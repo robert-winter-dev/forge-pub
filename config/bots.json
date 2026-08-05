@@ -1,0 +1,46 @@
+{
+  "_comment": "Zentrale FORGE-Bot-Registry (Ticket #0266 Teil 2) – einzige Quelle der Wahrheit für Service-Name, Arbeitsverzeichnis, DB-Datei, PID-Datei und Anzeigename je Bot/Service. Konsumenten: bin/svc, bin/forge-check.js, lib/bot-registry.js, bots/settings/bin/bot-control-daemon.js, bots/settings/routes/bots.js, bots/*/lib/notify.js.",
+  "liquidity": {
+    "displayName": "Liquidity Bot",
+    "service": "forge-liquiditybot",
+    "dir": "bots/liquidity",
+    "dbFile": "data/liquiditybot.db",
+    "pidFile": "data/liquiditybot.pid"
+  },
+  "lending": {
+    "displayName": "FORGE Lending Bot",
+    "service": "forge-lendingbot",
+    "dir": "bots/lending",
+    "dbFile": "data/lendingbot.db",
+    "pidFile": "data/lendingbot.pid"
+  },
+  "nexus": {
+    "displayName": "Nexus (API-Proxy)",
+    "service": "forge-nexus",
+    "dir": "core/nexus",
+    "dbFile": null,
+    "pidFile": null
+  },
+  "premium": {
+    "displayName": "Premium (Nostr-Identität, Message Center)",
+    "service": "forge-premium",
+    "dir": "core/premium",
+    "dbFile": null,
+    "pidFile": null
+  },
+  "settings": {
+    "displayName": "Settings Server",
+    "service": "forge-settings",
+    "dir": "bots/settings",
+    "dbFile": null,
+    "pidFile": null
+  },
+  "settings-daemon": {
+    "displayName": "Settings Daemon",
+    "service": "forge-settings-daemon",
+    "_dirNote": "bewusst KEIN dir – läuft aus demselben Verzeichnis wie forge-settings (bots/settings); bin/svc's cwd-basierte Ghost-Erkennung könnte die beiden Prozesse sonst verwechseln und den falschen killen (siehe #0266 Teil 2, gefixt nach Incident bei Registry-Einführung)",
+    "dir": null,
+    "dbFile": null,
+    "pidFile": null
+  }
+}

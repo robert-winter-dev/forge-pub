@@ -1,0 +1,23 @@
+[Unit]
+Description=FORGE Settings – Interner HTTPS Admin-Server
+After=network.target forge-nexus.service forge-premium.service
+Wants=forge-nexus.service forge-premium.service
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/bots/settings
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+Environment=NODE_ENV=production
+EnvironmentFile=-/opt/forge/local/env/settings.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forge-settings
+
+[Install]
+WantedBy=multi-user.target

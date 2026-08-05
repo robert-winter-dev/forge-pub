@@ -1,0 +1,14 @@
+{
+  "name":        "forge-wallet-monitor",
+  "version":     "0.1.0",
+  "type":        "module",
+  "description": "FORGE Wallet Monitor – trackt Balances aller Bot-Wallets (SOL, USDC, Whitelist-Token)",
+  "main":        "monitor.js",
+  "scripts": {
+    "start": "node monitor.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "better-sqlite3":  "^11.7.0"
+  }
+}

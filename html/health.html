@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FORGE - public: Health Monitor</title>
+    <link rel="icon" type="image/png" href="img/forge-logo.png">
+    <link rel="stylesheet" href="css/forge.css?v=20260731a">
+    <link rel="stylesheet" href="css/toast.css?v=20260722b">
+    <link rel="stylesheet" href="css/health.css?v=20260720a">
+</head>
+<body>
+
+<header>
+    <!-- Zeile 1: Logo + Status -->
+    <div class="header-content">
+        <div class="header-logo">
+            <img src="img/forge-logo.png" alt="FORGE Logo">
+            <h1>Health <span class="title-word-monitor">Monitor</span></h1>
+            <button class="health-legend-btn" id="healthLegendBtn" title="Legende anzeigen">ⓘ</button>
+        </div>
+        <div class="header-right">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-text">
+                    <span class="last-update offline" id="lastUpdate">Kein Signal</span>
+                </span>
+                <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                    <span class="notif-envelope" id="notifEnvelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
+                </button>
+            </div>
+        </div>
+    </div>
+    <!-- Zeile 2: Chain-Tabs -->
+    <div class="health-tabs-band">
+        <div class="health-tabs-inner" id="healthTabs" role="tablist">
+            <button class="htab active" data-tab="intern"    role="tab" aria-selected="true">Intern</button>
+            <button class="htab"        data-tab="solana"    role="tab" aria-selected="false">Solana</button>
+            <button class="htab"        data-tab="nostr"     role="tab" aria-selected="false">Nostr</button>
+        </div>
+    </div>
+</header>
+
+<main>
+
+    <!-- Tab: Intern -->
+    <div class="htab-content active" id="tab-intern" role="tabpanel">
+        <div class="services-grid" id="services-intern">
+            <div class="svc-loading">Lade Dienste…</div>
+        </div>
+    </div>
+
+    <!-- Tab: Solana -->
+    <div class="htab-content" id="tab-solana" role="tabpanel">
+        <div class="services-grid" id="services-solana">
+            <div class="svc-loading">Lade Dienste…</div>
+        </div>
+    </div>
+
+    <!-- Tab: Nostr -->
+    <div class="htab-content" id="tab-nostr" role="tabpanel">
+        <div class="services-grid" id="services-nostr">
+            <div class="svc-loading">Lade Dienste…</div>
+        </div>
+    </div>
+
+
+    <!-- Tab: Base (Platzhalter) -->
+    <div class="htab-content" id="tab-base" role="tabpanel">
+        <div class="placeholder-hint">
+            <span class="placeholder-icon">🔗</span>
+            <p>Base-Integration ist in Planung.<br>Dienste erscheinen hier sobald Base aktiv ist.</p>
+        </div>
+    </div>
+
+</main>
+
+<!-- Service-Detail-Modal -->
+<div class="svc-modal-backdrop hidden" id="svcModalBackdrop">
+    <div class="svc-modal" role="dialog" aria-modal="true" aria-labelledby="svcModalTitle">
+        <div class="svc-modal-header">
+            <span class="svc-modal-dot" id="svcModalDot"></span>
+            <span class="svc-modal-title" id="svcModalTitle"></span>
+            <button class="svc-modal-close" id="svcModalClose" aria-label="Schließen">✕</button>
+        </div>
+        <div class="svc-modal-body" id="svcModalBody"></div>
+    </div>
+</div>
+
+<!-- JS-Tooltip (einmaliges DOM-Element, wird per JS positioniert) -->
+<div class="svc-js-tooltip hidden" id="svcJsTooltip"></div>
+
+<!-- Footer (Inhalt wird via initFooter() in nav.js gesetzt) -->
+<footer></footer>
+
+<!-- Legende-Modal -->
+<div class="health-legend-overlay hidden" id="healthLegendOverlay">
+    <div class="health-legend-box">
+        <div class="health-legend-header">
+            <span>Legende – History-Balken</span>
+            <button class="health-legend-close" id="healthLegendClose">✕</button>
+        </div>
+        <div class="health-legend-body">
+            <div class="health-legend-row"><span class="hleg-block ok"></span><span><strong>Online</strong> – Service antwortet normal</span></div>
+            <div class="health-legend-row"><span class="hleg-block warn"></span><span><strong>Degraded</strong> – Service antwortet, aber langsam oder mit Fehlern</span></div>
+            <div class="health-legend-row"><span class="hleg-block error"></span><span><strong>Offline</strong> – Service nicht erreichbar</span></div>
+            <div class="health-legend-row"><span class="hleg-block unknown"></span><span><strong>Unbekannt</strong> – Check lief, Status nicht bestimmbar</span></div>
+            <div class="health-legend-row"><span class="hleg-block nodata"></span><span><strong>Keine Daten</strong> – In dieser Stunde wurde kein Check aufgezeichnet</span></div>
+            <p class="health-legend-note">Jeder Balken zeigt 168 Stunden (7 Tage).<br>Links = älteste Einträge, rechts = aktuell.</p>
+        </div>
+    </div>
+</div>
+
+<div class="notif-panel hidden" id="notifPanel">
+    <div class="notif-panel-header">
+        <span class="notif-panel-title">Benachrichtigungen</span>
+        <button class="notif-panel-close" id="notifPanelClose">✕</button>
+    </div>
+    <div class="notif-panel-body" id="notifPanelBody">
+        <div class="notif-empty">Keine Benachrichtigungen</div>
+    </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module" src="js/health.js?v=20260803b"></script>
+
+</body>
+</html>

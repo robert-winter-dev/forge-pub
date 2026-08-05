@@ -1,0 +1,21 @@
+[Unit]
+Description=FORGE Premium – Nostr-Identität (Message Center + künftige FORGE.pub-Auslieferung)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/core/premium
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+
+EnvironmentFile=-/opt/forge/local/env/premium.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forge-premium
+
+[Install]
+WantedBy=multi-user.target

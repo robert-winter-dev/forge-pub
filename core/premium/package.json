@@ -1,0 +1,16 @@
+{
+  "name": "forge-premium",
+  "version": "0.2.11",
+  "type": "module",
+  "description": "FORGE Premium – Nostr-Identität (Message Center + FORGE.pub-Auslieferung), localhost-API für forge-settings",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "qrcode": "^1.5.4"
+  }
+}

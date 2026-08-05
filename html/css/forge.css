@@ -1,0 +1,646 @@
+/* ── Reset & Basis ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg:            #020617;
+    --bg-2:          #0f172a;
+    --surface:       #1e293b;
+    --surface-2:     #334155;
+    --border:        #475569;
+    --text:          #f1f5f9;
+    --text-muted:    #94a3b8;
+    --accent:        #00d4ff;
+    --accent-glow:   rgba(0, 212, 255, 0.15);
+    --primary:       #00d4ff;   /* chart.js hover-Label Farbe */
+    --bg-dark:       #020617;   /* chart.js hover-Label Halo  */
+    --success:       #10b981;
+    --warn:          #f59e0b;
+    --danger:        #ef4444;
+    --radius:        12px;
+}
+
+body {
+    background: linear-gradient(135deg, var(--bg) 0%, var(--bg-2) 100%);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+header {
+    background: linear-gradient(to right, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.8));
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    padding: 1rem;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+.header-content {
+    max-width: 1400px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 1.5rem;
+}
+.header-logo {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.75rem;
+}
+.header-logo img {
+    height: 48px;
+    width: auto;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+.header-logo h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--accent);
+    text-shadow: 0 0 24px var(--accent-glow);
+}
+.header-logo p {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+/* ── Haupt-Layout ────────────────────────────────────────────────── */
+main {
+    flex: 1;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+/* ── Section Title ───────────────────────────────────────────────── */
+.section-title-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0;
+}
+.section-title {
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+/* ── Übersichts-Charts ───────────────────────────────────────────── */
+.overview-charts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+}
+@media (max-width: 700px) {
+    .overview-charts { grid-template-columns: 1fr; }
+}
+
+.ov-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px 12px;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.ov-card:hover {
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.08);
+}
+
+.ov-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.ov-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.ov-title-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+@media (min-width: 400px) {
+    .ov-title-group {
+        flex-direction: row;
+        align-items: baseline;
+        gap: 8px;
+    }
+}
+.ov-current-val {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+}
+
+.ov-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ov-range-btns {
+    display: inline-flex;
+    gap: 2px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 6px;
+    padding: 2px;
+}
+
+.ov-range-btn {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.ov-range-btn:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.ov-range-btn.active { background: var(--accent); color: #000; }
+
+.ov-chart-wrap { position: relative; width: 100%; min-height: 50px; }
+
+.ov-chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+}
+
+.ov-empty {
+    display: none;
+    text-align: center;
+    padding: 1.5rem 1rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+}
+
+/* SVG-Klassen */
+.ov-grid  { stroke: #64748b; stroke-width: 1; opacity: 0.35; }
+.ov-line  { stroke-width: 2; fill: none; stroke-linejoin: round; stroke-linecap: round; }
+.ov-label { fill: var(--text-muted); font-size: 11px; font-family: inherit; }
+.ov-label-y { text-anchor: end; }
+.ov-label-x { text-anchor: middle; }
+
+/* ── Bot-Tabelle ─────────────────────────────────────────────────── */
+.bot-table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    overflow-x: auto;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+.bot-table-wrap:hover {
+    border-color: rgba(99, 102, 241, 0.5);
+    box-shadow: 0 0 20px rgba(99, 102, 241, 0.08);
+}
+.bot-table {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 360px;
+}
+.bot-table th {
+    text-align: right;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0 0 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.bot-table th:first-child { text-align: left; }
+.bot-table th:last-child  { padding-right: 0; }
+.profit-link {
+    cursor: pointer;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
+}
+.bt-pos.profit-link { text-decoration-color: rgba(74,222,128,0.5); }
+.bt-neg.profit-link { text-decoration-color: rgba(248,113,113,0.5); }
+.profit-link:hover  { text-decoration-style: solid; text-decoration-color: currentColor; }
+
+/* ── Profit-Modal ────────────────────────────────────────────────── */
+.profit-modal-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+}
+.profit-modal-backdrop.open { display: flex; }
+.profit-modal-inner {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 22px 16px;
+    width: min(860px, 95vw);
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+}
+.profit-modal-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    gap: 10px;
+}
+.profit-modal-title {
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+.profit-modal-close {
+    background: none; border: none;
+    color: var(--text-muted); font-size: 1rem;
+    cursor: pointer; line-height: 1; padding: 2px 4px;
+}
+.profit-modal-close:hover { color: var(--text); }
+.bot-table td {
+    text-align: right;
+    padding: 14px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.bot-table td:first-child { text-align: left; }
+.bot-table td:last-child  { padding-right: 0; }
+.bot-table tbody tr:last-child td { border-bottom: none; }
+.bot-table tfoot td {
+    padding: 14px 0 0;
+    font-size: 0.9rem;
+    font-weight: 700;
+    border-top: 1px solid var(--border);
+    color: var(--text);
+}
+.bot-table tfoot td:first-child { text-align: left; }
+.bt-name {
+    font-weight: 600;
+    font-size: 0.92rem;
+    color: var(--text);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+.bt-name:hover { color: var(--accent); }
+.bt-val { font-weight: 600; color: var(--text); }
+.bt-pos { font-weight: 700; color: var(--success); }
+.sol-warn { color: var(--danger); cursor: help; }
+.th-info { opacity: 0.5; font-size: 0.78em; margin-left: 3px; cursor: help; font-weight: 400; }
+th[data-tooltip] { cursor: help; }
+
+/* ── Tooltip (JS-gesteuert) ──────────────────────────────────────── */
+#fgt {
+    display: none;
+    position: fixed;
+    z-index: 9999;
+    background: #1e293b;
+    color: #f1f5f9;
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 6px;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    max-width: 300px;
+    pointer-events: none;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    overflow: hidden;
+}
+#fgt .fgt-title {
+    font-weight: 700;
+    font-size: 0.75rem;
+    padding: 6px 12px 5px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    color: var(--accent);
+}
+#fgt .fgt-body { padding: 7px 12px 9px; }
+.bt-neg { font-weight: 700; color: var(--danger); }
+.bt-neu { font-weight: 600; color: var(--text-muted); }
+
+/* Toast-Popups: zentral in css/toast.css (wird zusätzlich eingebunden). */
+
+/* ── Footer ──────────────────────────────────────────────────────── */
+footer {
+    padding: 20px 40px;
+    border-top: 1px solid var(--border);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-align: center;
+}
+footer a { color: var(--text-muted); text-decoration: none; }
+footer a:hover { color: var(--accent); }
+.footer-bot  { margin-top: 4px; }
+
+/* ── Header Right ─────────────────────────────────────────────────── */
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-left: 1px solid var(--border);
+    padding-left: 1.25rem;
+}
+
+/* ── Status-Indikator ────────────────────────────────────────────── */
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+.status-text { display: contents; }
+
+/* ── Bot-State-Icon (Dreieck) ────────────────────────────────────── */
+.bot-state-icon {
+    font-size: 0.85rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.4s ease;
+}
+.bot-state-icon.state-running { color: var(--success); }
+.bot-state-icon.state-paused  { color: var(--warn); }
+.bot-state-icon.state-waiting { color: var(--warn); }
+.bot-state-icon.state-stale   { color: var(--danger); }
+
+/* ── Last-Update-Label ───────────────────────────────────────────── */
+.last-update {
+    font-size: 0.72rem;
+    line-height: 1.5;
+    white-space: nowrap;
+    transition: color 0.4s ease;
+}
+
+/* ── Notification Envelope ───────────────────────────────────────── */
+/* Immer grün, unabhängig vom Bot-Status – Status-Signal ist bot-state-icon,
+   nicht das Brief-Icon. Nur der Badge (ungelesen) ändert sich. */
+.notif-envelope {
+    font-style: normal;
+    color: var(--success);
+    transition: color 0.3s;
+}
+
+/* ── Notification Bell ───────────────────────────────────────────── */
+.notif-bell {
+    position: relative;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 2px 6px;
+    border-radius: 6px;
+    transition: background 0.15s;
+    line-height: 1;
+}
+.notif-bell:hover { background: rgba(255,255,255,0.08); }
+.notif-badge {
+    position: absolute;
+    top: 0; right: 0;
+    background: #e74c3c;
+    color: #fff;
+    font-size: 0.6rem;
+    font-weight: 700;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    pointer-events: none;
+}
+.notif-badge.hidden { display: none; }
+
+/* ── Notification Panel ──────────────────────────────────────────── */
+.notif-panel {
+    position: fixed;
+    top: 57px; right: 0;
+    width: 360px;
+    max-width: 100vw;
+    height: calc(100vh - 57px);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.4);
+}
+.notif-panel.hidden { display: none; }
+.notif-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.notif-panel-title { font-weight: 600; font-size: 0.95rem; flex: 1; }
+.notif-panel-close {
+    background: none; border: none; cursor: pointer;
+    color: var(--text-muted); font-size: 1rem;
+    padding: 4px; border-radius: 4px; line-height: 1;
+}
+.notif-panel-close:hover { color: var(--text); }
+.notif-panel-body { flex: 1; overflow-y: auto; padding: 8px 0; }
+.notif-empty {
+    color: var(--text-muted); text-align: center;
+    padding: 32px 16px; font-size: 0.85rem;
+}
+.notif-item {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.notif-item.level-warn  { border-left: 3px solid #f39c12; }
+.notif-item.level-error { border-left: 3px solid #e74c3c; }
+.notif-item.level-info  { border-left: 3px solid transparent; }
+.notif-item-top  { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notif-item-msg  { font-size: 0.82rem; color: var(--text); line-height: 1.4; }
+.notif-item-meta { font-size: 0.7rem; color: var(--text-muted); }
+
+/* ── Klickbare Cards ─────────────────────────────────────────────── */
+.ov-card-clickable {
+    cursor: pointer;
+}
+.ov-card-clickable:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 24px rgba(0, 212, 255, 0.12);
+}
+
+/* ── SVG Chart-Klassen ───────────────────────────────────────────── */
+.ov-chart-grid  { stroke: #64748b; stroke-width: 1; opacity: 0.35; }
+.ov-chart-line  { stroke-width: 2; fill: none; stroke-linejoin: round; stroke-linecap: round; }
+/* Achsen-Labels (statisch, FORGE-spezifisch) */
+.ov-chart-label { fill: var(--text-muted); font-size: 11px; font-family: inherit; }
+.ov-chart-label-y { text-anchor: end; }
+.ov-chart-label-x { text-anchor: middle; }
+
+/* Achsen-Labels (chart.js Hover-Overlay – shared) */
+.chart-label { fill: var(--text-muted); font-size: 11px; font-family: inherit; }
+.chart-label-y { text-anchor: end; }
+.chart-label-x { text-anchor: middle; }
+
+/* ── Chart-Modal (Vollbild-Ansicht) ──────────────────────────────── */
+.ov-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 500;
+}
+.ov-modal-dialog {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: min(92vw, 860px);
+    height: min(72vh, 500px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+.ov-modal-header {
+    display: flex;
+    align-items: center;
+    padding: 0.8rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 1rem;
+}
+.ov-modal-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    flex: 1;
+}
+.ov-modal-close {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.25rem;
+    transition: color 0.15s;
+}
+.ov-modal-close:hover { color: var(--text); }
+.ov-modal-body {
+    position: relative;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0.5rem 0.25rem 0.25rem 0;
+    min-height: 0;
+}
+.ov-modal-svg {
+    width: 100%;
+    flex: 1;
+    min-height: 0;
+    display: block;
+}
+
+/* ── Bar-Chart Legende (nur Modal) ──────────────────────────────── */
+.ov-bar-legend {
+    display: flex;
+    gap: 1.2rem;
+    padding: 0.4rem 1rem 0;
+    flex-shrink: 0;
+}
+.ov-bar-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+.ov-bar-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+/* ── Bar-Chart Tooltip ───────────────────────────────────────────── */
+.chart-tooltip-box {
+    position: absolute;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 0.75rem;
+    color: var(--text);
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── Tabelle: Lade-Platzhalter ───────────────────────────────────── */
+.tbl-loading {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px;
+    font-size: 0.85rem;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+    header { padding: 20px; }
+    main   { padding: 20px; }
+    footer { padding: 16px 20px; }
+    .header-right { display: flex; flex-direction: row; align-items: center; justify-content: flex-end; }
+    #last-update  { white-space: nowrap; }
+    .col-mob-hide { display: none; }
+    .bot-table    { min-width: 0; }
+}
+
+/* ── Portrait-Modus: Bot-Tabelle auf Bot / Profit Netto ─────────── */
+@media (max-width: 768px) and (orientation: portrait) {
+    .bot-table th:nth-child(2),
+    .bot-table td:nth-child(2),
+    .bot-table th:nth-child(4),
+    .bot-table td:nth-child(4) { display: none; }
+}
+
+/* ── Mobile Lesbarkeit (gilt global für alle Seiten) ─────────────── */
+@media (max-width: 640px) {
+    :root {
+        font-size:    17px;      /* skaliert alle rem-Werte ~6% hoch  */
+        --text-muted: #b0bcc8;   /* heller als Desktop (#94a3b8) → weniger matt */
+    }
+}

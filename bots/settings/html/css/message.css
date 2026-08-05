@@ -1,0 +1,544 @@
+/* ── Größere Detail-Modals (Boxen zeigen nur angeschnittenen Text, Volltext
+   braucht mehr Platz zum Lesen als der settings.css-Standard von 480px) ──── */
+#forge-modal-msg-system-detail  .forge-modal,
+#forge-modal-msg-premium-detail .forge-modal {
+    max-width: 620px;
+}
+#forge-modal-msg-support-thread .forge-modal {
+    max-width: 700px;
+    width: 94vw;
+}
+
+/* ── Message Center – Layout ──────────────────────────────────────
+   Zwei Spalten: Menü (schmal) | Inhalt (Einstellungen-Panel ODER genau eines
+   der Vollbreite-Panels System/Premium/Support, siehe .mc-system-panel weiter
+   unten). Nutzt wie das Dashboard die volle Bildschirmbreite (settings.css
+   .main-content max-width:1400px), keine waagerechten Scrollbalken – siehe
+   min-width:0 auf den Grid-Kindern gegen Overflow durch lange Texte. */
+.main-content.mc-layout {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 1rem;
+    align-items: start;
+}
+
+.mc-menu, .mc-detail { min-width: 0; }
+
+/* ── Spalte 1: Menü ───────────────────────────────────────────── */
+.mc-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    position: sticky;
+    top: 1rem;
+}
+.mc-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+    font-weight: 500;
+    text-align: left;
+    padding: 0.65rem 0.85rem;
+    cursor: pointer;
+}
+.mc-menu-item:hover { border-color: var(--accent); color: var(--text); }
+.mc-menu-item.active {
+    color: var(--accent);
+    border-color: rgba(0,212,255,0.4);
+    background: rgba(0,212,255,0.06);
+    font-weight: 600;
+}
+.mc-menu-badge {
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1;
+    border-radius: 999px;
+    padding: 0.22rem 0.42rem;
+    flex-shrink: 0;
+}
+.mc-menu-badge.hidden { display: none; }
+
+/* ── Einstellungen-Panel (mc-detail, einzige verbleibende Nutzerin) ────
+   Kein eigener Sticky/Scroll-Container mehr (bis 2026-07-30 hier vorhanden):
+   .mc-menu ist bereits sticky und bleibt beim Scrollen sichtbar, ein
+   zusätzliches sticky+max-height+overflow-y auf .mc-detail ragte durch die
+   feste 6rem-Reserve (deckt Header + main-content-Padding nicht ganz) immer
+   minimal über den Viewport hinaus → doppelter senkrechter Scrollbalken
+   (äußere Seite + inneres Panel), besonders sichtbar bei kleiner Fensterhöhe. */
+.mc-detail-body { min-height: 200px; }
+
+/* ── Identität + "Neue Nachricht" (jetzt im Support-Panel, siehe unten) ── */
+.mc-identity {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    padding: 0.55rem 0.7rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+.mc-identity .msg-identity-text { flex: 1; overflow-wrap: anywhere; }
+.mc-identity code { color: var(--accent); }
+
+.msg-placeholder {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    line-height: 1.6;
+    padding: 2rem 1rem;
+    text-align: center;
+}
+
+.msg-icon-btn {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 7px;
+    width: 32px;
+    height: 32px;
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.msg-icon-btn:hover { color: var(--text); border-color: var(--accent); }
+.msg-icon-btn-accent { color: var(--accent); border-color: rgba(0,212,255,0.35); }
+
+.msg-qr-hint {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+}
+
+/* E-Mail-artiger Kopf im Thread-Modal: "Von" (eigene FORGE-Nostr-Identität,
+   unter der geantwortet wird) + "Mit" (Gegenstelle). */
+.msg-thread-modal-header {
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+}
+.msg-thread-modal-row {
+    display: flex;
+    gap: 0.6rem;
+    font-size: 0.85rem;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+.msg-thread-modal-row + .msg-thread-modal-row { margin-top: 0.25rem; }
+.msg-thread-modal-label {
+    flex-shrink: 0;
+    width: 2.6rem;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding-top: 0.1rem;
+}
+/* Breitere Variante für Zeilen mit längeren Labels (z.B. "ZEITRAUM" in der
+   Premium-Zahlungs-Detailansicht) - die Basisbreite reicht nur für "Von"/"Mit". */
+.msg-thread-modal-label--wide { width: 6rem; }
+
+/* ── Modal-Compose-Felder ──────────────────────────────────────── */
+.msg-modal-field { margin-bottom: 0.75rem; }
+.msg-modal-field label {
+    display: block;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-bottom: 0.3rem;
+}
+.msg-modal-field input,
+.msg-modal-field textarea {
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.55rem 0.7rem;
+    color: var(--text);
+    font-size: 0.88rem;
+    font-family: inherit;
+    resize: vertical;
+    box-sizing: border-box;
+}
+
+/* ── Nachrichten-Thread (Support-Detail) ─────────────────────────── */
+.msg-thread {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-height: 200px;
+    max-height: 55vh;
+    overflow-y: auto;
+    padding: 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 0.75rem;
+}
+
+.msg-empty {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 1.5rem 0;
+}
+
+.msg-item {
+    max-width: 80%;
+    padding: 0.5rem 0.7rem;
+    border-radius: 10px;
+    font-size: 0.87rem;
+    line-height: 1.45;
+    background: var(--surface-2);
+    overflow-wrap: anywhere;
+}
+.msg-item-meta { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+.msg-item.msg-out { align-self: flex-end; background: var(--accent-glow); border: 1px solid rgba(0,212,255,0.3); }
+.msg-item.msg-in  { align-self: flex-start; }
+
+/* Textarea statt Input – mindestens 3 Zeilen sichtbar (2026-07-30), Button
+   unter statt neben dem Feld (bei drei Zeilen Höhe wirkt nebeneinander schief). */
+.msg-compose {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+.msg-compose textarea {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.6rem 0.8rem;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-family: inherit;
+    resize: vertical;
+    min-height: 4.8em;
+}
+.msg-compose button {
+    align-self: flex-end;
+    background: var(--accent);
+    color: var(--bg);
+    border: none;
+    border-radius: 7px;
+    padding: 0.6rem 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+.msg-compose button:hover { opacity: 0.88; }
+
+.msg-status { font-size: 0.78rem; color: var(--warn); margin-top: 0.4rem; min-height: 1em; }
+
+/* ── System-/Premium-Detailkarte ─────────────────────────────────── */
+.mc-detail-card {
+    padding: 0.9rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+.mc-detail-card.level-error { border-left: 3px solid var(--danger); }
+.mc-detail-card.level-warn  { border-left: 3px solid var(--warn); }
+.mc-detail-meta {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+}
+/* Variante oben im Body statt unten (System-Detail: Level/Datum/Bot ersetzen den
+   entfernten Modal-Titel, siehe openSystemMessageModal). */
+.mc-detail-meta-top {
+    margin-top: 0;
+    margin-bottom: 0.6rem;
+    padding-top: 0;
+    padding-bottom: 0.6rem;
+    border-top: none;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Absender-Zeile der Detailansicht (2026-07-30, Layout-Vorgabe des Betreibers):
+   Zeile 2 unter dem Modal-Titel = Name des betroffenen Bots + Datum/Uhrzeit.
+   Die Meldungs-ART steht jetzt im Modal-Titel, nicht mehr als Badge hier drin.
+   flex-wrap, damit auf schmalen Fenstern die Uhrzeit umbricht statt den Bot-Namen
+   abzuschneiden — beides ist gleich wichtig für die Zuordnung einer Meldung. */
+.mc-detail-sender {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2rem 0.6rem;
+    margin-bottom: 0.7rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+}
+.mc-detail-bot  { font-weight: 600; color: var(--text); font-size: 0.86rem; }
+.mc-detail-when { font-size: 0.78rem; color: var(--text-muted); }
+/* white-space: pre-line – die Meldungstexte enthalten bewusst gesetzte Zeilen-
+   umbrüche (\n in notify.js), u.a. um die Handlungsaufforderung am Ende optisch
+   vom Befund zu trennen. Ohne pre-line lief alles zu einem Absatz zusammen. */
+.mc-detail-text { white-space: pre-line; }
+
+/* Info/Warn/Fehler-Badge im Modal-Titel (System-Detailansicht) – Text statt nur
+   Farbe (Rücksicht auf Farbschwäche), zusätzlich per Suche auffindbar (siehe
+   routes/messages.js GET /system, level ist Teil der q-Suche). */
+.mc-modal-level {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.15rem 0.45rem;
+    border-radius: 999px;
+    margin-right: 0.5rem;
+    background: var(--bg-2);
+    color: var(--text-muted);
+}
+.mc-modal-level.level-error     { background: rgba(239,68,68,0.15);  color: var(--danger); }
+.mc-modal-level.level-warn      { background: rgba(234,179,8,0.15);  color: var(--warn); }
+.mc-modal-level.level-info      { background: rgba(0,212,255,0.12);  color: var(--accent); }
+.mc-modal-level.level-lifecycle { background: rgba(148,163,184,0.15); color: var(--text-muted); }
+
+/* ── Einstellungen-Panel ────────────────────────────────────────── */
+/* Grid statt fester max-width (2026-07-30): nutzt die volle Panel-Breite (mcDetail
+   spannt seit dem Wegfall der Kurzform-Liste schon die ganze Fläche neben dem
+   Menü) – auf breiten Bildschirmen stehen mehrere Zeilen nebeneinander statt
+   einer einzelnen schmalen Spalte mit viel Leerraum rechts. */
+.msg-settings {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+    gap: 0.6rem 1rem;
+    /* Kein align-items:start – die Boxen sollen sich auf die Höhe der jeweils
+       höchsten Zeile strecken (Grid-Default), sonst wirkt eine Reihe mit
+       unterschiedlich hohem Inhalt (z.B. Nostr-Account: npub bricht auf zwei
+       Zeilen um) unruhig, weil die anderen Boxen daneben kürzer bleiben. */
+}
+.msg-setting-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+    padding: 0.75rem 0.9rem;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; cursor: pointer;
+}
+.msg-setting-row > span { display: flex; flex-direction: column; gap: 0.15rem; }
+.msg-setting-label { font-size: 0.9rem; color: var(--text); }
+.msg-setting-hint  { font-size: 0.75rem; color: var(--text-muted); }
+.msg-setting-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+.msg-settings-note { grid-column: 1 / -1; font-size: 0.75rem; color: var(--text-muted); line-height: 1.5; margin-top: 0.3rem; }
+
+.msg-settings-heading {
+    grid-column: 1 / -1;
+    font-size: 0.85rem;
+    color: var(--text);
+    margin: 1.5rem 0 0.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+.msg-account-row {
+    display: flex; flex-direction: column; align-items: stretch; gap: 0.4rem;
+    padding: 0.75rem 0.9rem;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px;
+}
+.msg-account-controls { display: flex; justify-content: flex-end; gap: 0.4rem; align-items: center; }
+.msg-account-controls input {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.4rem 0.6rem;
+    color: var(--text);
+    font-size: 0.85rem;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.msg-account-btn {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.4rem 0.8rem;
+    color: var(--text);
+    font-size: 0.82rem;
+    cursor: pointer;
+    flex-shrink: 0;
+    min-width: 130px;
+    text-align: center;
+}
+.msg-account-btn:hover { border-color: var(--accent); }
+.msg-account-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.msg-account-btn:disabled:hover { border-color: var(--border); }
+
+/* ── System-/Premium-Nachrichten: eigenständiges Vollbreite-Panel ─────────
+   Ersetzt Spalte 2+3 (Liste + Detail) nur wenn "System" oder "Premium" aktiv
+   ist – die beiden werden per .mc-hidden-by-panel ausgeblendet (siehe
+   selectMenu() in message.js), Support/Einstellungen bleiben unverändert.
+   Zwei Instanzen dieser Klasse (#mcSystemPanel, #mcPremiumPanel) – nie beide
+   gleichzeitig sichtbar, siehe selectMenu(). */
+.mc-system-panel {
+    grid-column: 2 / 4;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+/* Autoren-Regeln schlagen die UA-Standardregel [hidden]{display:none} sonst
+   trotz [hidden]-Attribut – ohne dieses Override blieb das Panel z.B. unter
+   "Einstellungen" sichtbar (Bug 2026-07-29). */
+.mc-system-panel[hidden] { display: none; }
+.mc-hidden-by-panel { display: none !important; }
+
+.mcs-toprow {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+.mcs-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+/* Live-Volltextsuche statt fester Filterliste (2026-07-30) – funktioniert beim
+   Tippen (debounce siehe message.js), System serverseitig, Premium/Support
+   clientseitig auf der ohnehin schon geladenen Liste. */
+.mcs-search {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.45rem 0.6rem;
+    color: var(--text);
+    font-size: 0.85rem;
+    flex-shrink: 0;
+    min-width: 220px;
+}
+.mcs-search:focus { outline: none; border-color: var(--accent); }
+/* Auch außerhalb der Toprow genutzt (z.B. "An"-Feld im Neue-Nachricht-Modal). */
+.mcs-infotext {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.4;
+}
+.mcs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.6rem;
+}
+/* Feste Höhe für alle Boxen (System/Premium/Support) – passt eine Nachricht
+   nicht komplett rein, wird sie angeschnitten (line-clamp unten). Volltext
+   gibt's per Klick im Modal.
+   92px → 110px (2026-07-30): dritte Zeile für Meldungs-Art nötig.
+   110px → 92px (2026-08-01): Meldungs-Art zog in die Kopfzeile (.mcs-box-level),
+   die dritte Zeile entfiel wieder – siehe messageDetailBody-Kommentar in message.js. */
+.mcs-box {
+    display: flex;
+    flex-direction: column;
+    height: 92px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.6rem 0.75rem;
+    cursor: pointer;
+    transition: border-color 0.15s;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+.mcs-box:hover { border-color: var(--accent); }
+/* NUR ungelesen bekommt den farbigen Rand – Level (info/warn/error) wird jetzt
+   stattdessen im Modal-Titel als Badge angezeigt (siehe .mc-modal-level unten),
+   damit ein bereits gelesener Fehler nicht dauerhaft wie "neu" aussieht. */
+.mcs-box.unread { border-left: 3px solid var(--accent); }
+.mcs-box-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.25rem;
+    flex-shrink: 0;
+}
+.mcs-box-sender { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+.mcs-box-time { color: var(--text-muted); font-size: 0.7rem; white-space: nowrap; flex-shrink: 0; }
+/* Meldungs-Art in der Übersichtskachel (2026-07-30, in Kopfzeile verschoben 2026-08-01):
+   steht im Detail-Modal im Titel, war in der Liste aber gar nicht sichtbar – man musste
+   jede Kachel öffnen, um zu sehen ob es ein Fehler oder nur eine Info ist. Text statt
+   Farbe, weil Farbschwäche berücksichtigt werden muss (nicht entfernen). */
+.mcs-box-level {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.mcs-box-text {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.45;
+    /* max-height statt flex:1 (2026-07-30): flex:1 ließ das Element auf die
+       gesamte Rest-Höhe der Box wachsen (mehr als 2 Zeilen hoch) – webkit-line-
+       clamp schneidet dann zwar Zeile 3+ inhaltlich ab, der zu hohe Rahmen
+       zeigte davon aber noch ein paar Pixel. Feste max-height = exakt 2 Zeilen
+       erzwingt den harten Schnitt. */
+    max-height: calc(1.45em * 2);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+
+.mcs-bottomrow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+.mcs-bottomrow .mcs-pagination { flex: 1; }
+.mcs-bottomrow #mcsMarkAllBtn { flex-shrink: 0; }
+
+.mcs-pagination {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    justify-content: center;
+}
+.mcs-page-btn {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    min-width: 2rem;
+}
+.mcs-page-btn:hover { border-color: var(--accent); color: var(--text); }
+.mcs-page-btn.active {
+    border-color: var(--accent);
+    background: rgba(0,212,255,0.1);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* ── Responsive: < 900px → Menü als waagerechte Reihe über dem Inhalt ──
+   Kein Schritt-basiertes Umschalten mehr nötig (seit dem Wegfall der
+   Kurzform-Liste, 2026-07-30): Menü ist immer sichtbar, darunter genau ein
+   Panel (Einstellungen ODER System/Premium/Support je nach [hidden]). */
+@media (max-width: 900px) {
+    .main-content.mc-layout { grid-template-columns: 1fr; }
+    .mc-menu {
+        flex-direction: row;
+        flex-wrap: wrap;
+        position: static;
+    }
+}

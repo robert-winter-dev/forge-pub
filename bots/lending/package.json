@@ -1,0 +1,39 @@
+{
+  "name": "forge-lendingbot",
+  "version": "0.6.1",
+  "description": "Automated yield farming bot for Solana lending protocols",
+  "main": "bin/bot.js",
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development node bin/bot.js",
+    "export": "node bin/export.js"
+  },
+  "keywords": [
+    "solana",
+    "lending",
+    "yield",
+    "farming",
+    "defi",
+    "automation"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@drift-labs/sdk": "^2.161.0-beta.1",
+    "@jup-ag/lend": "^0.1.8",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.92.2",
+    "axios": "^1.7.7",
+    "better-sqlite3": "^11.7.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.64.0",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

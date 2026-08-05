@@ -1,0 +1,395 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   FORGE – Shared CSS
+   Gemeinsame Styles für alle Bot-Dashboards (SpotGridBot, LendingBot, Liquidity Bot).
+   Wird geladen via: <link rel="stylesheet" href="../css/shared.css">
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Status-Indikator (Container) ────────────────────────────────────────── */
+
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: default;
+}
+
+/* ── Last Update Timestamp ────────────────────────────────────────────────── */
+
+.last-update {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    transition: color 0.4s ease;
+}
+
+.last-update.online  { color: var(--success); }
+.last-update.warning { color: var(--warning); animation: pulse-icon 2.5s ease-in-out infinite; }
+.last-update.offline { color: var(--danger);  }
+
+/* ── Bot-State-Icon (▶ running / ⏸ paused / ⚠ waiting / stale) ──────────── */
+
+.bot-state-icon {
+    font-size: 0.85rem;
+    line-height: 1;
+    flex-shrink: 0;
+    transition: color 0.4s ease;
+}
+
+.bot-state-icon.state-running {
+    color: var(--success);
+    animation: pulse-icon 2.5s ease-in-out infinite;
+}
+
+.bot-state-icon.state-paused {
+    color: var(--warning);
+}
+
+.bot-state-icon.state-waiting {
+    color: var(--warning);
+    animation: pulse-icon 2.5s ease-in-out infinite;
+}
+
+.bot-state-icon.state-stale {
+    color: var(--danger);
+    animation: blink-icon 1s step-start infinite;
+}
+
+/* ── Notification Envelope ───────────────────────────────────────────────── */
+/* Immer grün, unabhängig vom Bot-Status – Status-Signal ist bot-state-icon,
+   nicht das Brief-Icon. Nur der Badge (ungelesen) ändert sich. */
+
+.notif-envelope {
+    display: inline-flex;
+    color: var(--success);
+    transition: color 0.3s;
+}
+.notif-envelope svg { display: block; width: 17px; height: 17px; }
+
+/* ── Premium-Status-Icon (FORGE-Hammer-Logo – grau = inaktiv, farbig = aktiv) ── */
+/* Logo statt Emoji: CSS "color" wirkt auf ein Bild nicht, deshalb per
+   grayscale-Filter statt Farbwechsel gesteuert. */
+.premium-status-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: default;
+}
+.premium-status-icon img {
+    display: block;
+    height: 1.05rem;
+    width: auto;
+    filter: grayscale(1);
+    opacity: 0.55;
+    transition: filter 0.3s, opacity 0.3s;
+}
+.premium-status-icon.active img {
+    filter: none;
+    opacity: 1;
+}
+/* Auto-Pay aus, bezahlte Stunde läuft noch (2026-07-29): statt Pulsieren
+   (bis 2026-07-31 – zu unruhig, verworfen) zeigt ein Text neben der Krone die
+   Restlaufzeit der bereits bezahlten Deckung an. */
+.premium-countdown-text {
+    font-size: 0.78rem;
+    color: var(--text-secondary, #888);
+    margin-left: 0.3rem;
+    white-space: nowrap;
+    cursor: default;
+}
+
+/* ── Notification Bell ────────────────────────────────────────────────────── */
+
+.notif-bell {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    border-radius: 6px;
+    transition: background 0.15s;
+}
+.notif-bell:hover { background: rgba(255,255,255,0.08); }
+
+.notif-badge {
+    position: absolute;
+    top: 0; right: 0;
+    background: #e74c3c;
+    color: #fff;
+    font-size: 0.6rem;
+    font-weight: 700;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    pointer-events: none;
+}
+.notif-badge.hidden { display: none; }
+
+/* ── Notification Panel ───────────────────────────────────────────────────── */
+
+.notif-panel {
+    position: fixed;
+    top: 56px; right: 0;
+    width: 360px;
+    max-width: 100vw;
+    height: calc(100vh - 56px);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -4px 0 24px rgba(0,0,0,0.4);
+    transition: transform 0.2s ease;
+}
+.notif-panel.hidden { display: none; }
+
+.notif-panel-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+.notif-panel-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    flex: 1;
+}
+.notif-panel-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 1rem;
+    padding: 4px;
+    border-radius: 4px;
+    line-height: 1;
+}
+.notif-panel-close:hover { color: var(--text-primary); }
+
+/* Filter-Tabs (optional, nur SpotGridBot) */
+.notif-filters {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    width: 100%;
+    margin-top: 4px;
+}
+.notif-filter {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    padding: 3px 8px;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.notif-filter:hover { border-color: var(--primary); color: var(--text-primary); }
+.notif-filter.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+}
+
+.notif-panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+}
+.notif-empty {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 32px 16px;
+    font-size: 0.85rem;
+}
+
+/* ── Notification Item ────────────────────────────────────────────────────── */
+
+.notif-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    transition: background 0.1s;
+}
+.notif-item:hover { background: rgba(255,255,255,0.03); }
+.notif-item.level-warn  { border-left: 3px solid #f39c12; }
+.notif-item.level-error { border-left: 3px solid #e74c3c; }
+.notif-item.level-info  { border-left: 3px solid transparent; }
+
+.notif-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.notif-item-dismiss {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    padding: 0 2px;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.15s, color 0.15s;
+}
+.notif-item:hover .notif-item-dismiss { opacity: 1; }
+.notif-item-dismiss:hover { color: var(--text-primary); }
+
+.notif-item-msg {
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+.notif-item-meta {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    display: flex;
+    gap: 8px;
+}
+.notif-item-pair {
+    background: rgba(255,255,255,0.08);
+    border-radius: 4px;
+    padding: 0 5px;
+}
+
+/* Toast-Popups: zentral in css/toast.css (wird zusätzlich eingebunden). */
+
+/* ── Chart Bar Tooltip (shared, used by attachBarTooltip in chart.js) ─────── */
+
+.chart-tooltip-box {
+    position: absolute;
+    background: var(--bg-darker);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ── Chart Range Buttons ─────────────────────────────────────────────────── */
+
+.chart-range-btns {
+    display: inline-flex;
+    gap: 2px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    padding: 2px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+.chart-range-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.chart-range-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+.chart-range-btn.active {
+    background: var(--primary);
+    color: #fff;
+}
+
+/* ── Scrollbar Styling ────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+
+/* ── Animations ───────────────────────────────────────────────────────────── */
+
+@keyframes pulse-icon {
+    0%, 100% { opacity: 1;   }
+    50%       { opacity: 0.4; }
+}
+
+@keyframes blink-icon {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0);    }
+}
+
+@keyframes skeleton-loading {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+/* Health-Monitor-Animationen (Titel-Blink wenn Bot-Fehler) */
+@keyframes forge-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+}
+
+@keyframes forge-blink {
+    0%, 49%  { opacity: 1; }
+    50%, 100% { opacity: 0.15; }
+}
+
+.header-logo h1.health-warning  { animation: forge-pulse 2s ease-in-out infinite; color: var(--warning); }
+.header-logo h1.health-critical { animation: forge-blink 0.8s step-end infinite;  color: var(--danger);  }
+
+/* ── Loading / Skeleton ───────────────────────────────────────────────────── */
+
+.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+.skeleton {
+    background: linear-gradient(90deg, var(--surface) 0%, var(--surface-light) 50%, var(--surface) 100%);
+    background-size: 200% 100%;
+    animation: skeleton-loading 1.5s infinite;
+}
+
+/* ── Card Fade-in ────────────────────────────────────────────────────────── */
+
+.card {
+    animation: fadeIn 0.3s ease;
+}
+
+/* ── Value Coloring (positiv / negativ / neutral) ────────────────────────── */
+
+[data-type="neutral"]  { color: var(--text-secondary); }
+[data-type="positive"] { color: var(--success); font-weight: 600; }
+[data-type="negative"] { color: var(--danger);  font-weight: 600; }
+
+/* ── Klickbare Elemente (Dotted-Underline-Pattern) ───────────────────────── */
+
+.clickable-dotted {
+    cursor: pointer;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
+    transition: opacity 0.15s ease;
+}
+.clickable-dotted:hover { opacity: 0.7; }

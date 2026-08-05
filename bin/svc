@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# FORGE – Maintenance-aware Service Control
+# Ersatz für: sudo systemctl start|stop|restart <service>
+#
+# Aktiviert automatisch den Wartungsmodus vor der Aktion und beendet ihn
+# danach – auch bei Fehlern oder Ctrl+C (trap EXIT).
+#
+# Nutzung:
+#   bin/svc restart forge-liquiditybot
+#   bin/svc stop    forge-nexus
+#   bin/svc start   forge-lendingbot
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -uo pipefail
+
+# FORGE_ROOT: bevorzugt über git (robust gegen Symlinks/Aufruf aus Unterordnern),
+# mit Pfad-Fallback für Installationen OHNE Git-Checkout. Der Fork auf forge-pub1
+# wird aus einem signierten Tarball nach /opt/forge entpackt — dort ist weder ein
+# .git-Verzeichnis noch überhaupt das git-Binary vorhanden, und `git rev-parse`
+# lieferte eine leere FORGE_ROOT (alle Pfade darunter wurden dann absolut falsch).
+# Der Fallback ist sicher, weil dieses Script per Definition in <root>/bin/ liegt.
+if command -v git >/dev/null 2>&1 \
+   && FORGE_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null)" \
+   && [[ -n "$FORGE_ROOT" ]]; then
+    :
+else
+    FORGE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+fi
+MAINTENANCE_CMD="node ${FORGE_ROOT}/bin/maintenance.js"
+
+# ── Argumente ─────────────────────────────────────────────────────────────────
+
+ACTION="${1:-}"
+SERVICE="${2:-}"
+
+if [[ -z "$ACTION" || -z "$SERVICE" ]]; then
+    echo "Nutzung: $(basename "$0") <start|stop|restart> <service>"
+    echo "Beispiel: $(basename "$0") restart forge-liquiditybot"
+    exit 1
+fi
+
+if [[ "$ACTION" != "start" && "$ACTION" != "stop" && "$ACTION" != "restart" ]]; then
+    echo "❌ Unbekannte Aktion '${ACTION}' – erlaubt: start, stop, restart"
+    exit 1
+fi
+
+# ── Service-Konfiguration ─────────────────────────────────────────────────────
+# BOT_DIR:  WorkingDirectory des systemd-Service (exakt wie in der .service-Datei).
+#           Wird genutzt um /proc/PID/cwd zu prüfen – unterscheidet z.B. Liquidity
+#           von LendingBot (beide starten als "node bin/bot.js").
+# PID_FILE: Vom Bot selbst geschriebene PID-Datei (zuverlässiger als pgrep).
+#
+# Quelle der Wahrheit: config/bots.json (siehe lib/bot-registry.js für die
+# Node-seitige Entsprechung). Unbekannte Services fallen auf leere BOT_DIR/
+# PID_FILE zurück (gleiches Verhalten wie zuvor der "*)"-Case-Zweig) – der
+# Service-Aktion selbst (systemctl) schadet das nicht, nur die cwd-/PID-
+# basierte Ghost-Bereinigung greift dann nicht.
+
+REGISTRY="${FORGE_ROOT}/config/bots.json"
+
+if [[ ! -f "$REGISTRY" ]]; then
+    echo "❌ Registry nicht gefunden: ${REGISTRY}"
+    exit 1
+fi
+
+# Registry-Lookup über node statt jq (Änderung 2026-07-30): jq ist eine externe
+# Abhängigkeit, die auf einer frischen Fork-VM schlicht fehlt — node dagegen ist in
+# jeder FORGE-Installation vorhanden, sonst liefe kein einziger Dienst. Damit hat
+# bin/svc keine Abhängigkeit mehr, die nicht ohnehin Voraussetzung ist.
+REGISTRY_ENTRY=$(SVC_NAME="$SERVICE" node -e '
+    const bots = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const hit = Object.values(bots).find(
+        v => v && typeof v === "object" && v.service === process.env.SVC_NAME,
+    );
+    process.stdout.write(hit ? `${hit.dir ?? ""}\t${hit.pidFile ?? ""}` : "\t");
+' "$REGISTRY") || { echo "❌ Fehler beim Lesen von ${REGISTRY}"; exit 1; }
+
+REL_DIR="${REGISTRY_ENTRY%%$'\t'*}"
+REL_PID="${REGISTRY_ENTRY#*$'\t'}"
+
+if [[ -n "$REL_DIR" ]]; then
+    BOT_DIR="${FORGE_ROOT}/${REL_DIR}"
+else
+    BOT_DIR=""
+fi
+
+if [[ -n "$REL_PID" ]]; then
+    PID_FILE="${FORGE_ROOT}/${REL_DIR}/${REL_PID}"
+else
+    PID_FILE=""
+fi
+
+# ── Ghost-Bereinigung ─────────────────────────────────────────────────────────
+# Findet node-Prozesse deren WorkingDirectory (cwd) zum Service-Verzeichnis passt
+# UND die NICHT dem angegebenen systemd-MainPID entsprechen.
+#
+# Warum cwd statt pgrep-Pattern?
+#   systemd startet "node bin/bot.js" mit relativem Pfad aus dem WorkingDirectory.
+#   pgrep -f "LiquidityMiningBot3/bin/bot.js" würde systemd-Prozesse NIE finden.
+#   Mehrere Services (Liquidity, LendingBot) nutzen dieselbe Binary-Bezeichnung –
+#   nur das cwd unterscheidet sie eindeutig.
+#
+# Quellen:
+#  1. PID-Datei (vom Bot selbst geschrieben – präziseste Methode für Liquidity)
+#  2. /proc/PID/cwd – für alle Services
+
+kill_ghosts() {
+    local stage="$1"        # "pre" oder "post" (nur für Log-Ausgabe)
+    local exclude_pid="$2"  # PID die NICHT als Ghost gilt (aktueller MainPID)
+
+    [[ -z "$BOT_DIR" ]] && return 0
+
+    local found=0
+
+    # Methode 1: PID-Datei lesen (nur wenn vorhanden)
+    if [[ -n "$PID_FILE" && -f "$PID_FILE" ]]; then
+        local file_pid
+        file_pid=$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+        if [[ -n "$file_pid" && "$file_pid" =~ ^[0-9]+$ && "$file_pid" != "$exclude_pid" ]]; then
+            if kill -0 "$file_pid" 2>/dev/null; then
+                echo "⚠️  [$stage] Ghost via PID-Datei: PID $file_pid → SIGTERM"
+                kill "$file_pid" 2>/dev/null \
+                    && echo "   ✓ PID $file_pid beendet" \
+                    || echo "   ✗ SIGTERM fehlgeschlagen (PID $file_pid nicht mehr erreichbar)"
+                found=1
+            fi
+        fi
+    fi
+
+    # Methode 2: alle node-Prozesse prüfen deren cwd zum Service-Verzeichnis passt
+    local pid cwd
+    while read -r pid; do
+        [[ -z "$pid" || "$pid" == "$exclude_pid" ]] && continue
+        cwd=$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || echo "")
+        # cwd muss exakt dem BOT_DIR entsprechen (kein Prefix-Match auf andere Services)
+        [[ "$cwd" != "$BOT_DIR" ]] && continue
+        echo "⚠️  [$stage] Ghost via cwd-Check: PID $pid (cwd=$cwd) → SIGTERM"
+        kill "$pid" 2>/dev/null \
+            && echo "   ✓ PID $pid beendet" \
+            || echo "   ✗ SIGTERM fehlgeschlagen (PID $pid nicht mehr erreichbar)"
+        found=1
+    done < <(pgrep -f "bin/bot.js" 2>/dev/null || true; pgrep -f "server.js" 2>/dev/null || true)
+
+    [[ $found -eq 1 ]] && sleep 2  # warten damit Prozesse sauber enden
+    return 0
+}
+
+# ── Cleanup-Trap (feuert bei jedem Exit: normal, Fehler, Ctrl+C) ─────────────
+
+_CLEANUP_DONE=0
+cleanup() {
+    if [[ $_CLEANUP_DONE -eq 0 ]]; then
+        _CLEANUP_DONE=1
+        ${MAINTENANCE_CMD} --off 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# ── Maintenance aktivieren ────────────────────────────────────────────────────
+
+echo ""
+${MAINTENANCE_CMD} --on "${ACTION} ${SERVICE}" --minutes 5
+
+# ── Ghosts VOR der Service-Aktion bereinigen ──────────────────────────────────
+
+if [[ "$ACTION" == "stop" || "$ACTION" == "restart" ]]; then
+    PRE_MAIN_PID=$(systemctl show "${SERVICE}" --property=MainPID --value 2>/dev/null || echo "0")
+    kill_ghosts "pre" "$PRE_MAIN_PID"
+fi
+
+# ── Service-Aktion ────────────────────────────────────────────────────────────
+
+echo ""
+echo "⚡  sudo systemctl ${ACTION} ${SERVICE}"
+sudo systemctl "${ACTION}" "${SERVICE}" || true   # Fehler nicht skript-abbrechend
+echo ""
+
+# ── Warten bis erwarteter Zustand erreicht ────────────────────────────────────
+
+if [[ "$ACTION" == "stop" ]]; then
+    TARGET="inactive"
+    TIMEOUT=20
+    POST_START_WAIT=0
+else
+    TARGET="active"
+    TIMEOUT=60
+    POST_START_WAIT=10
+fi
+
+echo -n "⏳  Warte auf '${TARGET}'"
+ELAPSED=0
+SUCCESS=0
+
+while [[ $ELAPSED -lt $TIMEOUT ]]; do
+    CURRENT=$(systemctl is-active "${SERVICE}" 2>/dev/null || echo "unknown")
+    if [[ "$CURRENT" == "$TARGET" ]]; then
+        SUCCESS=1
+        break
+    fi
+    if [[ "$CURRENT" == "failed" ]]; then
+        break
+    fi
+    echo -n "."
+    sleep 1
+    ELAPSED=$((ELAPSED + 1))
+done
+
+echo ""
+
+FINAL=$(systemctl is-active "${SERVICE}" 2>/dev/null || echo "unknown")
+
+if [[ $SUCCESS -eq 1 ]]; then
+    echo "✅  ${SERVICE}: ${FINAL}"
+
+    # ── Ghosts NACH der Service-Aktion bereinigen ─────────────────────────────
+    # Fängt Prozesse die während/nach dem Restart entstanden sind und nicht dem
+    # neuen MainPID entsprechen (Race-Conditions bei Doppel-Restart, ExecStartPre-Reste).
+    if [[ "$ACTION" == "start" || "$ACTION" == "restart" ]]; then
+        POST_MAIN_PID=$(systemctl show "${SERVICE}" --property=MainPID --value 2>/dev/null || echo "0")
+        kill_ghosts "post" "$POST_MAIN_PID"
+    fi
+
+    # Startup-Notifications abwarten bevor Maintenance endet
+    if [[ $POST_START_WAIT -gt 0 ]]; then
+        echo -n "⏳  Startup-Notifications abwarten (${POST_START_WAIT}s)"
+        for ((i=0; i<POST_START_WAIT; i++)); do
+            echo -n "."
+            sleep 1
+        done
+        echo ""
+    fi
+else
+    echo "⚠️   ${SERVICE}: ${FINAL} (nach ${ELAPSED}s erwartet: ${TARGET})"
+    if [[ "$FINAL" == "failed" ]]; then
+        echo ""
+        echo "── Letzte Log-Zeilen ──────────────────────────────────────"
+        sudo journalctl -u "${SERVICE}" --no-pager -n 15 2>/dev/null || true
+    fi
+fi
+
+echo ""
+# EXIT-Trap übernimmt --off

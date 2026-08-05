@@ -1,0 +1,44 @@
+# FORGE.pub – LogRotate Configuration (FORK-ONLY)
+# Wird von bin/setup.sh automatisch nach /etc/logrotate.d/forge-pub installiert
+# (anders als am Master, wo logrotate.d/forge manuell kopiert wird – Fund
+# 2026-08-05, forge-pub1: fehlte komplett, Job-Logs wuchsen unbegrenzt).
+#
+# Deckt die Cron-/Script-Logs ab, die per `>>`/openSync(..., 'a') in Datei-
+# Anhänge schreiben und von forge-cron.js offen gehalten werden (daher
+# copytruncate). journald-Logs der systemd-Services haben eigene Rotation,
+# NICHT hier abgedeckt.
+
+/opt/forge/log/cron/*.log
+/opt/forge/log/liquidity/*.log
+{
+    su forge forge
+
+    daily
+    rotate 14
+    maxage 14
+
+    compress
+    delaycompress
+
+    missingok
+    notifempty
+
+    # Prozesse (Cron-Scripts, forge-cron.js) halten die Datei offen → Inhalt
+    # leeren statt Datei zu ersetzen, sonst schreibt der Prozess ins Leere.
+    copytruncate
+}
+
+# Range-Advisor-Tagesberichte (bots/liquidity/bin/bot.js): viele kleine,
+# abgeschlossene Dateien statt einer wachsenden – kein offenes Handle,
+# deshalb ohne copytruncate.
+/opt/forge/log/liquidity/advisor/*.md
+{
+    su forge forge
+
+    daily
+    rotate 14
+    maxage 14
+
+    missingok
+    notifempty
+}

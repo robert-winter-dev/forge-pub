@@ -1,0 +1,5 @@
+{
+  "_comment": "Fork-seitige Update-Quelle (ships mit dem Fork, siehe bin/update-check.js). 'repo' ist noch ein PLATZHALTER — vor dem ersten echten GitHub-Promote durch den tatsächlichen 'owner/repo'-Namen ersetzen (siehe fork-export.md). 'defaultChannel' gilt, solange keine Instanz-spezifische local/update-channel.txt existiert (siehe update.md 'Test-Strategie: Staging-Kanal') — nur forge-pub1/forge-pub2 bekommen dort 'staging', echte Kunden bleiben auf 'stable'.",
+  "repo": "TBD/forge-pub",
+  "defaultChannel": "stable"
+}

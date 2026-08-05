@@ -1,0 +1,20 @@
+diff --git a/node_modules/@orca-so/common-sdk/dist/web3/transactions/transactions-builder.js b/node_modules/@orca-so/common-sdk/dist/web3/transactions/transactions-builder.js
+index a19baca..bab905e 100644
+--- a/node_modules/@orca-so/common-sdk/dist/web3/transactions/transactions-builder.js
++++ b/node_modules/@orca-so/common-sdk/dist/web3/transactions/transactions-builder.js
+@@ -257,7 +257,14 @@ class TransactionBuilder {
+         }, resolvedConfirmCommitment);
+         const confirmTxErr = result.value.err;
+         if (confirmTxErr) {
+-            throw new Error(confirmTxErr.toString());
++            let detail;
++            try {
++                detail = JSON.stringify(confirmTxErr);
++            }
++            catch {
++                detail = confirmTxErr.toString();
++            }
++            throw new Error(detail);
+         }
+         return txId;
+     }

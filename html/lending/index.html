@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FORGE Lending Bot – Dashboard</title>
+
+    <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260323t">
+    <link rel="stylesheet" href="css/layout.css?v=20260615a">
+    <link rel="stylesheet" href="../css/shared.css?v=20260731a">
+    <link rel="stylesheet" href="../css/toast.css?v=20260722b">
+    <link rel="stylesheet" href="css/components.css?v=20260602a">
+    <script>window.FORGE_TZ = 'Europe/Berlin';</script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-content">
+
+            <!-- Spalte 1: Logo -->
+            <div class="header-col header-logo">
+                <a href="../" title="Zur Hauptseite">
+                    <img src="img/forge-logo.png?v=20260323m" alt="FORGE Logo" class="logo-icon">
+                </a>
+                <h1 id="headerTitle">Lending Bot</h1>
+            </div>
+
+            <!-- Spalte 2: Status (rechtsbündig) -->
+            <div class="header-col header-status">
+                <div class="status-indicator" id="statusIndicator">
+                    <span class="status-text">
+                        <span class="bot-state-icon" id="botStateIcon"></span>
+                        <span class="last-update offline" id="lastUpdate">Kein Signal</span>
+                    </span>
+                    <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                        <span class="notif-envelope" id="notifEnvelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
+                    </button>
+                </div>
+            </div>
+
+        </div>
+    </header>
+
+    <!-- Notification Panel -->
+    <div class="notif-panel hidden" id="notifPanel">
+        <div class="notif-panel-header">
+            <span class="notif-panel-title">Benachrichtigungen</span>
+            <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound + Popups deaktivieren">💰</button>
+            <button class="notif-panel-close" id="notifToastToggle" title="Popups an/aus">🔔</button>
+            <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden">🗑</button>
+            <button class="notif-panel-close" id="notifPanelClose">✕</button>
+        </div>
+        <div class="notif-panel-body" id="notifPanelBody">
+            <div class="notif-empty">Keine Benachrichtigungen</div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <main class="container">
+
+        <!-- Row 1: Top Cards (Wallet | Gesamt | PnL (24h) | Yield-APR (24h)) -->
+        <div class="top-cards-row">
+
+            <!-- Card 1: Wallet -->
+            <section class="card top-card" id="cardWallet">
+                <div class="metric">
+                    <span class="label">Wallet</span>
+                    <div class="value-group">
+                        <span class="value clickable-value" id="walletValue" title="Details anzeigen">—</span>
+                        <span class="unit">USDC</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Card 2: Gesamt -->
+            <section class="card top-card" id="cardGesamt">
+                <div class="metric">
+                    <span class="label">Gesamt</span>
+                    <div class="value-group">
+                        <span class="value clickable-value" id="gesamtValue" title="Entwicklung anzeigen">—</span>
+                        <span class="unit">USDC</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Card 3: PnL (24h) -->
+            <section class="card top-card" id="cardPnl24h">
+                <div class="metric">
+                    <span class="label">PnL (24h)</span>
+                    <div class="value-group">
+                        <span class="value" id="pnl24hValue" data-type="neutral">—</span>
+                        <span class="unit" id="pnl24hUnit" data-type="neutral">USDC</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Card 4: Yield-APR (24h) -->
+            <section class="card top-card" id="cardRendite">
+                <div class="metric">
+                    <span class="label has-tooltip"
+                          data-tooltip-title="Yield-APR (24h, netto)"
+                          data-tooltip-content="Annualisierte Netto-Rendite auf Basis der letzten 24h: (Yield − Payed Fees) / Gesamt-Kapital × 365. Rollend über heute und gestern (zeitgewichtet).">Yield-APR (24h)</span>
+                    <div class="value-group" id="renditeGroup" data-type="neutral">
+                        <span class="value" id="renditeValue">—</span>
+                        <span class="unit">%</span>
+                    </div>
+                </div>
+            </section>
+
+        </div>
+
+        <!-- Row 2: Charts nebeneinander -->
+        <div class="charts-row">
+
+            <section class="card" id="apyChartCard">
+                <div class="card-chart-head">
+                    <h2>APY <div class="apy-chart-legend" id="apyChartLegend"></div></h2>
+                    <div class="chart-range-btns" id="apyRangeBtns"></div>
+                </div>
+                <div class="chart-wrapper">
+                    <svg id="apyChartSvg" class="portfolio-chart" height="160" style="cursor:pointer" title="Vergrößern"></svg>
+                    <p class="chart-empty-msg" id="apyChartEmptyMsg">APY-Verlauf wird aufgebaut…</p>
+                </div>
+            </section>
+
+            <section class="card" id="yieldChartCard">
+                <div class="card-chart-head">
+                    <h2>Yield</h2>
+                    <div class="chart-range-btns" id="yieldRangeBtns"></div>
+                </div>
+                <div class="chart-wrapper" id="yieldChartWrapper" style="position:relative">
+                    <svg id="yieldChartSvg" class="portfolio-chart" height="160" style="cursor:pointer" title="Vergrößern"></svg>
+                    <p class="chart-empty-msg" id="yieldChartEmptyMsg">Keine Yield-Daten vorhanden…</p>
+                </div>
+            </section>
+
+        </div>
+
+        <!-- Row 3: Verfügbare Pools | Aktive Pools -->
+        <div class="charts-row" id="poolsRow">
+
+            <section class="card" id="availablePoolsCard">
+                <h2>Pool Metriken</h2>
+                <div id="availablePoolsContainer">
+                    <p class="empty-state">— Keine Pool-Daten verfügbar</p>
+                </div>
+            </section>
+
+            <section class="card" id="activePoolsCard">
+                <h2>Operative Metriken</h2>
+                <div id="activePoolsContainer">
+                    <p class="empty-state">— Keine aktiven Positionen</p>
+                </div>
+            </section>
+
+        </div>
+
+        <!-- Row 4: Statistiken -->
+        <section class="card card-full" id="statisticsCard">
+            <h2>Statistiken</h2>
+            <div class="stats-cards">
+
+                <!-- Heute -->
+                <div class="stat-card">
+                    <div class="stat-card-header">Heute <span class="stat-card-date" id="statDateToday"></span></div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Payed Fees" data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für Ein-/Auszahlungen heute. Klicken für Aufschlüsselung.">Payed Fees</span>
+                        <span class="stat-card-value" id="statPayedFeesToday">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield" data-tooltip-content="Akkumulierter USDC-Ertrag aus allen Lending-Positionen heute. Klicken für Tagesverlauf.">Yield</span>
+                        <span class="stat-card-value" id="statYieldToday">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield-APR" data-tooltip-content="Annualisierte Rendite auf Basis des heutigen Yields: Yield / Gesamt-Kapital × 365.">Yield-APR</span>
+                        <span class="stat-card-value" id="statRenditeToday" data-type="neutral">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="PnL" data-tooltip-content="Yield minus Payed Fees: wirtschaftliches Nettoergebnis heute nach Abzug aller TX-Kosten.">PnL</span>
+                        <span class="stat-card-value" id="statPnlToday" data-type="neutral">—</span>
+                    </div>
+                </div>
+
+                <!-- Gestern -->
+                <div class="stat-card">
+                    <div class="stat-card-header">Gestern <span class="stat-card-date" id="statDateYesterday"></span></div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Payed Fees" data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für Ein-/Auszahlungen gestern. Klicken für Aufschlüsselung.">Payed Fees</span>
+                        <span class="stat-card-value" id="statPayedFeesYesterday">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield" data-tooltip-content="Akkumulierter USDC-Ertrag aus allen Lending-Positionen gestern. Klicken für Details.">Yield</span>
+                        <span class="stat-card-value" id="statYieldYesterday">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield-APR" data-tooltip-content="Annualisierte Rendite auf Basis des gestrigen Yields: Yield / Gesamt-Kapital × 365.">Yield-APR</span>
+                        <span class="stat-card-value" id="statRenditeYesterday" data-type="neutral">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="PnL" data-tooltip-content="Yield minus Payed Fees: wirtschaftliches Nettoergebnis gestern nach Abzug aller TX-Kosten.">PnL</span>
+                        <span class="stat-card-value" id="statPnlYesterday" data-type="neutral">—</span>
+                    </div>
+                </div>
+
+                <!-- Monat -->
+                <div class="stat-card">
+                    <div class="stat-card-header">Monat <span class="stat-card-date" id="statDateMonth"></span></div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Payed Fees" data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für Ein-/Auszahlungen diesen Monat. Klicken für Aufschlüsselung.">Payed Fees</span>
+                        <span class="stat-card-value" id="statPayedFeesMonth">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield" data-tooltip-content="Akkumulierter USDC-Ertrag aus allen Lending-Positionen diesen Monat. Klicken für Tagesverlauf.">Yield</span>
+                        <span class="stat-card-value" id="statYieldMonth">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="Yield-APR" data-tooltip-content="Annualisierte Rendite auf Basis des monatlichen Yields: Yield / Gesamt-Kapital × 365, hochgerechnet auf 1 Jahr.">Yield-APR</span>
+                        <span class="stat-card-value" id="statRenditeMonth" data-type="neutral">—</span>
+                    </div>
+                    <div class="stat-card-row">
+                        <span class="stat-card-label has-tooltip" data-tooltip-title="PnL" data-tooltip-content="Yield minus Payed Fees: wirtschaftliches Nettoergebnis diesen Monat nach Abzug aller TX-Kosten.">PnL</span>
+                        <span class="stat-card-value" id="statPnlMonth" data-type="neutral">—</span>
+                    </div>
+                </div>
+
+            </div>
+        </section>
+
+        <!-- Row 4b: Pending Withdrawals (nur sichtbar wenn vorhanden) -->
+        <section class="card card-pending-withdrawals hidden" id="pendingWithdrawalsCard">
+            <h2>
+                <span class="pending-icon">⏳</span>
+                Ausstehende Withdrawals
+                <span class="pending-subtitle">Lulo Regular Pool – Cooldown läuft</span>
+            </h2>
+            <div id="pendingWithdrawalsContainer"></div>
+        </section>
+
+        <!-- Row 5: Transaktionen -->
+        <section class="card card-full" id="txCard">
+            <h2>Letzte 25 Transaktionen</h2>
+            <div class="tx-list" id="txContainer">
+                <div class="tx-header">
+                    <span>Zeit</span>
+                    <span>Typ</span>
+                    <span class="tx-col-pool">Ziel</span>
+                    <span class="col-r">Betrag</span>
+                    <span class="col-r tx-col-hash">TX</span>
+                </div>
+                <div id="txList">
+                    <p class="empty-state">— Keine Transaktionen</p>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- Footer (Inhalt wird via initFooter() in nav.js gesetzt) -->
+    <footer class="footer"></footer>
+
+    <!-- Tooltip Overlay (JS-gesteuert) -->
+    <div class="forge-tooltip" id="forgeTooltip">
+        <table>
+            <thead><tr><th id="forgeTooltipTitle"></th></tr></thead>
+            <tbody><tr><td id="forgeTooltipBody"></td></tr></tbody>
+        </table>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Pool-APY-Modal -->
+    <div id="poolApyModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="poolApyModalTitle">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="poolApyModalTitle">APY-Verlauf</h3>
+                <button class="modal-close" id="poolApyModalClose" aria-label="Schließen">✕</button>
+            </div>
+            <div class="chart-range-btns" id="poolApyRangeBtns"></div>
+            <div class="chart-wrapper">
+                <svg id="poolApyChartSvg" class="portfolio-chart" height="200"></svg>
+                <p class="chart-empty-msg" id="poolApyChartEmptyMsg">Noch keine Verlaufsdaten für diesen Pool.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pool-InOut-Modal (In-/Out-Klick) -->
+    <div id="poolInOutModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="poolInOutModalTitle">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="poolInOutModalTitle">Ein-/Auszahlungen</h3>
+                <button class="modal-close" id="poolInOutModalClose" aria-label="Schließen">✕</button>
+            </div>
+            <div class="chart-range-btns" id="poolInOutRangeBtns"></div>
+            <div class="chart-wrapper" style="position:relative">
+                <svg id="poolInOutChartSvg" class="portfolio-chart" height="200"></svg>
+                <p class="chart-empty-msg" id="poolInOutChartEmptyMsg">Keine Ein-/Auszahlungen in diesem Zeitraum.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pool-TVL-Modal -->
+    <div id="poolTvlModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="poolTvlModalTitle">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="poolTvlModalTitle">TVL-Verlauf</h3>
+                <button class="modal-close" id="poolTvlModalClose" aria-label="Schließen">✕</button>
+            </div>
+            <div class="chart-range-btns" id="poolTvlRangeBtns"></div>
+            <div class="chart-wrapper">
+                <svg id="poolTvlChartSvg" class="portfolio-chart" height="200"></svg>
+                <p class="chart-empty-msg" id="poolTvlChartEmptyMsg">Noch keine TVL-Verlaufsdaten für diesen Pool.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Gebunden-Detail-Modal -->
+    <div class="chart-modal-overlay" id="gebundenModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="gebundenModalTitle">
+        <div class="wallet-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="gebundenModalTitle">Gebundenes Kapital</span>
+                <button class="chart-modal-close" id="gebundenModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="wallet-modal-body" id="gebundenModalBody"></div>
+        </div>
+    </div>
+
+    <!-- Portfolio-Chart-Modal (Gesamt-Karte) -->
+    <div class="chart-modal-overlay" id="portfolioChartModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="portfolioChartModalTitle">
+        <div class="chart-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="portfolioChartModalTitle">Entwicklung Gesamtguthaben</span>
+                <button class="chart-toggle" id="portfolioChartOutlierToggle" title="Ausreißer ausblenden">&#8856;</button>
+                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="chart-range-btns" id="portfolioChartModalRangeBtns"></div>
+            <div class="chart-modal-body">
+                <svg id="portfolioChartModalSvg" class="chart-modal-svg"></svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- APY-Chart-Modal -->
+    <div class="chart-modal-overlay" id="apyChartModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="apyChartModalTitle">
+        <div class="chart-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="apyChartModalTitle">APY-Verlauf</span>
+                <button class="chart-modal-close" id="apyChartModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="chart-range-btns" id="apyChartModalRangeBtns"></div>
+            <div class="chart-modal-body">
+                <svg id="apyChartModalSvg" class="chart-modal-svg"></svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- Yield-Chart-Modal -->
+    <div class="chart-modal-overlay" id="yieldChartModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="yieldChartModalTitle">
+        <div class="chart-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="yieldChartModalTitle">Yield</span>
+                <button class="chart-modal-close" id="yieldChartModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="chart-range-btns" id="yieldChartModalRangeBtns"></div>
+            <div class="chart-modal-body" id="yieldChartModalBody" style="position:relative">
+                <svg id="yieldChartModalSvg" class="chart-modal-svg"></svg>
+            </div>
+        </div>
+    </div>
+
+    <!-- Wallet-Detail-Modal -->
+    <div class="chart-modal-overlay" id="walletDetailModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="walletDetailModalTitle">
+        <div class="wallet-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="walletDetailModalTitle">Wallet (Wert &gt; 0,00 USDC)</span>
+                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="wallet-modal-body" id="walletDetailModalBody"></div>
+        </div>
+    </div>
+
+    <!-- Payed-Fees-Modal -->
+    <div class="chart-modal-overlay" id="statPayedFeesModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="statPayedFeesModalTitle">
+        <div class="wallet-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="statPayedFeesModalTitle">TX-Fees</span>
+                <button class="chart-modal-close" id="statPayedFeesModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="wallet-modal-body" id="statPayedFeesModalBody"></div>
+        </div>
+    </div>
+
+    <!-- Yield-Modal -->
+    <div class="chart-modal-overlay" id="statYieldModal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="statYieldModalTitle">
+        <div class="wallet-modal-dialog">
+            <div class="chart-modal-header">
+                <span class="chart-modal-pair" id="statYieldModalTitle">Yield</span>
+                <button class="chart-modal-close" id="statYieldModalClose" aria-label="Schließen">&times;</button>
+            </div>
+            <div class="wallet-modal-body" id="statYieldModalBody"></div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script type="module" src="js/app.js?v=20260803b"></script>
+</body>
+</html>

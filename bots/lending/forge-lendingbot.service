@@ -1,0 +1,27 @@
+[Unit]
+Description=FORGE LendingBot - USDC Lending & Yield Optimizer (Solana)
+After=network-online.target forge-nexus.service
+Wants=network-online.target
+BindsTo=forge-nexus.service
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/bots/lending
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/bin/node bin/bot.js
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+StandardInput=null
+
+# .env Datei laden (API Keys, PRIVATE_KEY, etc.)
+EnvironmentFile=/opt/forge/local/env/lending.env
+
+# Ressourcen-Limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+{
+  "_comment": "Öffentliche Ed25519-Schlüssel (KEINE Geheimnisse) für den FORGE.pub Update-Verifier. Wird bei der Erstinstallation nach local/trust/trust-anchor.json kopiert (siehe bin/setup.sh) — danach NIE wieder durch ein normales Code-Update überschrieben (Befund C, 2026-08-03: local/ liegt außerhalb des Apply-Bereichs von do_deploy). Rotation läuft ausschließlich über einen eigenen, signierten trust-rotation-Manifest-Typ (siehe update.md), nie durch Ersetzen dieser Datei im Rahmen eines normalen Releases. Primär- und Recovery-Pubkey erst eintragen, wenn tools/pub-export/generate-signing-key.js beide Keypaare erzeugt hat.",
+  "schemaVersion": 1,
+  "primary": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAgThvJpDmlkNA2xeAXwFThaCeZZyeoQsehCSXKA3elyA=\n-----END PUBLIC KEY-----\n",
+  "recovery": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAdeyYqG6Ew8+UMijoJL1JPMfoS8SRDBt3sQ7HL/U6by4=\n-----END PUBLIC KEY-----\n"
+}

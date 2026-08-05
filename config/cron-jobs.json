@@ -1,0 +1,57 @@
+{
+  "jobs": [
+    {
+      "id": "health-check",
+      "description": "Alle Dienste prüfen + health-status.json",
+      "schedule": "*/5 * * * *",
+      "command": "node bin/health-check.js",
+      "enabled": true
+    },
+    {
+      "id": "wallet-monitor",
+      "description": "Wallet-Balances aller Bots erfassen",
+      "schedule": "*/10 * * * *",
+      "command": "node core/wallet-monitor/monitor.js",
+      "enabled": true
+    },
+    {
+      "id": "pool-offers-dryrun",
+      "description": "FORGE.pub Pool-Offer Dry-Run-Gate vor Kapitalfreigabe",
+      "schedule": "*/15 * * * *",
+      "command": "node bin/pool-offers-dryrun.js",
+      "cwd": "bots/liquidity",
+      "enabled": true
+    },
+    {
+      "id": "pool-offers-sync",
+      "description": "FORGE.pub Offer-Updates für übernommene Pools",
+      "schedule": "37 * * * *",
+      "command": "node bin/pool-offers-sync.js",
+      "cwd": "bots/liquidity",
+      "enabled": true
+    },
+    {
+      "id": "premium-pay",
+      "description": "FORGE.pub Premium – stündliche Zahlung (FORK-ONLY, Ein/Aus-Schalter)",
+      "schedule": "5 * * * *",
+      "command": "node core/premium/premium-pay.js",
+      "cwd": ".",
+      "enabled": true
+    },
+    {
+      "id": "lmb3-cleanup",
+      "description": "LMB3 Cleanup-Job (inkl. SOL-Topup)",
+      "schedule": "5 * * * *",
+      "command": "node bin/cleanup.js",
+      "enabled": true,
+      "cwd": "bots/liquidity"
+    },
+    {
+      "id": "zombie-check",
+      "description": "Täglicher Zombie-NFT-Check",
+      "schedule": "1 0 * * *",
+      "command": "bin/run-zombie-check.sh",
+      "enabled": true
+    }
+  ]
+}

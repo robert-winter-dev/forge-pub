@@ -1,0 +1,68 @@
+/* ════════════════════════════════════════════════════════════════════════
+   FORGE – Zentrales Toast-CSS
+   Einzige Quelle für das Toast-Layout (Container + Level-Farben), damit
+   Popups in allen Frontends (Hub, Bot-Dashboards, Settings) identisch
+   aussehen. Wird zusätzlich zum jeweiligen Seiten-CSS eingebunden.
+   JS-Gegenstück: html/js/toast.js (ToastManager + showToast()).
+   Levels: info / success / warn / error / earnings.
+   ════════════════════════════════════════════════════════════════════════ */
+
+.toast-container {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+    pointer-events: none;
+}
+.toast {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    max-width: 320px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: var(--text, var(--text-primary));
+    pointer-events: all;
+    cursor: pointer;
+    animation: toastIn 0.2s ease;
+    transition: opacity 0.3s, transform 0.3s;
+}
+.toast.level-success { border-left: 3px solid var(--success); }
+.toast.level-warn     { border-left: 3px solid #f39c12; }
+.toast.level-error    { border-left: 3px solid var(--danger); }
+.toast.level-info     { border-left: 3px solid var(--accent, var(--primary)); }
+.toast.level-earnings {
+    border-left: 3px solid #2ecc71;
+    background: linear-gradient(135deg, var(--surface) 0%, rgba(46,204,113,0.07) 100%);
+}
+.toast.removing { opacity: 0; transform: translateX(20px); }
+.toast-pair {
+    font-size: 0.68rem;
+    color: var(--text-muted, var(--text-secondary));
+    margin-top: 2px;
+}
+.toast-earnings-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.70rem;
+    color: var(--text-muted, var(--text-secondary));
+    margin-bottom: 1px;
+}
+.toast-earnings-icon  { font-size: 0.95rem; line-height: 1; }
+.toast-earnings-label { font-weight: 600; color: var(--text, var(--text-primary)); }
+.toast-earnings-amount {
+    font-size: 1.0rem;
+    font-weight: 700;
+    color: #2ecc71;
+    letter-spacing: 0.01em;
+}
+@keyframes toastIn {
+    from { opacity: 0; transform: translateX(20px); }
+    to   { opacity: 1; transform: translateX(0); }
+}

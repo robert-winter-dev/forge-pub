@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FORGE - public: Dashboard</title>
+    <link rel="icon" type="image/png" href="img/forge-logo.png">
+    <link rel="stylesheet" href="css/forge.css?v=20260731a">
+    <link rel="stylesheet" href="css/toast.css?v=20260722b">
+    <script>window.FORGE_TZ = 'Europe/Berlin';</script>
+</head>
+<body>
+
+<header>
+    <div class="header-content">
+        <div class="header-logo">
+            <img src="img/forge-logo.png" alt="FORGE Logo">
+            <h1>FORGE</h1>
+        </div>
+        <div class="header-right">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-text">
+                    <span class="bot-state-icon" id="botStateIcon"></span>
+                    <span class="last-update offline" id="last-update">Kein Signal</span>
+                </span>
+                <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                    <span class="notif-envelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</header>
+
+<div class="notif-panel hidden" id="notifPanel">
+    <div class="notif-panel-header">
+        <span class="notif-panel-title">Benachrichtigungen</span>
+        <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound deaktivieren">🔊</button>
+        <button class="notif-panel-close" id="notifToastToggle" title="Popups deaktivieren">🔔</button>
+        <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden">🗑</button>
+        <button class="notif-panel-close" id="notifPanelClose">✕</button>
+    </div>
+    <div class="notif-panel-body" id="notifPanelBody">
+        <div class="notif-empty">Keine Benachrichtigungen</div>
+    </div>
+</div>
+
+<main>
+    <!-- Zeile 1: Charts -->
+    <div class="overview-charts" id="overviewCharts">
+
+        <!-- Gesamtguthaben (Portfolio-Verlauf) -->
+        <div class="ov-card ov-card-clickable" id="portfolioCard">
+            <div class="ov-header">
+                <div class="ov-title-group">
+                    <span class="ov-title">Gesamtguthaben</span>
+                    <span class="ov-current-val" id="portfolioCurrentVal"></span>
+                </div>
+                <div class="ov-controls">
+                    <div class="ov-range-btns" id="ovRangeBtns">
+                        <button class="ov-range-btn" data-range="1D">1D</button>
+                        <button class="ov-range-btn" data-range="1W">1W</button>
+                        <button class="ov-range-btn active" data-range="1M">1M</button>
+                    </div>
+                </div>
+            </div>
+            <div class="ov-chart-wrap" id="portfolioChartWrap">
+                <svg class="ov-chart" id="portfolioChartSvg" height="140"></svg>
+                <div class="ov-empty" id="portfolioEmpty">Keine Daten für diesen Zeitraum</div>
+            </div>
+        </div>
+
+        <!-- Tageseinnahmen (Profit Netto) -->
+        <div class="ov-card ov-card-clickable" id="earningsCard">
+            <div class="ov-header">
+                <div class="ov-title-group">
+                    <span class="ov-title">PnL</span>
+                    <span class="ov-current-val" id="earningsCurrentVal"></span>
+                </div>
+                <div class="ov-controls">
+                    <div class="ov-range-btns" id="earningsRangeBtns">
+                        <button class="ov-range-btn" data-range="1D">1D</button>
+                        <button class="ov-range-btn" data-range="1W">1W</button>
+                        <button class="ov-range-btn active" data-range="1M">1M</button>
+                    </div>
+                </div>
+            </div>
+            <div class="ov-chart-wrap" id="earningsChartWrap">
+                <svg class="ov-chart" id="earningsChartSvg" height="140"></svg>
+                <div class="ov-empty" id="earningsEmpty">Keine Daten für diesen Zeitraum</div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Zeile 2: Bot-Tabelle -->
+    <div class="section-title-row">
+        <p class="section-title">FORGE Bots: 24h</p>
+    </div>
+
+    <div class="bot-table-wrap">
+        <table class="bot-table">
+            <thead>
+                <tr>
+                    <th>Bot</th>
+                    <th>Gesamtguthaben</th>
+                    <th data-tooltip-title="PnL 24h" data-tooltip="Gewinn/Verlust der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard.">PnL 24h</th>
+                    <th data-tooltip-title="APR 24h" data-tooltip="Annualisierte Rendite auf Basis der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard.">APR 24h</th>
+                </tr>
+            </thead>
+            <tbody id="botTableBody">
+                <tr><td colspan="4" class="tbl-loading">Laden …</td></tr>
+            </tbody>
+            <tfoot>
+                <tr>
+                    <td>Gesamt</td>
+                    <td id="totalGesamt">–</td>
+                    <td id="totalProfit">–</td>
+                    <td></td>
+                </tr>
+            </tfoot>
+        </table>
+    </div>
+</main>
+
+<!-- Modal: Gesamtguthaben -->
+<div class="ov-modal-overlay" id="portfolioModal" style="display:none">
+    <div class="ov-modal-dialog">
+        <div class="ov-modal-header">
+            <span class="ov-modal-title">Gesamtguthaben – Verlauf</span>
+            <div class="ov-range-btns" id="ovModalRangeBtns">
+                <button class="ov-range-btn" data-range="1D">1D</button>
+                <button class="ov-range-btn" data-range="1W">1W</button>
+                <button class="ov-range-btn active" data-range="1M">1M</button>
+            </div>
+            <button class="ov-modal-close" id="portfolioModalClose" title="Schließen">&times;</button>
+        </div>
+        <div class="ov-modal-body" id="portfolioModalBody">
+            <svg class="ov-modal-svg" id="portfolioModalSvg"></svg>
+        </div>
+    </div>
+</div>
+
+<!-- Modal: Tageseinnahmen -->
+<div class="ov-modal-overlay" id="earningsModal" style="display:none">
+    <div class="ov-modal-dialog">
+        <div class="ov-modal-header">
+            <span class="ov-modal-title">PnL – Verlauf</span>
+            <div class="ov-range-btns" id="earModalRangeBtns">
+                <button class="ov-range-btn" data-range="1D">1D</button>
+                <button class="ov-range-btn" data-range="1W">1W</button>
+                <button class="ov-range-btn active" data-range="1M">1M</button>
+            </div>
+            <button class="ov-modal-close" id="earningsModalClose" title="Schließen">&times;</button>
+        </div>
+        <div class="ov-modal-body" id="earningsModalBody">
+            <svg class="ov-modal-svg" id="earningsModalSvg"></svg>
+        </div>
+    </div>
+</div>
+
+<!-- Footer (Inhalt wird via initFooter() in forge.js gesetzt) -->
+<footer></footer>
+
+<div class="toast-container" id="toastContainer"></div>
+<div id="fgt"></div>
+
+<script type="module" src="js/forge.js?v=20260803b"></script>
+
+</body>
+</html>

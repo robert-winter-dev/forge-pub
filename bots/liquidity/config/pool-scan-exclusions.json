@@ -1,0 +1,54 @@
+{
+  "blacklist": [
+    {
+      "address": "CNTPTpytHK9txrsPCvaEnc3PoN9ZVWDDcSnFSZZonMue",
+      "pair": "ANSEM/SOL",
+      "reason": "Token-2022 (tokenB) + adaptiveFeeEnabled — beide Abbruchkriterien, kein xStock-Ausnahmemuster. Zusätzlich strukturell riskant: Pool ~3 Tage alt, TVL +36%/24h, Preis-Crash >50% in wenigen Tagen, Fee-APR-Fenster divergieren extrem (565%/205%/48%).",
+      "addedAt": "2026-07-05"
+    }
+  ],
+  "maybeLater": [
+    {
+      "address": "5p58XYzEUuvceAb4momaQ943rTPLgigdBXtJNdnZTDJ9",
+      "pair": "USDG/USDe",
+      "reason": "Token-2022 (tokenA, USDG) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (USDG ist Global-Dollar/Paxos-Stablecoin, kein Backed-Finance-xStock-Token). Beide Blocker technischer Natur, kein struktureller Makel: Stablecoin-Pool, in schlechten Märkten als Parkmöglichkeit interessant. Bei Umbau-Kapazität (Token-2022-Support + Live-Fee-Unterstützung) neu bewerten.",
+      "addedAt": "2026-07-15"
+    },
+    {
+      "address": "Tuy6gMupGQN7wCZ8rVP1EuLRYB132VSo9Smy4AJvQgn",
+      "pair": "Fartcoin/SOL",
+      "reason": "adaptiveFeeEnabled — estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. APR/Vola-Profil sonst attraktiv (7d/30d Fee-APR ~100%, kein Spike, vgl. PUMP/SOL, HYPE/SOL). Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-07-05"
+    },
+    {
+      "address": "HsK7nknVVv6E9PEuovdQG1orUKvzZnWZfSpXkLpMCy9U",
+      "pair": "WYT/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard. estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL 384k USDC, Fee-APR 24h/7d/30d ohne Spike-Muster. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-07-08"
+    },
+    {
+      "address": "ig9EkJ63zrSRg7BKMGdyfPfNRCRwxGNVV1FByz26QkC",
+      "pair": "GEOD/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL ~326k USDC, Fees24h ~7326 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-07-27"
+    },
+    {
+      "address": "3oL8urV54Lm9ZAFemSegmQox6oEzCJ2kag6hbWKbHt6w",
+      "pair": "META/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL ~201k USDC, Fees24h ~3148 USDC. META ist MetaDAO-Governance-Token (Futarchy-Protokoll), kein RWA. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-08-02"
+    },
+    {
+      "address": "2oStJEcUckQgX2aGUE3L8w8d5phxcuceDHwTfTGg33SN",
+      "pair": "ANSEM/USDC",
+      "reason": "Token-2022 (tokenA, Metadaten-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (reiner Meme-Coin, kein Backed-Finance-Token). Anderer Pool als das bereits geblacklistete ANSEM/SOL, gleiches Kriterien-Muster. TVL ~108k USDC, Fees24h ~1278 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-08-02"
+    },
+    {
+      "address": "4AFAkCSkSNmra64irggEFd8ZtF4WCtFe51qVaFFNBL2D",
+      "pair": "PUMP/USDC",
+      "reason": "Token-2022 (tokenA, zusätzlich transferHook-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster. Anderer Whirlpool als der bestehende liq-pump-sol (SOL/PUMP, adaptiveFeeEnabled:false, statisch) — gleicher Token, aber andere Pool-Instanz mit dynamischer Fee. TVL ~224k USDC, Fees24h ~1026 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-08-02"
+    }
+  ]
+}

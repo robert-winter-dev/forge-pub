@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FORGE - public: Message Center</title>
+    <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
+    <link rel="stylesheet" href="css/settings.css?v=20260731e">
+    <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
+    <link rel="stylesheet" href="css/message.css?v=20260801a">
+</head>
+<body>
+
+<header class="header">
+    <div class="header-content">
+        <div class="header-col header-logo">
+            <a href="/forge/" title="Zur Hauptseite">
+                <img src="/forge/img/forge-logo.png" alt="FORGE Logo" class="logo-icon">
+            </a>
+            <h1>Message <span class="title-word-monitor">Center</span></h1>
+        </div>
+        <div class="header-right">
+            <span class="last-update" id="lastUpdate">–</span>
+            <button class="notif-bell" id="notifBell" title="Support-Nachrichten">
+                <span class="notif-envelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
+            </button>
+        </div>
+    </div>
+</header>
+
+<main class="main-content mc-layout" id="mcLayout">
+
+    <!-- Spalte 1: Menü -->
+    <nav class="mc-menu" id="mcMenu" aria-label="Nachrichtenkategorien">
+        <button class="mc-menu-item" data-menu="system">System<span class="mc-menu-badge hidden" id="mcBadgeSystem">0</span></button>
+        <button class="mc-menu-item" data-menu="support">Support<span class="mc-menu-badge hidden" id="mcBadgeSupport">0</span></button>
+        <button class="mc-menu-item" data-menu="premium">Premium<span class="mc-menu-badge hidden" id="mcBadgePremium">0</span></button>
+        <button class="mc-menu-item" data-menu="einstellungen">Einstellungen</button>
+    </nav>
+
+    <!-- Einstellungen: einzige verbleibende Nutzerin von mcDetail (volle Breite,
+         siehe .mc-no-list) – System/Premium/Support haben je ein eigenes
+         Vollbreite-Panel weiter unten. -->
+    <div class="mc-detail" id="mcDetail">
+        <div class="mc-detail-body" id="mcDetailBody">
+            <div class="msg-empty">Keine Nachricht ausgewählt.</div>
+        </div>
+    </div>
+
+    <!-- System-Nachrichten: eigenständiges Vollbreite-Panel (ersetzt Spalte 2+3
+         nur wenn "System" aktiv ist, siehe selectMenu() in message.js) -->
+    <div class="mc-system-panel" id="mcSystemPanel" hidden>
+        <div class="mcs-toprow">
+            <div class="mcs-info">
+                <input type="search" class="mcs-search" id="mcsSearchInput" placeholder="Suchen…" autocomplete="off">
+            </div>
+        </div>
+        <div class="mcs-grid" id="mcsGrid"></div>
+        <div class="mcs-bottomrow">
+            <div class="mcs-pagination" id="mcsPagination"></div>
+            <button class="mcs-page-btn" id="mcsMarkAllBtn"
+                title="Alle geladenen System-Nachrichten als gelesen markieren"
+                aria-label="Alle als gelesen markieren">&#10003;</button>
+        </div>
+    </div>
+
+    <!-- Premium-Nachrichten: gleiches Vollbreite-Panel wie System, eigene IDs
+         (mcp*) und eigener Filter (Alle/Gesendet/Empfangen statt Absender) -->
+    <div class="mc-system-panel" id="mcPremiumPanel" hidden>
+        <div class="mcs-toprow">
+            <div class="mcs-info">
+                <input type="search" class="mcs-search" id="mcpSearchInput" placeholder="Suchen…" autocomplete="off">
+            </div>
+        </div>
+        <div class="mcs-grid" id="mcpGrid"></div>
+        <div class="mcs-bottomrow">
+            <div class="mcs-pagination" id="mcpPagination"></div>
+            <button class="mcs-page-btn" id="mcpMarkAllBtn"
+                title="Alle geladenen Premium-Nachrichten als gelesen markieren"
+                aria-label="Alle als gelesen markieren">&#10003;</button>
+        </div>
+    </div>
+
+    <!-- Support-Nachrichten: gleiches Vollbreite-Panel wie System/Premium –
+         eine Box pro Konversation, Klick öffnet Thread + Antwortfeld im Modal. -->
+    <div class="mc-system-panel" id="mcSupportPanel" hidden>
+        <div class="mcs-toprow">
+            <div class="mcs-info">
+                <input type="search" class="mcs-search" id="mcSupSearchInput" placeholder="Suchen…" autocomplete="off">
+            </div>
+            <button class="msg-icon-btn msg-icon-btn-accent" id="msgNewBtn" title="Neue Nachricht" aria-label="Neue Nachricht" hidden>✎</button>
+        </div>
+        <div class="mcs-grid" id="mcSupGrid"></div>
+        <div class="mcs-bottomrow">
+            <div class="mcs-pagination" id="mcSupPagination"></div>
+            <button class="mcs-page-btn" id="mcSupMarkAllBtn"
+                title="Alle Konversationen als gelesen markieren"
+                aria-label="Alle als gelesen markieren">&#10003;</button>
+        </div>
+    </div>
+
+</main>
+
+<footer class="footer"></footer>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module" src="js/message.js?v=20260803b"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+[Unit]
+Description=FORGE Settings Daemon – Privileged Bot-Control Task Runner
+After=network.target
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/bots/settings
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+ExecStart=/usr/bin/node bin/bot-control-daemon.js
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forge-settings-daemon
+
+[Install]
+WantedBy=multi-user.target

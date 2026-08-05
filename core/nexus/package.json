@@ -1,0 +1,15 @@
+{
+  "name": "forge-nexus",
+  "version": "1.0.0",
+  "description": "FORGE Nexus – Zentrales API-Routing, Rate-Limiting und Notification-Service",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}

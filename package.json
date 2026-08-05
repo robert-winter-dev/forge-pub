@@ -1,0 +1,15 @@
+{
+  "name": "forge",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "FORGE – Shared libraries for FORGE bots",
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "aws4fetch": "^1.0.20",
+    "better-sqlite3": "^11.7.0",
+    "bs58": "^6.0.0",
+    "nostr-tools": "^2.24.1"
+  }
+}

@@ -1,0 +1,35 @@
+[Unit]
+Description=FORGE Liquidity Bot - Orca CLMM Liquidity Mining (Solana)
+After=network-online.target forge-nexus.service
+Wants=network-online.target
+BindsTo=forge-nexus.service
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/bots/liquidity
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+
+ExecStartPre=/bin/sleep 30
+ExecStart=/usr/bin/node bin/bot.js
+
+# .env laden (Keypair-Pfad, RPC, Telegram, etc.)
+EnvironmentFile=/opt/forge/local/env/liquidity.env
+
+# Graceful shutdown: SIGTERM → Bot schließt offene TXs + sendet Telegram-Nachricht
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Restart bei Absturz (nicht bei manuellem Stop)
+Restart=on-failure
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+StandardInput=null
+
+# Ressourcen-Limits
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

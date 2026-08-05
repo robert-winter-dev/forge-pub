@@ -1,0 +1,1081 @@
+#!/usr/bin/env node
+/**
+ * FORGE LendingBot – Hauptschleife
+ *
+ * Verantwortlichkeiten:
+ *   - APY-Monitoring aller konfigurierten Protokolle (stündlich)
+ *   - Telegram-Alert bei TVL-Crossing (900K / 1M)
+ *   - Portfolio-Snapshots in DB (stündlich)
+ *   - Dashboard-Export + Sync (alle 5 Minuten)
+ *   - Graceful Shutdown (SIGTERM / SIGINT)
+ *   - PID-Lock (verhindert doppeltes Starten)
+ *
+ * Starten:
+ *   node bin/bot.js
+ *   sudo systemctl start forge-lendingbot.service
+ *
+ * Stoppen:
+ *   sudo systemctl stop forge-lendingbot.service
+ *   (SIGTERM → graceful shutdown, kein kill -9)
+ */
+
+import { existsSync, writeFileSync, readFileSync, unlinkSync } from 'fs';
+import { execFile }   from 'child_process';
+import { promisify }  from 'util';
+import { dirname, resolve, join } from 'path';
+import { fileURLToPath }    from 'url';
+
+import { config, loadAutoDeployConfig } from '../lib/config.js';
+import { sendTelegram } from '../lib/notify.js';
+import { KaminoProtocol, /* DriftProtocol (DEAKTIVIERT 2026-04-02), */ LoopscaleProtocol, JupiterLendProtocol,
+         createProtocolByName } from '../lib/lending-protocols.js';
+import { getSolBalance, getUsdcBalance, loadKeypair, signAndSend, sendUsdc, fetchFeeSol } from '../lib/wallet.js';
+import {
+    getDb,
+    recordProtocolStat,
+    getPreviousProtocolStat,
+    getProtocolStatNear24h,
+    upsertWalletSnapshot,
+    getWalletSnapshot,
+    recordPortfolioSnapshot,
+    prunePortfolioHistory,
+    addNotification,
+    getActivePositions,
+    updatePosition,
+    closePosition,
+    addPosition,
+    addToPosition,
+    recordTransaction,
+    getTotalDepositsWithdraws,
+    getTransactionsByProtocol,
+    kvGet, kvSet,
+    hasDailySnapshot,
+    recordDailySnapshot,
+} from '../lib/db.js';
+import {
+    get72hPoolStats,
+    getQualifiedPools,
+} from '../lib/rebalancer.js';
+import { loadTvlGuard, isPoolEnabled, disablePool } from '../lib/tvl-guard.js';
+import { syncDashboard } from '../lib/sync.js';
+import { FORGE_TZ, todayTz } from '../../../core/config.js';
+import { PATHS, botPidPath } from '../../../config/paths.js';
+
+const execFileAsync = promisify(execFile);
+const __dirname     = dirname(fileURLToPath(import.meta.url));
+const EXPORT_SCRIPT = resolve(__dirname, 'export.js');
+
+// ─── Konstanten ───────────────────────────────────────────────────────────────
+
+/** Interval zwischen APY-Checks (aus config, default: 1h) */
+const APY_INTERVAL_MS  = config.apyUpdateIntervalMs;
+
+/** Maximaler Jitter vor jedem APY-Tick – verhindert dass alle Calls stets auf dieselbe Sekunde fallen */
+const APY_JITTER_MS    = 5 * 60 * 1000;  // bis zu 5 Minuten
+
+/** Dashboard Export + Sync alle 5 Minuten */
+const SYNC_INTERVAL_MS = 5 * 60 * 1000;
+
+/** PID-Lock Datei */
+const PID_FILE  = botPidPath('lending');
+
+/** Move-Lock: gesetzt während bin/move.js läuft → Auto-Deploy pausieren */
+const MOVE_LOCK = join(PATHS.lendingData, 'move.lock');
+
+// ─── SOL-Topup Konstanten ─────────────────────────────────────────────────────
+const SOL_MINT          = 'So11111111111111111111111111111111111111112';
+const USDC_MINT         = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const SOL_TOPUP_TRIGGER = 0.10;  // Unter diesem Wert: USDC → SOL tauschen
+const SOL_TOPUP_TARGET  = 0.20;  // Ziel-Guthaben nach dem Swap
+const SOL_WARN_TRIGGER  = 0.07;  // Unter diesem Wert: Telegram-Warnung wenn kein USDC vorhanden
+const SOL_DECIMALS      = 9;
+const USDC_DECIMALS     = 6;
+const TOPUP_SLIPPAGE    = 100;   // 1 % Slippage-Toleranz
+
+let lastPruneDay = '';
+
+// ─── PID-Lock ─────────────────────────────────────────────────────────────────
+
+(function acquirePidLock() {
+    if (existsSync(PID_FILE)) {
+        const existingPid = parseInt(readFileSync(PID_FILE, 'utf-8').trim(), 10);
+        if (!isNaN(existingPid)) {
+            try {
+                process.kill(existingPid, 0); // wirft wenn Prozess nicht existiert
+                console.error(`[PID-Lock] Bot ${config.botId} läuft bereits (PID ${existingPid}). Abbruch.`);
+                process.exit(1);
+            } catch {
+                // Veraltete Lock-Datei → überschreiben
+            }
+        }
+    }
+    writeFileSync(PID_FILE, String(process.pid), 'utf-8');
+    process.on('exit', () => { try { unlinkSync(PID_FILE); } catch { /* ignore */ } });
+})();
+
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
+function log(msg) {
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    console.log(`[${ts}] ${msg}`);
+}
+
+function logErr(msg) {
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    console.error(`[${ts}] ❌ ${msg}`);
+}
+
+// ─── Fehler-Zähler für selbstheilende Fehler ─────────────────────────────────
+//
+// Für zyklische Abfragen (Balance, APY, Position), die üblicherweise an einem
+// kurzen Upstream-/RPC-Hiccup scheitern und sich beim nächsten Tick von selbst
+// lösen: ein einzelner Fehlschlag bleibt lokales console.warn, erst ab dem
+// 2. Mal in Folge wird eskaliert (console.error + Telegram). Erfolg setzt den
+// Zähler zurück. Analog zum etablierten Muster in
+// bots/liquidity/bin/bot.js (_openPositionFailCount etc.).
+//
+// NICHT verwenden für DB-Schreibfehler oder finanzkritische Aktionen (Auto-Exit,
+// SOL-Topup, Auto-Deploy) — die müssen weiterhin sofort sichtbar sein.
+const _failCounts = new Map();
+
+// ─── Debounce für 0-Balance-Reads (Position schließen) ───────────────────────
+//
+// Loopscale liefert nach einem frisch bestätigten Deposit gelegentlich noch für
+// einen Poll-Zyklus den Pre-Deposit-Stand (0 USDC) zurück (Indexer-Lag). Ohne
+// Debounce schließt der Dust-Fallback unten die gerade erst angelegte DB-Position
+// fälschlich, obwohl das Geld on-chain angekommen ist (Vorfall 2026-08-02, Ticket
+// Loopscale Public 250 USDC). Analog zum Fail-Streak-Muster oben: erst nach
+// ZERO_BALANCE_CONFIRM_TICKS aufeinanderfolgenden 0-Reads wirklich schließen.
+const _zeroBalanceStreak = new Map();
+const ZERO_BALANCE_CONFIRM_TICKS = 2;
+
+function noteFail(key, label, err, { escalateAt = 2 } = {}) {
+    const fails = (_failCounts.get(key) ?? 0) + 1;
+    _failCounts.set(key, fails);
+    if (fails >= escalateAt) {
+        logErr(`${label} (${fails}× in Folge): ${err.message}`);
+        sendTelegram(`⚠️ *${label} fehlgeschlagen* (${fails}× in Folge): ${err.message}`).catch(() => {});
+    } else {
+        log(`⚠ ${label} transient (${fails}/${escalateAt} – warte auf Bestätigung im nächsten Zyklus): ${err.message}`);
+    }
+}
+
+function resetFail(key) {
+    _failCounts.delete(key);
+}
+
+const NEXUS_URL = 'http://127.0.0.1:3100'; // FORGE API Proxy (Jupiter-Quotes für SOL-Topup)
+
+// ─── Protokolle ───────────────────────────────────────────────────────────────
+
+/** Erstellt eine Protokoll-Instanz für einen konfigurierten Pool-Namen. */
+function instantiateProtocol(name) {
+    // if (name === 'drift')   return new DriftProtocol();  // DEAKTIVIERT 2026-04-02
+    if (name === 'jupiter') return new JupiterLendProtocol();
+    const kaminoMarket = config.kamino.markets[name];
+    if (kaminoMarket) return new KaminoProtocol({
+        name,
+        label:       kaminoMarket.label,
+        market:      kaminoMarket.market,
+        usdcReserve: kaminoMarket.reserve,
+    });
+    const loopscaleVault = config.loopscale.vaults[name];
+    if (loopscaleVault) return new LoopscaleProtocol({
+        name,
+        label:        loopscaleVault.label,
+        vaultAddress: loopscaleVault.address,
+    });
+    return null;
+}
+
+/**
+ * Erstellt Protokoll-Instanzen für ALLE konfigurierten Pools
+ * (LENDING_PROTOCOLS + MONITOR_PROTOCOLS, dedupliziert).
+ *
+ * Die Qualifikationskriterien (TVL/APY) entscheiden automatisch,
+ * welche Pools tatsächlich Kapital erhalten – keine manuelle Trennung nötig.
+ */
+function buildAllProtocols() {
+    const seen   = new Set();
+    const protos = [];
+    for (const name of [...config.protocols, ...config.monitorProtocols]) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        const proto = instantiateProtocol(name);
+        if (proto) protos.push(proto);
+        else logErr(`Unbekanntes Protokoll: ${name} (wird übersprungen)`);
+    }
+    return protos;
+}
+
+// ─── Hilfsfunktionen ──────────────────────────────────────────────────────────
+
+function fmt(n, decimals = 2) {
+    if (n == null || isNaN(n)) return '—';
+    return Number(n).toLocaleString('de-DE', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals,
+    });
+}
+
+// ─── Alert-Logik ──────────────────────────────────────────────────────────────
+
+const TVL_THRESHOLDS     = [900_000, 1_000_000];
+const DUST_THRESHOLD_USDC  = 1.0;  // Positionen unter diesem Betrag gelten als leer (Dust nach Withdraw)
+// Schutz gegen veraltete API-Werte nach Withdrawals
+// (z.B. Loopscale gibt nach Withdrawal kurzzeitig noch den Pre-Withdrawal-Wert zurück).
+// Schwelle ist zeitbasiert: erlaubt akkumulierte Zinsen seit letztem DB-Update (max 20% APY als Puffer),
+// mindestens aber MIN_PLAUSIBLE_JUMP pro Tick. Post-Withdrawal-Spikes (250+ USDC) werden weiterhin erkannt.
+const MIN_PLAUSIBLE_JUMP   = 1.0;   // absolutes Minimum pro Tick in USDC
+const MAX_STALE_APY        = 1.00;  // 100% APY als obere Schranke – unrealistisch für Lending, fängt aber Post-Withdrawal-Spikes (250+ USDC) sicher ab
+
+/**
+ * Prüft nach jedem DB-Schreiben:
+ *  - Hat die TVL eine der Schwellen (900K / 1M) überschritten oder unterschritten?
+ *
+ * Muss NACH recordProtocolStat() aufgerufen werden.
+ */
+async function checkAlerts(proto, currentApy, currentTvl) {
+    // ── TVL-Schwellwert-Crossing ─────────────────────────────────────────────
+    if (currentTvl != null) {
+        const prev = getPreviousProtocolStat(proto.name);
+        if (prev?.tvl != null) {
+            for (const threshold of TVL_THRESHOLDS) {
+                const tLabel = threshold >= 1_000_000
+                    ? `$${(threshold / 1_000_000).toFixed(0)}M`
+                    : `$${(threshold / 1_000).toFixed(0)}K`;
+                const tvlFmt = currentTvl >= 1e6
+                    ? `$${(currentTvl / 1e6).toFixed(2)}M`
+                    : `$${(currentTvl / 1e3).toFixed(0)}K`;
+                if (prev.tvl < threshold && currentTvl >= threshold) {
+                    await sendTelegram(
+                        `📈 *${proto.label}* TVL über ${tLabel}\n`
+                        + `Jetzt: ${tvlFmt}`
+                    );
+                    addNotification({ level: 'warn', message: `📈 ${proto.label} TVL über ${tLabel} – Jetzt: ${tvlFmt}` });
+                } else if (prev.tvl >= threshold && currentTvl < threshold) {
+                    await sendTelegram(
+                        `📉 *${proto.label}* TVL unter ${tLabel}\n`
+                        + `Jetzt: ${tvlFmt}`
+                    );
+                    addNotification({ level: 'warn', message: `📉 ${proto.label} TVL unter ${tLabel} – Jetzt: ${tvlFmt}` });
+                }
+            }
+        }
+    }
+}
+
+// ─── APY-Check ────────────────────────────────────────────────────────────────
+
+/**
+ * Ruft APYs aller Protokolle ab und schreibt sie in die DB.
+ */
+async function checkApys(protocols) {
+    const apyMap = new Map();
+
+    for (const proto of protocols) {
+        let apy, tvl = null;
+        try {
+            // getPoolStats() liefert APY + TVL in einem Call (falls implementiert)
+            if (typeof proto.getPoolStats === 'function') {
+                const stats = await proto.getPoolStats();
+                apy = stats.apy;
+                tvl = stats.tvl ?? null;
+            } else {
+                apy = await proto.getSupplyAPY();
+            }
+            const tvlStr = tvl != null
+                ? ` | TVL: $${tvl >= 1e6 ? (tvl / 1e6).toFixed(1) + 'M' : tvl >= 1e3 ? (tvl / 1e3).toFixed(0) + 'K' : tvl.toFixed(0)}`
+                : '';
+            log(`APY ${proto.label}: ${fmt(apy, 2)} %${tvlStr}`);
+            apyMap.set(proto.name, apy);
+            resetFail(`apy:${proto.name}`);
+        } catch (err) {
+            noteFail(`apy:${proto.name}`, `APY ${proto.label} nicht abrufbar`, err);
+            continue;
+        }
+
+        // In DB speichern (inkl. TVL)
+        try {
+            recordProtocolStat({
+                protocol: proto.name,
+                poolType: proto.poolType ?? proto.name,
+                apy,
+                tvl,
+            });
+        } catch (err) {
+            logErr(`DB recordProtocolStat (${proto.name}): ${err.message}`);
+        }
+
+        // Alerts: TVL-Crossing + APY-Änderung ≥ 0,5%
+        try {
+            await checkAlerts(proto, apy, tvl);
+        } catch (err) {
+            logErr(`Alert-Check (${proto.name}): ${err.message}`);
+        }
+
+    }
+    return apyMap;
+}
+
+// ─── Auto-Exit (TVL < 900K) ───────────────────────────────────────────────────
+
+/**
+ * Prüft alle aktiven Positionen auf TVL-Unterschreitung.
+ * Wenn TVL < autoExitTvlUsdc: sofortiger Withdraw, unabhängig vom Rebalancing-Cooldown.
+ *
+ * Das freigewordene Kapital kehrt ins Wallet zurück. Anders als früher wird der
+ * Pool dabei zusätzlich deaktiviert (poolEnabled=false) — er nimmt danach an
+ * KEINEM Deposit-Weg mehr teil (weder manuell noch Auto-Deploy), bis der Nutzer
+ * ihn im Settings-UI bewusst wieder aktiviert.
+ *
+ * Pools OHNE offene Position, deren TVL ebenfalls unter der Schwelle liegt,
+ * werden aus demselben Grund deaktiviert (kein Withdraw nötig, nichts investiert).
+ */
+async function checkAndAutoExit(allProtocols, walletAddress) {
+    if (existsSync(MOVE_LOCK)) {
+        log('Auto-Exit pausiert (move.lock aktiv)');
+        return;
+    }
+
+    const stats72h         = get72hPoolStats();
+    const activePositions  = getActivePositions();
+    const activeProtocols  = new Set(activePositions.map(p => p.protocol));
+
+    // Protokolle mit aktiver Position UND TVL < protokoll-eigener Schwelle ermitteln.
+    // Schwelle + Versand-Adresse kommen pro Protokoll aus settings.db (ForgeSettings).
+    const exitInfo = new Map(); // protocol → { threshold, sendTo }
+    for (const pos of activePositions) {
+        const stats = stats72h.get(pos.protocol);
+        const tvl   = stats?.tvl ?? null;
+        if (tvl === null) continue;
+        const guard = loadTvlGuard(pos.protocol);
+        if (guard.enabled && guard.thresholdUsd > 0 && tvl < guard.thresholdUsd) {
+            exitInfo.set(pos.protocol, { threshold: guard.thresholdUsd, sendTo: guard.sendTo });
+        }
+    }
+
+    // Protokolle OHNE Position, aber ebenfalls unter der Schwelle und noch
+    // aktiviert → nur deaktivieren, kein Withdraw nötig (nichts investiert).
+    for (const proto of allProtocols) {
+        if (activeProtocols.has(proto.name)) continue; // oben bereits behandelt
+        const stats = stats72h.get(proto.name);
+        const tvl   = stats?.tvl ?? null;
+        if (tvl === null) continue;
+        const guard = loadTvlGuard(proto.name);
+        if (!guard.enabled || !(guard.thresholdUsd > 0) || tvl >= guard.thresholdUsd) continue;
+        if (!isPoolEnabled(proto.name)) continue; // bereits deaktiviert
+        disablePool(proto.name);
+        log(`Pool automatisch deaktiviert (kein Investment, TVL unter Schwelle): ${proto.name}`);
+    }
+
+    if (exitInfo.size === 0) return;
+
+    const keypair = loadKeypair();
+
+    for (const [protocolName, guard] of exitInfo) {
+        const exitThreshold = guard.threshold;
+        const stats  = stats72h.get(protocolName);
+        const tvlFmt = stats?.tvl != null
+            ? (stats.tvl >= 1e6 ? `$${(stats.tvl / 1e6).toFixed(2)}M` : `$${(stats.tvl / 1e3).toFixed(0)}K`)
+            : '—';
+        log(`⚠️ Auto-Exit: ${protocolName} TVL ${tvlFmt} < $${(exitThreshold / 1_000).toFixed(0)}K → Withdraw`);
+
+        try {
+            const proto  = createProtocolByName(protocolName);
+            const result = await proto.buildWithdrawTx(walletAddress, 'all');
+            const txSig  = await signAndSend(
+                result.transaction, keypair,
+                { preserveBlockhash: result.preserveBlockhash ?? false }
+            );
+
+            // Aktive DB-Positionen schließen
+            const toClose   = activePositions.filter(p => p.protocol === protocolName);
+            const exitAmount = toClose.reduce((s, p) => s + (p.amount ?? 0), 0);
+            toClose.forEach(p => closePosition(p.id));
+
+            // Pool deaktivieren – ab jetzt keine Deposits mehr (manuell + Auto-Deploy),
+            // bis der Nutzer im Settings-UI bewusst wieder aktiviert.
+            disablePool(protocolName);
+
+            const fee = await fetchFeeSol(txSig);
+            recordTransaction({
+                type:     'withdraw',
+                protocol: protocolName,
+                poolType: 'lending',
+                amount:   exitAmount,
+                txHash:   txSig,
+                feeSol:   fee,
+                note:     `Auto-Exit: TVL ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K`,
+            });
+
+            log(`Auto-Exit ✅ ${protocolName}: ${fmt(exitAmount)} USDC → TX ${txSig}`);
+
+            // Optionaler Versand an externe Adresse (echter Ausstieg statt Wallet/Reinvest).
+            // Adresse pro Protokoll aus settings.db. Betrag auf tatsächliche Wallet-Balance
+            // begrenzt (Yield/Slippage-Abweichung → kein InsufficientFunds).
+            let sendNote = '';
+            const sendTo = guard.sendTo;
+            if (sendTo) {
+                try {
+                    const walletUsdc     = await getUsdcBalance(walletAddress);
+                    const transferAmount = Math.min(exitAmount, walletUsdc);
+                    if (transferAmount > 0) {
+                        const sendSig = await sendUsdc(keypair, sendTo, transferAmount);
+                        sendNote = `\nVersand: ${fmt(transferAmount)} USDC → ${sendTo.slice(0, 8)}… (TX ${sendSig})`;
+                        log(`Auto-Exit Versand ✅ ${fmt(transferAmount)} USDC → ${sendTo} (TX ${sendSig})`);
+                    } else {
+                        log(`Auto-Exit Versand übersprungen: Wallet-USDC = ${fmt(walletUsdc)}`);
+                    }
+                } catch (sendErr) {
+                    logErr(`Auto-Exit Versand fehlgeschlagen (${protocolName}): ${sendErr.message}`);
+                    await sendTelegram(`⚠️ *Auto-Exit Versand fehlgeschlagen*\nPool: ${protocolName}\nFehler: ${sendErr.message}`);
+                    addNotification({ level: 'warn', message: `⚠️ Auto-Exit Versand fehlgeschlagen: ${protocolName} – ${sendErr.message}` });
+                }
+            }
+
+            await sendTelegram(
+                `🚨 *Auto-Exit ausgeführt*\n`
+                + `Pool: ${protocolName}\n`
+                + `Grund: TVL ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K\n`
+                + `Betrag: ${fmt(exitAmount)} USDC\n`
+                + `TX: ${txSig}${sendNote}`
+            );
+            addNotification({ level: 'error', message: `🚨 Auto-Exit: ${protocolName} – ${fmt(exitAmount)} USDC entnommen (TVL ${tvlFmt})` });
+        } catch (err) {
+            logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${err.message}`);
+            await sendTelegram(
+                `⚠️ *Auto-Exit fehlgeschlagen*\n`
+                + `Pool: ${protocolName} | TVL: ${tvlFmt}\n`
+                + `Fehler: ${err.message}`
+            );
+            addNotification({ level: 'warn', message: `⚠️ Auto-Exit fehlgeschlagen: ${protocolName} – ${err.message}` });
+        }
+    }
+}
+
+// ─── Tagesanfangs-Snapshot (für statistics.today) ────────────────────────────
+
+/**
+ * Schreibt einmalig pro Kalendertag (Berlin-Zeit) die aktuellen positions.amount-
+ * Werte in daily_position_snapshots. positions.amount steigt monoton (on-chain
+ * akkumuliert, kein API-Rauschen) → Delta current − snapshot ergibt den Tages-Yield
+ * ohne portfolio_history-Rauschen (Ticket #5).
+ *
+ * Idempotent: hasDailySnapshot prüft vor dem Schreiben. Kein doppelter Eintrag möglich.
+ */
+function maybeRecordDailyPositionSnapshot() {
+    const today     = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ }).format(new Date());
+    if (hasDailySnapshot(today)) return;
+
+    const positions = getActivePositions();
+    if (positions.length === 0) return;  // Bot noch nicht deployed
+
+    // Duplikat-Protokolle zusammenführen (analog zu export.js) – max(amount)
+    const merged = new Map();
+    for (const p of positions) {
+        if (!merged.has(p.protocol) || p.amount > merged.get(p.protocol).amount) {
+            merged.set(p.protocol, p);
+        }
+    }
+
+    recordDailySnapshot(today, [...merged.values()]);
+    log(`Tages-Snapshot: ${merged.size} Protokoll(e) für ${today} gespeichert`);
+}
+
+// ─── Portfolio-Snapshot ───────────────────────────────────────────────────────
+
+/**
+ * Aktuelle Positionen + SOL-Balance abfragen und als Snapshot in DB schreiben.
+ */
+async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map()) {
+    let totalValue = 0;
+    let solBalance = 0;
+    let usdcBalance = 0;
+
+    // SOL- und USDC-Balance direkt aus Wallet
+    try {
+        solBalance = await getSolBalance(walletAddress);
+        resetFail('sol-balance');
+    } catch (err) {
+        noteFail('sol-balance', 'SOL-Balance', err);
+    }
+    try {
+        usdcBalance = await getUsdcBalance(walletAddress);
+        resetFail('usdc-balance');
+    } catch (err) {
+        noteFail('usdc-balance', 'USDC-Balance', err);
+    }
+
+    // Positionen aus API abfragen und summieren
+    let totalYield = 0;
+    for (const proto of protocols) {
+        try {
+            const pos = await proto.getPosition(walletAddress);
+            resetFail(`position:${proto.name}`);
+
+            // Defensiver Fallback: wenn On-Chain-Balance = 0, null oder Dust (<1 USDC) →
+            // alle aktiven DB-Positionen schließen (verhindert fake Yield nach Withdrawal).
+            // Debounce: erst schließen, wenn der 0-Wert ZERO_BALANCE_CONFIRM_TICKS mal in
+            // Folge bestätigt wurde (fängt API-Lag direkt nach einem Deposit ab).
+            if (!pos || pos.amount < DUST_THRESHOLD_USDC) {
+                const stale = getActivePositions().filter(p => p.protocol === proto.name);
+                if (stale.length > 0) {
+                    const streakKey = `zero:${proto.name}`;
+                    const streak = (_zeroBalanceStreak.get(streakKey) ?? 0) + 1;
+                    _zeroBalanceStreak.set(streakKey, streak);
+                    const dustInfo = pos?.amount > 0 ? ` (${fmt(pos.amount)} USDC Dust ignoriert)` : '';
+
+                    if (streak < ZERO_BALANCE_CONFIRM_TICKS) {
+                        totalValue += stale.reduce((sum, p) => sum + p.amount, 0);
+                        log(`⚠ Position ${proto.label}: 0 USDC${dustInfo} – ${streak}/${ZERO_BALANCE_CONFIRM_TICKS}, evtl. staler API-Response (z.B. nach Deposit), DB-Position vorerst behalten`);
+                    } else {
+                        stale.forEach(p => closePosition(p.id));
+                        _zeroBalanceStreak.delete(streakKey);
+                        log(`Position ${proto.label}: 0 USDC${dustInfo} (${stale.length} DB-Position(en) geschlossen)`);
+                    }
+                }
+            } else {
+                _zeroBalanceStreak.delete(`zero:${proto.name}`);
+            }
+
+            if (pos && pos.amount >= DUST_THRESHOLD_USDC) {
+                totalValue += pos.amount;
+                log(`Position ${proto.label}: ${fmt(pos.amount)} USDC`);
+
+                // DB-Position aktualisieren: aktueller Betrag (für Yield-Berechnung) + APY
+                const currentApy = apyMap.get(proto.name) ?? null;
+                const dbPositions = getActivePositions().filter(p => p.protocol === proto.name);
+
+                for (const dbPos of dbPositions) {
+                    try {
+                        // Stale-API-Schutz in beide Richtungen:
+                        //
+                        // ↑ Zu hoher Wert: z.B. Loopscale gibt nach Withdrawal kurzzeitig Pre-Withdrawal-
+                        //   Wert zurück. Schwelle = zeitbasierter Zinspuffer + Deposits der letzten 24h
+                        //   (damit echte Deposit-Anstiege nicht als stale eingestuft werden).
+                        //
+                        // ↓ Zu niedriger Wert: API liefert kurzzeitig Pre-Deposit-Wert zurück, nachdem
+                        //   ein Deposit on-chain bestätigt wurde. Ohne diesen Schutz würde der korrekte
+                        //   DB-Wert (nach addToPosition) mit dem stalen niedrigen API-Wert überschrieben,
+                        //   was anschließend den ↑-Schutz dauerhaft triggert.
+                        const prevAmount = dbPos.amount ?? 0;
+                        const elapsedDays = (Date.now() - (dbPos.last_updated_at ?? Date.now())) / 86_400_000;
+
+                        // Alle Deposits der letzten 24h in die Schwelle einrechnen –
+                        // echte Balance-Anstiege durch Einzahlungen werden so nicht blockiert.
+                        const DEPOSIT_LOOKBACK_MS = 24 * 3_600_000;
+                        const recentDepositSum = getTransactionsByProtocol(proto.name, Date.now() - DEPOSIT_LOOKBACK_MS)
+                            .filter(tx => tx.type === 'deposit')
+                            .reduce((sum, tx) => sum + tx.amount, 0);
+
+                        const maxPlausibleJump = Math.max(MIN_PLAUSIBLE_JUMP, elapsedDays * MAX_STALE_APY / 365 * prevAmount)
+                            + recentDepositSum;
+
+                        const isUpwardStale   = pos.amount > prevAmount + maxPlausibleJump;
+                        const isDownwardStale = pos.amount < prevAmount - MIN_PLAUSIBLE_JUMP;
+
+                        if (isUpwardStale || isDownwardStale) {
+                            const dir = isUpwardStale ? `> DB ${fmt(prevAmount)} + ${fmt(maxPlausibleJump, 2)}` : `< DB ${fmt(prevAmount)} - ${fmt(MIN_PLAUSIBLE_JUMP, 2)}`;
+                            log(`⚠ ${proto.label}: API-Wert ${fmt(pos.amount)} USDC ${dir} – staler API-Response vermutet, DB-Wert beibehalten`);
+                            totalValue -= pos.amount;   // wurde oben schon addiert – korrigieren
+                            totalValue += prevAmount;
+                        } else {
+                            updatePosition(dbPos.id, { amount: pos.amount, currentApy });
+                        }
+                    } catch (err) {
+                        logErr(`DB updatePosition (${proto.name}): ${err.message}`);
+                    }
+                }
+            }
+        } catch (err) {
+            // Fallback: aktive Positionen aus DB
+            const dbPositions = getActivePositions().filter(p => p.protocol === proto.name);
+            if (dbPositions.length > 0) {
+                totalValue += Math.max(...dbPositions.map(p => p.amount ?? 0));
+            }
+            noteFail(`position:${proto.name}`, `Position ${proto.label} aus API`, err);
+        }
+    }
+
+    // Gesamtguthaben = Wallet-USDC + Pool-Positionen
+    const totalGuthaben = usdcBalance + totalValue;
+    try {
+        recordPortfolioSnapshot(totalGuthaben);
+        log(`Guthaben-Snapshot: ${fmt(usdcBalance)} USDC (Wallet) + ${fmt(totalValue)} USDC (Pools) = ${fmt(totalGuthaben)} USDC`);
+    } catch (err) {
+        logErr(`DB recordPortfolioSnapshot: ${err.message}`);
+    }
+
+    // Tagesanfangs-Snapshot: einmal pro Kalendertag (Berlin), rauschfreie Basis für statistics.today
+    try {
+        maybeRecordDailyPositionSnapshot();
+    } catch (err) {
+        logErr(`DB maybeRecordDailyPositionSnapshot: ${err.message}`);
+    }
+
+    // DB-Bereinigung: einmal täglich
+    const todayStr = todayTz();                             // FORGE_TZ-basiert statt UTC
+    if (todayStr !== lastPruneDay) {
+        try { prunePortfolioHistory(90); } catch (err) { logErr(`prunePortfolioHistory: ${err.message}`); }
+        lastPruneDay = todayStr;
+    }
+
+    // Wallet-Snapshot speichern (auch beim ersten Start)
+    try {
+        const snap = getWalletSnapshot();
+
+        // Gesamtyield = aktueller Poolwert minus netto-investiertes Kapital aus allen Transaktionen.
+        const txTotals     = getTotalDepositsWithdraws();
+        const netInvested  = (txTotals?.total_deposits ?? 0) - (txTotals?.total_withdraws ?? 0);
+        const computedYield = Math.max(0, totalValue - netInvested);
+
+        upsertWalletSnapshot({
+            currentValue: totalValue || snap?.current_value || 0,
+            totalYield:   computedYield,
+            avgApy:       snap?.avg_apy ?? 0,
+            walletUsdc:   usdcBalance,
+            walletSol:    solBalance,
+        });
+        log(`Wallet: ${fmt(solBalance, 4)} SOL | ${fmt(usdcBalance)} USDC`);
+    } catch (err) {
+        logErr(`DB upsertWalletSnapshot: ${err.message}`);
+    }
+
+    return usdcBalance;
+}
+
+// ─── Dashboard Export ─────────────────────────────────────────────────────────
+
+async function runExport() {
+    try {
+        await execFileAsync(process.execPath, [EXPORT_SCRIPT], {
+            env:     process.env,
+            timeout: 30_000,
+        });
+        log('Dashboard: data.json exportiert');
+    } catch (err) {
+        logErr(`Dashboard Export fehlgeschlagen: ${err.stderr ?? err.message}`);
+    }
+}
+
+// ─── Sync ─────────────────────────────────────────────────────────────────────
+
+async function runSync() {
+    if (!config.syncTarget?.trim()) return;
+    try {
+        await syncDashboard(config.syncTarget, config.syncSshPort, log);
+        log(`Dashboard: → ${config.syncTarget}`);
+    } catch (err) {
+        logErr(`Dashboard Sync fehlgeschlagen: ${err.message}`);
+    }
+}
+
+// ─── Auto-Deploy neuer Wallet-Mittel ──────────────────────────────────────────
+
+const KV_AUTO_DEPLOY_LAST_WALLET = 'auto_deploy_last_wallet';
+const MIN_DEPLOY_USDC            = 1.0; // Mindestbetrag, ab dem auto-deployed wird
+
+/**
+ * Erkennt neues USDC im Wallet und deployed es automatisch per computeDepositPlan.
+ *
+ * Beim ersten Start nach Bot-Neustart wird nur der letzte Wallet-Stand gesetzt – kein Deploy,
+ * damit bereits liegendes USDC nicht unerwartet investiert wird.
+ */
+async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
+    // 🔴 bot_paused wurde bisher NUR von emergency-withdraw.js gesetzt, aber nirgends
+    // gelesen (gefunden 2026-08-04) — ein Emergency-Exit hätte das frisch abgezogene
+    // Kapital beim nächsten Sync-Intervall (5 Min) klaglos wieder deployt, sobald der
+    // Service danach neu gestartet wurde. Analog zum bereits bestehenden
+    // move.lock-Guard direkt darüber.
+    if (kvGet('bot_paused') === 'true') {
+        log(`Auto-Deploy pausiert (bot_paused: ${kvGet('bot_paused_reason') ?? 'unbekannt'})`);
+        return;
+    }
+    if (existsSync(MOVE_LOCK)) { log('Auto-Deploy pausiert (move.lock aktiv)'); return; }
+
+    // Frisch aus .env lesen – wirkt sofort ohne Bot-Neustart
+    const adCfg = loadAutoDeployConfig();
+    const mode  = adCfg.autoDeployMode;
+    if (mode === 'disabled') {
+        log('Auto-Deploy deaktiviert (Modus: disabled)');
+        return;
+    }
+
+    log(`Auto-Deploy aktiv (Modus: ${mode}) – prüfe auf neue Mittel …`);
+    const lastStr = kvGet(KV_AUTO_DEPLOY_LAST_WALLET);
+
+    // Erster Start: letzten Wallet-Stand merken, kein Deploy
+    if (lastStr === null) {
+        kvSet(KV_AUTO_DEPLOY_LAST_WALLET, String(walletUsdc));
+        log(`Auto-Deploy: letzter Wallet-Stand gesetzt (${fmt(walletUsdc)} USDC)`);
+        return;
+    }
+
+    const lastKnown = parseFloat(lastStr);
+    // Floor auf 2 Dezimalstellen → verhindert Gleitkomma-Überhang bei Deposits
+    const newFunds  = Math.floor((walletUsdc - lastKnown) * 100) / 100;
+
+    if (newFunds < MIN_DEPLOY_USDC) {
+        if (walletUsdc < lastKnown) {
+            // Wallet ist kleiner als zuletzt bekannt → manuelle Aktion außerhalb des Bots.
+            // Auf 0 zurücksetzen, damit der aktuelle Wallet-Betrag beim nächsten Tick
+            // als neue Mittel erkannt und deployed wird.
+            kvSet(KV_AUTO_DEPLOY_LAST_WALLET, '0');
+            log(`Auto-Deploy: Wallet ${fmt(walletUsdc)} USDC < letzter Stand ${fmt(lastKnown)} USDC – auf 0 zurückgesetzt`);
+        } else {
+            kvSet(KV_AUTO_DEPLOY_LAST_WALLET, String(walletUsdc));
+            log(`Auto-Deploy: keine neuen Mittel (Wallet ${fmt(walletUsdc)} USDC, letzter Stand ${fmt(lastKnown)} USDC)`);
+        }
+        return;
+    }
+
+    // Minimale Einzahlung – modus-abhängig; Baseline NICHT verschieben damit USDC akkumuliert
+    const minDeposit = mode.startsWith('protocol:')
+        ? adCfg.fixedAutoDeployMinDeposit
+        : adCfg.autoDeployMinDeposit;
+    if (minDeposit > 0 && newFunds < minDeposit) {
+        log(`Auto-Deploy: ${fmt(newFunds)} USDC < Minimum ${fmt(minDeposit)} USDC – akkumuliere (Baseline bleibt bei ${fmt(lastKnown)} USDC)`);
+        return;
+    }
+
+    // Maximale Einzahlung/Lauf – modus-abhängig, wie schon bei der Minimalen
+    const maxDeposit  = mode.startsWith('protocol:')
+        ? adCfg.fixedAutoDeployMaxDeposit
+        : adCfg.autoDeployMaxDeposit;
+    const deployFunds = maxDeposit > 0 ? Math.min(newFunds, maxDeposit) : newFunds;
+
+    if (deployFunds < newFunds) {
+        log(`💰 Neue Mittel erkannt: +${fmt(newFunds)} USDC, gedeckelt auf ${fmt(deployFunds)} USDC (Maximale Einzahlung ${fmt(maxDeposit)} USDC) → Auto-Deposit wird ausgeführt`);
+    } else {
+        log(`💰 Neue Mittel erkannt: +${fmt(deployFunds)} USDC → Auto-Deposit wird ausgeführt`);
+    }
+
+    // Baseline nur um den tatsächlich deployten Betrag vorwärts bewegen,
+    // damit ggf. verbleibende Mittel (nicht deployt oder durch das Limit gedeckelt)
+    // beim nächsten Tick erneut erkannt werden
+    kvSet(KV_AUTO_DEPLOY_LAST_WALLET, String(lastKnown + deployFunds));
+
+    // ── Deposit-Plan je nach Modus ────────────────────────────────────────────
+    let plan;
+
+    if (mode.startsWith('protocol:')) {
+        const protocolId = mode.slice('protocol:'.length);
+        try {
+            createProtocolByName(protocolId); // Verfügbarkeits-Check
+        } catch {
+            log(`⚠️  Auto-Deploy: Protokoll "${protocolId}" nicht verfügbar – übersprungen`);
+            await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\nProtokoll "${protocolId}" nicht verfügbar (Modus: Invest in X).`);
+            return;
+        }
+        // Pool-Freigabe prüfen – vom Nutzer deaktiviert oder durch TVL-Schutz
+        // automatisch deaktiviert (siehe checkAndAutoExit/disablePool)
+        if (!isPoolEnabled(protocolId)) {
+            log(`Auto-Deploy übersprungen: ${protocolId} ist deaktiviert (Pool-Freigabe)`);
+            await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\nPool "${protocolId}" ist deaktiviert – im Settings-UI wieder aktivieren, falls gewünscht.`);
+            return;
+        }
+        // APY-Schwelle für festes Protokoll prüfen
+        const fixedMinApy = adCfg.fixedApyThresholdPercent;
+        if (fixedMinApy > 0) {
+            const stats = get72hPoolStats().get(protocolId);
+            const curApy = stats?.avgApy ?? 0;
+            if (curApy < fixedMinApy) {
+                log(`Auto-Deploy übersprungen: ${protocolId} APY ${curApy.toFixed(2)}% < Minimum ${fixedMinApy}%`);
+                return;
+            }
+        }
+        plan = [{ protocol: protocolId, amount: deployFunds, reason: `Invest in ${protocolId} (Modus)` }];
+    } else {
+        // Modus: ranking (Bester Pool) → alles in den qualifizierten Pool mit höchstem APY
+        const qualified = getQualifiedPools(get72hPoolStats());
+        const best      = qualified[0] ?? null;
+        plan = best
+            ? [{ protocol: best.protocol, amount: deployFunds, reason: `Bester Pool (${best.avgApy.toFixed(2)}% ⌀72h)` }]
+            : [];
+    }
+
+    if (plan.length === 0) {
+        log('⚠️  Auto-Deploy: kein Deposit-Plan – keine qualifizierten Pools?');
+        await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\n+${fmt(deployFunds)} USDC erkannt, aber keine qualifizierten Pools verfügbar.`);
+        return;
+    }
+
+    const keypair = loadKeypair();
+    const results = [];
+    let   allOk   = true;
+
+    for (const step of plan) {
+        try {
+            const proto  = createProtocolByName(step.protocol);
+            const txData = await proto.buildDepositTx(walletAddress, step.amount);
+            const base64            = typeof txData === 'string' ? txData : (txData.transaction ?? txData);
+            const preserveBlockhash = typeof txData === 'object' ? (txData.preserveBlockhash ?? true) : true;
+            const txSig = await signAndSend(base64, keypair, { preserveBlockhash });
+
+            log(`Auto-Deploy ✅ ${fmt(step.amount)} USDC → ${step.protocol} | TX: ${txSig}`);
+
+            const existingPos = getActivePositions().filter(p => p.protocol === step.protocol);
+            if (existingPos.length > 0) {
+                addToPosition(existingPos[0].id, step.amount);
+            } else {
+                addPosition({
+                    protocol: step.protocol,
+                    poolType: proto.poolType ?? 'lending',
+                    asset:    'USDC',
+                    amount:   step.amount,
+                    txHash:   txSig,
+                });
+            }
+            const feeDeploy = await fetchFeeSol(txSig);
+            recordTransaction({
+                type:     'deposit',
+                protocol: step.protocol,
+                poolType: proto.poolType ?? 'lending',
+                amount:   step.amount,
+                txHash:   txSig,
+                feeSol:   feeDeploy,
+                note:     `Auto-Deploy (${step.reason})`,
+            });
+            results.push(`  ✅ ${step.protocol}: +${fmt(step.amount)} USDC`);
+        } catch (err) {
+            logErr(`Auto-Deploy fehlgeschlagen (${step.protocol}): ${err.message}`);
+            results.push(`  ❌ ${step.protocol}: ${err.message}`);
+            allOk = false;
+        }
+    }
+
+    // Telegram-Alert
+    const total     = plan.reduce((s, p) => s + p.amount, 0);
+    const cappedMsg = deployFunds < newFunds
+        ? ` (gedeckelt von ${fmt(newFunds)} USDC, Rest bleibt für den nächsten Lauf im Wallet)`
+        : '';
+    if (allOk) {
+        await sendTelegram(
+            `💰 *Auto-Deploy abgeschlossen*\n`
+            + `${fmt(newFunds)} USDC erkannt, ${fmt(total)} USDC investiert${cappedMsg}:\n`
+            + results.join('\n')
+        );
+    } else {
+        await sendTelegram(
+            `⚠️ *Auto-Deploy teilweise fehlgeschlagen*\n`
+            + `${fmt(newFunds)} USDC erkannt, ${fmt(total)} USDC geplant${cappedMsg}:\n`
+            + results.join('\n')
+        );
+    }
+
+    // Wallet-Snapshot sofort anpassen: deployFunds wurden vom Wallet abgezogen.
+    // takePortfolioSnapshot lief VOR dem Deposit → wallet_snapshot.wallet_usdc ist veraltet.
+    // Korrektur hier verhindert, dass Export und Dashboard bis zum nächsten Snapshot-Tick
+    // einen falschen (zu hohen) Wallet-Stand und einen falschen (zu niedrigen) Gesamtwert zeigen.
+    try {
+        const snap = getWalletSnapshot();
+        if (snap) {
+            upsertWalletSnapshot({
+                currentValue: snap.current_value,
+                totalYield:   snap.total_yield,
+                avgApy:       snap.avg_apy,
+                walletUsdc:   Math.max(0, (snap.wallet_usdc ?? 0) - deployFunds),
+                walletSol:    snap.wallet_sol,
+            });
+        }
+    } catch (err) {
+        logErr(`wallet_snapshot post-deploy Korrektur: ${err.message}`);
+    }
+
+    // Sofortiger Export + Sync: alle Dashboard-Felder (Operative Metriken, Wallet,
+    // Transaktionen, Gesamtwert) werden simultan aktualisiert – kein Verzug bis zum
+    // nächsten regulären 5-Minuten-Sync.
+    await runExport();
+    await runSync();
+}
+
+// ─── Haupt-Tick ───────────────────────────────────────────────────────────────
+
+async function tick(allProtocols, walletAddress) {
+    log('── Tick ──────────────────────────────────────');
+    try {
+        const apyMap     = await checkApys(allProtocols);
+        const walletUsdc = await takePortfolioSnapshot(allProtocols, walletAddress, apyMap);
+        await checkAndAutoExit(allProtocols, walletAddress);
+        await checkAndTopupSol(walletAddress);          // SOL-Reserve vor Deploy prüfen
+        await checkAndDeployNewFunds(walletUsdc, walletAddress);
+    } catch (err) {
+        logErr(`Tick-Fehler: ${err.message}`);
+    }
+}
+
+// ─── SOL-Topup: USDC → SOL wenn Reserve zu gering ────────────────────────────
+
+async function checkAndTopupSol(walletAddress) {
+    const solBalance = await getSolBalance(walletAddress);
+    if (solBalance >= SOL_TOPUP_TRIGGER) return; // Alles OK
+
+    log(`⚠️  SOL-Reserve: ${solBalance.toFixed(4)} SOL < ${SOL_TOPUP_TRIGGER} SOL – starte USDC→SOL Topup`);
+
+    const usdcBalance = await getUsdcBalance(walletAddress);
+    if (usdcBalance < 0.5) {
+        log(`⚠️  SOL-Topup: zu wenig USDC im Wallet (${usdcBalance.toFixed(2)} USDC) – warte auf Akkumulation`);
+        if (solBalance < SOL_WARN_TRIGGER) {
+            await sendTelegram(`⚠️ *SOL-Reserve kritisch*\n${solBalance.toFixed(4)} SOL im Wallet – zu wenig USDC für automatischen Topup (${usdcBalance.toFixed(2)} USDC).`);
+        }
+        return;
+    }
+
+    // SOL-Preis über Nexus ermitteln
+    let solPrice = null;
+    try {
+        const url = `${NEXUS_URL}/jup/swap/v1/quote?inputMint=${USDC_MINT}&outputMint=${SOL_MINT}&amount=1000000&slippageBps=0`;
+        const res  = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+        if (res.ok) {
+            const q = await res.json();
+            solPrice = q?.outAmount ? 1_000_000 / (parseFloat(q.outAmount) / 1e9) : null;
+        }
+    } catch { /* SOL-Preis nicht abrufbar */ }
+
+    if (!solPrice) {
+        log(`⚠️  SOL-Topup: SOL-Preis nicht abrufbar – übersprungen`);
+        return;
+    }
+
+    const neededSol  = SOL_TOPUP_TARGET - solBalance;
+    const neededUsdc = Math.min(usdcBalance, Math.ceil(neededSol * solPrice * 1.02 * 100) / 100); // +2 % Puffer
+
+    log(`SOL-Topup: brauche ${neededSol.toFixed(4)} SOL → swap ${neededUsdc.toFixed(2)} USDC (Preis: ${solPrice.toFixed(2)} USDC/SOL)`);
+
+    try {
+        // 1. Quote
+        const inAmount = Math.round(neededUsdc * 10 ** USDC_DECIMALS);
+        const qParams  = new URLSearchParams({
+            inputMint:   USDC_MINT,
+            outputMint:  SOL_MINT,
+            amount:      String(inAmount),
+            slippageBps: String(TOPUP_SLIPPAGE),
+        });
+        const qRes   = await fetch(`${NEXUS_URL}/jup/swap/v1/quote?${qParams}`, { signal: AbortSignal.timeout(10_000) });
+        if (!qRes.ok) throw new Error(`Quote HTTP ${qRes.status}`);
+        const quote  = await qRes.json();
+        if (!quote?.outAmount) throw new Error('kein outAmount in Quote');
+
+        // 2. Swap-TX bauen
+        const keypair  = loadKeypair();
+        const swapRes  = await fetch(`${NEXUS_URL}/jup/swap/v1/swap`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+                quoteResponse:             quote,
+                userPublicKey:             keypair.publicKey.toBase58(),
+                wrapAndUnwrapSol:          true,
+                dynamicComputeUnitLimit:   true,
+                prioritizationFeeLamports: 'auto',
+            }),
+            signal: AbortSignal.timeout(15_000),
+        });
+        if (!swapRes.ok) throw new Error(`Swap-TX HTTP ${swapRes.status}`);
+        const swapData = await swapRes.json();
+        if (!swapData?.swapTransaction) throw new Error('kein swapTransaction in Antwort');
+
+        // 3. Signieren + senden
+        const txSig = await signAndSend(swapData.swapTransaction, keypair, { preserveBlockhash: false });
+        const solReceived = parseFloat(quote.outAmount) / 10 ** SOL_DECIMALS;
+
+        log(`SOL-Topup ✅ ${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL | TX: ${txSig}`);
+        await sendTelegram(`🔋 *SOL-Topup ausgeführt*\n${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL\nReserve war: ${solBalance.toFixed(4)} SOL`);
+        addNotification({ level: 'info', message: `🔋 SOL-Topup: ${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL` });
+    } catch (err) {
+        logErr(`SOL-Topup fehlgeschlagen: ${err.message}`);
+        await sendTelegram(`🚨 *SOL-Topup fehlgeschlagen*\n${err.message}\nSOL-Balance: ${solBalance.toFixed(4)} SOL`);
+    }
+}
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
+
+async function start() {
+    // Wallet-Adresse aus Keypair ableiten
+    const walletAddress = loadKeypair().publicKey.toBase58();
+
+    log(`════════════════════════════════════════════`);
+    log(`  ${config.botDisplayName} gestartet`);
+    log(`  PID       : ${process.pid}`);
+    log(`  Wallet    : ${walletAddress}`);
+    log(`  Protokolle: ${[...config.protocols, ...config.monitorProtocols].join(', ')}`);
+    log(`  Interval  : ${(APY_INTERVAL_MS / 60_000).toFixed(0)} min`);
+    log(`  Sync      : ${config.syncTarget || '(deaktiviert)'}`);
+    log(`════════════════════════════════════════════`);
+
+    // DB initialisieren
+    getDb();
+    kvSet('bot_state', 'running');
+
+    // Alle Protokoll-Instanzen (LENDING + MONITOR, dedupliziert)
+    const allProtocols = buildAllProtocols();
+    if (allProtocols.length === 0) {
+        logErr('Keine Protokolle konfiguriert (LENDING_PROTOCOLS / MONITOR_PROTOCOLS). Bot beendet sich.');
+        process.exit(1);
+    }
+    log(`  Pools bekannt: ${allProtocols.map(p => p.label).join(', ')}`);
+
+    // Telegram: Startup-Nachricht
+    await sendTelegram(
+        `🟢 *${config.botDisplayName} gestartet*\n`
+        + `Pools: ${allProtocols.map(p => p.label).join(', ')}`
+    );
+
+    // Graceful Shutdown
+    let shuttingDown = false;
+    async function gracefulShutdown(signal) {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        log(`[Signal] ${signal} empfangen – fahre herunter …`);
+        kvSet('bot_state', 'offline');
+        await sendTelegram(`🔴 *${config.botDisplayName} gestoppt* (${signal})`);
+
+        // Letzter Export vor dem Stopp
+        try {
+            await runExport();
+            await runSync();
+        } catch { /* ignorieren */ }
+
+        process.exit(0);
+    }
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
+
+    process.on('unhandledRejection', async (reason) => {
+        const msg = reason instanceof Error ? reason.message : String(reason);
+        log(`[bot] Unbehandelte Promise-Rejection (kein Crash): ${msg}`);
+        await sendTelegram(`🚨 UnhandledRejection (kein Crash): ${msg}`).catch(() => {});
+    });
+
+    // ── Erster Tick sofort ────────────────────────────────────────────────────
+    await tick(allProtocols, walletAddress);
+    await runExport();
+    await runSync();
+
+    // ── APY-Interval (stündlich, mit Jitter) ─────────────────────────────────
+    setInterval(async () => {
+        if (shuttingDown) return;
+        await new Promise(r => setTimeout(r, Math.random() * APY_JITTER_MS));
+        if (shuttingDown) return;
+        await tick(allProtocols, walletAddress);
+    }, APY_INTERVAL_MS);
+
+    // ── Sync-Interval (alle 5 Minuten) ────────────────────────────────────────
+    setInterval(async () => {
+        if (shuttingDown) return;
+        const walletUsdc = await takePortfolioSnapshot(allProtocols, walletAddress);
+        await checkAndDeployNewFunds(walletUsdc, walletAddress);
+        await runExport();
+        await runSync();
+    }, SYNC_INTERVAL_MS);
+
+    log('Bot läuft. Warte auf nächsten Tick …');
+}
+
+// ─── Einstiegspunkt ───────────────────────────────────────────────────────────
+
+start().catch(err => {
+    logErr(`Kritischer Fehler beim Start: ${err.message}`);
+    console.error(err);
+    process.exit(1);
+});

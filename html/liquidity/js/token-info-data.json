@@ -1,0 +1,187 @@
+{
+    "_comment": "Statisch kuratierte Kurzinfos zu allen Tokens, die in config/pools.json vorkommen. Key = Solana-Mint-Adresse (stabil, unabhaengig von displayPair-Reihenfolge/Umbenennung); symbol nur zur menschlichen Lesbarkeit, nicht als Schluessel verwenden. PFLICHT bei jedem neuen/geaenderten Eintrag: category/description/url IMMER per aktueller Web-Abfrage (WebSearch o.ae.) recherchieren -- NIEMALS aus Trainingswissen/Cache ergaenzen. Bleibt nach Recherche etwas unklar, NICHT raten -- Eintrag explizit als unklar markieren (Beispiel: BILL unten) und ggf. eine zweite Quelle vorschlagen. checkedAt = Datum der (letzten) Recherche, IMMER mitpflegen -- spaetestens alle 3 Monate erneut verifizieren (siehe bin/check-token-info-age.js, monatlicher Cron-Job). Kategorie-Konvention: moeglichst spezifisch/informativ, keine Boilerplate-Haeufung; alle gebrueckten/gewrappten Assets einheitlich als Wrapped Coin. Bei neuen Pools (bin/scan-new-pools.js) hier ergaenzen, sonst zeigt das Info-Modal \"Keine Infos hinterlegt\". Frueher token-info-data.js (ausgefuehrtes ES-Modul) -- als reine JSON-Datei umgezogen (FORGE.pub Pool-Offers Blocker 1, 2026-07-27): ein Datenkanal darf niemals Code ausliefern.",
+    "tokens": {
+        "So11111111111111111111111111111111111111112": {
+            "symbol": "SOL",
+            "category": "Layer-1-Coin",
+            "description": "Natives Token der Solana-Blockchain. Dient als Gas-Token für Transaktionsgebühren und Staking, ist Basiswährung des gesamten Solana-Ökosystems.",
+            "url": "https://solana.com",
+            "checkedAt": "2026-07-24"
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+            "symbol": "USDC",
+            "category": "Stablecoin",
+            "description": "1:1 USD-gedeckter Stablecoin von Circle. Größter Stablecoin im Solana-DeFi-Ökosystem, dient meist als Quote-Währung.",
+            "url": "https://www.circle.com/usdc",
+            "checkedAt": "2026-07-24"
+        },
+        "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr": {
+            "symbol": "EURC",
+            "category": "Stablecoin",
+            "description": "1:1 Euro-gedeckter Stablecoin von Circle (Gegenstück zu USDC in Euro).",
+            "url": "https://www.circle.com/eurc",
+            "checkedAt": "2026-07-24"
+        },
+        "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij": {
+            "symbol": "cbBTC",
+            "category": "Wrapped Coin",
+            "description": "1:1 BTC-gedecktes Token von Coinbase, bringt Bitcoin-Exposure auf Solana/DeFi.",
+            "url": "https://www.coinbase.com/cbbtc",
+            "checkedAt": "2026-07-24"
+        },
+        "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh": {
+            "symbol": "WBTC",
+            "category": "Wrapped Coin",
+            "description": "1:1 BTC-gedecktes Token von BitGo, älteste und am weitesten verbreitete Bitcoin-Wrapped-Variante.",
+            "url": "https://wbtc.network",
+            "checkedAt": "2026-07-24"
+        },
+        "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs": {
+            "symbol": "ETH",
+            "category": "Wrapped Coin",
+            "description": "Über die Wormhole-Bridge auf Solana gebrachtes Ethereum (ETH), 1:1 gedeckt.",
+            "url": "https://wormhole.com",
+            "checkedAt": "2026-07-24"
+        },
+        "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": {
+            "symbol": "ORCA",
+            "category": "DEX-/Governance-Token",
+            "description": "Natives Token der Orca-DEX – des Protokolls, über das dieser Bot alle Pools handelt. Dient Governance und Fee-Vergünstigungen auf Orca.",
+            "url": "https://www.orca.so",
+            "checkedAt": "2026-07-24"
+        },
+        "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": {
+            "symbol": "JitoSOL",
+            "category": "Liquid-Staking-Token (LST)",
+            "description": "Verzinster Liquid-Staking-Token von Jito – repräsentiert gestaktes SOL inkl. MEV-Erträgen, frei handelbar/einsetzbar in DeFi.",
+            "url": "https://www.jito.network",
+            "checkedAt": "2026-07-24"
+        },
+        "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL": {
+            "symbol": "JTO",
+            "category": "Governance-Token",
+            "description": "Governance-Token der Jito Foundation (Steuerung des Jito-Liquid-Staking- und MEV-Protokolls).",
+            "url": "https://www.jito.network",
+            "checkedAt": "2026-07-24"
+        },
+        "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4": {
+            "symbol": "JLP",
+            "category": "Liquidity-Pool-Token",
+            "description": "Anteilsschein am Perp-Liquiditätspool von Jupiter Perpetuals – Halter verdienen/verlieren an den Trading-Gegenpositionen der Jupiter-Trader.",
+            "url": "https://jup.ag/perps",
+            "checkedAt": "2026-07-24"
+        },
+        "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump": {
+            "symbol": "Fartcoin",
+            "category": "Memecoin",
+            "description": "Rein community-getriebener Solana-Memecoin ohne Utility, über pump.fun gestartet. Hohe Volatilität, kein Projekt/Roadmap dahinter.",
+            "url": "https://fartcoin.io",
+            "checkedAt": "2026-07-24"
+        },
+        "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn": {
+            "symbol": "PUMP",
+            "category": "Plattform-Token",
+            "description": "Natives Token von pump.fun, der größten Launchpad-Plattform für Memecoins auf Solana.",
+            "url": "https://pump.fun",
+            "checkedAt": "2026-07-24"
+        },
+        "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof": {
+            "symbol": "RENDER",
+            "category": "Utility-Token",
+            "description": "Token des Render Network – vermittelt dezentrales GPU-Rendering (u.a. für 3D/KI-Workloads) zwischen Anbietern und Nachfragern.",
+            "url": "https://rendernetwork.com",
+            "checkedAt": "2026-07-24"
+        },
+        "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": {
+            "symbol": "HYPE",
+            "category": "Wrapped Coin",
+            "description": "Über die Sunrise-Bridge (Wormhole NTT) auf Solana gebrachtes HYPE – natives Token der Hyperliquid-Chain (Perp-DEX/L1).",
+            "url": "https://hyperliquid.xyz",
+            "checkedAt": "2026-07-24"
+        },
+        "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": {
+            "symbol": "ZEC",
+            "category": "Wrapped Coin",
+            "description": "Über OmniBridge (NEAR Intents) auf Solana gebrachtes Zcash (ZEC), 1:1 gedeckt. Die abgeschirmten (privaten) Zcash-Transaktionen funktionieren nur auf der nativen Zcash-Chain – die Solana-Version selbst ist nicht privat.",
+            "url": "https://z.cash",
+            "checkedAt": "2026-07-24"
+        },
+        "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp": {
+            "symbol": "ORE",
+            "category": "Mining-/Reward-Token",
+            "description": "Seit ORE v2 (Okt. 2025) kein klassisches PoW-Mining mehr: Miner staken SOL auf ein 5×5-Grid, pro Runde gewinnt ein zufällig gezogenes Feld die SOL-Einsätze der Verlierer-Felder plus ORE-Belohnung. Fixer Supply-Cap (mittlerweile 5 statt ursprünglich 21 Mio.).",
+            "url": "https://ore.supply",
+            "checkedAt": "2026-07-24"
+        },
+        "Bi11Je4MH3PpyCNiuTAepRbsA5U6DK3DJy79ZFthddX": {
+            "symbol": "BILL",
+            "category": "Identitäts-Netzwerk-Utility-Token",
+            "description": "Utility-Token von Billions Network, einem privatsphärewahrenden Identitätsnetzwerk für Menschen und KI-Agenten (Zero-Knowledge-Verifikation ohne Datenweitergabe). Gegründet von den Gründern von Disco.xyz, Hermez und Polygon (CEO Evin McMullen). Protokoll-/Chain-agnostisch, u.a. auf Solana, Base, BNB Chain verfügbar.",
+            "url": "https://billions.network/",
+            "checkedAt": "2026-07-28"
+        },
+        "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": {
+            "symbol": "USELESS",
+            "category": "Memecoin",
+            "description": "Satirischer Solana-Memecoin (\"bewusst nutzlos\"), im Mai 2025 über LetsBonk.fun gestartet. Keine Utility, keine Roadmap – reines Community-/Meme-Momentum.",
+            "url": "https://theuselesscoin.com",
+            "checkedAt": "2026-07-24"
+        },
+        "METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m": {
+            "symbol": "MPLX",
+            "category": "Infrastruktur-/Governance-Token",
+            "description": "Token von Metaplex, dem Standard-Protokoll für NFTs und Tokenisierung auf Solana. Governance + Anteil an Protokollgebühren (DAO kauft laufend MPLX per Buyback zurück).",
+            "url": "https://www.metaplex.com",
+            "checkedAt": "2026-07-24"
+        },
+        "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W": {
+            "symbol": "SPYx",
+            "category": "Tokenisierte Aktie (RWA)",
+            "description": "xStocks-Token von Backed Finance (Schweiz, unter Swiss-DLT-Act reguliert), 1:1 durch einen S&P-500-ETF-Anteil (SPY) gedeckt. Handelbar 24/7 auf Solana.",
+            "url": "https://xstocks.com",
+            "checkedAt": "2026-07-24"
+        },
+        "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB": {
+            "symbol": "TSLAx",
+            "category": "Tokenisierte Aktie (RWA)",
+            "description": "xStocks-Token von Backed Finance (Schweiz, unter Swiss-DLT-Act reguliert), 1:1 durch eine Tesla-Aktie gedeckt. Handelbar 24/7 auf Solana.",
+            "url": "https://xstocks.com",
+            "checkedAt": "2026-07-24"
+        },
+        "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb": {
+            "symbol": "SPCX",
+            "category": "Tokenisierte Aktie (RWA)",
+            "description": "Tokenisierte SpaceX-Aktie von Backpack Securities (seit Juni 2026, zeitgleich mit dem SpaceX-Nasdaq-Listing), 1:1 durch eine real gehaltene SpaceX-Aktie gedeckt. Handelbar 24/7 auf Solana, Rückgabe in echte Aktie möglich.",
+            "url": "https://backpack.exchange",
+            "checkedAt": "2026-07-24"
+        },
+        "AvZZF1YaZDziPY2RCK4oJrRVrbN3mTD9NL24hPeaZeUj": {
+            "symbol": "syrupUSDC",
+            "category": "Yield-bearing Stablecoin",
+            "description": "Verzinster USDC-Wrapper von Maple Finance (Syrup) — Einlagen fließen in fix verzinste, übersicherte Kredite an institutionelle Kreditnehmer. Preis steigt langsam über die Zeit statt 1:1-Peg (Ertrag über Kursanstieg). Über Chainlink CCIP von Ethereum nach Solana gebracht.",
+            "url": "https://maple.finance",
+            "checkedAt": "2026-07-24"
+        },
+        "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv": {
+            "symbol": "PENGU",
+            "category": "Memecoin / Community-Token",
+            "description": "Ökosystem-Token der Pudgy-Penguins-NFT-Marke, Ende 2024 auf Solana gelauncht (später Multichain, u.a. Ethereum/Abstract). Treibt u.a. das Spiel „Pudgy World\" und Community-Programme, Preis hängt aber vor allem an Marken-/Community-Sentiment.",
+            "url": "https://pengu.pudgypenguins.com",
+            "checkedAt": "2026-07-24"
+        },
+        "3dQTr7ror2QPKQ3GbBCokJUmjErGg8kTJzdnYjNfvi3Z": {
+            "symbol": "BORG",
+            "category": "Exchange-Utility-Token",
+            "description": "Utility-Token der Krypto-Plattform SwissBorg (ursprünglich 2017 als CHSB auf Ethereum gestartet, Oktober 2023 zu BORG rebrandet). Schaltet App-Vorteile frei (niedrigere Gebühren, höhere Launchpad-Allokation, höherer Yield, Stimmrecht bei Referenden). Seit Mai 2024 per Wormhole 1:1 auf Solana gebrückt.",
+            "url": "https://swissborg.com/buy-borg",
+            "checkedAt": "2026-07-28"
+        },
+        "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH": {
+            "symbol": "USDG",
+            "category": "Stablecoin",
+            "description": "1:1 USD-gedeckter Stablecoin (Global Dollar), emittiert von Paxos (reguliert in Singapur und der EU/MiCA). Besonderheit: Teil des Global-Dollar-Network-Konsortiums, das einen Großteil der Reserve-Erträge mit teilnehmenden Partnern/Börsen (u.a. Robinhood) teilt, statt sie allein zu behalten.",
+            "url": "https://www.globaldollar.com/",
+            "checkedAt": "2026-07-28"
+        }
+    }
+}

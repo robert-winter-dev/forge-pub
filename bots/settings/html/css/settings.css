@@ -1,0 +1,1098 @@
+/* ── Reset & Basis ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+    --bg:          #020617;
+    --bg-2:        #0f172a;
+    --surface:     #1e293b;
+    --surface-2:   #334155;
+    --border:      #475569;
+    --text:            #f1f5f9;
+    --text-muted:      #94a3b8;
+    --text-secondary:  #cbd5e1;
+    --accent:      #00d4ff;
+    --accent-glow: rgba(0, 212, 255, 0.15);
+    --success:     #10b981;
+    --warn:        #f59e0b;
+    --danger:      #ef4444;
+    --radius:      12px;
+}
+
+body {
+    background: linear-gradient(135deg, var(--bg) 0%, var(--bg-2) 100%);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Header ──────────────────────────────────────────────────────── */
+.header {
+    background: linear-gradient(to right, rgba(15,23,42,0.8), rgba(30,41,59,0.8));
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    padding: 1rem;
+}
+
+.header-content {
+    max-width: 1400px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    padding-bottom: 0;
+}
+
+.header-col { display: flex; align-items: center; gap: 0.75rem; }
+.header-logo { gap: 0.75rem; }
+.logo-icon { height: 48px; width: auto; object-fit: contain; }
+.header-logo h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--accent);
+    text-shadow: 0 0 24px var(--accent-glow);
+}
+
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-left: 1px solid var(--border);
+    padding-left: 1.25rem;
+}
+
+.last-update {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    transition: color 0.4s ease;
+}
+.last-update.online  { color: var(--success); }
+.last-update.offline { color: var(--danger); }
+
+/* ── LMBot Panel Grid (2×1+full) ─────────────────────────────── */
+.liquiditybot-panel-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+        "service wallet"
+        "pools   pools";
+    gap: 1rem;
+    align-items: stretch;
+}
+.liquiditybot-grid-service { grid-area: service; }
+.liquiditybot-grid-service > .settings-card,
+.liquiditybot-grid-wallet  > .settings-card { height: 100%; box-sizing: border-box; }
+.liquiditybot-grid-wallet  { grid-area: wallet;  }
+.liquiditybot-grid-pools   { grid-area: pools;   }
+
+.cleanup-radio-option {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0;
+    font-size: 0.85rem;
+    color: var(--text);
+    cursor: pointer;
+}
+.cleanup-radio-option input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
+
+/* ── Cleanup-Modals (Manuell / Bester Pool / Dust) ──────────────────
+   Drei eigenständige Modals statt Tabs (Feature 2026-07-27) – über .cu-panel-body
+   auf ähnliche Höhe gebracht, damit keines davon deutlich kürzer/länger wirkt. */
+.cu-panel-desc {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.6rem;
+    border-bottom: 1px solid var(--border);
+}
+.cu-panel-desc .info-tip-label { margin-top: 0.1rem; flex-shrink: 0; }
+.cu-panel-body { min-height: 12rem; }
+
+/* ── Settings-Card ───────────────────────────────────────────── */
+.settings-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1rem 1.25rem;
+}
+
+.settings-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-bottom: 0.6rem;
+    margin-bottom: 0.6rem;
+    border-bottom: 1px solid rgba(71, 85, 105, 0.4);
+}
+.settings-card-header .sch-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.01em;
+}
+.settings-card-header .sch-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+.settings-card-header .sch-refresh {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-muted);
+    width: 26px;
+    height: 26px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: color 0.15s, border-color 0.15s, transform 0.4s;
+}
+.settings-card-header .sch-refresh:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--text-muted);
+}
+.settings-card-header .sch-refresh:disabled {
+    cursor: wait;
+    opacity: 0.6;
+}
+.settings-card-header .sch-refresh.spinning {
+    animation: sch-spin 1s linear infinite;
+}
+@keyframes sch-spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+}
+
+.settings-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid rgba(71, 85, 105, 0.4);
+}
+.settings-row:last-of-type { border-bottom: none; }
+
+.settings-label {
+    width: 80px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+/* ── Stub-Placeholder ────────────────────────────────────────── */
+.settings-stub {
+    text-align: center;
+    padding: 2.5rem 2rem;
+    border-style: dashed;
+}
+.settings-stub .stub-icon  { font-size: 2rem; margin-bottom: 0.5rem; }
+.settings-stub .stub-title { font-size: 1rem; font-weight: 600; color: var(--text); margin-bottom: 0.3rem; }
+.settings-stub .stub-desc  { font-size: 0.8rem; color: var(--text-muted); }
+
+/* ── Forge Modal (gemeinsam via modal.js) ────────────────────── */
+.forge-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.75);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+.forge-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 480px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.forge-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.forge-modal-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+.forge-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0.2rem 0.4rem;
+    border-radius: 5px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+}
+.forge-modal-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+.forge-modal-body {
+    padding: 1.25rem;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 0.875rem;
+    line-height: 1.6;
+}
+/* SLTP-Modal: breitere erste Spalte damit "(cbBTC)" etc. nicht umbricht */
+.sltp-settings .settings-label { width: 130px; }
+/* Ranking-Tab: noch breitere Spalte für lange Labels */
+.rk-settings .settings-label { width: 175px; }
+/* Fee-Claim-Modal: "Claim-Intervall", "Reinvest-Anteil", "Swap → USDC" nicht umbrechen */
+.fc-settings .settings-label { width: 140px; white-space: nowrap; }
+/* Auszahlen-Modal: "Swap → USDC" / "Senden an" nicht umbrechen */
+.pw-settings .settings-label { width: 140px; white-space: nowrap; }
+
+.forge-modal-footer {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 1rem 1.25rem;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.forge-modal-footer-note {
+    margin-right: auto;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+.btn-primary {
+    background: var(--accent);
+    color: var(--bg);
+    font-weight: 600;
+}
+
+
+/* ── Main ────────────────────────────────────────────────────────── */
+.main-content {
+    flex: 1;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 1.75rem 1rem;
+}
+
+/* ── Tab-Panel (Container, kein eigenes Styling – Inhalt kommt vom Modul) ── */
+.bot-tab-panel { /* intentionally unstyled */ }
+
+.bot-info-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px solid rgba(71, 85, 105, 0.4);
+}
+.bot-info-row:last-of-type { border-bottom: none; }
+
+.bot-info-label {
+    width: 75px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+/* ── Status-Badge ────────────────────────────────────────────────── */
+.status-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.2rem 0.6rem;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.status-badge.active   { background: rgba(16,185,129,0.15); color: var(--success); }
+.status-badge.inactive { background: rgba(239,68,68,0.12);  color: var(--danger); }
+.status-badge.unknown  { background: rgba(148,163,184,0.12); color: var(--text-muted); }
+.status-badge.loading  { background: rgba(0,212,255,0.1);   color: var(--accent); }
+/* Nur wo zusätzlich .btn-uniform gesetzt ist (Liquidity-Bot-Status über den
+   Buttons) – zentriert Text + übernimmt die einheitliche Breite, ohne die
+   Badges anderer Bots/Seiten zu beeinflussen. */
+.status-badge.btn-uniform { display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; }
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+.bot-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.btn {
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 0.4rem 0.9rem;
+    border-radius: 7px;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.btn:hover  { opacity: 0.85; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-restart  { background: rgba(0,212,255,0.15);  color: var(--accent); }
+.btn-stop     { background: rgba(239,68,68,0.15);  color: var(--danger); }
+.btn-start    { background: rgba(16,185,129,0.15); color: var(--success); }
+
+/* Einheitliche Breite für Service- (Start/Stop/Restart) und Cleanup-Buttons
+   (Manuell/Bester Pool/Dust) – beide Zeilen sollen optisch als eine Button-Spalte
+   untereinander stehen (Feature 2026-07-27). "Bester Pool" ist das längste Label. */
+.btn-uniform { min-width: 7rem; justify-content: center; }
+
+/* ── Task-Feedback ───────────────────────────────────────────────── */
+.task-status {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-height: 1.1em;
+    padding: 0.3rem 0 0.1rem;
+}
+.task-status.running { color: var(--accent); }
+.task-status.done    { color: var(--success); }
+.task-status.failed  { color: var(--danger); }
+
+/* Toast-Popups: zentral in /forge/css/toast.css (siehe index.html). */
+
+/* ── Footer ──────────────────────────────────────────────────────── */
+.footer {
+    border-top: 1px solid var(--border);
+    padding: 1rem;
+    text-align: center;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-top: auto;
+}
+
+/* ── Wallet-Tab ──────────────────────────────────────────────────── */
+.wallet-loading { color: var(--text-muted); padding: 1.5rem 0; font-size: 0.85rem; }
+.wallet-hint    { font-size: 0.82rem; color: var(--text-muted); padding: 0.4rem 0; }
+
+/* Wallet-Action-Tabelle */
+.wallet-action-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.wallet-action-table tr + tr td { border-top: 1px solid rgba(71,85,105,0.3); }
+.wat-label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 0.8rem 1.25rem 0.8rem 0;
+    white-space: nowrap;
+    width: 160px;
+}
+.wat-info {
+    padding: 0.8rem 1rem 0.8rem 0;
+    font-size: 0.85rem;
+    color: var(--text);
+}
+.wat-action {
+    padding: 0.8rem 0;
+    text-align: right;
+    white-space: nowrap;
+}
+.wat-action .btn { min-width: 5.5rem; }
+.wat-muted   { color: var(--text-muted); font-size: 0.82rem; }
+.addr-short  { font-family: monospace; font-size: 0.82rem; color: var(--accent); }
+.wat-modal-status { margin-bottom: 0.25rem; }
+
+/* Pool-Typen-Tab: Kopfzeile für die Bulk-Default-Tabelle (wallet-action-table hat
+   sonst nur Label/Info/Action-Zeilen ohne <thead>). */
+.pool-types-table th {
+    text-align: left;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 0.4rem 1rem 0.4rem 0;
+    white-space: nowrap;
+}
+
+/* Guthaben-Modal: identische Tabelle wie im Dashboard (html/js/wallet-detail-modal.js) */
+.wallet-detail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    background: var(--surface);
+    font-variant-numeric: tabular-nums;
+}
+.wallet-detail-table th,
+.wallet-detail-table td {
+    padding: 0.4rem 0.875rem;
+    text-align: left;
+}
+.wallet-detail-table th {
+    color: var(--text);
+    font-weight: 600;
+    background: rgba(99, 102, 241, 0.15);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.wallet-detail-table td {
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(71, 85, 105, 0.5);
+    vertical-align: middle;
+}
+.wallet-detail-table tbody tr:last-child td { border-bottom: none; }
+.wallet-detail-table tbody tr:nth-child(even) { background: rgba(59, 130, 246, 0.06); }
+.wallet-detail-table tbody tr:hover           { background: rgba(99, 102, 241, 0.1); }
+.wallet-detail-table td:last-child,
+.wallet-detail-table th:last-child { text-align: right; white-space: nowrap; }
+.wallet-detail-total td {
+    font-weight: 700;
+    color: var(--text);
+    background: rgba(99, 102, 241, 0.08);
+    border-top: 1px solid var(--border);
+    border-bottom: none;
+}
+.wallet-detail-table.scrollable tbody {
+    display: block;
+    max-height: 11rem;
+    overflow-y: auto;
+}
+.wallet-detail-table.scrollable thead tr,
+.wallet-detail-table.scrollable tbody tr,
+.wallet-detail-table.scrollable tfoot tr {
+    display: table;
+    width: 100%;
+    table-layout: fixed;
+}
+.wallet-detail-meta {
+    margin-top: 0.85rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: right;
+}
+
+/* Bot-Control-Modal (Start/Stop/Restart): Button + Erklärung nebeneinander,
+   die drei Zeilen untereinander (Liquidity Bot → Status → Verwalten). */
+.bcm-row {
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    margin-bottom: 0.7rem;
+}
+.bcm-row:last-of-type { margin-bottom: 1rem; }
+.bcm-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+/* Modal-Tabs (wm = wallet modal; wb = wallet-box-Außenreiter Guthaben/Senden/
+   Empfangen/Private Key, gleiches Aussehen, eigener Klassenname wegen der
+   verschachtelten Senden/Adressbuch-Innenreiter im selben Modal). */
+.wm-tab-bar, .wb-tab-bar, .cu-tab-bar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1rem;
+}
+.wm-tab, .wb-tab, .cu-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 6px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
+}
+.wm-tab:hover,  .wb-tab:hover,  .cu-tab:hover  { color: var(--text); }
+.wm-tab.active, .wb-tab.active, .cu-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Markiert einen Reiter als "derzeit nicht die aktive Regel" (z.B. Lending
+   Auto-Deploy: nur eine von zwei Regeln kann aktiv sein) -- bleibt klickbar,
+   Signal läuft über Deckkraft statt Farbe (Farbschwäche). */
+.cu-tab.cu-tab-dim { opacity: 0.45; }
+
+/* Adressbuch-Formular innerhalb Modal */
+.ab-form-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.25rem;
+}
+.ab-form-title {
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.wallet-section-title {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--text-muted);
+    margin-bottom: 0.25rem;
+}
+
+.settings-card + .settings-card { margin-top: 1rem; }
+
+/* Key-Status */
+.key-status      { font-size: 0.85rem; }
+.key-status.set  { color: var(--success); }
+.key-status.unset { color: var(--warn); }
+.key-status.crit { color: var(--danger); }
+.key-preview     { font-size: 0.75rem; color: var(--text-muted); font-family: monospace; }
+
+/* Adresse anzeigen (Einzahlen) */
+.addr-display-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; min-width: 0; }
+.addr-text {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.78rem;
+    color: var(--accent);
+    word-break: break-all;
+}
+.btn-icon { padding: 0.3rem 0.6rem; font-size: 0.9rem; }
+.btn.copied { background: rgba(16,185,129,0.15) !important; color: var(--success) !important; }
+
+/* QR Code */
+.qr-wrapper { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; display: inline-block; }
+.qr-img     { display: block; width: 160px; height: 160px; }
+
+/* Senden – Adresse wählen */
+.addr-select-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+}
+.addr-selected-display {
+    flex: 1;
+    padding: 0.4rem 0.75rem;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: var(--text);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: default;
+    user-select: none;
+}
+.addr-selected-display.empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+/* Senden */
+.send-token-row,
+.send-amount-row  { display: flex; gap: 0.5rem; align-items: center; flex: 1; min-width: 0; }
+.send-token-row .modal-select,
+.send-amount-row .modal-input { flex: 1; width: auto; min-width: 0; }
+.btn-sm          { padding: 0.3rem 0.65rem; font-size: 0.75rem; }
+.send-hint       { font-size: 0.75rem; color: var(--text-muted); margin-left: 0.5rem; }
+.settings-error  { color: var(--danger); font-size: 0.875rem; }
+
+/* Adressbuch-Modal */
+.ab-modal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+    max-height: 340px;
+    overflow-y: auto;
+}
+.ab-modal-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.55rem 0.75rem;
+    background: var(--bg-2);
+    border: 1px solid rgba(71,85,105,0.4);
+    border-radius: 7px;
+}
+.ab-modal-info    { flex: 1; min-width: 0; }
+.ab-modal-name    { font-size: 0.85rem; font-weight: 500; color: var(--text); }
+.ab-modal-addr    { font-family: monospace; font-size: 0.7rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ab-modal-actions { display: flex; gap: 0.3rem; flex-shrink: 0; }
+
+/* Modal-Inhalte */
+.modal-hint  { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.75rem; line-height: 1.5; }
+.modal-label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.35rem; }
+.modal-input, .modal-select {
+    display: block;
+    width: 100%;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.5rem 0.75rem;
+    color: var(--text);
+    font-size: 0.875rem;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.modal-input:focus, .modal-select:focus { border-color: var(--accent); }
+.modal-input::placeholder { color: var(--text-muted); }
+.key-textarea {
+    display: block;
+    width: 100%;
+    min-height: 80px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 0.5rem 0.75rem;
+    color: var(--text);
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.8rem;
+    resize: vertical;
+    outline: none;
+}
+.key-textarea:focus { border-color: var(--accent); }
+.modal-feedback       { font-size: 0.8rem; min-height: 1.2em; margin-top: 0.5rem; }
+.modal-feedback.error { color: var(--danger); }
+.modal-feedback.ok    { color: var(--success); }
+
+.ap-suggestion       { font-size: 0.8rem; color: var(--text-muted); font-style: italic; }
+.ap-suggestion-hint  { font-size: 0.75rem; opacity: 0.7; }
+
+.pool-summary        { margin-left: 0.5rem; font-size: 0.8rem; color: var(--text); }
+.pool-summary-off    { color: var(--text-muted); }
+
+/* ── Ranking-Info ───────────────────────────────────────────────── */
+.ranking-info {
+    font-size: 0.85rem;
+    color: var(--text);
+}
+/* Modal-Headline: farbiger Hintergrund je nach Verdikt */
+.ranking-strong { background: rgba( 60, 180,  90, 0.18); color: #2e7d3f; border-color: rgba(60,180,90,0.5); }
+.ranking-ok     { background: rgba(255, 200,  60, 0.20); color: #a07000; border-color: rgba(255,200,60,0.6); }
+.ranking-weak   { background: rgba(255, 200,  60, 0.20); color: #a07000; border-color: rgba(255,200,60,0.6); }
+.ranking-bad    { background: rgba(220,  60,  60, 0.18); color: #a82020; border-color: rgba(220,60,60,0.5); }
+
+/* ── Ranking-Modal ──────────────────────────────────────────────── */
+#forge-modal-liquiditybot-ranking-modal .forge-modal { max-width: 580px; }
+
+.ranking-modal { display: flex; flex-direction: column; gap: 0.75rem; }
+
+/* Headline-Box: einheitliche neutrale Optik unabhängig vom Tier.
+   Die Tier-Information wird durch den Slider und den fett-roten "Empfehlung: Abziehen"-Text
+   bei Withdraw kommuniziert — nicht über Hintergrundfarbe (Farbschwäche-freundlich). */
+
+.rk-tab-bar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--border);
+}
+.rk-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+    padding: 6px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s, border-color 0.15s;
+    margin-bottom: -1px;
+}
+.rk-tab:hover  { color: var(--text); }
+.rk-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.rk-panel { display: flex; flex-direction: column; gap: 0.75rem; padding-top: 0.5rem; }
+.rk-panel[hidden] { display: none; }
+.rk-panel > .ranking-section:first-child { border-top: none; }
+.ranking-headline {
+    text-align: center;
+    padding: 0.8rem;
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+}
+
+/* Economic-Scorer Tier-Klassen (seit 2026-05-18) — hellere Werte für dunkles Theme.
+   Werden u.a. in der Pool-Tabelle (Ranking-Spalte) genutzt. */
+.tier-invest   { color: #5dd58c; }
+.tier-hold     { color: #ffc94a; }
+.tier-observe  { color: #90a4ae; }
+.tier-withdraw { color: #ff6b6b; }
+/* Headline-Text immer in normaler Textfarbe (Tier-Bedeutung kommt durch Slider) */
+.ranking-headline .ranking-headline-net { font-size: 1.3rem; font-weight: 700; color: var(--text); }
+.ranking-headline-rank { font-size: 1rem; font-weight: 500; opacity: 0.75; margin-left: 0.3rem; }
+.ranking-headline-sub  { font-size: 0.85rem; opacity: 0.85; margin-top: 0.2rem; }
+
+/* Headline-Aufteilung: links Empfehlung, rechts PnL 1D */
+.ranking-headline-row { display: flex; justify-content: center; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.ranking-headline-pnl { font-size: 0.95rem; font-weight: 600; white-space: nowrap; }
+.ranking-headline-pnl.negative { color: #ff6b6b; }
+.ranking-headline-pnl.positive { color: #5dd58c; }
+
+/* ── Tier-Slider (Withdraw — Hold — Invest) ──────────────────────────────── */
+.tier-slider {
+    margin: 1rem 0 0.25rem;
+    padding: 0 0.6rem;
+}
+.tier-slider.low-confidence { opacity: 0.45; }
+.tier-slider-track {
+    position: relative;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 5px;
+    margin: 0 0.9rem;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.tier-slider-dot {
+    position: absolute;
+    top: 50%;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 3px solid rgba(15, 23, 42, 0.95);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.5);
+    transform: translate(-50%, -50%);
+    transition: left 0.4s ease;
+}
+.tier-slider-labels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.7rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+}
+.tier-slider-labels > span {
+    color: var(--text-muted);
+    transition: color 0.2s, font-weight 0.2s;
+    letter-spacing: 0.02em;
+}
+.tier-slider-labels > span.active { color: var(--accent); font-weight: 700; }
+
+.ranking-section {
+    border-top: 2px solid rgba(128,128,128,0.25);
+    padding-top: 0.7rem;
+}
+.ranking-section-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    letter-spacing: 0.06em;
+    margin-bottom: 0.5rem;
+}
+.ranking-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    border-radius: 0.3rem;
+    overflow: hidden;
+    border: 1px solid rgba(128,128,128,0.18);
+}
+.ranking-grid > div {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.42rem 0.6rem;
+    font-size: 0.85rem;
+    border-right: 1px solid rgba(128,128,128,0.12);
+    border-bottom: 1px solid rgba(128,128,128,0.12);
+}
+.ranking-grid > div:nth-child(2n) { border-right: none; }
+/* letzte Zeile: bottom border weg */
+.ranking-grid > div:nth-last-child(-n+2) { border-bottom: none; }
+/* Zebra: Paare abwechselnd einfärben (1+2, 5+6, …) */
+.ranking-grid > div:nth-child(4n+1),
+.ranking-grid > div:nth-child(4n+2) { background: rgba(128,128,128,0.07); }
+.ranking-grid > div span    { color: var(--text-muted); }
+.ranking-grid > div strong  { font-weight: 600; text-align: right; }
+.ranking-grid-total {
+    font-weight: 700;
+    background: rgba(60,140,200,0.10) !important;
+}
+.ranking-grid-total span, .ranking-grid-total strong { color: var(--text); }
+.ranking-alloc-text {
+    font-size: 0.9rem;
+    padding: 0.5rem 0.7rem;
+    background: rgba(128,128,128,0.07);
+    border-radius: 0.3rem;
+}
+.ranking-footer {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    text-align: center;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(128,128,128,0.15);
+}
+
+/* ── Simulation-Sektion (Bewertung-Tab) ──────────────────────────── */
+.ranking-grid > div strong.positive { color: #5dd58c; }
+.ranking-grid > div strong.negative { color: #ff6b6b; }
+.sim-badge {
+    display: inline-block;
+    font-size: 0.62rem;
+    font-weight: 700;
+    padding: 0.1rem 0.5rem;
+    border-radius: 0.6rem;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+    letter-spacing: 0.02em;
+    text-transform: none;
+    /* Dunkler Text auf gedämpftem Pastell-Hintergrund + farbiger Rand:
+       gut lesbar auch bei Farbschwäche, Bedeutung primär über Text. */
+}
+.sim-badge-measured  { background: #d6f1e0; color: #1a5a36; border: 1px solid #5dd58c; }  /* gemessen */
+.sim-badge-projected { background: #dcebf6; color: #1f4e7a; border: 1px solid #5aa9d6; }  /* Projektion */
+.sim-badge-simulated { background: #fbe7d0; color: #6e3e0c; border: 1px solid #d98026; }  /* Simulation */
+
+/* ── Pool-Select / Pool-Picker ───────────────────────────────────── */
+.pool-select { max-width: 240px; }
+
+.pool-picker { position: relative; max-width: 240px; }
+.pool-picker-drop {
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 0; right: 0;
+    z-index: 200;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    max-height: 12rem;
+    overflow-y: auto;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+.pool-picker-opt {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.pool-picker-opt:hover,
+.pool-picker-opt[data-active="true"] { background: var(--accent-muted, rgba(99,102,241,0.15)); }
+.pool-picker-opt.pp-inactive { color: var(--text-muted); font-style: italic; }
+
+/* Pool-Typ-Filter neben dem Pool-Picker. appearance:none-Reset nötig, sonst
+   zeigen mobile Browser (v.a. iOS Safari) den nativen Select-Hintergrund
+   (hell) mit unserer hellen Textfarbe → praktisch unsichtbar. */
+.pool-type-filter {
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: var(--bg-2);
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23cbd5e1'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text);
+    font-size: 0.8rem;
+    padding: 0.35rem 1.6rem 0.35rem 0.6rem;
+    margin-left: 0.4rem;
+    outline: none;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.pool-type-filter option { background: var(--bg-2); color: var(--text); }
+
+@keyframes card-pool-switch-flash {
+    0%   { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }
+    55%  { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }
+    100% { box-shadow: 0 0 0 0   rgba(99,102,241,0); }
+}
+.card-pool-switch-flash { animation: card-pool-switch-flash 0.9s ease-out; }
+
+/* ── Info-Tooltip (CSS-only, white-space:pre für \n) ─────────────── */
+.info-tip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    cursor: help;
+    position: relative;
+    line-height: 1;
+}
+
+/* ⓘ neben Label-Text – nutzt Forge-Tooltip statt CSS-Tooltip */
+.info-tip-label {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    cursor: help;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+.info-tip-label:hover { opacity: 1; }
+.info-tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 8px);
+    transform: translateX(-50%);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.65rem;
+    font-size: 0.75rem;
+    color: var(--text);
+    white-space: pre;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 50;
+    min-width: 170px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+}
+.info-tip:hover::after { opacity: 1; }
+
+/* Input mit Einheit (USDC) */
+.input-unit-row { display: flex; align-items: center; gap: 0.5rem; }
+.input-short    { width: 110px; }
+.input-unit     { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+
+/* Toggle-Hint */
+.toggle-hint { font-size: 0.78rem; color: var(--text-muted); margin-left: 0.4rem; }
+
+/* ── Toggle-Switch ────────────────────────────────────────────────── */
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    flex-shrink: 0;
+}
+.toggle-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    transition: background 0.2s, border-color 0.2s;
+}
+.toggle-slider::before {
+    content: '';
+    position: absolute;
+    height: 16px;
+    width: 16px;
+    left: 3px;
+    bottom: 3px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+}
+.toggle-switch input:checked + .toggle-slider {
+    background: rgba(0, 212, 255, 0.18);
+    border-color: var(--accent);
+}
+.toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(20px);
+    background: var(--accent);
+}
+.toggle-sm { width: 36px; height: 20px; }
+.toggle-sm .toggle-slider::before { height: 12px; width: 12px; }
+.toggle-sm input:checked + .toggle-slider::before { transform: translateX(16px); }
+.toggle-switch input:disabled + .toggle-slider { cursor: not-allowed; opacity: 0.55; }
+.toggle-switch:has(input:disabled) { cursor: not-allowed; }
+
+/* ── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+    .liquiditybot-panel-grid {
+        grid-template-columns: 1fr;
+        grid-template-areas: "service" "wallet" "pools";
+    }
+}
+@media (max-width: 640px) {
+    .main-content { padding: 1rem 0.75rem; }
+    .wat-label { width: 130px; padding-right: 0.75rem; }
+}
+
+/* ── Forge Tooltip (identisch zu SGB) ──────────────────────────────────────── */
+.forge-tooltip {
+    display: none; position: fixed; z-index: 9999;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; max-width: 360px; min-width: 200px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5); pointer-events: none; overflow: hidden;
+}
+.forge-tooltip table { border-collapse: collapse; width: 100%; }
+.forge-tooltip thead th {
+    padding: 0.6rem 0.875rem; background: rgba(0,212,255,0.1);
+    color: var(--text); font-weight: 600; font-size: 0.8125rem;
+    text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.forge-tooltip tbody td {
+    padding: 0.5rem 0.875rem; color: var(--text-muted);
+    font-size: 0.8125rem; line-height: 1.65;
+}
+
+/* ── Premium-Status-Icon (FORGE-Hammer-Logo – grau = inaktiv, farbig = aktiv) ── */
+/* Logo statt Emoji: CSS "color" wirkt auf ein Bild nicht, deshalb per
+   grayscale-Filter statt Farbwechsel gesteuert. */
+.premium-status-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: default;
+}
+.premium-status-icon img {
+    display: block;
+    height: 1.05rem;
+    width: auto;
+    filter: grayscale(1);
+    opacity: 0.55;
+    transition: filter 0.3s, opacity 0.3s;
+}
+.premium-status-icon.active img { filter: none; opacity: 1; }
+.premium-status-icon.hidden { display: none; }
+
+/* ── Brief-Icon (Message Center) ──────────────────────────────────── */
+.header-right { display: flex; align-items: center; gap: 0.3rem; }
+.notif-bell {
+    position: relative;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px;
+    background: none; border: none;
+    color: var(--text); cursor: pointer;
+    padding: 0; border-radius: 6px;
+    transition: background 0.15s;
+}
+.notif-bell:hover { background: rgba(255,255,255,0.08); }
+/* Immer grün, unabhängig vom Bot-Status – Status-Signal ist der Status-Badge
+   in der Bot-Zeile, nicht das Brief-Icon. Nur der Badge (ungelesen) ändert sich. */
+.notif-envelope { display: inline-flex; color: var(--success); }
+.notif-envelope svg { display: block; width: 17px; height: 17px; }
+.notif-badge {
+    position: absolute; top: 0; right: 0;
+    background: #e74c3c; color: #fff;
+    font-size: 0.6rem; font-weight: 700;
+    min-width: 16px; height: 16px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 3px; pointer-events: none;
+}
+.notif-badge.hidden { display: none; }

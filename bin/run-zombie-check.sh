@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# ══════════════════════════════════════════════════════════════════════════════
+# FORGE – Zombie-NFT Cleanup (täglich 00:01)
+# ══════════════════════════════════════════════════════════════════════════════
+# Findet und verbrennt Orca-Position-NFTs, die nach einem Rebalancing im Wallet
+# verblieben sind (Liquidität = 0 oder Dust). Läuft vollautomatisch mit --execute.
+#
+# Ablauf:
+#   1. burn-zombie-nfts.js --include-dust --execute ausführen
+#   2. Ergebnis auf stdout/stderr ausgeben
+#   3. Telegram-Notification:
+#      - Bei Zombies (erfolgreich geburnt): warn → Telegram ✅
+#      - Bei Fehlern: warn → Telegram 🚨
+#      - Bei sauberem Wallet: keine Telegram-Nachricht (kein Spam)
+#
+# Kein eigenes Logfile mehr (Fund 2026-08-05, forge-pub1): bin/forge-cron.js
+# fängt stdout+stderr JEDES Cron-Jobs bereits automatisch und fork-sicher in
+# <PATHS.logs>/cron/<job-id>.log auf (Master: FORGE/logs/cron/zombie-check.log,
+# Fork: /opt/forge/log/cron/zombie-check.log – siehe forge-cron.js runJob()).
+# Ein zusätzliches, selbst geschriebenes Log hier lief dem NIE fork-bewusst
+# hinterher (fest verdrahtetes "${FORGE_ROOT}/logs", auf dem Fork also
+# fälschlich unter app/logs/ statt log/ – app/ wird bei jedem Update ersetzt)
+# und erzeugte am Ende zwei bis drei divergierende Kopien derselben Datei.
+# Bei einem manuellen Aufruf AUSSERHALB von forge-cron.js (z.B. zum Testen)
+# gibt es dadurch bewusst kein Logfile mehr, nur Terminal-Ausgabe.
+# ══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+FORGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIQUIDITY="${FORGE_ROOT}/bots/liquidity"
+
+STATE_JSON="${FORGE_ROOT}/data/zombie-check-state.json"
+NEXUS_URL="${NEXUS_URL:-http://localhost:3100}"
+
+TS="$(date '+%Y-%m-%d %H:%M:%S')"
+echo ""
+echo "══════════════════════════════════════════════════════════════"
+echo "  FORGE Zombie-NFT Cleanup – ${TS}"
+echo "══════════════════════════════════════════════════════════════"
+
+OUT_FILE="$(mktemp)"
+trap 'rm -f "${OUT_FILE}"' EXIT
+
+if (cd "${LIQUIDITY}" && node bin/burn-zombie-nfts.js --full-close --execute) > "${OUT_FILE}" 2>&1; then
+  EXIT_OK=1
+else
+  EXIT_OK=0
+fi
+
+cat "${OUT_FILE}"
+
+# Auswertung aus Script-Output
+COUNT="$(grep -oE 'Zombies gesamt: [0-9]+'       "${OUT_FILE}" | grep -oE '[0-9]+' | tail -1 || true)"
+BURNED="$(grep -oE 'Fertig: [0-9]+'              "${OUT_FILE}" | grep -oE '[0-9]+' | tail -1 || true)"
+FAILED="$(grep -c '❌ Fehler bei'                 "${OUT_FILE}" || true)"
+SKIPPED="$(grep -c '⛔ SICHERHEIT'                "${OUT_FILE}" || true)"
+COUNT="${COUNT:-0}"
+BURNED="${BURNED:-0}"
+FAILED="${FAILED:-0}"
+SKIPPED="${SKIPPED:-0}"
+
+if [[ "${EXIT_OK}" -eq 0 ]]; then
+  MSG="Zombie-NFT-Cleanup fehlgeschlagen (Script-Exit != 0) — siehe Cron-Log zombie-check"
+  echo "  ✗ ${MSG}"
+  curl -s -X POST "${NEXUS_URL}/notify" \
+    -H 'Content-Type: application/json' \
+    -d "{\"botId\":\"liquidity\",\"level\":\"warn\",\"category\":\"zombie-check\",\"message\":\"🚨 ${MSG}\"}" \
+    >/dev/null 2>&1 || true
+
+elif [[ "${COUNT}" -gt 0 && "${FAILED}" -gt 0 ]]; then
+  SKIP_SUFFIX=""
+  if [[ "${SKIPPED}" -gt 0 ]]; then
+    SKIP_SUFFIX=" + ${SKIPPED} mit Liquidität übersprungen"
+  fi
+  MSG="${BURNED}/${COUNT} Zombie-NFT(s) geburnt — ${FAILED} Fehler${SKIP_SUFFIX}. Siehe Cron-Log zombie-check"
+  echo "  ⚠ ${MSG}"
+  curl -s -X POST "${NEXUS_URL}/notify" \
+    -H 'Content-Type: application/json' \
+    -d "{\"botId\":\"liquidity\",\"level\":\"warn\",\"category\":\"zombie-check\",\"message\":\"⚠️ ${MSG}\"}" \
+    >/dev/null 2>&1 || true
+
+elif [[ "${COUNT}" -gt 0 ]]; then
+  echo "  ✓ ${BURNED}/${COUNT} Zombie-NFT(s) erfolgreich geburnt und Rent zurückgeholt"
+
+  # Ein Telegram-Notify pro einzelnem Burn (statt einer aggregierten Meldung),
+  # damit erkennbar ist welcher Pool betroffen war und wie viel Rent zurückkam.
+  while IFS= read -r LINE; do
+    [[ -z "${LINE}" ]] && continue
+    POOL="$(sed -n 's/.*pool=\(.*\) mint=.*/\1/p' <<<"${LINE}")"
+    RENT="$(sed -n 's/.*rentSol=\(.*\)$/\1/p' <<<"${LINE}")"
+    MSG="Pool: ${POOL}: Zombie-NFT erfolgreich geburnt
+${RENT} SOL Rent zurückgeholt"
+    curl -s -X POST "${NEXUS_URL}/notify" \
+      -H 'Content-Type: application/json' \
+      -d "$(printf '{"botId":"liquidity","level":"warn","category":"zombie-check","message":"🔥 %s"}' "${MSG//$'\n'/\\n}")" \
+      >/dev/null 2>&1 || true
+  done < <(grep '^\[burn-result\]' "${OUT_FILE}")
+
+  if [[ "${SKIPPED}" -gt 0 ]]; then
+    MSG="⚠️ ${SKIPPED} NFT(s) mit Liquidität übersprungen (manuelle Prüfung nötig)"
+    echo "  ⚠ ${MSG}"
+    curl -s -X POST "${NEXUS_URL}/notify" \
+      -H 'Content-Type: application/json' \
+      -d "{\"botId\":\"liquidity\",\"level\":\"warn\",\"category\":\"zombie-check\",\"message\":\"⚠️ ${MSG}\"}" \
+      >/dev/null 2>&1 || true
+  fi
+
+else
+  if [[ "${SKIPPED}" -gt 0 ]]; then
+    MSG="Keine Zombies — aber ${SKIPPED} NFT(s) mit Liquidität übersprungen (manuelle Prüfung nötig)"
+    echo "  ⚠ ${MSG}"
+    curl -s -X POST "${NEXUS_URL}/notify" \
+      -H 'Content-Type: application/json' \
+      -d "{\"botId\":\"liquidity\",\"level\":\"warn\",\"category\":\"zombie-check\",\"message\":\"⚠️ ${MSG}\"}" \
+      >/dev/null 2>&1 || true
+  else
+    echo "  ✓ Keine Zombies — Wallet sauber"
+  fi
+fi
+
+# State-JSON für forge-check.js schreiben
+cat > "${STATE_JSON}" <<JSON
+{
+  "lastRun": "${TS}",
+  "lastRunTs": $(date +%s%3N),
+  "count": ${COUNT},
+  "burned": ${BURNED},
+  "failed": ${FAILED},
+  "skipped": ${SKIPPED},
+  "ok": $([ "${EXIT_OK}" -eq 1 ] && echo "true" || echo "false")
+}
+JSON

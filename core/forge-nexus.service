@@ -1,0 +1,19 @@
+[Unit]
+Description=FORGE Nexus – Zentrales API-Routing, Rate-Limiting und Notification-Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=forge
+WorkingDirectory=/opt/forge/app/core/nexus
+Environment=FORGE_ENV_DIR=/opt/forge/local/env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forge-nexus
+
+[Install]
+WantedBy=multi-user.target

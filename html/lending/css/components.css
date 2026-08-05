@@ -1,0 +1,741 @@
+/* FORGE LendingBot – Components CSS */
+
+/* ── Chart-Modal-Overlay (geteilt: Chart-Modals + Wallet-Modal) ─────────── */
+
+.chart-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.78);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+.chart-modal-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.8rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.chart-modal-pair {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.chart-modal-close {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.6rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.2rem;
+    margin-left: auto;
+    transition: color 0.15s;
+}
+.chart-modal-close:hover { color: var(--text-primary); }
+
+/* ── Chart-Card-Header: Titel-Zeile + Range-Buttons darunter ────────────── */
+
+.card-chart-head {
+    margin-bottom: 1rem;
+}
+.card-chart-head h2 {
+    margin-bottom: 0.3rem;
+}
+.card-chart-head .chart-range-btns {
+    display:     flex;
+    width:       fit-content;
+    margin-left: auto;
+}
+
+/* ── Chart-Modal: Dialog + Body + SVG ───────────────────────────────────── */
+
+/* Range-Buttons als direkte Kinder des Dialogs (unterhalb des Headers) */
+.chart-modal-dialog > .chart-range-btns {
+    display:      flex;
+    width:        fit-content;
+    margin-left:  auto;
+    margin-right: 0;
+    padding:      0.3rem 1.25rem 0;
+    flex-shrink:  0;
+}
+
+.chart-modal-dialog {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: min(92vw, 720px);
+    height: min(70vh, 460px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+
+.chart-modal-body {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    padding: 0.5rem 0.25rem 0.25rem 0;
+}
+
+.chart-modal-svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* Chart-Modal Toggle-Buttons (Ausreißer-Filter u.ä.) */
+.chart-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    padding: 3px 9px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.chart-toggle:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+.chart-toggle.active {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+}
+
+/* ── Wallet-Detail-Modal ─────────────────────────────────��───────────────── */
+
+.wallet-modal-dialog {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 92vw;
+    max-width: 460px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+}
+/* TX-Fees-Modal braucht mehr Breite für die 4-spaltige Tabelle
+   (Zeit · Typ · Pool · Fee), sonst entsteht horizontaler Scrollbalken. */
+#statPayedFeesModal .wallet-modal-dialog {
+    max-width: 620px;
+}
+.wallet-modal-body {
+    padding: 1.25rem 1.5rem 1.25rem;
+    overflow-y: auto;
+}
+.fees-table-scroll {
+    max-height: 360px;
+    overflow-y: auto;
+}
+.fees-table-scroll thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-dark);
+    z-index: 1;
+}
+.fees-table-scroll td:first-child,
+.fees-table-scroll th:first-child { white-space: nowrap; }
+.wallet-detail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    background: var(--surface);
+    font-variant-numeric: tabular-nums;
+}
+.wallet-detail-table th,
+.wallet-detail-table td {
+    padding: 0.4rem 0.875rem;
+    text-align: left;
+}
+.wallet-detail-table th {
+    color: var(--text-primary);
+    font-weight: 600;
+    background: rgba(99, 102, 241, 0.15);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+.wallet-detail-table td {
+    color: var(--text-secondary);
+    border-bottom: 1px solid rgba(71, 85, 105, 0.5);
+    vertical-align: middle;
+}
+.wallet-detail-table tbody tr:last-child td { border-bottom: none; }
+.wallet-detail-table tbody tr:nth-child(even) { background: rgba(59, 130, 246, 0.06); }
+.wallet-detail-table tbody tr:hover           { background: rgba(99, 102, 241, 0.1); }
+.wallet-detail-table td:last-child,
+.wallet-detail-table th:last-child { text-align: right; white-space: nowrap; }
+.wallet-detail-total td {
+    font-weight: 700;
+    color: var(--text-primary);
+    background: rgba(99, 102, 241, 0.08);
+    border-top: 1px solid var(--border);
+    border-bottom: none;
+}
+.wallet-detail-meta {
+    margin-top: 0.85rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-align: right;
+}
+.clickable-value {
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    text-decoration-color: rgba(255,255,255,0.25);
+    transition: text-decoration-color 0.15s, color 0.15s;
+}
+.clickable-value:hover {
+    color: var(--primary, #6366f1);
+    text-decoration-color: var(--primary, #6366f1);
+}
+
+/* ── APY klickbar (Pool-Chart-Trigger) ───────────────────────────────────── */
+
+.pc-apy.apy-clickable {
+    cursor: pointer;
+    border-radius: 4px;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
+    transition: opacity 0.15s ease;
+}
+.pc-apy.apy-clickable:hover {
+    opacity: 0.7;
+}
+
+/* ── TVL klickbar (TVL-Chart-Trigger) ────────────────────────────────────── */
+
+.pc-tvl.tvl-clickable {
+    cursor: pointer;
+    border-radius: 4px;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
+    transition: opacity 0.15s ease;
+}
+.pc-tvl.tvl-clickable:hover {
+    opacity: 0.7;
+}
+
+/* ── Investment klickbar (TX-Liste-Trigger) ──────────────────────────────── */
+
+.investment-clickable {
+    cursor: pointer;
+    border-radius: 4px;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
+    transition: opacity 0.15s ease;
+}
+.investment-clickable:hover {
+    opacity: 0.7;
+}
+
+/* ── Hintergrund-Scroll sperren wenn Modal offen ─────────────────────────── */
+
+body.modal-open {
+    overflow: hidden;
+}
+
+/* ── Pool-TX-Modal ───────────────────────────────────────────────────────── */
+
+.modal-box-narrow {
+    max-width: 540px;
+    width: 94vw;
+}
+
+.tx-modal-list {
+    overflow-y: auto;
+    max-height: calc(5 * 33px + 34px); /* 5 Datenzeilen + Thead */
+    padding: 0 0 0.5rem;
+}
+
+/* Sticky Thead im TX-Modal */
+.tx-modal-list .tip-orders thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card-bg);
+}
+
+/* ── TX-Checkmark-Spalte ─────────────────────────────────────────────────── */
+
+.tx-check-col {
+    width: 22px;
+    text-align: center;
+    padding-left: 0;
+    padding-right: 0.5rem;
+}
+
+.tx-fee-check {
+    color: var(--success);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: help;
+}
+
+/* ── Rebalance-Countdown-Badge (Pools-Header) ───────────────────────────── */
+
+.rebalance-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--primary);
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    cursor: help;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* ── Break-Even-Badge (Pool-Card Footer) ────────────────────────────────── */
+
+.break-even-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 1px 7px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--success);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    cursor: help;
+    margin-left: auto;
+}
+
+.tx-modal-empty {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    padding: 1.25rem 1.25rem;
+    text-align: center;
+}
+
+/* ── Transaktions-Tabelle (tip-orders, identisch SpotGridBot) ────────────── */
+
+.tip-orders {
+    border-collapse: collapse;
+    width: 100%;
+    background: var(--surface);
+}
+
+.tip-orders th,
+.tip-orders td {
+    padding: 0.4rem 0.875rem;
+    text-align: left;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.tip-orders th {
+    color: var(--text-primary);
+    font-weight: 600;
+    background: rgba(99, 102, 241, 0.15);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.tip-orders tbody tr {
+    border-bottom: 1px solid rgba(71, 85, 105, 0.5);
+}
+.tip-orders tbody tr:last-child { border-bottom: none; }
+
+.tip-orders tbody tr:nth-child(even) {
+    background: rgba(59, 130, 246, 0.06);
+}
+
+.tip-orders tbody tr:hover {
+    background: rgba(99, 102, 241, 0.1);
+}
+
+.tip-orders td {
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.tip-orders td.tx-type-deposit  { color: var(--success); font-weight: 600; }
+.tip-orders td.tx-type-withdraw { color: var(--warning);  font-weight: 600; }
+
+.tip-orders td.tx-amount-deposit  { color: var(--success); font-weight: 600; text-align: right; }
+.tip-orders td.tx-amount-withdraw { color: var(--warning);  font-weight: 600; text-align: right; }
+
+.tip-orders td.tx-hash-col {
+    width: 28px;
+    text-align: center;
+    padding-left: 0;
+}
+.tip-orders td.tx-hash-col a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+}
+.tip-orders td.tx-hash-col a:hover { color: var(--text-primary); }
+
+.tip-orders .tip-total td {
+    border-top: 1px solid var(--border);
+    color: var(--text-primary);
+    font-weight: 600;
+    padding-top: 0.5rem;
+    background: none;
+}
+.tip-orders .tip-total td.tx-amount-deposit  { color: var(--success); }
+.tip-orders .tip-total td.tx-amount-withdraw { color: var(--warning);  }
+
+/* ── Pool-APY-Modal ──────────────────────────────────────────────────────── */
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    animation: modal-fade-in 0.15s ease;
+}
+.modal-overlay.hidden {
+    display: none;
+}
+
+@keyframes modal-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+.modal-box {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: min(660px, 92vw);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    animation: modal-slide-in 0.15s ease;
+}
+
+/* Range-Buttons (1D/1W/1M) im Modal-Body rechtsbündig — analog zu Header-Flex-
+   Containern, in denen das margin-left:auto auf .chart-range-btns bereits greift. */
+.modal-box > .chart-range-btns,
+.modal-tab-panel > .chart-range-btns {
+    display:      flex;
+    width:        fit-content;
+    margin-left:  auto;
+    margin-right: 0;
+}
+
+@keyframes modal-slide-in {
+    from { transform: translateY(-12px); opacity: 0; }
+    to   { transform: translateY(0);     opacity: 1; }
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+}
+
+.modal-header h3 {
+    margin: 0;
+    flex: 1;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 1rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    line-height: 1;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.modal-close:hover {
+    background: var(--border);
+    color: var(--text-primary);
+}
+
+/* ── Forge Tooltip (JS-gesteuert) ────────────────────────────────────────── */
+
+.forge-tooltip {
+    display: none;
+    position: fixed;
+    z-index: 9999;
+    background: var(--surface-light);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-width: 350px;
+    min-width: 200px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.forge-tooltip table {
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.forge-tooltip thead th {
+    padding: 0.6rem 0.875rem;
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 0.8125rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.forge-tooltip tbody td {
+    padding: 0.45rem 0.875rem;
+    color: var(--text-secondary);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    white-space: pre-line;
+}
+
+.has-tooltip {
+    cursor: help;
+}
+
+/* ── Protocol-Info-Icon ─────────────────────────────────────────────────────── */
+
+.pc-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1em;
+    height: 1em;
+    border-radius: 50%;
+    background: rgba(250, 204, 21, 0.15);
+    color: #facc15;
+    font-size: 0.7em;
+    font-style: normal;
+    margin-left: 0.3em;
+    vertical-align: middle;
+    flex-shrink: 0;
+    line-height: 1;
+}
+
+.price-marker {
+    fill: var(--success);
+    stroke: none;
+}
+
+.price-marker-ring {
+    fill: none;
+    stroke: var(--success);
+    stroke-width: 2;
+}
+
+/* ── Chart Hover Tooltip (SVG) ───────────────────────────────────────────── */
+
+.chart-hover-line {
+    stroke: var(--border);
+    stroke-width: 1;
+    stroke-dasharray: 3, 3;
+    pointer-events: none;
+}
+
+.chart-tooltip-box {
+    background: var(--bg-darker);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.78rem;
+    color: var(--text-primary);
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    position: absolute;
+}
+
+/* ── Pending Withdrawals Card ────────────────────────────────────────────── */
+
+.card-pending-withdrawals {
+    border-color: rgba(245, 158, 11, 0.4);
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.05), var(--surface));
+}
+
+.card-pending-withdrawals h2 {
+    color: var(--warning);
+    gap: 0.5rem;
+}
+
+.pending-icon {
+    font-size: 1rem;
+}
+
+.pending-subtitle {
+    font-size: 0.75rem;
+    font-weight: 400;
+    color: var(--text-secondary);
+    margin-left: auto;
+}
+
+.pending-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.pending-item {
+    background: var(--surface-light);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: 1rem;
+}
+
+.pending-item-left {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.pending-item-amount {
+    font-size: 1.25rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.pending-item-unit {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.pending-item-meta {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.pending-item-center {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+/* Countdown-Balken */
+.cooldown-bar-wrapper {
+    width: 100%;
+    max-width: 300px;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.cooldown-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--warning);
+    transition: width 1s linear;
+}
+
+.cooldown-bar-fill.ready {
+    background: var(--success);
+    width: 100% !important;
+}
+
+.cooldown-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+.cooldown-label.ready {
+    color: var(--success);
+    font-weight: 700;
+}
+
+.pending-item-right {
+    text-align: right;
+}
+
+.pending-ready-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--success);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.pending-waiting-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: rgba(245, 158, 11, 0.12);
+    color: var(--warning);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+@media (max-width: 768px) {
+    .pending-item {
+        grid-template-columns: 1fr;
+    }
+
+    .cooldown-bar-wrapper {
+        max-width: 100%;
+    }
+
+    .pending-item-right {
+        text-align: left;
+    }
+}
+
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .apy-chart-legend {
+        margin-left: 0;
+        margin-top: 0.25rem;
+    }
+
+    .notif-panel {
+        width: 100vw;
+    }
+}
+
+@media (max-width: 360px) {
+    .card {
+        padding: 0.75rem;
+    }
+
+    .container {
+        padding: 0.5rem;
+    }
+}
