@@ -63,7 +63,7 @@ function findPool(poolId) {
     try {
         const db  = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
         const row = db.prepare(
-            `SELECT active, enabled, range_override_fixed_pct FROM pools WHERE id = ?`
+            `SELECT active, enabled, range_override_fixed_pct, enabled_changed_at, enabled_reason FROM pools WHERE id = ?`
         ).get(poolId);
         db.close();
         if (row) {
@@ -71,6 +71,8 @@ function findPool(poolId) {
             if (row.enabled !== null && row.enabled !== undefined) {
                 pool.enabled = row.enabled === 1;
             }
+            pool.enabledChangedAt = row.enabled_changed_at ?? null;
+            pool.enabledReason    = row.enabled_reason ?? null;
             if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
                 && pool.rangeOverride && typeof pool.rangeOverride === 'object') {
                 pool.rangeOverride.fixedPct = row.range_override_fixed_pct;
@@ -141,12 +143,13 @@ function writeFixedPct(poolId, newPct) {
  * unangetastet — ein Schreiben dorthin würde beim nächsten Bot-Zyklus ohnehin vom
  * DB-Wert überschrieben und hätte keine Wirkung.
  */
-function writeEnabled(poolId, enabled) {
+function writeEnabled(poolId, enabled, reason) {
     const db = openLiquidityDbRW();
     try {
         const row = db.prepare(`SELECT id FROM pools WHERE id = ?`).get(poolId);
         if (!row) throw new Error(`Pool ${poolId} nicht in DB-Tabelle pools gefunden (syncPools ausstehend?)`);
-        db.prepare(`UPDATE pools SET enabled = ? WHERE id = ?`).run(enabled ? 1 : 0, poolId);
+        db.prepare(`UPDATE pools SET enabled = ?, enabled_changed_at = ?, enabled_reason = ? WHERE id = ?`)
+            .run(enabled ? 1 : 0, Date.now(), reason, poolId);
     } finally {
         db.close();
     }
@@ -358,6 +361,29 @@ router.get('/liquidity/:poolId/position-state', (req, res) => {
 });
 
 /**
+ * GET /liquidity/:poolId/position-state/live
+ *
+ * Live-Preis/Range-Status direkt on-chain (adapter.getPositionState(), dieselbe
+ * Quelle wie beim Rebalancing-Check) statt aus dem nur stündlich aktualisierten
+ * data.json-Cache (Fund 2026-08-07: Deposit-Modal zeigte nach einem Rebalancing
+ * bis zu 1h lang fälschlich "out of Range"). Bewusst eigener Endpoint statt Teil
+ * von /position-state: der On-Chain-Call dauert (RPC + Rate-Limiter) spürbar
+ * länger als ein reiner Cache-Read — das Modal öffnet mit /position-state sofort
+ * und holt diesen Live-Wert im Hintergrund nach (siehe bot-liquidity.js), damit
+ * der ~30s-Delay eines blockierenden Calls beim Öffnen entfällt.
+ */
+router.get('/liquidity/:poolId/position-state/live', async (req, res) => {
+    const pool = findPool(req.params.poolId);
+    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    try {
+        const live = await runCli('bin/position-state.js', ['--pool', pool.pair], { timeoutMs: 15_000 });
+        res.json(live ?? { ok: false, error: 'kein Ergebnis' });
+    } catch (err) {
+        res.json({ ok: false, error: err.message });
+    }
+});
+
+/**
  * GET /liquidity/:poolId/deposit-gas-estimate?isNew=0|1
  *
  * Schätzt, wie viel USDC im Wallet mindestens vorhanden sein muss, damit ein
@@ -553,7 +579,7 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
     }
 
     try {
-        writeEnabled(pool.id, enabled);
+        writeEnabled(pool.id, enabled, enabled ? 'Manuell aktiviert über Settings-UI' : 'Manuell deaktiviert über Settings-UI');
     } catch (err) {
         return res.status(500).json({ error: `Konnte enabled nicht setzen: ${err.message}` });
     }

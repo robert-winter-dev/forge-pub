@@ -203,6 +203,8 @@ export const PATHS = {
     liquidityDb:      botDbPath('liquidity'),
     liquidityPools:   j('bots', 'liquidity', 'config', 'pools.json'),
     premiumPricing:   j('config', 'premium-pricing.json'),
+    premiumMinVersion: j('config', 'premium-min-version.json'),
+    version:          j('config', 'version.json'),
     liquidityScores:  path.join(botDataDir('liquidity'), 'pool-scores.json'),
     lendingDb:        botDbPath('lending'),
 

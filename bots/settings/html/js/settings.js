@@ -5,11 +5,11 @@
  * Navigation erfolgt über das Hamburger-Menü (nav.js).
  */
 
-import { initNav, initFooter } from '/forge/js/nav.js?v=20260731c';
+import { initNav, initFooter } from '/forge/js/nav.js?v=20260808h';
 import { showToast }           from '/forge/js/toast.js?v=20260722b';
-import { initMessageBell }     from '/forge/js/message-bell.js?v=20260803b';
-import * as liquidity          from './bot-liquidity.js?v=20260802b';
-import * as lending            from './bot-lending.js?v=20260802l';
+import { initMessageBell }     from '/forge/js/message-bell.js?v=20260809a';
+import * as liquidity          from './bot-liquidity.js?v=20260808b';
+import * as lending            from './bot-lending.js?v=20260807a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────
 const HASH_TO_SVC = {
@@ -60,6 +60,7 @@ initFooter({ botName: `Settings: ${FULL_NAME[activeSvc] ?? activeSvc}` });
 initMessageBell({ requireLan: false });
 
 let botStatuses  = {};
+let botCapital   = {};
 let activeModule = null;
 
 // ── Letztes Update ────────────────────────────────────────────────────────────
@@ -84,6 +85,7 @@ function updateTimestamp() {
 function makeContext(svcId) {
     return {
         getStatus:     (id) => botStatuses[id ?? svcId],
+        getHasCapital: (id) => botCapital[id ?? svcId] ?? false,
         showToast,
         refreshStatus: () => loadBots(),
     };
@@ -190,6 +192,7 @@ async function loadBots() {
         const bots = await res.json();
         for (const bot of bots) {
             botStatuses[bot.id] = bot.status;
+            botCapital[bot.id]  = bot.hasCapital ?? false;
         }
         updateTimestamp();
     } catch { /* Statuses unverändert lassen */ }

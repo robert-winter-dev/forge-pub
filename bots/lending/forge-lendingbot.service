@@ -9,7 +9,6 @@ Type=simple
 User=forge
 WorkingDirectory=/opt/forge/app/bots/lending
 Environment=FORGE_ENV_DIR=/opt/forge/local/env
-ExecStartPre=/bin/sleep 20
 ExecStart=/usr/bin/node bin/bot.js
 Restart=on-failure
 RestartSec=10

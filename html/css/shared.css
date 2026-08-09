@@ -25,6 +25,7 @@
 .last-update.online  { color: var(--success); }
 .last-update.warning { color: var(--warning); animation: pulse-icon 2.5s ease-in-out infinite; }
 .last-update.offline { color: var(--danger);  }
+.last-update.disabled { color: var(--text-secondary); }
 
 /* ── Bot-State-Icon (▶ running / ⏸ paused / ⚠ waiting / stale) ──────────── */
 
@@ -346,19 +347,6 @@
     100% { background-position: -200% 0; }
 }
 
-/* Health-Monitor-Animationen (Titel-Blink wenn Bot-Fehler) */
-@keyframes forge-pulse {
-    0%, 100% { opacity: 1; }
-    50%       { opacity: 0.5; }
-}
-
-@keyframes forge-blink {
-    0%, 49%  { opacity: 1; }
-    50%, 100% { opacity: 0.15; }
-}
-
-.header-logo h1.health-warning  { animation: forge-pulse 2s ease-in-out infinite; color: var(--warning); }
-.header-logo h1.health-critical { animation: forge-blink 0.8s step-end infinite;  color: var(--danger);  }
 
 /* ── Loading / Skeleton ───────────────────────────────────────────────────── */
 
@@ -393,3 +381,32 @@
     transition: opacity 0.15s ease;
 }
 .clickable-dotted:hover { opacity: 0.7; }
+
+/* ── Bot-inaktiv-Platzhalter (2026-08-07) ────────────────────────────────────
+   Ersetzt eine ganze Box, wenn der zugehörige Bot keine aktive Position hält
+   (z.B. frisch nach der Installation, oder nach vollständigem Ausstieg ohne
+   Wiedereinstieg) — sonst zeigen die Tabellen nur unerklärte leere Zellen.
+   Gleiche Form wie .premium-locked-panel (liquidity/css/components.css),
+   bewusst als eigene, einfachere Klasse (nur Text, kein Icon/Link) hier im
+   geteilten Stylesheet, da beide Dashboards sie brauchen. */
+.bot-inactive-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 180px;
+    padding: 2rem;
+    border: 1px dashed var(--border, #334155);
+    border-radius: 8px;
+    text-align: center;
+}
+.bot-inactive-panel-main {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-secondary, #94a3b8);
+}
+.bot-inactive-panel-note {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #94a3b8);
+}

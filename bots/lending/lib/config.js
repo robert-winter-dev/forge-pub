@@ -56,7 +56,7 @@ export const config = {
 
     // ── Bot-Identifikation ───────────────────────────────────────────────────
     botId:          optional('BOT_ID', 'lending'),
-    botDisplayName: optional('BOT_DISPLAY_NAME', 'FORGE Lending Bot'),
+    botDisplayName: optional('BOT_DISPLAY_NAME', 'Lending Bot'),
 
     // ── Telegram ─────────────────────────────────────────────────────────────
     telegram: {
@@ -146,7 +146,7 @@ export const config = {
                 // Öffentlich zugänglicher USDC-Vault (RWA-besichert, ~7.9% APY)
                 // In allgemeiner API-Liste enthalten → directQuery funktioniert
                 address: '3gcVWr7Bgpp2EmbuF1VjjW6djHBik1d3vqjZLw2po6os',
-                label:   'Loopscale USDC Public',
+                label:   'Loopscale Public',
             },
             'loopscale-genesis': {
                 // Nicht in allgemeiner API-Liste → braucht Filter-Fallback mit ≥2 Adressen

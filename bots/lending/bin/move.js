@@ -343,6 +343,7 @@ async function main() {
         console.log('');
 
     } catch (err) {
+        if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
         console.error(`\n  ❌ Fehler: ${err.message}`);
         console.error('     Lock wird trotzdem entfernt.');
         process.exitCode = 1;

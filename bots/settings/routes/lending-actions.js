@@ -140,6 +140,28 @@ function savePoolEnabled(db, protocolId, enabled) {
 }
 
 /**
+ * True wenn das Protokoll laut lendingbot.db eine offene Position mit
+ * Kapital hält. Analog zur bereits bestehenden Sperre beim Liquidity Bot
+ * (bots/settings/routes/pools-actions.js hasOpenPosition()) — dort verhindert
+ * dieselbe Prüfung, dass ein Pool mit offener Position deaktiviert wird.
+ * Beim Lending Bot fehlte dieses Gegenstück bisher (Fund 2026-08-07): die
+ * Route deaktivierte bis jetzt "einfaches Setzen, keine weitere Logik", auch
+ * mit `amount > 0`.
+ */
+function hasProtocolCapital(protocolId) {
+    try {
+        const db = new Database(PATHS.lendingDb, { readonly: true, fileMustExist: true });
+        const row = db.prepare(
+            `SELECT 1 FROM positions WHERE protocol = ? AND closed_at IS NULL AND amount > 0 LIMIT 1`
+        ).get(protocolId);
+        db.close();
+        return !!row;
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Startet export.js + sync.sh im Hintergrund – Antwort an Client ist bereits raus.
  *
  * Existenz-Checks + error-Handler bewusst: in einem reduzierten Deployment ohne
@@ -205,15 +227,22 @@ function runCli(scriptRelPath, cliArgs, { timeoutMs = 120_000 } = {}) {
     });
 }
 
-/** Bekannte Protokolle mit Labels (aus .env.example / config). */
+/**
+ * Bekannte Protokolle mit Labels.
+ * 🔒 Muss Wort für Wort mit labelFor() in bots/lending/bin/export.js übereinstimmen —
+ * das ist die Quelle, die im Dashboard live angezeigt wird. Abweichende Labels hier
+ * ließen denselben Pool im Dashboard und in den Settings wie zwei verschiedene Pools
+ * aussehen (Befund 2026-08-09: 'Loopscale Onre' hier vs. 'Loopscale Public' im
+ * Dashboard für dasselbe Protokoll `loopscale-onre`).
+ */
 const PROTOCOL_LABELS = {
-    'kamino':             'Kamino (Main)',
+    'kamino':             'Kamino',
     'kamino-figure':      'Kamino Figure',
-    'kamino-onre':        'Kamino Onre',
+    'kamino-onre':        'Kamino OnRe',
     'kamino-huma':        'Kamino Huma',
     'jupiter':            'Jupiter Lend',
-    'loopscale-genesis':  'Loopscale Genesis',
-    'loopscale-onre':     'Loopscale Onre',
+    'loopscale-genesis':  'Loopscale Gen',
+    'loopscale-onre':     'Loopscale Public',
 };
 
 // ── Routen ────────────────────────────────────────────────────────────────────
@@ -308,7 +337,8 @@ router.put('/tvl-guard/:protocolId', (req, res) => {
 
 // ── PUT /api/lending/pool-enabled/:protocolId – Pool aktivieren/deaktivieren ──
 //
-// Deaktivieren: einfaches Setzen, keine weitere Logik.
+// Deaktivieren: blockiert, solange das Protokoll noch Kapital hält (s.u.
+// hasProtocolCapital) — davor "einfaches Setzen, keine weitere Logik".
 // Aktivieren (Reaktivierung): liegt der aktuelle TVL unter der konfigurierten
 // TVL-Schutz-Schwelle, wird die Schwelle auf 50 % des aktuellen TVL gesenkt –
 // sonst würde der Pool durch den TVL-Schutz beim nächsten Bot-Tick sofort
@@ -321,6 +351,12 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
     const { enabled } = req.body ?? {};
     if (typeof enabled !== 'boolean') {
         return res.status(400).json({ ok: false, error: 'enabled (bool) fehlt' });
+    }
+    if (enabled === false && hasProtocolCapital(protocolId)) {
+        return res.status(409).json({
+            ok: false,
+            error: 'Protokoll hat eine offene Position (Kapital) – erst auszahlen, dann deaktivieren.',
+        });
     }
 
     const db = openSettingsDb();
@@ -336,9 +372,14 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
 
             const guard = loadTvlGuard(db, protocolId);
             if (currentTvl != null && currentTvl > 0 && guard.enabled && currentTvl < guard.thresholdUsd) {
+                // Mindestens 1 USDC (Fund 2026-08-07): bei sehr niedrigem TVL (< 2 USDC)
+                // rundet Math.floor(currentTvl * 0.5) auf 0 ab — saveTvlGuard() lehnt
+                // eine aktivierte Schwelle von 0 als ungültig ab, die Reaktivierung
+                // schlug dadurch komplett fehl, obwohl der Guard-Zweck (Schwelle unter
+                // dem aktuellen TVL halten) mit 1 USDC genauso erfüllt ist.
                 adjustedTvlGuard = saveTvlGuard(db, protocolId, {
                     ...guard,
-                    thresholdUsd: Math.floor(currentTvl * 0.5),
+                    thresholdUsd: Math.max(1, Math.floor(currentTvl * 0.5)),
                 });
             }
         }

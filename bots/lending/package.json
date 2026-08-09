@@ -1,6 +1,6 @@
 {
   "name": "forge-lendingbot",
-  "version": "0.6.1",
+  "version": "0.9.4",
   "description": "Automated yield farming bot for Solana lending protocols",
   "main": "bin/bot.js",
   "type": "module",

@@ -16,8 +16,16 @@
  *   node core/premium/premium-pay.js --dry-run
  *   node core/premium/premium-pay.js
  *
- * Läuft als Cron stündlich (config/cron-jobs.json), gated durch lib/premium-auto-
- * pay-store.js: ohne den Ein/Aus-Schalter auf der Verwalten-Seite (Liquidity →
+ * Bezahlt wird EINE Stunde genau EINMAL — der Cron läuft trotzdem alle 10 Min
+ * (config/cron-jobs.json). Grund (2026-08-09): bei genau einem Slot pro Stunde
+ * ließ ein einziger verpasster Lauf die ganze Stunde unbezahlt, und der Master
+ * liefert ohne Zahlung keinen Blob (Vorfall forge-pub1: der Deploy-Lock in
+ * bin/forge-cron.js verwarf den 5-Minuten-Slot, Folge war eine Stunde ohne
+ * Premium-Daten plus ein irreführender "Dienst nicht erreichbar"-Alarm). Die
+ * Wiederholung ist gefahrlos, weil premium_pay_log (hour_id PRIMARY KEY) eine
+ * zweite Zahlung derselben Stunde hart abweist — siehe "Idempotenz" unten.
+ *
+ * Gated durch lib/premium-auto-pay-store.js: ohne den Ein/Aus-Schalter auf der Verwalten-Seite (Liquidity →
  * Premium → Verwalten → Aktivieren) sendet dieses Skript NIE eine echte Zahlung —
  * weder per Cron noch bei manuellem Aufruf ohne --dry-run. Der Schalter gilt für
  * BEIDE Wege gleichermaßen, sonst könnte ein manueller Lauf ihn unterlaufen.
@@ -38,9 +46,13 @@
  * wäre für den Nutzer verlorenes Geld. Diese Sperre schützt davor, nicht den Master.
  */
 
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import dotenv from 'dotenv';
 import { Connection, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { SimplePool } from 'nostr-tools';
 import Database from 'better-sqlite3';
-import { PATHS } from '../../config/paths.js';
+import { PATHS, envFile } from '../../config/paths.js';
 import { isForkInstance } from '../../lib/premium-identity-context.js';
 import { loadPremiumKeypair, fetchPremiumBalances } from '../../lib/premium-wallet.js';
 import { getCurrentPricing } from '../../lib/premium-pricing-store.js';
@@ -49,6 +61,10 @@ import { isAutoPayEnabled, isOutagePaused, isPayFailureNotified, setPayFailureNo
 import { buildMemo, hourIdOf } from '../../lib/premium-memo.js';
 import { submitAndConfirm } from '../tx-queue-client.js';
 import { recordPremiumMessage } from './messages-db.js';
+import { identityExists, loadIdentity, loadRelays, loadContacts, sendDirectMessage } from '../../lib/nostr-client.js';
+import { cleanVersion } from '../../lib/version.js';
+
+dotenv.config({ path: envFile('premium') });
 
 // USDC_MINT bewusst hier lokal deklariert statt aus core/premium/payment-rules.js
 // importiert (obwohl dort identisch vorhanden) — payment-rules.js ist MASTER-ONLY
@@ -56,6 +72,8 @@ import { recordPremiumMessage } from './messages-db.js';
 // Skript abhängen. Dieselbe Adresse ist bereits an fünf weiteren Stellen im
 // Code hart verdrahtet (bots/liquidity/lib/wallet.js u.a.) — etablierte
 // Konvention in diesem Repo, kein neues Muster.
+const execFileAsync = promisify(execFile);
+
 const USDC_MINT     = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const USDC_DECIMALS = 6;
 const SPL_PROGRAM_ID   = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -95,6 +113,20 @@ function fail(msg, { json } = {}) {
     if (json) console.log(JSON.stringify({ ok: false, error: msg }));
     else console.error(`❌ ${msg}`);
     process.exit(1);
+}
+
+// Für erwartete "nichts zu tun"-Zustände (kein echter Fehler) — exit 0 statt exit 1,
+// damit der stündliche Cron-Lauf sie nicht als ausgefallenen Dienst meldet. Fund
+// 2026-08-07: "kein Aktivierungs-Token" und "Auto-Pay ausgeschaltet" liefen bisher
+// über fail() (exit 1) — bei einem noch nie aktivierten Fork (oder bewusst
+// ausgeschaltetem Auto-Pay) alarmierte der Health-Check dadurch jede Stunde
+// fälschlich "Dienst antwortet nicht mehr, bitte neu starten", obwohl ein Neustart
+// daran nichts ändert. isForkInstance()/isOutagePaused() nutzten dieses Muster
+// bereits vorher korrekt.
+function skip(msg, { json } = {}) {
+    if (json) console.log(JSON.stringify({ ok: false, skipped: msg }));
+    else console.log(`[premium-pay] ${msg}`);
+    process.exit(0);
 }
 
 function openPayLogDb() {
@@ -141,6 +173,45 @@ function buildMemoIx(memoText, signerPubkey) {
     });
 }
 
+/**
+ * Meldet dem Master bei jedem Lauf die eigene installierte FORGE.pub-Version
+ * (config/version.json – EINE Quelle für Master und Fork, siehe lib/version.js).
+ * cleanVersion() liefert bewusst reines a.b.c ohne '+buildNumber' — der Master vergleicht
+ * strikt per Semver (lib/premium-min-version.js isValidVersion), Build-Metadata würde
+ * die Prüfung brechen.
+ * Fire-and-forget: der Master antwortet nur, wenn die Version unter der Mindestversion
+ * liegt (core/premium/server.js `handleVersionCheck`, config/premium-min-version.json).
+ * Eine solche Antwort trifft asynchron über den separat laufenden Daemon (server.js)
+ * ein, nicht hier – dieses Skript ist ein Cron-Einzellauf ohne offene Subscription.
+ *
+ * Eigene, kurzlebige SimplePool-Verbindung wie core/premium/deliver-blob.js — nicht
+ * die des laufenden forge-premium-Daemons. pool.destroy() danach nicht vergessen,
+ * sonst hält der Prozess wegen offener WebSockets nie an.
+ *
+ * Ein Fehlschlag hier (Relay nicht erreichbar, keine Identität, kein Master-Kontakt)
+ * darf den eigentlichen Zahlungsversuch NICHT verhindern – der Aufrufer fängt jeden
+ * Fehler ab und wirft ihn nie weiter.
+ */
+async function reportVersionCheck() {
+    const IDENTITY_NAME = process.env.NOSTR_IDENTITY?.trim() || 'FORGE.Master';
+    if (!identityExists(IDENTITY_NAME)) return;
+
+    const masterContact = loadContacts().find(c => c.id === 'forge-master');
+    if (!masterContact) return;
+
+    const identity = loadIdentity(IDENTITY_NAME);
+    const relays = loadRelays();
+    const pool = new SimplePool();
+    try {
+        await Promise.any(sendDirectMessage(
+            pool, relays, identity, masterContact.pubkeyHex,
+            JSON.stringify({ cmd: 'premium-version-check', version: cleanVersion() }),
+        ));
+    } finally {
+        pool.destroy();
+    }
+}
+
 async function main() {
     const args = process.argv.slice(2);
     const json = args.includes('--json');
@@ -155,17 +226,22 @@ async function main() {
     if (!Number.isInteger(hourId) || hourId <= 0) fail('--hour muss eine positive Ganzzahl sein', { json });
 
     if (!isForkInstance()) {
-        const msg = 'läuft nur auf einem FORGE.pub-Fork – auf dem Master gibt es kein Premium-Wallet.';
-        if (json) console.log(JSON.stringify({ ok: false, skipped: msg }));
-        else console.log(`[premium-pay] ${msg}`);
-        process.exit(0);
+        skip('läuft nur auf einem FORGE.pub-Fork – auf dem Master gibt es kein Premium-Wallet.', { json });
     }
+
+    // Eigene Version melden (Versions-Gate, siehe core/premium/server.js
+    // handleVersionCheck) – VOR jedem weiteren Schritt, auch vor --dry-run, damit der
+    // Master immer eine aktuelle Sichtung hat. Best-effort, darf den Zahlungsversuch
+    // selbst nie verhindern.
+    await reportVersionCheck().catch(err => {
+        console.warn(`[premium-pay] Versions-Meldung konnte nicht gesendet werden: ${err.message}`);
+    });
 
     const keypair = loadPremiumKeypair();
     if (!keypair) fail('kein Premium-Wallet konfiguriert (bin/install.sh, Abschnitt "Premium-Wallet")', { json });
 
     const activation = getMyActivationToken();
-    if (!activation) fail('kein Aktivierungs-Token vorhanden – erst per "premium-activate" beim Master aktivieren', { json });
+    if (!activation) skip('kein Aktivierungs-Token vorhanden – wartet auf Aktivierung per "premium-activate" beim Master (kein Fehler).', { json });
 
     const pricing = getCurrentPricing();
     if (!pricing?.receivingWallet) {
@@ -182,7 +258,7 @@ async function main() {
     // soll aber auch bei ausgeschaltetem Schalter zur Fehlersuche nutzbar bleiben.
     const autoPayEnabled = isAutoPayEnabled();
     if (!autoPayEnabled && !dryRun) {
-        fail('automatische Zahlung ist deaktiviert (Liquidity → Premium → Verwalten → Aktivieren)', { json });
+        skip('automatische Zahlung ist deaktiviert (Liquidity → Premium → Verwalten → Aktivieren) – Nutzer-Einstellung, kein Fehler.', { json });
     }
 
     // System-Pausierung durch blob-health-check.js (>2h keine Daten UND öffentlicher
@@ -191,10 +267,28 @@ async function main() {
     // Nutzer-Schalter auch: bewegt ohnehin kein Kapital, soll aber zur Fehlersuche
     // trotzdem funktionieren.
     if (isOutagePaused() && !dryRun) {
-        const msg = 'automatische Zahlung ist pausiert – Premium-Service wurde als vorübergehend nicht erreichbar erkannt (siehe Message Center), wird automatisch fortgesetzt, sobald er wieder erreichbar ist.';
-        if (json) console.log(JSON.stringify({ ok: false, skipped: msg }));
-        else console.log(`[premium-pay] ${msg}`);
-        process.exit(0);
+        skip('automatische Zahlung ist pausiert – Premium-Service wurde als vorübergehend nicht erreichbar erkannt (siehe Message Center), wird automatisch fortgesetzt, sobald er wieder erreichbar ist.', { json });
+    }
+
+    // Liquidity Bot muss laufen, sonst gibt es niemanden, der die gelieferten
+    // Marktdaten nutzt (Fund 2026-08-07). Bewusst NUR diese eine Stunde überspringen
+    // (skip(), kein enabled-Flag anfassen) statt eines dauerhaften Pausier-Zustands
+    // mit eigener Zeitschwelle: premium-pay läuft ohnehin nur stündlich, ein kurzes
+    // Down durch ein länger laufendes Update trifft diesen Check nur zufällig genau
+    // in der einen Cron-Minute — im schlimmsten Fall fällt eine einzelne Zahlung aus,
+    // nichts wird "aus Versehen dauerhaft deaktiviert". Ein bewusstes manuelles
+    // Stoppen des Bots deaktiviert die Zahlung dagegen sofort UND dauerhaft direkt
+    // in der Stop-Route (bots/settings/routes/bots.js), nicht hier.
+    if (!dryRun) {
+        let liquidityBotActive = true;
+        try {
+            await execFileAsync('/usr/bin/systemctl', ['is-active', '--quiet', 'forge-liquiditybot']);
+        } catch {
+            liquidityBotActive = false;
+        }
+        if (!liquidityBotActive) {
+            skip('Liquidity Bot ist gerade nicht aktiv – Zahlung für diese Stunde übersprungen (kein Fehler, kein dauerhaftes Deaktivieren).', { json });
+        }
     }
 
     const priceRaw = Math.round(pricing.priceUsdcPerHour * 10 ** USDC_DECIMALS);
@@ -204,7 +298,12 @@ async function main() {
     const already = payLogDb.prepare(`SELECT * FROM premium_pay_log WHERE hour_id = ?`).get(hourId);
     if (already && !dryRun) {
         payLogDb.close();
-        fail(`Stunde ${hourId} wurde bereits bezahlt (TX ${already.signature}, ${new Date(already.sent_at).toLocaleString('de-DE')}) – keine zweite Zahlung.`, { json });
+        // skip() statt fail(): seit dem 10-Min-Takt (2026-08-09) ist "diese Stunde ist
+        // schon bezahlt" der ERWARTETE Ausgang von 5 der 6 Läufe pro Stunde und damit
+        // kein Fehler. Über fail() (exit 1) hätte jeder Wiederholversuch einen
+        // Cron-Fehlalarm im Health-Check ausgelöst (checkCronJobs wertet lastExitCode
+        // aus) — dieselbe Falle wie 2026-08-07 bei "Auto-Pay ausgeschaltet".
+        skip(`Stunde ${hourId} wurde bereits bezahlt (TX ${already.signature}, ${new Date(already.sent_at).toLocaleString('de-DE')}) – keine zweite Zahlung.`, { json });
     }
 
     const owner = keypair.publicKey;
@@ -239,7 +338,14 @@ async function main() {
                 setPayFailureNotified(true);
             }
         }
-        fail(`unzureichendes USDC-Guthaben: ${balances?.usdcBalance ?? 0} vorhanden, ${pricing.priceUsdcPerHour} benötigt`, { json });
+        // skip() statt fail(): ein leeres Guthaben ist beim Endnutzer der NORMALFALL,
+        // kein Defekt — und er ist an dieser Stelle bereits vollständig behandelt
+        // (Auto-Pay aus + einmalige Meldung im Message Center, siehe oben). Der
+        // zusätzliche Exit 1 machte daraus über cron-state.json einen technischen
+        // Ausfallalarm ("cron:premium-pay nicht erreichbar – bitte den Dienst neu
+        // starten"), der weder zutrifft noch weiterhilft (belegt 2026-08-07 auf einem
+        // Testhost). Gleiche Klasse wie der Ingest-Fehlalarm, nur über den Cron-Kanal.
+        skip(`unzureichendes USDC-Guthaben: ${balances?.usdcBalance ?? 0} vorhanden, ${pricing.priceUsdcPerHour} benötigt – automatische Zahlung abgeschaltet, Meldung ging ins Message Center.`, { json });
     }
     if (!destInfo) {
         fail(`Empfangs-Token-Konto (${destAta.toBase58()}) existiert nicht on-chain – ungewöhnlich für eine aktive Master-Adresse, bitte prüfen.`, { json });

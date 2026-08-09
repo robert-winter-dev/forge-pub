@@ -36,11 +36,11 @@ import lendingActionsRouter  from './routes/lending-actions.js';
 import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
-import { createRequire } from 'module';
+import updateRouter   from './routes/update.js';
+import { displayVersion } from '../../lib/version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const _require  = createRequire(import.meta.url);
-const { version: APP_VERSION } = _require('./package.json');
+const APP_VERSION = displayVersion();
 
 const PORT      = parseInt(process.env.PORT      || '3200');
 const PORT_CA   = parseInt(process.env.PORT_CA   || '3201');
@@ -82,13 +82,36 @@ app.use('/api/lending',   lendingActionsRouter);
 app.use('/api/addresses', addressesRouter);
 app.use('/api/messages',  messagesRouter);
 app.use('/api/premium',   premiumRouter);
+app.use('/api/update',    updateRouter);
 
 // FORGE-Dashboards intern erreichbar unter /forge/ (identisch zum externen Pfad)
 // Kein PHP-Interpreter: .php-Dateien werden als text/html serviert (PHP-Tags werden vom Browser ignoriert).
 // Directory-Index: index.php (kein index.html, generate-html entfernt seit f769047).
+// Eine gemeinsame Options-Definition für BEIDE Mounts (:3200 unten + caApp/:3201
+// weiter unten) – Bug 2026-08-08: der :3201-Mount hatte lange Zeit eine eigene,
+// unvollständige Kopie ohne setHeaders(). Ohne die Content-Type-Zuweisung erkennt
+// der Browser index.php nicht als HTML und bietet es zum Download an; ohne die
+// index-Option findet express.static gar keinen Verzeichnis-Index ("Cannot GET
+// /forge/") – auf dem Master gibt es nur index.php, kein index.html (siehe oben),
+// beide Symptome fielen auf den Forks nicht auf, weil der Export index.php zu
+// index.html konvertiert (generate-html.js).
 const FORGE_HTML = PATHS.html;
-app.use('/forge', express.static(FORGE_HTML, {
+const FORGE_STATIC_OPTS = {
     index: ['index.php', 'index.html'],
+    // Ohne das generiert express.static einen ETag/Last-Modified aus Dateigröße+
+    // mtime der HTML/PHP-Datei. Der bleibt über einen Server-Codefix hinweg
+    // unverändert (nur server.js ändert sich, nicht die Dashboard-Datei selbst) –
+    // Browser fragen dann per If-None-Match/If-Modified-Since nach, der Server
+    // antwortet "304 Not Modified" OHNE die Header neu zu senden, und der Browser
+    // zeigt für immer die alte (falsche) Antwort weiter, egal wie oft man den
+    // Server danach fixt (Bug 2026-08-08: index.php löste auf Port 3201 einen
+    // Download aus, ein Server-Fix allein reichte nicht, weil ETag-Revalidierung
+    // den alten Content-Type am Leben hielt). "no-cache/no-store" unten reicht
+    // dafür allein nicht, weil das nur *Revalidierung erzwingt* statt *jede
+    // Validierung zu unterbinden* – erst ganz ohne Validator (kein ETag, kein
+    // Last-Modified) muss der Server bei jeder Anfrage wirklich neu antworten.
+    etag: false,
+    lastModified: false,
     setHeaders(res, filePath) {
         if (filePath.endsWith('.php')) {
             res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -116,7 +139,8 @@ app.use('/forge', express.static(FORGE_HTML, {
             res.setHeader('Expires', '0');
         }
     },
-}));
+};
+app.use('/forge', express.static(FORGE_HTML, FORGE_STATIC_OPTS));
 
 // Settings-Frontend (root)
 app.use(express.static(path.join(__dirname, 'html'), {
@@ -152,8 +176,9 @@ const caApp = express();
 // /forge/ same-origin verfügbar machen (nav.js, Logo, CSS): ein Cross-Origin-Import
 // von https://host:3200 aus dieser HTTP-Seite (Port 3201) scheitert an CORS
 // (unterschiedlicher Port = unterschiedliche Origin, express.static setzt keine
-// Access-Control-Allow-Origin-Header) – deshalb hier identisch zur HTTPS-Seite mounten.
-caApp.use('/forge', express.static(FORGE_HTML));
+// Access-Control-Allow-Origin-Header) – deshalb hier identisch zur HTTPS-Seite mounten,
+// mit denselben FORGE_STATIC_OPTS (siehe Kommentar dort) statt einer eigenen Kopie.
+caApp.use('/forge', express.static(FORGE_HTML, FORGE_STATIC_OPTS));
 
 // ZIP-Download: Chrome/Edge prüfen den Dateiinhalt und blockieren PEM-kodierte
 // Zertifikate unabhängig von der Dateiendung. ZIP-Dateien werden nie blockiert.
@@ -432,7 +457,7 @@ caApp.get('/', (req, res) => {
   });
 </script>
 <script type="module">
-  import { initNav } from '/forge/js/nav.js?v=20260802b';
+  import { initNav } from '/forge/js/nav.js?v=20260808h';
   initNav({ current: 'ssl-cert' });
 </script>
 </body>

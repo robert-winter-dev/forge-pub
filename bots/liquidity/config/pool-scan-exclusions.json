@@ -49,6 +49,18 @@
       "pair": "PUMP/USDC",
       "reason": "Token-2022 (tokenA, zusätzlich transferHook-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster. Anderer Whirlpool als der bestehende liq-pump-sol (SOL/PUMP, adaptiveFeeEnabled:false, statisch) — gleicher Token, aber andere Pool-Instanz mit dynamischer Fee. TVL ~224k USDC, Fees24h ~1026 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
       "addedAt": "2026-08-02"
+    },
+    {
+      "address": "VY1ZQXjqBwvuWgVfTfhqanJe96GGoQrX7xZZDrWPGiT",
+      "pair": "SKR/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. SKR = Seeker (Solana-Mobile-Phone-Token), reales Projekt, kein Meme-Coin. TVL ~362.5k USDC, Fees24h ~1150 USDC, aber Fees24h-Delta -43% und Preis-Delta 24h -19,6% — 7d-Kurshistorie zeigt Spike (0,0063→0,0094→0,0076), eher abklingender Hype als stetige Nachfrage. Aktuell keine Kapazität, den adaptiveFee-Fix umzusetzen.",
+      "addedAt": "2026-08-06"
+    },
+    {
+      "address": "yXQzwv3hGxpEyaxPtbsQJdY31vjfh8E6fuVoGvYshio",
+      "pair": "WINGS/USDC",
+      "reason": "Token-2022 (tokenA, WINGS, metadataPointer/tokenMetadata-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (WINGS = Wingbits, DePIN-Flugtracking-Token, kein Backed-Finance-Token). TVL ~332.7k USDC, Fees24h ~1654 USDC. Volumenmuster auffällig: 24h-Volumen (185.9k) macht bereits 71% des 7d-Volumens (260.3k) aus, volumeDelta 24h ≈ +204% — Indiz für Einmal-Spike statt stetiger Nachfrage, bei erneuter Prüfung gegenchecken. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "addedAt": "2026-08-07"
     }
   ]
 }

@@ -398,6 +398,12 @@ footer a:hover { color: var(--accent); }
     white-space: nowrap;
     transition: color 0.4s ease;
 }
+.last-update.online   { color: var(--success); }
+.last-update.warning  { color: var(--warn); }
+.last-update.offline  { color: var(--danger); }
+/* Bewusst gestoppte Bots (z.B. forge-pub2-Testbetrieb) sind kein Fehlerzustand –
+   eigene, neutrale Farbe statt des alarmierenden .offline-Rot. */
+.last-update.disabled { color: var(--text-muted); }
 
 /* ── Notification Envelope ───────────────────────────────────────── */
 /* Immer grün, unabhängig vom Bot-Status – Status-Signal ist bot-state-icon,

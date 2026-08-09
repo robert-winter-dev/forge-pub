@@ -18,7 +18,7 @@
  * POST /api/messages/premium/:id/read     → einzelne Premium-Nachricht als gelesen markieren
  * GET  /api/messages/system         → System-Notifications aus nexus.db, paginiert
  *                                      (?page=&q=), bleibt hier, kein Nostr-Bezug.
- *                                      unreadCount + allIds sind unpaginiert (max. 300) –
+ *                                      unreadCount + allIds sind unpaginiert (max. 100) –
  *                                      allIds nur noch für die "alle als gelesen"-Bulk-Aktion.
  * POST /api/messages/system/mark-read → { ids:[...] } als gelesen markieren, proxied an
  *                                        den Nexus (schreibt exklusiv auf nexus.db).
@@ -55,6 +55,25 @@ const BOT_DISPLAY_NAMES = Object.fromEntries(
  */
 function resolveBotName(displayName, botId) {
     return displayName || BOT_DISPLAY_NAMES[botId] || 'System';
+}
+
+// Pool-Name neben dem Bot-Namen in der Message-Center-Kopfzeile (Ticket 2026-08-08):
+// die meisten notify.js-Aufrufer schreiben den Pool bereits strukturiert in den
+// context-JSON-Blob (Key "pair", bei tierTransition zusätzlich "pool" — beide
+// werden hier geprüft). Für ältere, bereits gespeicherte Nachrichten, die den
+// Pool nur im Fließtext haben (context war zum Sendezeitpunkt leer), greift als
+// Fallback eine Regex auf den Nachrichtentext — deckt das gängige "TOKEN/TOKEN"-
+// Format ab, das jede Pool-Pair-Bezeichnung in FORGE hat.
+const PAIR_TEXT_RE = /\b[A-Za-z0-9]{2,10}\/[A-Za-z0-9]{2,10}\b/;
+function extractPool(context, message) {
+    if (context) {
+        try {
+            const parsed = JSON.parse(context);
+            const pool = parsed?.pair ?? parsed?.pool ?? null;
+            if (pool) return pool;
+        } catch { /* kein valides JSON – Fallback greift unten */ }
+    }
+    return message?.match(PAIR_TEXT_RE)?.[0] ?? null;
 }
 
 const router = Router();
@@ -171,8 +190,9 @@ router.get('/support/stream', async (req, res) => {
 });
 
 // GET /system?page=<1-based>&q=<Volltextsuche, optional>
-// perPage fest 15 (Message-Center-Redesign 2026-07-29): 20 Seiten × 15 = 300 Zeilen,
-// exakt das Fenster, das notify-db.js per Pruning nach jedem Insert offen hält.
+// perPage fest 10 (Vorgabe vom 2026-08-08: max. 10 Seiten à 10 Zeilen je Rubrik):
+// 10 Seiten × 10 = 100 Zeilen, exakt das Fenster, das notify-db.js per Pruning nach
+// jedem Insert offen hält (MAX_NOTIFICATIONS).
 // q durchsucht message/category/bot_id/level (2026-07-30: Sender-Dropdown durch
 // Live-Volltextsuche ersetzt, praktischer als eine feste Filterliste; level
 // dazugenommen, damit sich z.B. "Warnung" im Modal-Titel-Badge auch anklicken/
@@ -192,7 +212,7 @@ router.get('/system', (req, res) => {
     // Reine Lese-Queries auf die Nexus-DB sind laut Konvention erlaubt (exklusiver
     // Schreibzugriff bleibt beim Nexus selbst, siehe notify-db.js). Kein Nostr-Bezug,
     // bleibt deshalb hier statt im Premium-Dienst.
-    const PER_PAGE = 15;
+    const PER_PAGE = 10;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const q    = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
@@ -209,9 +229,14 @@ router.get('/system', (req, res) => {
         const nameCol = hasDisplayName ? 'display_name' : 'NULL';
 
         const baseFilter = "level != 'info' AND message NOT LIKE '%APR-Alert%'";
-        // Suche schließt den Anzeigenamen mit ein: die UI zeigt "Liquidity Bot", ohne
-        // display_name in der Suche wäre genau der sichtbare Text nicht auffindbar.
-        const searchCols = ['message', 'category', 'bot_id', 'level', ...(hasDisplayName ? ['display_name'] : [])];
+        // Suche schließt Anzeigename UND context mit ein: die UI zeigt "Liquidity Bot"
+        // sowie (seit 2026-08-08) den Pool aus dem context-JSON-Blob in der Thema-Spalte
+        // (siehe extractPool()) – ohne beide Spalten in der Suche wäre genau der
+        // sichtbare Text nicht auffindbar. Der Pool steckt bei neueren Meldungen NUR in
+        // context (structured "pair"/"pool"-Feld), nicht mehr im Fließtext von message
+        // – LIKE auf dem rohen context-JSON reicht, weil der Pair-String dort als
+        // Klartext-Wert steht (z.B. `"pair":"PUMP/SOL"`).
+        const searchCols = ['message', 'category', 'bot_id', 'level', 'context', ...(hasDisplayName ? ['display_name'] : [])];
         const whereSql = q
             ? `WHERE ${baseFilter} AND (${searchCols.map(c => `${c} LIKE ?`).join(' OR ')})`
             : `WHERE ${baseFilter}`;
@@ -228,13 +253,18 @@ router.get('/system', (req, res) => {
         const readCol = hasRead ? 'read' : '0';
 
         const rows = db.prepare(`
-            SELECT id, timestamp, bot_id AS botId, level, category, message, ${nameCol} AS displayName, ${readCol} AS read
+            SELECT id, timestamp, bot_id AS botId, level, category, message, context, ${nameCol} AS displayName, ${readCol} AS read
             FROM notifications
             ${whereSql}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
         `).all(...params, PER_PAGE, (page - 1) * PER_PAGE)
-          .map(r => ({ ...r, read: !!r.read, botName: resolveBotName(r.displayName, r.botId) }));
+          .map(({ context, ...r }) => ({
+              ...r,
+              read:    !!r.read,
+              botName: resolveBotName(r.displayName, r.botId),
+              pool:    extractPool(context, r.message),
+          }));
 
         // Für "alle als gelesen"-Bulk-Aktion, auf die aktuelle Suche beschränkt.
         const allIds = db.prepare(`SELECT id FROM notifications ${whereSql}`).all(...params).map(r => r.id);
@@ -243,8 +273,15 @@ router.get('/system', (req, res) => {
         const unreadCount = hasRead
             ? db.prepare(`SELECT COUNT(*) AS c FROM notifications ${whereSql} AND read = 0`).get(...params).c
             : allIds.length;
+        // Zeitstempel der ältesten ungelesenen Nachricht – Brief-Icon (message-bell.js)
+        // vergleicht das mit Support/Premium, um bei Klick auf Icon/Badge zur Rubrik
+        // mit der am längsten offenen ungelesenen Nachricht zu springen, statt fest
+        // auf eine Rubrik zu verlinken.
+        const oldestUnread = hasRead
+            ? (db.prepare(`SELECT MIN(timestamp) AS t FROM notifications ${whereSql} AND read = 0`).get(...params).t ?? null)
+            : null;
 
-        res.json({ notifications: rows, page, perPage: PER_PAGE, totalCount, totalPages, allIds, unreadCount });
+        res.json({ notifications: rows, page, perPage: PER_PAGE, totalCount, totalPages, allIds, unreadCount, oldestUnread });
     } catch {
         // nexus.db existiert noch nicht oder hat noch keine Notification erhalten.
         res.json({ notifications: [], page: 1, perPage: PER_PAGE, totalCount: 0, totalPages: 1, allIds: [], unreadCount: 0 });

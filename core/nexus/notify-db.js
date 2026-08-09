@@ -91,10 +91,11 @@ export function getDb() {
  *                                    meldet für mehrere Bots.
  * @returns {number} Inserted ID
  */
-// Message-Center-UI zeigt max. 20 Seiten à 15 Zeilen (= 300) an (siehe messages.js
-// GET /system) — hier hart begrenzt, damit die Tabelle nicht unbegrenzt wächst und
-// die UI-Grenze auch tatsächlich zutrifft, statt nur eine Auslese-Obergrenze zu sein.
-const MAX_NOTIFICATIONS = 300;
+// Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
+// an (siehe messages.js GET /system) — hier hart begrenzt, damit die Tabelle nicht
+// unbegrenzt wächst und die UI-Grenze auch tatsächlich zutrifft, statt nur eine
+// Auslese-Obergrenze zu sein.
+const MAX_NOTIFICATIONS = 100;
 
 export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null) {
     const db   = getDb();

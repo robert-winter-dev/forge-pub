@@ -42,6 +42,7 @@ import { clmmLpValue as _clmmLpValue, clmmLpReturn as _clmmLpReturn,
 import { VOLUME_DUST_USD as VOLUME_MALUS_DUST_USD } from '../lib/volume-dust.js';
 import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS as BTC_EMA_SPANS } from '../lib/btc-trend/index.js';
 import { PATHS } from '../../../config/paths.js';
+import { displayVersion } from '../../../lib/version.js';
 
 // Zentraler Formatter für FORGE_TZ-Day-Keys (YYYY-MM-DD)
 const _dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ });
@@ -51,7 +52,7 @@ dotenv.config({ path: resolve(__dirname, '..', '.env') });
 
 // ─── Pfade ────────────────────────────────────────────────────────────────────
 
-const VERSION        = readFileSync(resolve(__dirname, '../VERSION'), 'utf-8').trim();
+const VERSION        = displayVersion();
 const DB_PATH        = PATHS.liquidityDb;
 const DATA_DIR            = resolve(__dirname, '../../../html/liquidity/data');
 const DATA_FILE           = resolve(DATA_DIR, 'data.json');
@@ -2529,9 +2530,30 @@ for (const po of poolsOverview) {
 
 // ─── Zusammenführen ───────────────────────────────────────────────────────────
 
+// Aggregat für's Dashboard: hat IRGENDEIN Pool eine offene Position? Frisch nach
+// der Installation (oder nach einem Voll-Exit ohne Wiedereinstieg) sind alle
+// Pools inaktiv — die Tabellen zeigen dann nur leere Platzhalter ohne Erklärung.
+// Die vier betroffenen Boxen (Volumen/Fees/Pool-/Operative Metriken) zeigen in
+// diesem Fall stattdessen einen "Bot inaktiv"-Hinweis (app.js). Bewusst NICHT
+// die Opportunity-Box — deren Premium-Sperre ist unabhängig vom Bot-Zustand.
+const botActive = poolsOverview.some(p => p.active);
+
+// bot_state kommt aus kv_config: 'offline' wird NUR vom SIGTERM/SIGINT-Handler
+// in bot.js gesetzt (bewusster Stop über bin/svc bzw. Settings) und dort direkt
+// vor dem letzten Export geschrieben. Fehlt der Eintrag (Tabelle noch nicht
+// angelegt, z.B. manueller export.js-Lauf vor dem ersten Bot-Start) → 'running'
+// als Default, damit das Dashboard dann normal über das Datenalter alarmiert.
+let botState = 'running';
+try {
+    const row = db.prepare(`SELECT value FROM kv_config WHERE key = 'bot_state'`).get();
+    if (row?.value) botState = row.value;
+} catch { /* kv_config existiert noch nicht */ }
+
 // ─── Live-Daten (jede Minute geschrieben) ────────────────────────────────────
 const data = {
     bot:           'Liquidity Bot',
+    botActive,
+    botState,
     version:       VERSION,
     timestamp:     new Date().toISOString(),
     activeProfile,   // 'medium' | 'short' — Sortierung in pools/positions ist profil-aware

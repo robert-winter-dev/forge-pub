@@ -1,16 +1,16 @@
 (async function () {
     'use strict';
 
-    const { ToastManager }      = await import('./toast.js?v=20260722b');
+    const { ToastManager }      = await import('./toast.js?v=20260809a');
     const { EarningsToast }     = await import('./earnings-toast.js?v=20260720a');
     const { renderNotifItem }   = await import('./notifications.js');
     const { NotifHub }          = await import('./notif-hub.js?v=20260720a');
-    const { initMessageBell }   = await import('./message-bell.js?v=20260803b');
-    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260731c');
+    const { initMessageBell }   = await import('./message-bell.js?v=20260809a');
+    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260809b');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
 
-    initNav({ current: 'overview', logout: 'logout.php' });
+    initNav({ current: 'overview' });
     initFooter();
 
     const toast = new ToastManager({
@@ -375,17 +375,40 @@
 
         const points = aggregatePortfolioHistory(sources, cutoff, now);
 
-        // Live-Gesamtwert (identisch mit Tabellen-Summe) als synthetischen "jetzt"-Punkt anhängen.
-        // Verhindert, dass Graph-Header und Tabellenzeile auseinanderlaufen wenn Kapital
-        // zwischen zwei Snapshots eingezahlt/ausgezahlt wurde (z.B. nach Rekalibrierung).
-        const liveTotal = (lendLive?.portfolio?.currentValue ?? 0) + (liqLive?.portfolio?.balance ?? 0);
-        if (liveTotal > 0 && points.length > 0) {
-            points.push({ t: now, v: liveTotal });
+        // Chart-Punkt: gleiche Metrik-Basis wie alle historischen portfolioHistory-Punkte
+        // (total_usd = LP + Fees + GESAMTER Wallet inkl. SOL-Reserve, siehe bin/export.js).
+        // liqLive.portfolio.balance zieht die SOL-Reserve bewusst ab (Tabellen-Metrik,
+        // Spike-Damper-Schutz) – als Chart-Punkt verwendet, knickt die Linie am rechten
+        // Rand künstlich ab, sobald genug freies SOL im Wallet liegt (Fund 2026-08-07:
+        // sichtbarer "Einbruch" nach einem manuellen Deposit/Withdraw-Test auf forge-pub1,
+        // obwohl real nichts fehlte – currentValue blieb stabil, nur balance war niedriger).
+        //
+        // lendLive.portfolio.currentValue ist NUR die aktiven Pool-Positionen (bewusst ohne
+        // Wallet, siehe bin/export.js) – als Chart-/Summen-Punkt verwendet, fällt Kapital,
+        // das gerade nicht investiert ist (z.B. nach einem Withdraw, vor Redeploy), komplett
+        // aus der Summe (Fund 2026-08-09: 20 USDC + SOL-Reserve im Wallet nach zwei Loopscale-
+        // Withdraws auf forge-pub1 verschwanden aus dem Overview-Chart, obwohl real vorhanden).
+        //
+        // Für den CHART-Punkt bewusst NICHT lendLive.portfolio.balance (das zählt zusätzlich
+        // das SOL-Wallet-Guthaben mit) – lendLive.portfolioHistory (5-Min-Verlauf, aus
+        // portfolio_history in der DB) enthielt SOL noch nie, nur Pool + Wallet-USDC. Der
+        // Live-Punkt muss dieselbe Basis wie die historischen Buckets haben, sonst springt die
+        // Linie am rechten Rand künstlich um den SOL-Wert (Fund 2026-08-09, zweiter Fund direkt
+        // nach dem ersten Rollout: sichtbarer Sprung 133 → 146 USDC ohne reale Ursache).
+        // balance bleibt für Tabelle/Kopf-Wert korrekt (siehe liveTotal unten) – dort ist SOL
+        // real Teil des Vermögens, nur die Chart-Zeitreihe darf die Basis nicht wechseln.
+        const chartLiveTotal = ((lendLive?.portfolio?.currentValue ?? 0) + (lendLive?.portfolio?.walletUsdc ?? 0))
+                              + (liqLive?.portfolio?.currentValue ?? 0);
+        if (chartLiveTotal > 0 && points.length > 0) {
+            points.push({ t: now, v: chartLiveTotal });
         }
 
         _lastPoints  = points;
 
-        // Aktueller Wert in Card-Header – immer Live-Wert, nicht letzten Snapshot-Bucket
+        // Aktueller Wert in Card-Header – identisch mit Tabellen-Summe (balance), NICHT
+        // der Chart-Metrik oben – sonst laufen Header und Tabellenzeile wieder auseinander
+        // (der ursprüngliche Zweck von liveTotal, siehe Git-Historie dieser Zeile).
+        const liveTotal = (lendLive?.portfolio?.balance ?? 0) + (liqLive?.portfolio?.balance ?? 0);
         const curVal = liveTotal > 0 ? liveTotal : (points.length > 0 ? points[points.length - 1].v : null);
         if (curVal != null) {
             const el = document.getElementById('portfolioCurrentVal');
@@ -424,8 +447,10 @@
     function renderTable(data) {
         const { lendLive, liqLive, lendStatus } = data;
 
-        // Gesamtguthaben (aus Zeile 1 "Gesamt"-Card des jeweiligen Bots)
-        const lendGesamt = lendLive?.portfolio?.currentValue ?? null;
+        // Gesamtguthaben (aus Zeile 1 "Gesamt"-Card des jeweiligen Bots). balance = Pool/LP
+        // + volles Wallet, NICHT currentValue (das zählt bei LendingBot nur aktive Positionen,
+        // siehe Fund 2026-08-09 oben in renderCharts).
+        const lendGesamt = lendLive?.portfolio?.balance ?? null;
         const liqGesamt = liqLive?.portfolio?.balance      ?? null;
 
         // PnL 24h: direkt aus vorberechneten Feldern der Bot-JSONs
@@ -447,16 +472,18 @@
 
         tbody.innerHTML = rows.map(r => {
             const g = r.gesamt != null
-                ? fmt2(r.gesamt) + '\u00A0USDC' : '–';
+                ? fmt2(r.gesamt) + '\u00A0USDC' : '0,00\u00A0USDC';
 
-            const p    = r.profit;
-            const pCls = p == null ? '' : p >= 0 ? 'bt-pos' : 'bt-neg';
-            const pTxt = p == null ? '–'
+            const p       = r.profit;
+            const pRounded = p != null ? Math.round(p * 100) / 100 : 0;
+            const pZero   = p == null || pRounded === 0;
+            const pCls = pZero ? 'bt-val' : p >= 0 ? 'bt-pos' : 'bt-neg';
+            const pTxt = pZero ? '0,00\u00A0USDC'
                 : (p >= 0 ? '+' : '') + fmt2(p) + '\u00A0USDC';
 
             const a    = r.apr;
             const aCls = a == null ? 'bt-neu' : a >= 0 ? 'bt-pos' : 'bt-neg';
-            const aTxt = a == null ? '–'
+            const aTxt = a == null ? '0,0\u00A0%'
                 : (a >= 0 ? '+' : '') + a.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '\u00A0%';
 
             return `<tr>
@@ -475,8 +502,12 @@
         const tpEl = document.getElementById('totalProfit');
         if (tgEl) tgEl.textContent = fmt2(totalGesamt) + '\u00A0USDC';
         if (tpEl) {
-            const cls = totalProfit >= 0 ? 'bt-pos' : 'bt-neg';
-            tpEl.innerHTML = `<span class="${cls}">${(totalProfit >= 0 ? '+' : '') + fmt2(totalProfit)}\u00A0USDC</span>`;
+            const totalProfitRounded = Math.round(totalProfit * 100) / 100;
+            const cls = totalProfitRounded === 0 ? 'bt-val' : totalProfit >= 0 ? 'bt-pos' : 'bt-neg';
+            const txt = totalProfitRounded === 0
+                ? '0,00\u00A0USDC'
+                : (totalProfit >= 0 ? '+' : '') + fmt2(totalProfit) + '\u00A0USDC';
+            tpEl.innerHTML = `<span class="${cls}">${txt}</span>`;
         }
     }
 
@@ -667,8 +698,17 @@
 
         // Last-Update
         // LendingBot: meta.exportedAt (ms) · Liquidity: timestamp (ISO-String)
+        // botState kommt aus kv_config ('running'/'offline'), von bot.js beim SIGTERM-
+        // Handler (bewusster Stop über bin/svc/systemctl) gesetzt. Sind BEIDE Bots
+        // bewusst gestoppt (z.B. forge-pub2-Testbetrieb), zeigt der Header statt eines
+        // irreführend "frischen" oder alarmierend roten Zeitstempels "Bots deaktiviert" –
+        // sonst sieht ein bewusst abgeschalteter Zustand wie ein Fehler aus.
+        const bothBotsDisabled = lendLive?.meta?.botState === 'offline'
+                               && liqLive?.botState      === 'offline';
         const ts = lendLive?.meta?.exportedAt ?? liqLive?.timestamp ?? null;
-        if (ts) {
+        if (bothBotsDisabled) {
+            setLastUpdate(null, { disabled: true });
+        } else if (ts) {
             setLastUpdate(new Date(ts));
         } else {
             setLastUpdate(null);

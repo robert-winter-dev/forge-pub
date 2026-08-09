@@ -1,6 +1,6 @@
 {
   "name": "forge-premium",
-  "version": "0.2.11",
+  "version": "0.9.4",
   "type": "module",
   "description": "FORGE Premium – Nostr-Identität (Message Center + FORGE.pub-Auslieferung), localhost-API für forge-settings",
   "main": "server.js",

@@ -169,9 +169,23 @@ async function simulate(connection, tx, isVersioned) {
     if (result.value.err) {
         const errStr = JSON.stringify(result.value.err);
         const logs   = (result.value.logs ?? []).slice(-5).join('\n  ');
-        throw new Error(
-            `TX-Simulation fehlgeschlagen: ${errStr}\n  Logs:\n  ${logs}`
+
+        // Rohe Solana-Fehler ("InstructionError, Custom:1, Program-Logs …") sind für
+        // Endnutzer nicht auswertbar und wirken alarmierender als der Fall meist ist —
+        // die häufigste Ursache ist ein Protokoll/Vault, das gerade keine sofortige
+        // Liquidität für die Transaktion hat (z.B. Kapital verliehen, Withdraw-Puffer
+        // knapp). Nutzer-Meldung bewusst allgemein gehalten statt den Fehlercode zu
+        // deuten – Fehlklassifikation (z.B. "Guthaben zu niedrig" bei einem Fehler,
+        // der eigentlich am Blockhash lag) wäre schlimmer als gar keine Deutung.
+        // Die vollständigen Rohdaten bleiben in `technicalDetail` erhalten, die
+        // Aufrufer (bin/withdraw.js etc.) loggen sie weiterhin fürs Debugging.
+        const err = new Error(
+            'Es ist ein Fehler aufgetreten. Bitte warte ein paar Minuten und versuche es '
+          + 'dann noch mal. Sollte sich der Fehler wiederholen, versuche es mit einer '
+          + 'kleineren Menge.'
         );
+        err.technicalDetail = `TX-Simulation fehlgeschlagen: ${errStr}\n  Logs:\n  ${logs}`;
+        throw err;
     }
 }
 

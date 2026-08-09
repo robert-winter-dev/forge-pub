@@ -41,10 +41,11 @@ import QRCode from 'qrcode';
 import { EventEmitter } from 'events';
 import { nip19 } from 'nostr-tools';
 import { PATHS, envFile } from '../../config/paths.js';
-import { issueActivationToken } from './activation.js';
+import { issueActivationToken, getLastIssuedAt } from './activation.js';
 import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
+import { loadMinVersionConfig, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
 import { startConnectionMonitor, getConnectionStats } from '../../lib/nostr-stats.js';
-import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed } from './messages-db.js';
+import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed, markActivationEventProcessed, pruneMessagesToLimit } from './messages-db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: envFile('premium') });
@@ -162,6 +163,9 @@ function classifyPremiumCommand(text) {
         // pro 10-Min-Zustellung"-Spam-Quelle ab, siehe Kommentar bei premium-blob-sealed
         // weiter unten (subscribeDirectMessages) und core/premium/blob-health-check.js.
         'premium-autopay-enabled', 'premium-autopay-disabled', 'premium-pay-failed', 'premium-outage',
+        // Versions-Gate (2026-08-06): Fork meldet bei jedem premium-pay.js-Lauf seine
+        // Softwareversion, Master antwortet nur, wenn sie unter der Mindestversion liegt.
+        'premium-version-check', 'premium-version-too-old',
     ]);
     if (parsed && typeof parsed === 'object' && KNOWN_COMMANDS.has(parsed.cmd)) return parsed;
     return null;
@@ -243,6 +247,14 @@ function humanizePremiumMessage(direction, cmd) {
                     + 'noch bei Guthabenproblemen oder wenn der Premium-Service vorübergehend nicht erreichbar ist.',
             };
         case 'premium-autopay-disabled':
+            if (cmd.reason === 'liquiditybot-stopped') {
+                return {
+                    summary: 'Premium-Service deaktiviert – Liquidity Bot gestoppt',
+                    detail: 'Der Liquidity Bot wurde manuell gestoppt, dafür liefert Premium Marktdaten – die '
+                        + 'automatische Zahlung wurde deshalb mit deaktiviert. Wieder aktivieren über '
+                        + 'Liquidity → Premium → Verwalten, sobald der Bot wieder läuft.',
+                };
+            }
             return {
                 summary: 'Premium-Service manuell deaktiviert',
                 detail: 'Es werden keine weiteren automatischen Zahlungen mehr ausgeführt.',
@@ -261,8 +273,8 @@ function humanizePremiumMessage(direction, cmd) {
             return {
                 summary: '⚠️ Zahlung fehlgeschlagen',
                 detail: `Transaktion konnte nicht ausgeführt werden (${cmd.detail ?? 'unbekannter Fehler'}). `
-                    + `Mögliche Ursache: zu wenig SOL für die Netzwerkgebühr. Bitte Guthaben prüfen/nachladen – die `
-                    + `automatische Zahlung wird beim nächsten erfolgreichen Versuch fortgesetzt.`,
+                    + `Mögliche Ursache: zu wenig SOL für die Netzwerkgebühr. Bitte Wallet mit mindestens 0,15 SOL `
+                    + `aufladen – die automatische Zahlung wird beim nächsten erfolgreichen Versuch fortgesetzt.`,
             };
         }
         case 'premium-outage':
@@ -276,6 +288,20 @@ function humanizePremiumMessage(direction, cmd) {
                     detail: 'Der Premium-Service ist vorübergehend nicht erreichbar. Die stündlichen Zahlungen wurden '
                         + 'ausgesetzt und werden automatisch wieder aufgenommen, wenn der Service wieder erreichbar ist.',
                 };
+        case 'premium-version-check':
+            return direction === 'in'
+                ? { summary: 'Versions-Meldung erhalten', detail: `Ein Fork hat seine Softwareversion gemeldet (${cmd.version ?? '?'}).` }
+                : { summary: 'Versions-Meldung gesendet', detail: 'Eigene Softwareversion an den FORGE Master gemeldet.' };
+        case 'premium-version-too-old':
+            return direction === 'in'
+                ? {
+                    summary: '⚠️ Premium-Service deaktiviert – Version veraltet',
+                    detail: `Die installierte Version (${cmd.yourVersion ?? '?'}) ist älter als die benötigte Mindestversion `
+                        + `${cmd.minRequiredVersion ?? '?'}. Der Premium-Service funktioniert u.U. nicht korrekt und wurde `
+                        + `deshalb deaktiviert. Bitte FORGE.pub aktualisieren und den Premium-Service danach über `
+                        + `Liquidity → Premium → Verwalten wieder aktivieren.`,
+                }
+                : { summary: 'Versionshinweis gesendet', detail: `Mindestversion ${cmd.minRequiredVersion ?? '?'} an eine veraltete Gegenstelle gemeldet.` };
         default:
             return { summary: `Unbekanntes Kommando: ${cmd.cmd ?? '?'}`, detail: JSON.stringify(cmd) };
     }
@@ -306,6 +332,7 @@ function migrateFromSettingsDbIfPresent() {
             `);
             const txn = dst.transaction((items) => { for (const r of items) insert.run(r); });
             txn(rows);
+            pruneMessagesToLimit(dst, 'support');
             console.log(`[premium] Migration aus settings.db: ${rows.length} Nachrichten geprüft/übernommen.`);
         } finally {
             dst.close();
@@ -488,6 +515,7 @@ function startNostrService() {
             `).run(timestamp, cleanText, rumor.pubkey ?? null, rumor.id ?? null, category, threadId);
 
             if (info.changes === 1) {
+                pruneMessagesToLimit(db, category);
                 messageEvents.emit(category === 'premium' ? 'premium-message' : 'support-message', {
                     direction: 'in',
                     timestamp,
@@ -503,13 +531,20 @@ function startNostrService() {
                     handlePremiumCommand(rumor).catch(err => {
                         console.error(`[premium] Aktivierungs-Befehl fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
                     });
+                    handleVersionCheck(rumor).catch(err => {
+                        console.error(`[premium] Versions-Meldung fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
+                    });
                 } else {
                     // FORGE.pub-Fork-Seite: premium-blob-sealed wird bereits weiter oben
                     // (vor dem DB-Insert) an handleBlobDelivery() durchgereicht – hier nur
                     // noch die signierte Preisliste, mitgeschickt in der premium-token-
-                    // Antwort (Bootstrap vor der ersten Zahlung, s. handlePricingDelivery).
+                    // Antwort (Bootstrap vor der ersten Zahlung, s. handlePricingDelivery),
+                    // und ein evtl. "Version zu alt"-Hinweis vom Master.
                     handlePricingDelivery(rumor).catch(err => {
                         console.error(`[premium] Preislisten-Verarbeitung fehlgeschlagen: ${err.message}`);
+                    });
+                    handleVersionTooOld(rumor).catch(err => {
+                        console.error(`[premium] Versions-Hinweis-Verarbeitung fehlgeschlagen: ${err.message}`);
                     });
                 }
             }
@@ -533,6 +568,38 @@ function startNostrService() {
             return; // normaler Support-Chat-Text, kein Kommando – kein Fehler
         }
         if (cmd?.cmd !== 'premium-activate' || typeof rumor.pubkey !== 'string') return;
+
+        // Backlog-Replay-Schutz (Fund 2026-08-08, analog zum premium-blob-sealed-Dedup vom
+        // 2026-08-03 weiter oben): rumor.id ist die deterministische ID des inneren,
+        // unsignierten Rumors (stabil über jeden Replay derselben DM) – anders als das
+        // `created_at` des äußeren Gift-Wraps, das NIP-17 absichtlich randomisiert und
+        // daher als `since`-Cursor ungeeignet ist (siehe lib/nostr-client.js). Eigene,
+        // nie geprunte Tabelle statt des event_id-UNIQUE-Index auf nostr_support_messages,
+        // weil genau der durch das Rubriken-Cap-Pruning wirkungslos wurde.
+        const dedupDb = openMessagesDb();
+        let isNew;
+        try {
+            isNew = markActivationEventProcessed(dedupDb, rumor.id ?? null);
+        } finally {
+            dedupDb.close();
+        }
+        if (!isNew) return; // bereits verarbeitet (Backlog-Replay) – kein erneuter Reissue
+
+        // Rate-Limit pro Kunden-Pubkey (Fund 2026-08-08): jede Ausstellung widerruft sofort
+        // den vorherigen Token (siehe activation.js) – ohne Bremse kann eine schnelle Folge
+        // echter Anfragen (hektisch klickender Client, oder absichtlicher Spam von einer
+        // beliebigen Nostr-Identität, Aktivierung ist unauthentifiziert) eine laufende
+        // Zahlung mitten im Abgleich ins Leere laufen lassen und erzeugt sinnlosen DB-/
+        // Relay-Traffic. Aktivierung selbst ist bewusst kostenlos/offen (jeder soll Kunde
+        // werden können) – die eigentliche Sicherheitsgrenze ist der on-chain-Zahlungsabgleich
+        // in payment-watcher.js, dieses Limit ist reine Anti-Chatter-Bremse, keine Zugangskontrolle.
+        const ACTIVATION_COOLDOWN_MS = 5 * 60 * 1000; // 5 Min
+        const lastIssuedAt = getLastIssuedAt(rumor.pubkey);
+        if (lastIssuedAt != null && Date.now() - lastIssuedAt < ACTIVATION_COOLDOWN_MS) {
+            const waitS = Math.round((ACTIVATION_COOLDOWN_MS - (Date.now() - lastIssuedAt)) / 1000);
+            console.warn(`[premium] Aktivierungsanfrage von ${rumor.pubkey.slice(0, 12)}… ignoriert (Rate-Limit, letzte Ausstellung vor ${Math.round((Date.now() - lastIssuedAt) / 1000)}s, noch ${waitS}s Cooldown).`);
+            return;
+        }
 
         // Jede Aktivierungsanfrage stellt einen frischen Token aus und widerruft einen
         // evtl. vorhandenen alten – deckt sowohl Erstaktivierung als auch "neuen Token
@@ -565,12 +632,62 @@ function startNostrService() {
                 INSERT INTO nostr_support_messages (direction, timestamp, text, peer_pubkey, category)
                 VALUES ('out', ?, ?, ?, 'premium')
             `).run(timestamp, replyText, rumor.pubkey);
+            pruneMessagesToLimit(db, 'premium');
         } finally {
             db.close();
         }
         messageEvents.emit('premium-message', { direction: 'out', timestamp, text: replyText, peerPubkey: rumor.pubkey });
 
         console.log(`🔑  Aktivierungs-Token ausgestellt an ${rumor.pubkey.slice(0, 12)}…`);
+    }
+
+    /**
+     * MASTER-SEITE: verarbeitet {cmd:'premium-version-check', version}, das der Fork bei
+     * jedem premium-pay.js-Lauf (stündlich) unaufgefordert schickt. Fork-Version wird
+     * ungeprüft übernommen (siehe lib/premium-min-version.js – Schummeln würde dem Nutzer
+     * nichts bringen). Antwort NUR, wenn die Version unter der Mindestversion liegt
+     * (config/premium-min-version.json) – fire-and-forget bei "ok", spart Round-Trips.
+     */
+    async function handleVersionCheck(rumor) {
+        let cmd;
+        try {
+            cmd = JSON.parse(rumor.content ?? '');
+        } catch {
+            return;
+        }
+        if (cmd?.cmd !== 'premium-version-check' || typeof rumor.pubkey !== 'string') return;
+
+        if (!isValidVersion(cmd.version)) {
+            console.warn(`[premium] premium-version-check mit ungültiger Version verworfen (${rumor.pubkey.slice(0, 12)}…): "${cmd.version}"`);
+            return;
+        }
+
+        let minRequiredVersion;
+        try {
+            ({ minRequiredVersion } = loadMinVersionConfig());
+        } catch (err) {
+            console.warn(`[premium] Mindestversions-Konfiguration konnte nicht gelesen werden: ${err.message}`);
+            return;
+        }
+        if (!isValidVersion(minRequiredVersion) || isVersionSupported(cmd.version, minRequiredVersion)) return;
+
+        const replyText = JSON.stringify({ cmd: 'premium-version-too-old', minRequiredVersion, yourVersion: cmd.version });
+        await Promise.any(sendDirectMessage(pool, relays, identity, rumor.pubkey, replyText));
+
+        const timestamp = Date.now();
+        const db = openMessagesDb();
+        try {
+            db.prepare(`
+                INSERT INTO nostr_support_messages (direction, timestamp, text, peer_pubkey, category)
+                VALUES ('out', ?, ?, ?, 'premium')
+            `).run(timestamp, replyText, rumor.pubkey);
+            pruneMessagesToLimit(db, 'premium');
+        } finally {
+            db.close();
+        }
+        messageEvents.emit('premium-message', { direction: 'out', timestamp, text: replyText, peerPubkey: rumor.pubkey });
+
+        console.log(`⏳  Fork meldete veraltete Version (${cmd.version} < ${minRequiredVersion}) – premium-version-too-old gesendet an ${rumor.pubkey.slice(0, 12)}…`);
     }
 
     /**
@@ -721,6 +838,41 @@ function startNostrService() {
         console.log(`💰  Preisliste aktualisiert (Version ${result.params.version}, ${result.params.priceUsdcPerHour} USDC/h).`);
     }
 
+    /**
+     * FORK-SEITE: empfängt {cmd:'premium-version-too-old', minRequiredVersion, yourVersion}
+     * vom Master (Gegenstück zu handleVersionCheck oben). Schaltet den Premium-Service
+     * über denselben Kill-Switch ab, der auch bei unzureichendem Guthaben greift
+     * (setAutoPayEnabled(false), siehe premium-pay.js) – der bereits vorhandene
+     * Autopay-Check dort verhindert danach jede weitere automatische Zahlung, bis der
+     * Nutzer nach einem Update manuell reaktiviert. Kein eigener DB-Insert nötig: die
+     * eingehende DM wurde bereits vom generischen Insert-Pfad oben gespeichert (category
+     * 'premium') und erscheint über humanizePremiumMessage() im Message-Center.
+     */
+    async function handleVersionTooOld(rumor) {
+        let cmd;
+        try {
+            cmd = JSON.parse(rumor.content ?? '');
+        } catch {
+            return;
+        }
+        if (cmd?.cmd !== 'premium-version-too-old') return;
+
+        const masterContact = loadContacts().find(c => c.id === 'forge-master');
+        if (!masterContact || rumor.pubkey !== masterContact.pubkeyHex) {
+            console.warn(`[premium] premium-version-too-old-DM von unbekanntem Absender verworfen (${rumor.pubkey}).`);
+            return;
+        }
+        if (!isValidVersion(cmd.minRequiredVersion)) {
+            console.warn(`[premium] premium-version-too-old mit ungültiger minRequiredVersion verworfen: "${cmd.minRequiredVersion}"`);
+            return;
+        }
+
+        const { setAutoPayEnabled } = await import('../../lib/premium-auto-pay-store.js');
+        setAutoPayEnabled(false);
+
+        console.warn(`[premium] Premium-Service deaktiviert – installierte Version (${cmd.yourVersion}) ist älter als die Mindestversion ${cmd.minRequiredVersion}.`);
+    }
+
     console.log(`✅  Nostr-Service aktiv (${identity.npub}) – Relays: ${relays.join(', ')}`);
 
     return {
@@ -757,6 +909,7 @@ function startNostrService() {
                     INSERT INTO nostr_support_messages (direction, timestamp, text, peer_pubkey, thread_id, category)
                     VALUES ('out', ?, ?, ?, ?, ?)
                 `).run(timestamp, text, peerPubkeyHex, effectiveThreadId, category);
+                pruneMessagesToLimit(db, category);
             } finally {
                 db.close();
             }
@@ -936,9 +1089,10 @@ app.get('/support/unread-count', (_req, res) => {
     const db = openMessagesDb();
     try {
         const row = db.prepare(
-            `SELECT COUNT(*) AS n FROM nostr_support_messages WHERE direction = 'in' AND read = 0 AND category = 'support'`
+            `SELECT COUNT(*) AS n, MIN(timestamp) AS oldest FROM nostr_support_messages
+             WHERE direction = 'in' AND read = 0 AND category = 'support'`
         ).get();
-        res.json({ unread: row.n });
+        res.json({ unread: row.n, oldestUnread: row.oldest ?? null });
     } finally {
         db.close();
     }
@@ -1028,7 +1182,7 @@ app.get('/premium', async (_req, res) => {
             FROM nostr_support_messages
             WHERE category = 'premium'
             ORDER BY timestamp DESC
-            LIMIT 200
+            LIMIT 100
         `).all();
     } finally {
         db.close();
@@ -1058,9 +1212,10 @@ app.get('/premium/unread-count', (_req, res) => {
     const db = openMessagesDb();
     try {
         const row = db.prepare(
-            `SELECT COUNT(*) AS n FROM nostr_support_messages WHERE category = 'premium' AND direction = 'in' AND read = 0`
+            `SELECT COUNT(*) AS n, MIN(timestamp) AS oldest FROM nostr_support_messages
+             WHERE category = 'premium' AND direction = 'in' AND read = 0`
         ).get();
-        res.json({ unread: row.n });
+        res.json({ unread: row.n, oldestUnread: row.oldest ?? null });
     } finally {
         db.close();
     }

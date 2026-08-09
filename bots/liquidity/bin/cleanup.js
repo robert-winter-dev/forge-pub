@@ -43,7 +43,13 @@ import { refreshAfterAction } from '../lib/refresh-state.js';
 import { acquireLock, releaseLock, isSlLocked, isManualLocked, isRebalanceLocked } from '../lib/cleanup-lock.js';
 import { deposit, getTokenUsdPrice, checkClmmRatio } from '../lib/deposit-lib.js';
 import { ensureWalletSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
-import { getOpenPosition, getDustWatch, startDustWatch, clearDustWatch } from '../lib/db.js';
+import {
+    getOpenPosition, getDustWatch, startDustWatch, clearDustWatch,
+    getLastTsExecutionAt, getLastTvlExecutionAt, getLastScoreLimitExecutionAt,
+} from '../lib/db.js';
+import { loadTsConfig } from '../lib/trailing-stop.js';
+import { loadTvlConfig } from '../lib/tvl-protection.js';
+import { loadConfig as loadScoreLimitConfig } from '../lib/score-limit.js';
 import { calculateRange } from '../lib/range.js';
 import { PATHS } from '../../../config/paths.js';
 
@@ -484,6 +490,43 @@ function _loadRankingIneligiblePools() {
     return ineligible;
 }
 
+/**
+ * Pools, die sich gerade in der Cooldown-Phase eines der drei Risk-Management-Exits
+ * (Trailing Stop, TVL-Schutz, Score-Limit) befinden, werden vom Ranking-Cleanup
+ * übersprungen — sonst würde frisch befreites Kapital sofort wieder in denselben
+ * (oder einen anderen, aber ebenso gerade erst verlassenen) Pool investiert, noch
+ * bevor der Nutzer eingreifen konnte. Vorher waren alle drei `cooldownHours`-Felder
+ * reine UI-Werte ohne jede Wirkung im Bot (Befund 2026-08-08, zuerst bei Trailing
+ * Stop gefunden, TVL/Score-Limit hatten dieselbe Lücke).
+ *
+ * Liefert eine Map poolId → { until, reason } für den jeweils spätesten aktiven
+ * Cooldown (falls mehrere Exit-Typen für denselben Pool gleichzeitig im Cooldown
+ * stehen sollten).
+ */
+function _loadCleanupCooldownBlockedPools(db) {
+    const blocked = new Map();
+    for (const poolId of config.pools.all.map(p => p.id)) {
+        const candidates = [
+            { reason: 'Trailing Stop', lastAt: getLastTsExecutionAt(db, poolId),         cooldownHours: Number(loadTsConfig(poolId)?.cooldownHours) },
+            { reason: 'TVL-Schutz',    lastAt: getLastTvlExecutionAt(db, poolId),        cooldownHours: Number(loadTvlConfig(poolId)?.cooldownHours) },
+            { reason: 'Score-Limit',   lastAt: getLastScoreLimitExecutionAt(db, poolId), cooldownHours: Number(loadScoreLimitConfig(poolId)?.cooldownHours) },
+        ];
+        for (const c of candidates) {
+            if (!c.lastAt) continue;
+            const cooldownHours = Number.isFinite(c.cooldownHours) && c.cooldownHours > 0 ? c.cooldownHours : 1;
+            const until = c.lastAt + cooldownHours * 3_600_000;
+            if (Date.now() >= until) continue;
+            const existing = blocked.get(poolId);
+            if (!existing || until > existing.until) blocked.set(poolId, { until, reason: c.reason });
+        }
+    }
+    for (const [poolId, { until, reason }] of blocked) {
+        const remainingMin = Math.ceil((until - Date.now()) / 60_000);
+        console.log(`[cleanup:ranking] ${poolId} im ${reason}-Cooldown (noch ${remainingMin} Min) – vom Ranking ausgeschlossen.`);
+    }
+    return blocked;
+}
+
 // ─── Invest-in-Pool Logik ─────────────────────────────────────────────────────
 
 const USDC_TOKEN = { mint: USDC_MINT, decimals: USDC_DECIMALS, symbol: 'USDC' };
@@ -576,6 +619,7 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
 async function runCleanupByRanking(db, keypair, connection) {
     const configuredIds = new Set(config.pools.all.map(p => p.id));
     const ineligible    = _loadRankingIneligiblePools();
+    const cooldownBlocked = _loadCleanupCooldownBlockedPools(db);
 
     if (ineligible.size > 0) {
         console.log(`[cleanup:ranking] ${ineligible.size} Pool(s) per Settings ausgeschlossen: ${[...ineligible].join(', ')}`);
@@ -595,6 +639,7 @@ async function runCleanupByRanking(db, keypair, connection) {
     const poolById = new Map(config.pools.all.map(p => [p.id, p]));
     for (const poolId of configuredIds) {
         if (ineligible.has(poolId)) continue;
+        if (cooldownBlocked.has(poolId)) continue;
         // Benutzer-Sperre (enabled=false): Pool ist vom Investieren ausgeschlossen
         // (z.B. nach TVL-Voll-Exit oder manueller Deaktivierung). Niemals reaktivieren.
         if (!isPoolEnabled(poolById.get(poolId))) continue;
@@ -803,9 +848,20 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
 
     let walletUsdc = await getUsableUsdcBalanceFresh(keypair.publicKey);
 
-    // Kein USDC aber Pool-Token im Wallet: Teil des Tokens → USDC swappen, damit Deposit möglich ist.
-    // Gilt für nicht-SOL, nicht-BTC Pools (z.B. ZEC/USDC, EURC/USDC).
-    if (walletUsdc < MIN_USDC_AMOUNT && targetPool.tokenA !== WSOL_MINT) {
+    // Zu wenig USDC für einen sinnvollen Deposit, aber Pool-Token im Wallet: Teil des
+    // Tokens → USDC swappen, damit Deposit möglich ist. Gilt für nicht-SOL, nicht-BTC
+    // Pools (z.B. ZEC/USDC, EURC/USDC).
+    //
+    // Schwelle bewusst Math.max(MIN_USDC_AMOUNT, CLEANUP_MIN_DEPOSIT) statt nur
+    // MIN_USDC_AMOUNT (1 USDC): Vorher griff der Pre-Swap nur bei praktisch null
+    // freiem USDC. Lag bereits ein kleiner Rest (z.B. 3,69 USDC) im Wallet – unter
+    // CLEANUP_MIN_DEPOSIT (10), aber über MIN_USDC_AMOUNT –, wurde der Pre-Swap
+    // komplett übersprungen UND der eigentliche Deposit weiter unten (Zeile ~895)
+    // wegen des Minimums verworfen. Ergebnis: Deadlock, der Pool-Token blieb dauerhaft
+    // ungeswappt im Wallet liegen, obwohl sein Gegenwert für einen Deposit gereicht
+    // hätte (Vorfall 2026-08-08, Pool liq-spcx-usdc, ~95 USDC in SPCX gestrandet).
+    const usdcInvestFloor = Math.max(MIN_USDC_AMOUNT, CLEANUP_MIN_DEPOSIT);
+    if (walletUsdc < usdcInvestFloor && targetPool.tokenA !== WSOL_MINT) {
         const nonUsdcMint = targetPool.usdcIsTokenA ? targetPool.tokenB : targetPool.tokenA;
         const nonUsdcDec  = targetPool.usdcIsTokenA ? targetPool.decimalsB : targetPool.decimalsA;
         const nonUsdcSym  = targetPool.pair.split('/')[targetPool.usdcIsTokenA ? 1 : 0];

@@ -1,6 +1,6 @@
 {
   "name": "forge-liquiditybot",
-  "version": "0.4.147",
+  "version": "0.9.4",
   "description": "FORGE Liquidity Bot – Concentrated Liquidity (V3 CLMM) auf Solana",
   "type": "module",
   "scripts": {

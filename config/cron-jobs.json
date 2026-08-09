@@ -32,8 +32,8 @@
     },
     {
       "id": "premium-pay",
-      "description": "FORGE.pub Premium – stündliche Zahlung (FORK-ONLY, Ein/Aus-Schalter)",
-      "schedule": "5 * * * *",
+      "description": "FORGE.pub Premium – Stundenzahlung (FORK-ONLY, Ein/Aus-Schalter)",
+      "schedule": "5,15,25,35,45,55 * * * *",
       "command": "node core/premium/premium-pay.js",
       "cwd": ".",
       "enabled": true

@@ -264,8 +264,16 @@ export function isPoolEnabled(pool) {
  * persistent). Schreibt nicht mehr in pools.json. NULL in der DB (noch nie gesetzt)
  * gilt als „freigegeben" (true) — konsistent zu isPoolEnabled(). Gibt true zurück
  * wenn geändert.
+ *
+ * @param {string} poolId
+ * @param {boolean} enabled
+ * @param {string} [reason] - Für die Settings-UI (Tooltip am Aktivieren-Button, wenn
+ *   der Pool gerade gesperrt ist): erklärt wann + warum, ohne dass man dafür Changelog/DB
+ *   durchsuchen muss (Fund 2026-08-06: forge-pub1 PUMP/SOL wirkte ohne diesen Kontext wie
+ *   ein stiller Bug). Jeder Aufrufer sollte seinen Grund benennen; ohne Angabe wird ein
+ *   generischer Platzhalter geschrieben statt den Aufruf abzulehnen.
  */
-export function setPoolEnabled(poolId, enabled) {
+export function setPoolEnabled(poolId, enabled, reason = 'Grund nicht protokolliert') {
     let changed;
     const bdb = openBotDbRW();
     try {
@@ -273,12 +281,15 @@ export function setPoolEnabled(poolId, enabled) {
         if (!row) throw new Error(`Pool ${poolId} nicht in DB-Tabelle pools gefunden (syncPools ausstehend?)`);
         const current = (row.enabled === null || row.enabled === undefined) ? true : row.enabled === 1;
         changed = (current !== enabled);
-        if (changed) bdb.prepare(`UPDATE pools SET enabled = ? WHERE id = ?`).run(enabled ? 1 : 0, poolId);
+        if (changed) {
+            bdb.prepare(`UPDATE pools SET enabled = ?, enabled_changed_at = ?, enabled_reason = ? WHERE id = ?`)
+                .run(enabled ? 1 : 0, Date.now(), reason, poolId);
+        }
     } finally {
         bdb.close();
     }
     if (!changed) return false;
-    console.log(`[config] Pool ${poolId} ${enabled ? 'freigegeben' : 'gesperrt'} (enabled=${enabled})`);
+    console.log(`[config] Pool ${poolId} ${enabled ? 'freigegeben' : 'gesperrt'} (enabled=${enabled}, Grund: ${reason})`);
     return true;
 }
 

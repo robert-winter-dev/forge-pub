@@ -1,6 +1,6 @@
 {
   "name": "forge-settings",
-  "version": "0.1.41",
+  "version": "0.9.4",
   "description": "FORGE Settings – Interner HTTPS Admin-Server (LAN only)",
   "type": "module",
   "main": "server.js",

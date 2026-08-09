@@ -47,6 +47,12 @@ function roundsToZeroUsdc(v) {
     return Math.round((v ?? 0) * 100) === 0;
 }
 
+function formatAge(ageSec) {
+    const hours = ageSec / 3600;
+    if (hours >= 1) return `${hours.toFixed(1)} Std.`;
+    return `${Math.round(ageSec / 60)} Min.`;
+}
+
 function escHtml(s) {
     return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -124,11 +130,18 @@ export function buildWalletDetailHtml(data, opts = {}) {
     const ageSec        = wmSnap.age_seconds ?? 0;
     const snapDt        = new Date(wmSnap.recorded_at);
     const snapTime      = `${String(snapDt.getHours()).padStart(2,'0')}:${String(snapDt.getMinutes()).padStart(2,'0')} Uhr`;
+    // Der Wallet-Monitor läuft alle 10 Min – bleibt ein Snapshot deutlich länger
+    // stehen (Monitoring gestoppt/Fehler statt normalem Zyklus-Jitter), ist
+    // "Nächstes Update in < 1 Min." irreführend (Vorfall 2026-08-07: Premium-
+    // Wallet 2,5 Tage eingefroren, Anzeige suggerierte trotzdem "gleich aktuell").
+    // Eigene Alter-Schwelle statt blind auf wmSnap.is_stale zu vertrauen — nicht
+    // jeder Aufrufer (z.B. bot-liquidity.js _walletMonitorShape()) setzt dieses Feld.
+    const isStale       = wmSnap.is_stale === true || ageSec > 15 * 60;
     const nextSec       = Math.max(0, 10 * 60 - ageSec);
     const nextMin       = Math.round(nextSec / 60);
-    const nextHtml      = nextMin <= 0 ? '< 1 Min.' : `${nextMin} Min.`;
-    const staleHtml     = wmSnap.is_stale
-        ? ' &nbsp;<span style="color:var(--warning,#f59e0b)">⚠ veraltet</span>' : '';
+    const metaHtml      = isStale
+        ? `Stand: ${snapTime} &nbsp;<span style="color:var(--warning,#f59e0b)">⚠ veraltet (${formatAge(ageSec)} alt)</span>`
+        : `Stand: ${snapTime} (Nächstes Update in ${nextMin <= 0 ? '< 1 Min.' : `${nextMin} Min.`})`;
 
     return `
         <table class="wallet-detail-table${scrollClass}">
@@ -141,7 +154,7 @@ export function buildWalletDetailHtml(data, opts = {}) {
                 </tr>
             </tfoot>
         </table>
-        <div class="wallet-detail-meta">Stand: ${snapTime} (Nächstes Update in ${nextHtml})${staleHtml}</div>`;
+        <div class="wallet-detail-meta">${metaHtml}</div>`;
 }
 
 /**

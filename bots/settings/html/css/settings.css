@@ -950,6 +950,21 @@ body {
     transition: opacity 0.15s;
 }
 .info-tip-label:hover { opacity: 1; }
+
+/* Pool manuell/automatisch gesperrt (enabled=false) – Aktivieren-Button + Info-Icon
+   deutlich hervorheben, damit ein gesperrter Pool nicht wie ein stiller Bug aussieht
+   (Fund 2026-08-06: forge-pub1 PUMP/SOL ohne erkennbaren Grund deaktiviert). Farbe ist
+   nur Verstärkung, nicht alleiniges Signal – Text/Icon tragen die eigentliche Aussage. */
+.info-tip-label.pool-disabled-hint {
+    color: var(--warn);
+    opacity: 1;
+    margin-right: 0.4rem;
+}
+.btn-pool-disabled {
+    border: 1px solid var(--warn);
+    color: var(--warn);
+}
+.btn-pool-disabled:hover { background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .info-tip::after {
     content: attr(data-tip);
     position: absolute;

@@ -16,16 +16,17 @@
  */
 
 import { DataManager }    from './data.js?v=20260421f';
-import { ToastManager }   from '../../js/toast.js?v=20260722b';
+import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
-import { initMessageBell } from '../../js/message-bell.js?v=20260803b';
-import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260731c';
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260731b';
+import { initMessageBell } from '../../js/message-bell.js?v=20260809a';
+import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260809b';
 import { filterOutliers, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260411a';
 import {
     TZ, todayISO, startOfDayMs, zonedWallClockToMs,
     partsInTZ, hourBucketKey, makeFmt, fmtDateDE
 } from '../../js/tz.js?v=20260414a';
+import { renderBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
 
 const toastManager   = new ToastManager({
     storageKey: 'lendingbot_lastToastTs',
@@ -98,7 +99,7 @@ function protocolLabel(key) {
         jupiter:             'Jupiter Lend',
         loopscale:           'Loopscale',
         'loopscale-onre':    'Loopscale Public',
-        'loopscale-genesis': 'Loopscale Genesis',
+        'loopscale-genesis': 'Loopscale Gen',
         save:                'Save',
         marginfi:            'MarginFi',
     };
@@ -141,6 +142,26 @@ function renderStatus(data) {
 
     const state     = data.meta?.botState ?? 'unknown';
     const exported  = data.meta?.exportedAt ?? 0;
+
+    // Bewusst gestoppter Bot (bin/svc stop bzw. Settings-Toggle): bot.js schreibt
+    // 'offline' beim Graceful-Shutdown als letzten Export-Wert, bevor der Prozess
+    // endet. exportedAt altert danach zwangsläufig — das ist dann aber kein Alarm,
+    // sondern erwartetes Verhalten. Statt des roten Blink-Dreiecks zeigen wir
+    // explizit "Bot deaktiviert", nichts blinkt mehr.
+    if (state === 'offline') {
+        stateIcon.textContent = '⏸';
+        stateIcon.className   = 'bot-state-icon state-paused';
+        const lastUpdateEl = document.getElementById('lastUpdate');
+        if (lastUpdateEl) {
+            lastUpdateEl.textContent = 'Bot deaktiviert';
+            lastUpdateEl.className   = 'last-update';
+        }
+        titleEl.className = '';
+        const ver = document.getElementById('footerVersion');
+        if (ver && data.meta?.version) ver.textContent = 'v' + data.meta.version;
+        return;
+    }
+
     const ageSec    = (Date.now() - exported) / 1000;
 
     // Signal-Alter bestimmt Status-Farbe (600s/1800s – toleriert 5-Min-Export-Zyklus)
@@ -149,9 +170,9 @@ function renderStatus(data) {
     else if (ageSec < 1800) cssClass = 'warning';
 
     // Bot-State Icon
-    const iconMap = { running: '▶', paused: '⏸', waiting: '⏳', offline: '⚫' };
-    const stateClass = { running: 'state-running', paused: 'state-paused', waiting: 'state-waiting', offline: 'state-stale' };
-    stateIcon.textContent = iconMap[state] ?? '⚫';
+    const iconMap = { running: '▶', paused: '⏸', waiting: '⏳' };
+    const stateClass = { running: 'state-running', paused: 'state-paused', waiting: 'state-waiting' };
+    stateIcon.textContent = iconMap[state] ?? '⚠';
     stateIcon.className   = 'bot-state-icon ' + (stateClass[state] ?? 'state-stale');
 
     if (ageSec > 1800) {
@@ -161,14 +182,11 @@ function renderStatus(data) {
 
     setLastUpdate(exported || null);
 
-    // Header-Titel Health-Indikator
-    if (ageSec > 1800) {
-        titleEl.className = 'health-critical';
-    } else if (ageSec > 600) {
-        titleEl.className = 'health-warning';
-    } else {
-        titleEl.className = '';
-    }
+    // Header-Titel blinkt/pulsiert bewusst NICHT mehr bei alten Daten (2026-08-07,
+    // Fund: ein absichtlich deaktivierter Bot lässt die Daten zwangsläufig altern —
+    // das sah wie ein Alarm aus, obwohl alles wie gewünscht lief). Der kleine
+    // Status-Icon (stateIcon, oben) bleibt als dezenter Hinweis bestehen.
+    titleEl.className = '';
 
     // Footer-Version
     const ver = document.getElementById('footerVersion');
@@ -528,7 +546,7 @@ const ALL_KNOWN_PROTOCOLS = [
     { id: 'lulo',              label: 'Lulo' },
     { id: 'jupiter',           label: 'Jupiter Lend' },
     { id: 'loopscale-onre',    label: 'Loopscale Public' },
-    { id: 'loopscale-genesis', label: 'Loopscale Genesis' },
+    { id: 'loopscale-genesis', label: 'Loopscale Gen' },
 ];
 
 /**
@@ -707,6 +725,12 @@ function renderAvailablePools(data) {
     const container = document.getElementById('availablePoolsContainer');
     if (!container) return;
 
+    if (data?.botActive === false) {
+        container.innerHTML = '';
+        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        return;
+    }
+
     const activeIds = new Set((data?.positions ?? []).map(p => p.protocol));
     const stats     = data?.protocolStats ?? {};
 
@@ -781,6 +805,12 @@ function _calcInOut1D(proto, txns) {
 function renderActivePools(data) {
     const container = document.getElementById('activePoolsContainer');
     if (!container) return;
+
+    if (data?.botActive === false) {
+        container.innerHTML = '';
+        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        return;
+    }
 
     const positions = [...(data?.positions ?? [])]
         .sort((a, b) => (b.currentApy ?? -1) - (a.currentApy ?? -1));
@@ -982,8 +1012,18 @@ function renderStatistics(data) {
         return `<span class="stat-value-number">${pos ? '+' : '−'}${fmt(Math.abs(v), 4)}</span><span class="stat-value-unit">USDC</span>`;
     };
     const fmtApr = v => {
-        if (v == null) return '—';
+        const rounded = v != null ? Math.round(v * 100) / 100 : 0;
+        if (v == null || rounded === 0) {
+            return '<span class="stat-value-number">0,00</span><span class="stat-value-unit">%</span>';
+        }
         return `<span class="stat-value-number">+${fmt(v, 2)}</span><span class="stat-value-unit">%</span>`;
+    };
+    // Rundet vor der Farbentscheidung (Fund 2026-08-07): ein Wert wie 0,001 wurde bisher
+    // fest als 'positive' (grün) eingefärbt, obwohl er auf 0,00 % gerundet angezeigt wird —
+    // sah wie ein Darstellungsfehler aus. Rundet der Wert auf 0, gilt er als neutral.
+    const aprType = v => {
+        const rounded = v != null ? Math.round(v * 100) / 100 : 0;
+        return rounded === 0 ? 'neutral' : 'positive';
     };
     const numType = v => v == null ? 'neutral' : v > 0 ? 'positive' : v < 0 ? 'negative' : 'neutral';
 
@@ -996,17 +1036,17 @@ function renderStatistics(data) {
 
     setVal('statPayedFeesToday',     fmtFees(feesToday));
     setVal('statYieldToday',         fmtYield(yieldToday));
-    setVal('statRenditeToday',       fmtApr(aprToday),          'positive');
+    setVal('statRenditeToday',       fmtApr(aprToday),          aprType(aprToday));
     setVal('statPnlToday',           fmtPnl(pnlToday),          numType(pnlToday));
 
     setVal('statPayedFeesYesterday', fmtFees(feesYesterday));
     setVal('statYieldYesterday',     fmtYield(yieldYesterday));
-    setVal('statRenditeYesterday',   fmtApr(aprYesterday),      'positive');
+    setVal('statRenditeYesterday',   fmtApr(aprYesterday),      aprType(aprYesterday));
     setVal('statPnlYesterday',       fmtPnl(pnlYesterday),      numType(pnlYesterday));
 
     setVal('statPayedFeesMonth',     fmtFees(feesMonth));
     setVal('statYieldMonth',         fmtYield(yieldMonth));
-    setVal('statRenditeMonth',       fmtApr(aprMonth),          'positive');
+    setVal('statRenditeMonth',       fmtApr(aprMonth),          aprType(aprMonth));
     setVal('statPnlMonth',           fmtPnl(pnlMonth),          numType(pnlMonth));
 
     // Top-Cards: rolling 24h – in export.js vorberechnet (single source, LB#0158).
@@ -1014,20 +1054,39 @@ function renderStatistics(data) {
     const apr24h    = stats.rolling24h?.apr   ?? null;
 
     // Card 3: PnL (24h)
+    // Rundet auf die angezeigten 2 Nachkommastellen, bevor Vorzeichen/Farbe entschieden
+    // werden (Fund 2026-08-07): vorher immer "+X,XXXX USDC" in Grün, auch bei 0 – sah wie
+    // ein Darstellungsfehler aus. Rundet der Wert auf 0,00, gilt er als neutral: kein
+    // Vorzeichen, keine Farbe, 2 statt 4 Nachkommastellen (einheitlich mit anderen USDC-
+    // Anzeigen).
     const pnl24hEl   = document.getElementById('pnl24hValue');
     const pnl24hUnit = document.getElementById('pnl24hUnit');
     if (pnl24hEl) {
-        pnl24hEl.textContent = '+' + fmt(_yield24h, 4);
-        pnl24hEl.setAttribute('data-type', 'positive');
-        pnl24hUnit?.setAttribute('data-type', 'positive');
+        const rounded = Math.round(_yield24h * 100) / 100;
+        if (rounded !== 0) {
+            const sign = _yield24h >= 0 ? '+' : '−';
+            pnl24hEl.textContent = sign + fmt(Math.abs(_yield24h), 2);
+            const dtype = _yield24h >= 0 ? 'positive' : 'negative';
+            pnl24hEl.setAttribute('data-type', dtype);
+            pnl24hUnit?.setAttribute('data-type', dtype);
+        } else {
+            pnl24hEl.textContent = '0,00';
+            pnl24hEl.setAttribute('data-type', 'neutral');
+            pnl24hUnit?.setAttribute('data-type', 'neutral');
+        }
     }
 
     // Card 4: Yield-APR (24h)
     const topEl    = document.getElementById('renditeValue');
     const topGroup = document.getElementById('renditeGroup');
-    if (topEl && apr24h != null) {
-        topEl.textContent = '+' + fmt(apr24h, 2);
-        topGroup?.setAttribute('data-type', 'positive');
+    if (topEl) {
+        if (apr24h != null) {
+            topEl.textContent = '+' + fmt(apr24h, 2);
+            topGroup?.setAttribute('data-type', 'positive');
+        } else {
+            topEl.textContent = '0,00';
+            topGroup?.setAttribute('data-type', 'neutral');
+        }
     }
 
     // Click-Handler (via clickable-value spans)
@@ -1281,6 +1340,7 @@ function renderApyChart(data) {
 
     if (avgHistory.length < 2) {
         svg.style.display      = 'none';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'APY-Verlauf wird aufgebaut…';
         emptyMsg.style.display = 'block';
         if (legend) legend.innerHTML = '';
         return;
@@ -1500,6 +1560,7 @@ function renderYieldChart(data) {
 
     if (bars.length === 0) {
         svg.style.display      = 'none';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Keine Yield-Daten vorhanden…';
         emptyMsg.style.display = 'block';
         return;
     }
@@ -2125,7 +2186,7 @@ function initInactiveToggle() {
     });
 }
 
-initNav({ current: 'lending', logout: '../logout.php' });
+initNav({ current: 'lending-dashboard' });
 initFooter({ botName: 'LendingBot' });
 
 document.addEventListener('DOMContentLoaded', () => {

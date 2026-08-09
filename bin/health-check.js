@@ -15,6 +15,7 @@ import { dirname, join }           from 'path';
 import { fileURLToPath }           from 'url';
 import Database                    from 'better-sqlite3';
 import { PATHS, envFile }          from '../config/paths.js';
+import { listJobs }                from '../lib/cron-registry.js';
 
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..');
@@ -60,16 +61,56 @@ const INSERT = db.prepare(
 
 // ── Check-Funktionen ──────────────────────────────────────────────────────────
 
+// Ein gestoppter Dienst ist nicht automatisch ein kaputter Dienst. `systemctl
+// is-active` beendet sich bei allem außer 'active' mit Exit ≠ 0, landet also im
+// catch — dadurch wurde JEDER angehaltene Bot als 'error' gewertet und löste den
+// Alarm "… nicht erreichbar. Bitte den betroffenen Dienst neu starten" aus, auch
+// wenn der Nutzer ihn selbst angehalten hatte (belegt 2026-08-07 auf einem Testhost:
+// zweimal für einen bewusst gestoppten Liquidity Bot). Beim Endnutzer ist das
+// Anhalten eines Bots ein völlig normaler Vorgang (Pause, kein Kapital im Einsatz).
+//
+// systemd trennt die Fälle selbst sauber: 'failed' = der Dienst ist gescheitert
+// (Crash, Startfehler, Restart-Limit erreicht) → alarmwürdig. 'inactive' = sauber
+// beendet → Hinweis, kein Alarm. Die Übergangszustände 'activating'/'deactivating'
+// sind Momentaufnahmen eines laufenden Starts/Stopps und nie ein Befund.
+//
+// Ein Tippfehler in svc.id (health-config.js) liefert über ActiveState EBENFALLS
+// 'inactive' – von "bewusst gestoppt" allein damit nicht unterscheidbar (verifiziert
+// 2026-08-09). LoadState trennt das zuverlässig: 'not-found' = die Unit existiert
+// nicht (Konfigurationsfehler, sofort alarmwürdig), 'loaded' = sie existiert und ist
+// nur gerade nicht aktiv. Ein zweiter Wert aus demselben `systemctl show`-Aufruf,
+// kein zusätzlicher Prozessstart nötig.
 function checkSystemd(serviceId) {
+    let activeState = 'unknown';
+    let loadState   = 'unknown';
     try {
-        const raw    = execSync(`systemctl is-active ${serviceId}`, { timeout: 5000, encoding: 'utf8' }).trim();
-        const status = raw === 'active' ? 'ok' : 'warn';
-        return { status, latency_ms: null, detail: raw };
+        // Bewusst OHNE --value: `systemctl show` gibt Properties in seiner eigenen
+        // internen Reihenfolge aus, nicht in der der -p-Flags (verifiziert 2026-08-09,
+        // LoadState kam vor ActiveState obwohl in umgekehrter Reihenfolge angefragt) –
+        // eine positionale Zuordnung wäre also stillschweigend falsch gewesen. Die
+        // KEY=value-Form macht die Zuordnung robust gegen die Ausgabereihenfolge.
+        const raw = execSync(
+            `systemctl show ${serviceId} -p ActiveState -p LoadState`,
+            { timeout: 5000, encoding: 'utf8' },
+        );
+        for (const line of raw.trim().split('\n')) {
+            const [key, value] = line.split('=');
+            if (key === 'ActiveState') activeState = value;
+            if (key === 'LoadState')   loadState   = value;
+        }
     } catch (e) {
-        // systemctl gibt Exit-Code ≠ 0 wenn nicht active → stdout enthält den Status
-        const raw = (e.stdout ?? '').trim() || (e.stderr ?? '').trim() || 'unknown';
-        return { status: 'error', latency_ms: null, detail: raw };
+        activeState = (e.stdout ?? '').trim() || (e.stderr ?? '').trim() || 'unknown';
     }
+    if (loadState === 'not-found') {
+        return { status: 'error', latency_ms: null, detail: `Unit "${serviceId}" existiert nicht – Konfigurationsfehler in health-config.js prüfen` };
+    }
+    if (activeState === 'active')                                  return { status: 'ok',   latency_ms: null, detail: activeState };
+    if (activeState === 'activating' || activeState === 'deactivating') return { status: 'ok', latency_ms: null, detail: activeState };
+    if (activeState === 'inactive') {
+        return { status: 'warn', latency_ms: null, detail: 'angehalten – läuft erst nach einem Start wieder' };
+    }
+    // 'failed' und alles Unerwartete ('unknown', leer, Fehlertext): echter Befund.
+    return { status: 'error', latency_ms: null, detail: activeState === 'failed' ? 'abgestürzt/gescheitert' : activeState };
 }
 
 async function checkHttp(url, method = 'GET') {
@@ -203,6 +244,46 @@ function checkPremiumHostStatus(hostKey) {
 // "Score-Daten veraltet"-Banner im Liquidity-Bot-Dashboard steuert.
 const INGEST_STALE_MS = 25 * 60 * 1000; // > 2 verpasste 10-Min-Publish-Läufe
 
+// Ausbleibende Daten haben zwei grundverschiedene Ursachen, die vor dem 2026-08-09
+// beide denselben "Dienst antwortet nicht mehr, bitte neu starten"-Alarm auslösten:
+//
+//   (a) Es wurde für die laufende Stunde nicht bezahlt. Dann liefert der Master
+//       bestimmungsgemäß nichts (core/premium/deliver-blob.js beliefert nur Zahler
+//       der Stunde). Nichts ist kaputt, ein Neustart ändert daran nichts — der
+//       Nutzer muss zahlen/aufladen/einschalten. Vorfall forge-pub1 2026-08-09: der
+//       Deploy-Lock verwarf den premium-pay-Cronslot, eine Stunde blieb unbezahlt,
+//       und der Alarm schickte die Fehlersuche in den Nostr-Stack statt in den
+//       Zahlungspfad. Für einen echten Kunden ist das der Normalfall (leeres
+//       Guthaben) und dürfte NIE als Dienstausfall gemeldet werden.
+//   (b) Es wurde bezahlt und trotzdem kam nichts an. Erst das ist ein echter
+//       Zustellungsfehler (Nostr-Subscription, Relay, Master) und alarmwürdig.
+//
+// Die Zahlungslage kommt aus denselben Quellen wie beim Zahl-Skript selbst:
+// premium_pay_log (core/premium/premium-pay.js, hour_id = laufende Abrechnungsstunde)
+// und die beiden unabhängigen Schalter aus lib/premium-auto-pay-store.js. Beide
+// werden hier bewusst READONLY gelesen — ein Health-Check darf niemals ein Schema
+// anlegen oder ändern, deshalb keine Store-Importe (openDb() dort schreibt).
+function readPaymentState(hourId) {
+    const state = { paidThisHour: false, autoPayEnabled: null, outagePaused: false };
+    try {
+        const db = new Database(PATHS.premiumDb, { readonly: true, fileMustExist: true });
+        try {
+            state.paidThisHour = !!db.prepare(`SELECT 1 FROM premium_pay_log WHERE hour_id = ?`).get(hourId);
+        } catch { /* Tabelle existiert erst nach der ersten Zahlung */ }
+        db.close();
+    } catch { /* premium.db (noch) nicht vorhanden – wie "nie bezahlt" behandeln */ }
+    try {
+        const db = new Database(PATHS.settingsDb, { readonly: true, fileMustExist: true });
+        try {
+            const row = db.prepare(`SELECT enabled, outage_paused FROM premium_settings WHERE id = 1`).get();
+            state.autoPayEnabled = row?.enabled === 1;
+            state.outagePaused   = row?.outage_paused === 1;
+        } catch { /* Tabelle/Spalte erst nach der ersten Aktivierung vorhanden */ }
+        db.close();
+    } catch { /* settings.db nicht lesbar – Zahlungslage bleibt unbekannt */ }
+    return state;
+}
+
 function checkPremiumIngestStatus() {
     try {
         const db = new Database(PATHS.liquidityDb, { readonly: true, fileMustExist: true });
@@ -217,10 +298,25 @@ function checkPremiumIngestStatus() {
             return { status: 'unknown', latency_ms: null, detail: 'Noch kein Premium-Blob integriert' };
         }
         const ageMin = Math.round((Date.now() - row.last_ingested_at) / 60000);
-        if (Date.now() - row.last_ingested_at > INGEST_STALE_MS) {
-            return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – Premium-Auslieferung steht vermutlich (siehe forge-premium-Log)` };
+        if (Date.now() - row.last_ingested_at <= INGEST_STALE_MS) {
+            return { status: 'ok', latency_ms: null, detail: `Letzter Ingest erfolgreich (vor ${ageMin} Min)` };
         }
-        return { status: 'ok', latency_ms: null, detail: `Letzter Ingest erfolgreich (vor ${ageMin} Min)` };
+
+        // Ab hier: Daten sind veraltet – die Ursache entscheidet über den Status.
+        // 'warn' statt 'error' überall dort, wo kein Defekt vorliegt: nur 'error'
+        // löst den Persistenz-Alert aus (siehe isSecondConsecutiveError unten).
+        const { paidThisHour, autoPayEnabled, outagePaused } = readPaymentState(Math.floor(Date.now() / 3_600_000));
+
+        if (outagePaused) {
+            return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – der Premium-Dienst des Anbieters gilt seit über 2h als nicht erreichbar, die Zahlung wurde automatisch pausiert. Nichts zu tun: sie läuft von selbst wieder an, sobald Daten ankommen.` };
+        }
+        if (autoPayEnabled === false) {
+            return { status: 'warn', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – die automatische Zahlung ist ausgeschaltet, ohne sie liefert der Anbieter keine Premium-Daten. Einschalten unter Liquidity → Premium → Verwalten.` };
+        }
+        if (!paidThisHour) {
+            return { status: 'warn', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – für die laufende Stunde liegt keine Zahlung vor, deshalb liefert der Anbieter keine Daten. Premium-Guthaben prüfen und ggf. USDC nachfüllen (Liquidity → Premium → Verwalten).` };
+        }
+        return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min, obwohl die laufende Stunde bezahlt ist – der Zustellweg ist gestört. Log von forge-premium prüfen (Nostr-Empfang).` };
     } catch (e) {
         return { status: 'unknown', latency_ms: null, detail: `liquiditybot.db nicht lesbar: ${e.message?.slice(0, 60)}` };
     }
@@ -267,12 +363,22 @@ async function fetchNexusStats() {
 // Sendet eine Nachricht an Nexus (→ Telegram) wenn ein Dienst 2 Checks in Folge
 // nicht erreichbar ist (≈ 10 Minuten). Alert wird nur einmal pro Ausfall gesendet
 // (Übergang: Check[n-1]=ok → Check[n]=error → Check[n+1]=error).
-async function sendPersistenceAlert(svcName, detail) {
+// `kind` trennt zwei Meldungsarten, die bis 2026-08-09 denselben Text bekamen:
+// ein Wartungsjob ist kein Dienst, "nicht erreichbar … neu starten" ist dort
+// schlicht falsch (es gibt nichts zum Neustarten, der Job läuft beim nächsten
+// Intervall ohnehin wieder). Zusätzlich stand statt eines Namens die rohe ID
+// im Titel ("cron:pool-offers-sync") – für den Adressaten unbrauchbar.
+async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) {
     try {
-        const msg = `🚨 *${svcName} seit ~10 Min. nicht erreichbar*\n` +
-            `Detail: ${detail ?? 'Timeout'}\n` +
-            `Der Dienst antwortet nicht mehr. Bitte im Dashboard unter Health prüfen und ` +
-            `den betroffenen Dienst neu starten.`;
+        const msg = kind === 'cron'
+            ? `🚨 *Wartungsjob „${svcName}" schlägt seit ~10 Min. fehl*\n`
+              + `Detail: ${detail ?? 'kein Grund protokolliert'}\n`
+              + `Der Job versucht es im nächsten Intervall automatisch erneut. Hält der Fehler an, `
+              + `im Dashboard unter Health das Protokoll des Jobs prüfen.`
+            : `🚨 *${svcName} seit ~10 Min. nicht erreichbar*\n`
+              + `Detail: ${detail ?? 'Timeout'}\n`
+              + `Der Dienst antwortet nicht mehr. Bitte im Dashboard unter Health prüfen und `
+              + `den betroffenen Dienst neu starten.`;
         const res = await fetch('http://127.0.0.1:3100/notify', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -281,7 +387,7 @@ async function sendPersistenceAlert(svcName, detail) {
             // angekommen, der fehlende Response-Check hat das verdeckt (2026-07-30).
             body:    JSON.stringify({
                 botId:       'health-check',
-                displayName: 'System-Überwachung',
+                displayName: 'Monitoring',
                 level:       'error',
                 category:    'system',
                 message:     msg,
@@ -298,6 +404,42 @@ async function sendPersistenceAlert(svcName, detail) {
     }
 }
 
+// ── Cron-Jobs: data/cron-state.json (von bin/forge-cron.js geschrieben) ────────
+// forge-cron.js protokolliert pro Job den letzten Exit-Code, aber bislang wertete
+// das niemand aus – ein dauerhaft mit Exit 1 fehlschlagender Job (z.B. wegen einer
+// falschen Datei-Ownership) blieb dadurch unbemerkt (Fund 2026-08-06, forge-pub2:
+// wallet-monitor lief 2 Tage lang alle 10 Min erfolglos, bevor die Wallet-Balance-
+// Anzeige im Dashboard das erste sichtbare Symptom war). Dynamisch über alle Jobs
+// statt hartcodierter Liste – ein neuer Cron-Job in config/cron-jobs.json wird so
+// automatisch mitüberwacht.
+function checkCronJobs() {
+    // PATHS.data statt join(FORGE_ROOT,'data') (Fund 2026-08-09, Nachzügler zum
+    // selben Fix in bin/forge-cron.js): auf dem FORGE.pub-Fork ist FORGE_ROOT der
+    // APP_DIR-Checkout, der bei jedem Update komplett neu geschrieben wird und dort
+    // NIE ein data/-Verzeichnis besitzt – forge-cron.js schreibt cron-state.json
+    // längst unter PATHS.data (<base>/local/data). Der alte Pfad lieferte auf dem
+    // Fork also immer ENOENT → catch → {} → "kein Befund". Damit war die gesamte
+    // Cron-Überwachung dort seit dem 09.08. lautlos wirkungslos, inklusive des
+    // wallet-monitor-Dauerfehlers vom 2026-08-06, der diesen Mechanismus erst
+    // motiviert hat. Auf dem Master identisch zum alten Pfad, kein Verhaltensunterschied.
+    const stateFile = join(PATHS.data, 'cron-state.json');
+    let state;
+    try {
+        state = JSON.parse(readFileSync(stateFile, 'utf8'));
+    } catch {
+        return {}; // Runner noch nie gelaufen o.ä. – kein Befund, keine Fehlalarme
+    }
+    const results = {};
+    for (const [jobId, s] of Object.entries(state)) {
+        if (!s || typeof s.lastExitCode !== 'number') continue;
+        results[`cron:${jobId}`] = s.lastExitCode === 0
+            ? { status: 'ok', latency_ms: s.lastDurationMs ?? null, detail: null, jobId }
+            : { status: 'error', latency_ms: s.lastDurationMs ?? null,
+                detail: s.lastError ?? `Exit ${s.lastExitCode}`, jobId };
+    }
+    return results;
+}
+
 // ── Hauptlauf ─────────────────────────────────────────────────────────────────
 const now    = Date.now();
 const latest = {};
@@ -312,6 +454,13 @@ for (const chain of chains) {
         const latStr = result.latency_ms != null ? `${result.latency_ms}ms` : '    –';
         console.log(`[health] ${svc.id.padEnd(26)} ${result.status.padEnd(7)} ${latStr}`);
     }
+}
+
+for (const [svcId, result] of Object.entries(checkCronJobs())) {
+    INSERT.run(svcId, now, result.status, result.latency_ms ?? null, result.detail ?? null);
+    latest[svcId] = result;
+    const latStr = result.latency_ms != null ? `${result.latency_ms}ms` : '    –';
+    console.log(`[health] ${svcId.padEnd(26)} ${result.status.padEnd(7)} ${latStr}`);
 }
 
 // ── Persistenz-Alerts prüfen ──────────────────────────────────────────────────
@@ -353,6 +502,24 @@ for (const chain of chains) {
         if (isSecondConsecutiveError(svc.id)) {
             await sendPersistenceAlert(svc.name, latest[svc.id].detail);
         }
+    }
+}
+
+// Cron-Jobs laufen typischerweise alle 5-10 Min – "2 Fehlschläge in Folge" fällt
+// hier je nach Job-Intervall zusammen mit denselben ~10-20 Min wie bei den
+// regulären Diensten oben.
+//
+// description statt roher jobId im Alertext (Fund 2026-08-09): "cron:pool-offers-sync"
+// sagt einem Endnutzer nichts, config/cron-jobs.json hat für jeden Job längst einen
+// verständlichen description-Text. kind:'cron' sorgt für den passenden Meldungstext
+// (kein "Dienst neu starten" für einen Job, der beim nächsten Intervall ohnehin
+// wieder anläuft, siehe sendPersistenceAlert oben).
+const cronDescriptions = Object.fromEntries(listJobs().map(j => [j.id, j.description ?? j.id]));
+for (const [svcId, result] of Object.entries(latest)) {
+    if (!svcId.startsWith('cron:') || result.status !== 'error') continue;
+    if (isSecondConsecutiveError(svcId)) {
+        const jobId = result.jobId ?? svcId.slice('cron:'.length);
+        await sendPersistenceAlert(cronDescriptions[jobId] ?? jobId, result.detail, { kind: 'cron' });
     }
 }
 

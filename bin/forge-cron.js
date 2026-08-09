@@ -33,9 +33,39 @@ import { listJobs, cronMatches } from '../lib/cron-registry.js';
 import { PATHS } from '../config/paths.js';
 
 const ROOT      = join(dirname(fileURLToPath(import.meta.url)), '..');
-const DATA      = join(ROOT, 'data');
-const LOCK_DIR  = join(DATA, 'cron-locks');
-const STATE_F   = join(DATA, 'cron-state.json');
+// PATHS.data statt join(ROOT, 'data') (Fund 2026-08-09): ROOT ist auf dem
+// FORGE.pub-Fork der APP_DIR-Checkout, der bei jedem Update komplett neu
+// geschrieben wird (rm -rf + rsync, siehe bin/setup-lib/deploy.sh do_deploy()).
+// Lag cron-state.json/cron-locks dort, verlor der Runner bei jedem Update
+// seine gesamte Job-Historie (Fehldiagnose "Job lief noch nie", obwohl er nur
+// den Zustand verloren hatte). PATHS.data zeigt auf dem Fork auf
+// <base>/local/data (überlebt Updates), auf dem Master unverändert auf
+// <FORGE>/data (bit-identisch zum alten join(ROOT,'data')).
+const DATA        = PATHS.data;
+const LOCK_DIR     = join(DATA, 'cron-locks');
+const STATE_F      = join(DATA, 'cron-state.json');
+// Vom Installer während do_deploy()/do_npm() gesetzt (bin/setup-lib/common.sh
+// deploy_lock_acquire/-release). Existiert die Datei, ist app/ gerade
+// gelöscht/neu ausgerollt und node_modules evtl. unvollständig — Jobs, die
+// genau jetzt anspringen, würden mit irreführenden Fehlern crashen (Fund
+// 2026-08-09: pool-offers-sync crashte mit "Cannot find package 'dotenv'",
+// weil der Cron-Tick mitten in ein laufendes npm install fiel). Statt das als
+// Job-Fehler zu werten, wird der Tick komplett übersprungen — die verpassten
+// Jobs werden in PENDING_F vorgemerkt und im ersten Tick nach dem Deploy
+// nachgeholt (siehe unten).
+const DEPLOY_LOCK  = join(DATA, 'deploy.lock');
+// Während eines Deploys übersprungene Jobs. Ohne diese Merkliste fiel ein Job
+// mit nur EINEM Slot pro Stunde ersatzlos aus — "beim nächsten fälligen
+// Zeitpunkt" ist dann eine Stunde später (Vorfall forge-pub1 2026-08-09:
+// premium-pay verpasste seinen 5-Minuten-Slot, die Stunde blieb unbezahlt, der
+// Anbieter lieferte deshalb eine Stunde lang keine Premium-Daten). Häufige Jobs
+// verlieren dadurch nichts, seltene alles — deshalb wird nachgeholt statt
+// verworfen.
+const PENDING_F    = join(DATA, 'cron-pending.json');
+// Ein nachgeholter Lauf ist nur so lange sinnvoll, wie sein Ergebnis noch aktuell
+// ist. Nach einem sehr langen Deploy ist ein 3h alter forge-check wertlos; 60 Min
+// deckt den relevanten Fall (stündliche Jobs) vollständig ab.
+const PENDING_MAX_AGE_MS = 60 * 60 * 1000;
 const LOG_DIR   = join(PATHS.logs, 'cron');
 const RUN_LOG   = join(LOG_DIR, 'forge-cron.log');
 
@@ -85,6 +115,75 @@ function updateState(id, patch) {
     const tmp = `${STATE_F}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n');
     renameSync(tmp, STATE_F);
+}
+
+// ─── Nachhol-Liste (data/cron-pending.json) ─────────────────────────────────────
+// Format: { "<jobId>": "<ISO-Zeit des ERSTEN verpassten Slots>" }. Bewusst der
+// erste und nicht der letzte: die TTL soll ab dem Zeitpunkt laufen, an dem der Job
+// eigentlich hätte laufen sollen.
+function readPending() {
+    try {
+        const p = JSON.parse(readFileSync(PENDING_F, 'utf8'));
+        return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {};
+    } catch {
+        return {};
+    }
+}
+function writePending(pending) {
+    try {
+        if (Object.keys(pending).length === 0) {
+            try { unlinkSync(PENDING_F); } catch { /* war schon weg */ }
+            return;
+        }
+        const tmp = `${PENDING_F}.${process.pid}.tmp`;
+        writeFileSync(tmp, JSON.stringify(pending, null, 2) + '\n');
+        renameSync(tmp, PENDING_F);
+    } catch (e) {
+        // Eine nicht schreibbare Merkliste darf den Runner nie stoppen – im
+        // schlimmsten Fall verhält er sich wie vor der Nachhol-Logik.
+        log(`⚠ Nachhol-Liste nicht schreibbar (${e.message}) – verpasste Jobs gehen verloren`);
+    }
+}
+/** Merkt die während eines Deploys übersprungenen Jobs vor (ältesten Zeitpunkt behalten). */
+function rememberPending(jobsToRemember) {
+    const pending = readPending();
+    for (const job of jobsToRemember) {
+        if (!pending[job.id]) pending[job.id] = NOW.toISOString();
+    }
+    writePending(pending);
+}
+/**
+ * Gibt die nachzuholenden Jobs zurück und leert die Merkliste. Übersprungen werden
+ * Einträge, die zu alt sind, deren Job es nicht mehr gibt bzw. der abgeschaltet
+ * wurde, und solche, die ohnehin in diesem Tick fällig sind (kein Doppelstart).
+ */
+function takePending(dueNow, allJobs) {
+    const pending = readPending();
+    if (Object.keys(pending).length === 0) return [];
+
+    const dueIds  = new Set(dueNow.map(j => j.id));
+    const byId    = new Map(allJobs.map(j => [j.id, j]));
+    const carried = [];
+    for (const [id, missedAt] of Object.entries(pending)) {
+        // Ein Zeitstempel in der Zukunft (Uhr-Sprung, manuell editierte Datei, Lauf
+        // mit --now) ist kein gültiger verpasster Slot – sonst würde ein einziger
+        // Zeitsprung Jobs beliebig lange nachschleppen.
+        const ageMs = NOW.getTime() - new Date(missedAt).getTime();
+        if (!Number.isFinite(ageMs) || ageMs < 0) {
+            log(`↩ ${id}: Nachholung verworfen – Zeitstempel ${missedAt} liegt nicht in der Vergangenheit`);
+            continue;
+        }
+        if (ageMs > PENDING_MAX_AGE_MS) {
+            log(`↩ ${id}: Nachholung verworfen – verpasster Lauf von ${missedAt} ist zu alt`);
+            continue;
+        }
+        if (dueIds.has(id)) continue;              // läuft in diesem Tick sowieso
+        const job = byId.get(id);
+        if (!job || job.enabled === false) continue; // inzwischen entfernt/abgeschaltet
+        carried.push(job);
+    }
+    writePending({}); // in jedem Fall leeren – ein zweiter Nachholversuch bringt nichts
+    return carried;
 }
 
 // ─── Locking ────────────────────────────────────────────────────────────────────
@@ -217,6 +316,28 @@ if (DRY_RUN) {
     log(`DRY-RUN @ ${NOW.toISOString()} – ${due.length} Job(s) fällig:`);
     for (const job of due) log(`  · ${job.id} (${job.schedule}) → ${job.command}`);
     process.exit(0);
+}
+
+if (existsSync(DEPLOY_LOCK)) {
+    // Bewusst KEIN Job-State-Update hier (weder ok noch error) – die Jobs sind
+    // schlicht nicht gestartet, das ist kein Lauf-Ergebnis. health-check.js
+    // sieht dadurch weiterhin nur den letzten ECHTEN Lauf, nie einen
+    // Deploy-bedingten Fehlschlag.
+    if (due.length > 0) {
+        rememberPending(due);
+        log(`⏸ Deploy läuft (${DEPLOY_LOCK}) – ${due.length} fällige(r) Job(s) für die Nachholung vorgemerkt: `
+            + due.map(j => j.id).join(', '));
+    }
+    process.exit(0);
+}
+
+// Nach dem Deploy: verpasste Jobs einsammeln. Muss VOR dem Leerlauf-Ausstieg
+// stehen – sonst würde ein nachzuholender Job nur dann starten, wenn zufällig im
+// selben Tick etwas anderes fällig ist.
+const carried = takePending(due, jobs);
+if (carried.length > 0) {
+    log(`↩ Nachholung nach Deploy: ${carried.map(j => j.id).join(', ')}`);
+    due.push(...carried);
 }
 
 if (due.length === 0) {

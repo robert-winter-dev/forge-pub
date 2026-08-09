@@ -28,7 +28,7 @@ import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition
          prunePortfolioHistory, prunePositionSnapshots, pruneRebalanceHistory,
          updatePositionCapital, updatePositionHodl, setPositionHwmBaseAdjustment,
          insertCapitalFlow, clearPositionSnapshots,
-         insertAdvisorDecision, pruneAdvisorDecisions } from '../lib/db.js';
+         insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
 import { calculateRange }  from '../lib/range.js';
 import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
@@ -188,6 +188,7 @@ function _ensureAutoCompoundEnabled(poolId) {
 
 let running = true;
 const db    = openDatabase();
+kvSet(db, 'bot_state', 'running');
 
 // ── Zentrale Preisdatenbank ──────────────────────────────────────────────────
 const PRICE_PAIR_MAP = { 'cbBTC/USDC': 'BTC/USDC' };
@@ -338,7 +339,7 @@ async function reconcilePositions(keypair, activePools) {
         // noch etwas zu verhindern (das Kapital steckt schon drin). Befund forge-pub1 2026-07-27.
         if (!isPoolEnabled(pool)) {
             try {
-                setPoolEnabled(pool.id, true);
+                setPoolEnabled(pool.id, true, 'Reconciliation: reale On-Chain-Position gefunden trotz Sperre – automatisch freigegeben');
                 console.log(`[bot] Reconciliation: Pool ${pool.id} war gesperrt (enabled=false) – automatisch freigegeben (echte Position vorhanden).`);
             } catch (err) {
                 console.error(`[bot] Reconciliation: setPoolEnabled fehlgeschlagen für ${pool.id}: ${err.message}`);
@@ -3086,8 +3087,14 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
 
 async function _takeSnapshot(pool, position, state, adapter) {
     try {
+        // Live-Preis aus state (bereits in diesem Zyklus on-chain abgefragt, wie beim
+        // Rebalancing-Check) statt aus pool_stats — die wird nur stündlich aktualisiert
+        // und bewertete die Position damit bis zu 1h nach jedem Rebalancing/Preissprung
+        // falsch (Fund 2026-08-07, SPCX/USDC: PnL-Sprung -59 statt korrekt +30 USDC,
+        // bis der stündliche pool_stats-Refresh nachzog). Fallback auf pool_stats nur
+        // falls state.currentPrice ausnahmsweise fehlt.
         const stats = getPoolStats(db, pool.id, 1);
-        const price = stats[0]?.price ?? 0;
+        const price = state?.currentPrice ?? stats[0]?.price ?? 0;
 
         // 1. Per-Pool-Snapshot (für "Mein Anteil", APR, IL je Pool im Dashboard)
         //    fees_pending_a/b in Token-Einheiten gespeichert → preisunabhängige APR-Berechnung
@@ -3706,10 +3713,20 @@ process.on('unhandledRejection', async (reason) => {
 
 // ─── SIGTERM-Handler ──────────────────────────────────────────────────────────
 
+// Letzter Export beim Herunterfahren (Fund 2026-08-07): syncDashboard() läuft
+// sonst NUR innerhalb der laufenden Haupt-Loop (alle EXPORT_INTERVAL_MS) — ein
+// gestoppter Bot exportiert dadurch nie wieder, das Dashboard zeigt beliebig
+// lange den letzten Stand VOR dem Stop (u.a. das neue botActive-Feld bliebe
+// veraltet). Bewusst NUR dieser einmalige Aufruf beim Shutdown, KEIN periodischer
+// Cron-Export nebenher — genau das verursachte früher eine Race-Condition auf
+// derselben data.json.tmp (siehe Kommentar in bin/run-hourly.sh). Ein einzelner
+// Aufruf exakt beim Beenden überschneidet sich mit nichts.
 process.on('SIGTERM', async () => {
     console.log('[bot] SIGTERM empfangen – fahre sauber herunter...');
     running = false;
+    kvSet(db, 'bot_state', 'offline');
     await notify.shutdown('SIGTERM').catch(() => {});
+    await syncDashboard(msg => console.log(`[bot] ${msg}`)).catch(() => {});
     db.close();
     process.exit(0);
 });
@@ -3717,7 +3734,9 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
     console.log('[bot] SIGINT empfangen – fahre sauber herunter...');
     running = false;
+    kvSet(db, 'bot_state', 'offline');
     await notify.shutdown('SIGINT').catch(() => {});
+    await syncDashboard(msg => console.log(`[bot] ${msg}`)).catch(() => {});
     db.close();
     process.exit(0);
 });

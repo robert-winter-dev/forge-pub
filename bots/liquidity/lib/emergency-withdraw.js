@@ -301,7 +301,7 @@ async function executeWithdraw() {
             // wie nach einem TVL-Voll-Exit.
             try {
                 setPoolActive(pos.pool_id, false);
-                setPoolEnabled(pos.pool_id, false);
+                setPoolEnabled(pos.pool_id, false, `Emergency-Exit: Position live geschlossen (TX ${closed.txHash.slice(0, 12)}…)`);
                 log(`${pos.pair}: Pool gesperrt (enabled=false) – manuelle Freigabe im Backend nötig, sonst keine Reinvestition`);
             } catch (err) {
                 log(`${pos.pair}: Pool-Sperre fehlgeschlagen (nicht kritisch): ${err.message}`);

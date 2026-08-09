@@ -208,6 +208,7 @@ async function main() {
             });
 
         } catch (err) {
+            if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
             console.error(`❌ ${err.message}`);
             allOk = false;
         }

@@ -1,75 +1,47 @@
-/* ── Größere Detail-Modals (Boxen zeigen nur angeschnittenen Text, Volltext
-   braucht mehr Platz zum Lesen als der settings.css-Standard von 480px) ──── */
+/* ── Größere Detail-Modals (Tabellenzeilen zeigen nur angeschnittenen Text,
+   Volltext braucht mehr Platz zum Lesen als der settings.css-Standard von 480px) ──── */
 #forge-modal-msg-system-detail  .forge-modal,
 #forge-modal-msg-premium-detail .forge-modal {
     max-width: 620px;
 }
-#forge-modal-msg-support-thread .forge-modal {
+#forge-modal-msg-support-thread .forge-modal,
+#forge-modal-msg-new .forge-modal {
     max-width: 700px;
     width: 94vw;
 }
 
+/* Klickbare gekürzte npub in "Von"/"Mit" (Thread-Modal) – kopiert beim Klick die
+   volle npub, siehe copyNpub()/peerLabelWithNpub() in message.js. */
+.msg-npub-copy {
+    cursor: pointer;
+    color: var(--text-muted);
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+}
+.msg-npub-copy:hover { color: var(--text); }
+
 /* ── Message Center – Layout ──────────────────────────────────────
-   Zwei Spalten: Menü (schmal) | Inhalt (Einstellungen-Panel ODER genau eines
-   der Vollbreite-Panels System/Premium/Support, siehe .mc-system-panel weiter
-   unten). Nutzt wie das Dashboard die volle Bildschirmbreite (settings.css
-   .main-content max-width:1400px), keine waagerechten Scrollbalken – siehe
-   min-width:0 auf den Grid-Kindern gegen Overflow durch lange Texte. */
+   Eine Spalte: genau ein Panel sichtbar (Einstellungen ODER eines der
+   Vollbreite-Panels System/Premium/Support, siehe .mc-system-panel weiter
+   unten). Die Navigation zwischen den Rubriken läuft seit 2026-08-08 nur
+   noch über das Hamburger-Menü (Gruppe "Message Center"), das frühere
+   eigene Spalten-Menü hier ist entfallen. Nutzt wie das Dashboard die volle
+   Bildschirmbreite (settings.css .main-content max-width:1400px), keine
+   waagerechten Scrollbalken – siehe min-width:0 gegen Overflow durch lange
+   Texte. */
 .main-content.mc-layout {
     display: grid;
-    grid-template-columns: 180px 1fr;
+    grid-template-columns: 1fr;
     gap: 1rem;
     align-items: start;
 }
 
-.mc-menu, .mc-detail { min-width: 0; }
-
-/* ── Spalte 1: Menü ───────────────────────────────────────────── */
-.mc-menu {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    position: sticky;
-    top: 1rem;
-}
-.mc-menu-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text-muted);
-    font-size: 0.88rem;
-    font-weight: 500;
-    text-align: left;
-    padding: 0.65rem 0.85rem;
-    cursor: pointer;
-}
-.mc-menu-item:hover { border-color: var(--accent); color: var(--text); }
-.mc-menu-item.active {
-    color: var(--accent);
-    border-color: rgba(0,212,255,0.4);
-    background: rgba(0,212,255,0.06);
-    font-weight: 600;
-}
-.mc-menu-badge {
-    background: var(--accent);
-    color: var(--bg);
-    font-size: 0.68rem;
-    font-weight: 700;
-    line-height: 1;
-    border-radius: 999px;
-    padding: 0.22rem 0.42rem;
-    flex-shrink: 0;
-}
-.mc-menu-badge.hidden { display: none; }
+.mc-detail { min-width: 0; }
 
 /* ── Einstellungen-Panel (mc-detail, einzige verbleibende Nutzerin) ────
-   Kein eigener Sticky/Scroll-Container mehr (bis 2026-07-30 hier vorhanden):
-   .mc-menu ist bereits sticky und bleibt beim Scrollen sichtbar, ein
-   zusätzliches sticky+max-height+overflow-y auf .mc-detail ragte durch die
+   Kein eigener Sticky/Scroll-Container (bis 2026-07-30 hier vorhanden, als es
+   noch ein sticky Spalten-Menü daneben gab): ein zusätzliches
+   sticky+max-height+overflow-y auf .mc-detail ragte durch die
    feste 6rem-Reserve (deckt Header + main-content-Padding nicht ganz) immer
    minimal über den Viewport hinaus → doppelter senkrechter Scrollbalken
    (äußere Seite + inneres Panel), besonders sichtbar bei kleiner Fensterhöhe. */
@@ -113,6 +85,22 @@
 }
 .msg-icon-btn:hover { color: var(--text); border-color: var(--accent); }
 .msg-icon-btn-accent { color: var(--accent); border-color: rgba(0,212,255,0.35); }
+
+/* "Neue Nachricht" (nur Support, rechtsbündig in der Toprow neben Titel+Suche,
+   seit 2026-08-08 als beschrifteter Button statt reines ✎-Icon – nur Support
+   kann eigene Nachrichten schreiben, System/Premium sind read-only Spiegel). */
+.msg-new-btn {
+    background: var(--bg-2);
+    border: 1px solid rgba(0,212,255,0.35);
+    color: var(--accent);
+    border-radius: 7px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.msg-new-btn:hover { border-color: var(--accent); background: rgba(0,212,255,0.08); }
 
 .msg-qr-hint {
     font-size: 0.78rem;
@@ -170,13 +158,62 @@
     resize: vertical;
     box-sizing: border-box;
 }
+/* Mind. doppelte Höhe (2026-08-09, Feedback: Feld war zu klein). */
+.msg-modal-field textarea { min-height: 9.6em; }
+
+/* Weitergeleitetes Zitat (Feedback 2026-08-09): eigener, rein lesender Block
+   statt Teil der editierbaren Textarea – links ein Akzentstrich wie ein
+   klassisches E-Mail-Zitat, damit auf den ersten Blick klar ist, dass hier
+   nichts mehr verändert werden kann. */
+.msg-quote-block {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 7px;
+    padding: 0.6rem 0.8rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+/* Höhenbegrenzung + eigener Scrollbereich NUR im Compose-Modal (dort ist die
+   Höhe fix, ein langes Zitat soll das Modal nicht sprengen) – im Nachrichten-
+   Thread NICHT anwenden: .msg-thread scrollt bereits selbst, ein zusätzlicher
+   innerer Scrollbereich ergab zwei Scrollbalken übereinander (Fund 2026-08-09,
+   Screenshot FORGE Master). */
+.msg-quote-block-compose { max-height: 220px; overflow-y: auto; }
+/* Dieselbe Zitat-Optik auch im Nachrichten-Thread (Empfänger UND eigene
+   Vorschau, siehe renderMessageBody() in message.js) – Label + Abstand zum
+   eigenen Kommentar, damit beides auf einen Blick auseinanderfällt statt wie
+   ein einziger Absatz zu wirken (Feedback 2026-08-09, Screenshot). */
+.msg-quote-label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-bottom: 0.3rem;
+}
+.msg-own-comment { margin-top: 0.6rem; }
+
+/* Support-Thread-Modal: NUR .msg-thread soll scrollen, nicht zusätzlich der
+   ganze Modal-Body (Fund 2026-08-09 – der vorherige Fix betraf nur den
+   verschachtelten Zitat-Block, hier ist die Ursache eine andere: die generische
+   .forge-modal-body-Regel aus settings.css hat für JEDES Modal ein eigenes
+   overflow-y:auto, unabhängig vom bereits vorhandenen inneren Scroll von
+   .msg-thread darunter – zwei übereinanderliegende Scrollbalken, sobald Von/Mit
+   + Thread + Antwortfeld zusammen die Modal-Höhe überschreiten). Scoped auf
+   dieses eine Modal (per ID), damit andere Modals ihr normales Body-Scrollen
+   behalten. */
+#forge-modal-msg-support-thread .forge-modal-body {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
 
 /* ── Nachrichten-Thread (Support-Detail) ─────────────────────────── */
 .msg-thread {
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-height: 0;
     gap: 0.5rem;
-    min-height: 200px;
     max-height: 55vh;
     overflow-y: auto;
     padding: 0.75rem;
@@ -203,6 +240,11 @@
     overflow-wrap: anywhere;
 }
 .msg-item-meta { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.2rem; }
+/* Ohne pre-wrap fielen mehrzeilige Nachrichten (z.B. ein weitergeleitetes Zitat
+   + FORWARD_DIVIDER) im Thread zu einem einzigen Absatz zusammen – die Zeilen-
+   umbrüche stecken im Text (siehe message.js), nur white-space:normal (Default)
+   ignoriert sie beim Rendern (Fund 2026-08-09, per Screenshot entdeckt). */
+.msg-item-text { white-space: pre-wrap; }
 
 .msg-item.msg-out { align-self: flex-end; background: var(--accent-glow); border: 1px solid rgba(0,212,255,0.3); }
 .msg-item.msg-in  { align-self: flex-start; }
@@ -278,13 +320,19 @@
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
+    justify-content: space-between;
     gap: 0.2rem 0.6rem;
     margin-bottom: 0.7rem;
     padding-bottom: 0.6rem;
     border-bottom: 1px solid var(--border);
 }
 .mc-detail-bot  { font-weight: 600; color: var(--text); font-size: 0.86rem; }
-.mc-detail-when { font-size: 0.78rem; color: var(--text-muted); }
+/* Pool-Name neben dem Bot-Namen (2026-08-08) – gleiche Zeile, etwas gedämpfter
+   als der Bot-Name, damit die Hierarchie Bot > Pool erkennbar bleibt. */
+.mc-detail-pool { font-weight: 400; color: var(--text-muted); }
+/* margin-left: auto statt nur justify-content am Container, damit die Uhrzeit
+   auch bei umbrechender Zeile (flex-wrap) verlässlich rechts landet. */
+.mc-detail-when { font-size: 0.78rem; color: var(--text-muted); margin-left: auto; }
 /* white-space: pre-line – die Meldungstexte enthalten bewusst gesetzte Zeilen-
    umbrüche (\n in notify.js), u.a. um die Handlungsaufforderung am Ende optisch
    vom Befund zu trennen. Ohne pre-line lief alles zu einem Absatz zusammen. */
@@ -377,14 +425,17 @@
 .msg-account-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .msg-account-btn:disabled:hover { border-color: var(--border); }
 
-/* ── System-/Premium-Nachrichten: eigenständiges Vollbreite-Panel ─────────
-   Ersetzt Spalte 2+3 (Liste + Detail) nur wenn "System" oder "Premium" aktiv
-   ist – die beiden werden per .mc-hidden-by-panel ausgeblendet (siehe
-   selectMenu() in message.js), Support/Einstellungen bleiben unverändert.
-   Zwei Instanzen dieser Klasse (#mcSystemPanel, #mcPremiumPanel) – nie beide
-   gleichzeitig sichtbar, siehe selectMenu(). */
+/* ── System-/Premium-/Support-Nachrichten: eigenständiges Vollbreite-Panel ──
+   Ersetzt das Einstellungen-Panel (.mc-detail), wenn "System"/"Premium"/
+   "Support" aktiv ist – die anderen werden per [hidden] bzw.
+   .mc-hidden-by-panel ausgeblendet (siehe selectMenu() in message.js). Drei
+   Instanzen dieser Klasse (#mcSystemPanel, #mcPremiumPanel, #mcSupportPanel)
+   – nie mehr als eine gleichzeitig sichtbar, siehe selectMenu().
+   Kein grid-column mehr nötig (bis 2026-08-08 hier auf "2 / 4" fest verdrahtet,
+   ein Relikt aus dem alten 2-Spalten-Grid mit dem seither entfallenen
+   Spalten-Menü – seit dem Umbau auf ein 1-Spalten-Grid schob das die Panels
+   in nicht mehr existierende Spalten, dadurch wirkte die Seite kaputt). */
 .mc-system-panel {
-    grid-column: 2 / 4;
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -397,16 +448,29 @@
 
 .mcs-toprow {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
 }
-.mcs-info {
+/* Rechte Seite der Toprow: Suchschlitz (+ bei Support "Neue Nachricht"
+   daneben) – Titel links, dieser Wrapper rechtsbündig (2026-08-08, Feedback:
+   Suchschlitz soll rechtsbündig stehen statt direkt neben dem Titel). */
+.mcs-toprow-right {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     flex-wrap: wrap;
+}
+/* Rubrik-Name (System/Support/Premium) – ersetzt seit 2026-08-08 die
+   Beschriftung, die vorher im jetzt entfallenen Spalten-Menü stand (siehe
+   .mct-table weiter unten). */
+.mcs-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0;
+    flex-shrink: 0;
 }
 /* Live-Volltextsuche statt fester Filterliste (2026-07-30) – funktioniert beim
    Tippen (debounce siehe message.js), System serverseitig, Premium/Support
@@ -429,73 +493,86 @@
     color: var(--text);
     line-height: 1.4;
 }
-.mcs-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 0.6rem;
-}
-/* Feste Höhe für alle Boxen (System/Premium/Support) – passt eine Nachricht
-   nicht komplett rein, wird sie angeschnitten (line-clamp unten). Volltext
-   gibt's per Klick im Modal.
-   92px → 110px (2026-07-30): dritte Zeile für Meldungs-Art nötig.
-   110px → 92px (2026-08-01): Meldungs-Art zog in die Kopfzeile (.mcs-box-level),
-   die dritte Zeile entfiel wieder – siehe messageDetailBody-Kommentar in message.js. */
-.mcs-box {
+/* ── Nachrichten-Tabelle (2026-08-08, ersetzt die vorherigen festen Boxen/Kacheln) ──
+   Gleiches Muster wie die Opportunity-Tabelle im Liquidity Bot: Kopfzeile +
+   Zeilen im selben CSS-Grid, Spalten füllen die volle Breite proportional
+   statt in einer festen Kachelgröße Platz zu verschenken. Thema bekommt den
+   größten Anteil (3fr) und schneidet per text-overflow:ellipsis ab statt eine
+   feste Zeichenzahl zu erzwingen – passt sich so automatisch an Fensterbreite
+   und Schriftgröße an. EINE einzige grid-template-columns-Regel für alle drei
+   Rubriken (kein Sonderfall mehr für Support, siehe Kommentar bei
+   supportRowHtml() in message.js) – Pflicht laut Feedback 2026-08-08: Thema/
+   Absender/Datum müssen in System/Premium/Support exakt gleich breit sein. */
+.mct-table {
     display: flex;
     flex-direction: column;
-    height: 92px;
-    background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 0.6rem 0.75rem;
-    cursor: pointer;
-    transition: border-color 0.15s;
     overflow: hidden;
-    overflow-wrap: anywhere;
 }
-.mcs-box:hover { border-color: var(--accent); }
-/* NUR ungelesen bekommt den farbigen Rand – Level (info/warn/error) wird jetzt
-   stattdessen im Modal-Titel als Badge angezeigt (siehe .mc-modal-level unten),
-   damit ein bereits gelesener Fehler nicht dauerhaft wie "neu" aussieht. */
-.mcs-box.unread { border-left: 3px solid var(--accent); }
-.mcs-box-head {
-    display: flex;
-    align-items: baseline;
-    gap: 0.4rem;
-    font-size: 0.8rem;
-    margin-bottom: 0.25rem;
-    flex-shrink: 0;
+.mct-header, .mct-row {
+    display: grid;
+    grid-template-columns: 3fr 1.3fr 1fr;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.55rem 0.75rem;
 }
-.mcs-box-sender { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
-.mcs-box-time { color: var(--text-muted); font-size: 0.7rem; white-space: nowrap; flex-shrink: 0; }
-/* Meldungs-Art in der Übersichtskachel (2026-07-30, in Kopfzeile verschoben 2026-08-01):
-   steht im Detail-Modal im Titel, war in der Liste aber gar nicht sichtbar – man musste
-   jede Kachel öffnen, um zu sehen ob es ein Fehler oder nur eine Info ist. Text statt
-   Farbe, weil Farbschwäche berücksichtigt werden muss (nicht entfernen). */
-.mcs-box-level {
+.mct-header {
     font-size: 0.68rem;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--text-muted);
-    white-space: nowrap;
-    flex-shrink: 0;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
 }
-.mcs-box-text {
-    font-size: 0.82rem;
-    color: var(--text-muted);
-    line-height: 1.45;
-    /* max-height statt flex:1 (2026-07-30): flex:1 ließ das Element auf die
-       gesamte Rest-Höhe der Box wachsen (mehr als 2 Zeilen hoch) – webkit-line-
-       clamp schneidet dann zwar Zeile 3+ inhaltlich ab, der zu hohe Rahmen
-       zeigte davon aber noch ein paar Pixel. Feste max-height = exakt 2 Zeilen
-       erzwingt den harten Schnitt. */
-    max-height: calc(1.45em * 2);
+/* Absender/Datum rechtsbündig (Feedback 2026-08-08), Thema bleibt linksbündig. */
+.mct-header > span:nth-child(2),
+.mct-header > span:nth-child(3) {
+    text-align: right;
+}
+.mct-row {
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 400;
+    transition: background 0.15s;
+}
+.mct-row:last-child { border-bottom: none; }
+.mct-row:hover { background: rgba(255,255,255,0.04); }
+/* NUR ungelesen bekommt den farbigen Rand + fette ganze Zeile (nicht nur der
+   Betreff, Feedback 2026-08-08) – Level (info/warn/error) steht zusätzlich als
+   Text-Badge vor dem Betreff (.mct-level), nie nur über Farbe
+   (Farbschwäche-Anforderung, nicht entfernen). */
+.mct-row.unread { border-left: 3px solid var(--accent); font-weight: 700; }
+.mct-row.unread .mct-subject { color: var(--text); }
+.mct-subject {
     overflow: hidden;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-muted);
+    min-width: 0;
 }
+.mct-level {
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin-right: 0.4rem;
+}
+/* Kein eigenes font-weight mehr (war vorher immer 600, unabhängig vom
+   Lesestatus) – Absender ist jetzt genauso normalgewichtig wie Thema/Datum,
+   fett wird die ganze Zeile nur noch über .mct-row.unread oben. */
+.mct-sender {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--text);
+    min-width: 0;
+}
+.mct-time { color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; text-align: right; }
 
 .mcs-bottomrow {
     display: flex;
@@ -530,15 +607,3 @@
     font-weight: 600;
 }
 
-/* ── Responsive: < 900px → Menü als waagerechte Reihe über dem Inhalt ──
-   Kein Schritt-basiertes Umschalten mehr nötig (seit dem Wegfall der
-   Kurzform-Liste, 2026-07-30): Menü ist immer sichtbar, darunter genau ein
-   Panel (Einstellungen ODER System/Premium/Support je nach [hidden]). */
-@media (max-width: 900px) {
-    .main-content.mc-layout { grid-template-columns: 1fr; }
-    .mc-menu {
-        flex-direction: row;
-        flex-wrap: wrap;
-        position: static;
-    }
-}

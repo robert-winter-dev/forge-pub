@@ -39,9 +39,19 @@ const DEFAULT_SLIPPAGE_BPS = 150;  // 1.5 % – einheitlich für alle Exit-Swaps
 const EXIT_SWAP_MAX_SLIPPAGE_PCT = 0.50;
 const EXIT_SWAP_MAX_CHUNKS       = 5;
 const EXIT_SWAP_CHUNK_DELAY_MS   = 5_000;
-// Unter diesem Wert (in Raw-Einheiten des Input-Tokens) wird kein Swap versucht.
-// Verhindert Jupiter-400-Fehler für Dust-Beträge (z.B. 1–1000 Lamport nach Reinvest).
-const MIN_SWAP_RAW               = 1_000_000; // ≙ 0,001 SOL / 0,001 ORE (je nach Decimals)
+// Unter diesem Wert (in Raw-Einheiten des Input-Tokens) wird nie ein Swap versucht –
+// echte Lamport-/Rundungsreste, für die sich nicht mal eine Jupiter-Quote lohnt.
+// Verhindert Jupiter-400-Fehler für Dust-Beträge (z.B. 1–100 Lamport nach Reinvest).
+const MIN_SWAP_RAW_ABSOLUTE      = 100;
+// Zwischen MIN_SWAP_RAW_ABSOLUTE und MIN_SWAP_RAW ist unklar, ob der Betrag Dust ist –
+// hängt vom Tokenpreis ab (z.B. hochpreisige RWA-Token wie SPCX mit wenig Decimals).
+// Vorher wurde hier pauschal anhand der Raw-Einheiten verworfen ("≙ 0,001 SOL"),
+// was für andere Token denselben Raw-Wert auf einen völlig anderen USD-Gegenwert
+// abbildet – ein SPCX-Rest von 0,67 Token (~95 USDC) galt so fälschlich als Dust
+// und blieb beim Trailing-Stop-Exit ungeswappt im Wallet liegen (Vorfall 2026-08-08,
+// Pool liq-spcx-usdc). Ab hier deshalb per Quote den tatsächlichen USD-Wert prüfen.
+const MIN_SWAP_RAW                = 1_000_000; // ≙ 0,001 SOL / 0,001 ORE (je nach Decimals)
+const MIN_SWAP_USDC               = 0.5;       // Dust-Schwelle in USD, analog cleanup.js DUST_SWAP_MIN_USDC
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -193,9 +203,30 @@ async function probeSlippage(token, totalAmount, logPrefix) {
  */
 async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label, logPrefix, slippageBps) {
     const fullRaw = Math.round(totalAmount * 10 ** token.decimals);
-    if (fullRaw < MIN_SWAP_RAW) {
+    if (fullRaw < MIN_SWAP_RAW_ABSOLUTE) {
         console.log(`${logPrefix} Swap ${label}: Betrag zu gering (${fullRaw} Raw-Units) – übersprungen`);
         return { amountOut: 0 };
+    }
+    if (fullRaw < MIN_SWAP_RAW) {
+        // Raw-Einheiten allein sagen nichts über den USD-Wert aus (Decimals/Preis
+        // variieren pro Token) – per Quote den tatsächlichen Gegenwert prüfen,
+        // statt pauschal als Dust zu verwerfen.
+        try {
+            const quote    = await quoteTokens({
+                inputMint: token.mint, outputMint: USDC_MINT,
+                inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
+                amount: totalAmount,
+            });
+            const usdValue = quote.outAmountRaw / 10 ** USDC_DECIMALS;
+            if (usdValue < MIN_SWAP_USDC) {
+                console.log(`${logPrefix} Swap ${label}: ~${usdValue.toFixed(4)} USDC (${fullRaw} Raw-Units) – Dust, übersprungen`);
+                return { amountOut: 0 };
+            }
+            console.log(`${logPrefix} Swap ${label}: ${fullRaw} Raw-Units, aber ~${usdValue.toFixed(2)} USDC wert – Swap wird trotzdem ausgeführt`);
+        } catch (err) {
+            console.warn(`${logPrefix} Swap ${label}: Quote fehlgeschlagen (${err.message}) – als Dust behandelt, übersprungen`);
+            return { amountOut: 0 };
+        }
     }
 
     // Slippage messen und ggf. Chunk-Anzahl bestimmen

@@ -59,12 +59,15 @@ const MAX_THRESHOLD_PCT     = 90;
  * 2026-08-01 bei PUMP/SOL (forge-pub1): Pool lief nach Reaktivierung ohne Stop.
  * Ein fehlender Eintrag darf nie „keine Absicherung" bedeuten.
  */
+const DEFAULT_COOLDOWN_HOURS = 1;
+
 const FALLBACK_TS_CONFIG = {
     enabled:         true,
     thresholdPct:    DEFAULT_THRESHOLD_PCT,
     minimumValueUsd: null,
     autoSwapToUSDC:  true,
     sendTo:          '',
+    cooldownHours:   DEFAULT_COOLDOWN_HOURS,
 };
 
 // Nur einmal pro Pool und Prozesslaufzeit loggen – der Check läuft in jedem Zyklus.
@@ -72,7 +75,7 @@ const _fallbackLogged = new Set();
 
 // ─── Settings-DB lesen ────────────────────────────────────────────────────────
 
-function loadTsConfig(poolId) {
+export function loadTsConfig(poolId) {
     try {
         const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
         const row = sdb.prepare(
@@ -81,7 +84,9 @@ function loadTsConfig(poolId) {
         sdb.close();
 
         const ts = row ? (JSON.parse(row.settings)?.trailingStop ?? null) : null;
-        if (ts) return ts;
+        // cooldownHours kam erst nachträglich dazu (2026-08-08) – Alt-Einträge ohne
+        // dieses Feld sollen trotzdem den Default-Cooldown bekommen, nicht 0/ungeschützt.
+        if (ts) return { ...ts, cooldownHours: Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : DEFAULT_COOLDOWN_HOURS };
 
         if (!_fallbackLogged.has(poolId)) {
             _fallbackLogged.add(poolId);

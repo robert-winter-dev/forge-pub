@@ -217,8 +217,12 @@ async function main() {
         // Loopscale: Server hat TX bereits co-signiert → Blockhash nicht überschreiben
         txSig = await signAndSend(base64Tx, keypair, { preserveBlockhash: isLoopscale });
     } catch (err) {
-        if (jsonMode) jout({ ok: false, error: `TX fehlgeschlagen: ${err.message}` });
-        else console.error(`\n  ❌ TX fehlgeschlagen: ${err.message}`);
+        // Siehe withdraw.js: err.technicalDetail = err.message ist bereits vollständig
+        // formuliert (aus lib/wallet.js simulate()), kein zusätzlicher Präfix davor.
+        if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
+        const userMsg = err.technicalDetail ? err.message : `TX fehlgeschlagen: ${err.message}`;
+        if (jsonMode) jout({ ok: false, error: userMsg });
+        else console.error(`\n  ❌ ${userMsg}`);
         process.exit(1);
     }
 

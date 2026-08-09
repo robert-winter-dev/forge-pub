@@ -9,13 +9,28 @@
  * Category wird aus dem Nachrichtentext erkannt.
  */
 
+import { existsSync }   from 'fs';
+import path             from 'path';
 import { config }       from './config.js';
 import { getBotConfig } from '../../../lib/bot-registry.js';
 import { FORGE_TZ }     from '../../../core/config.js';
+import { PATHS }        from '../../../config/paths.js';
 
 const NEXUS_URL       = 'http://127.0.0.1:3100';
 const { displayName: BOT_DISPLAY_NAME } = getBotConfig('lending');
 const NEXUS_BOT_ID    = config.botId ?? 'lending';
+const UPDATE_SUPPRESS_FLAG = path.join(PATHS.data, 'update-notify-suppress');
+
+/**
+ * Während eines FORGE.pub-Updates gesetzt (bin/setup-lib/common.sh
+ * update_notify_suppress_on) – do_update() sendet am Ende EINE Zusammenfassung
+ * statt der Einzel-"gestartet"/"gestoppt"-Meldungen jedes neu gestarteten Bots
+ * (Fund 2026-08-09). Ein Crash-Restart außerhalb eines Updates hat den Marker
+ * nicht gesetzt und meldet sich weiterhin wie bisher.
+ */
+export function isUpdateInProgress() {
+    return existsSync(UPDATE_SUPPRESS_FLAG);
+}
 
 function log(msg) {
     const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
@@ -52,9 +67,9 @@ function detectCategory(text) {
 // Reihenfolge zählt: die erste passende Regel gewinnt, spezifisch vor allgemein.
 const ACTION_RULES = [
     [/SOL-Reserve kritisch/i,
-        'Bitte Wallet mit USDC oder SOL aufladen – ohne SOL kann der Bot keine Transaktionen mehr senden.'],
+        'Bitte Wallet mit mindestens 0,15 SOL aufladen – ohne SOL kann der Bot keine Transaktionen mehr senden.'],
     [/SOL-Topup fehlgeschlagen/i,
-        'Der Bot versucht es im nächsten Zyklus erneut. Bleibt die Meldung, bitte Wallet manuell mit SOL aufladen.'],
+        'Der Bot versucht es im nächsten Zyklus erneut. Bleibt die Meldung, bitte Wallet manuell mit mindestens 0,15 SOL aufladen.'],
     [/SOL-Topup ausgeführt/i,
         'Es ist nichts zu tun, der Bot hat sich selbst versorgt.'],
     [/Auto-Exit ausgeführt/i,

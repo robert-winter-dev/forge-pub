@@ -240,8 +240,15 @@ async function main() {
             { preserveBlockhash: withdrawResult.preserveBlockhash ?? false });
         if (!jsonMode) console.log('     → ✓');
     } catch (err) {
-        if (jsonMode) jout({ ok: false, error: `TX fehlgeschlagen: ${err.message}` });
-        else console.error(`\n  ❌ TX fehlgeschlagen: ${err.message}`);
+        // Technische Rohdaten (Solana-Simulation, falls vorhanden) immer ins Log –
+        // der Nutzer bekommt nur err.message (siehe lib/wallet.js simulate()).
+        // err.technicalDetail = simulate() hat bereits eine vollständige, nutzerfreundliche
+        // Meldung als err.message gesetzt (siehe lib/wallet.js) – kein "TX fehlgeschlagen:"
+        // davorsetzen, das würde den beruhigenden Ton wieder technisch wirken lassen.
+        if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
+        const userMsg = err.technicalDetail ? err.message : `TX fehlgeschlagen: ${err.message}`;
+        if (jsonMode) jout({ ok: false, error: userMsg });
+        else console.error(`\n  ❌ ${userMsg}`);
         process.exit(1);
     }
 

@@ -5,22 +5,25 @@
  *
  * Verwendung:
  *   import { initNav } from '../../js/nav.js';
- *   initNav({ current: 'liquidity' });
+ *   initNav({ current: 'liquidity-dashboard' });
  *
- * IDs: 'overview' | 'lending' | 'liquidity'
+ * Struktur (flache Top-Level-Liste, seit 2026-08-08 — löst das ursprüngliche
+ * Problem, dass Bot-Dashboard und Bot-Settings an ganz unterschiedlichen
+ * Stellen im Menü standen):
+ *   Overview        > (eigener Link, keine Gruppe)
+ *   Liquidity Bot   > Dashboard, Settings
+ *   Lending Bot     > Dashboard, Settings
+ *   Message Center  > System, Support, Premium, Settings
+ *   System          > Health Monitor, SSL-Zertifikat, Settings
+ * IDs siehe buildNavTree(). Von den vier Gruppen (Liquidity Bot/Lending Bot/
+ * Message Center/System) ist per Default nur eine aufgeklappt (Accordion,
+ * siehe initNav()) – Öffnen einer anderen schließt die bisher offene.
  *
  * LAN-Erkennung: Wird die Seite über eine private IP aufgerufen
- * (192.168.x.x / 10.x.x.x / 172.16-31.x.x), erscheinen zusätzlich
- * die Links „Settings" und „SSL-Zertifikat" unter dem Health Monitor.
+ * (192.168.x.x / 10.x.x.x / 172.16-31.x.x), erscheinen zusätzlich die
+ * Bot-Settings-Links, die komplette Message-Center-Gruppe sowie
+ * SSL-Zertifikat/Settings unter System.
  */
-
-const NAV_ITEMS = [
-    { id: 'overview', label: 'Dashboard',           href: '/forge/' },
-    { id: 'liquidity', label: 'Liquidity Bot',  href: '/forge/liquidity/',  sub: true },
-    { id: 'lending',  label: 'Lending Bot',          href: '/forge/lending/',            sub: true },
-    { sep: true },
-    { id: 'health',   label: 'Health Monitor',      href: '/forge/health.html' },
-];
 
 /** Gibt true zurück wenn der Aufruf aus dem lokalen Netz kommt. */
 function isLanAccess() {
@@ -30,17 +33,51 @@ function isLanAccess() {
         || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
 }
 
-/** Baut die LAN-spezifischen Nav-Items dynamisch (IP aus aktuellem Hostname). */
-function lanItems() {
-    const ip = window.location.hostname;
-    return [
-        { id: 'message',          label: 'Message Center',  href: `https://${ip}:3200/message.html` },
-        { sep: true },
-        { id: 'settings',          label: 'Settings',       href: `https://${ip}:3200/` },
-        { id: 'settings-liquidity', label: 'Liquidity Bot', href: `https://${ip}:3200/#liquidity`, sub: true },
-        { id: 'settings-lending',  label: 'Lending Bot',     href: `https://${ip}:3200/#lending`,  sub: true },
-        { id: 'ssl-cert',          label: 'SSL-Zertifikat',  href: `http://${ip}:3201/` },
-    ];
+/** Baut den Nav-Baum. LAN-only-Zweige/-Items werden nur im lokalen Netz erzeugt. */
+function buildNavTree() {
+    const lan = isLanAccess();
+    const ip  = window.location.hostname;
+
+    const overview = { id: 'overview', label: 'Overview', href: '/forge/' };
+
+    const liquidity = {
+        id: 'liquidity', label: 'Liquidity Bot', group: true, items: [
+            { id: 'liquidity-dashboard', label: 'Dashboard', href: '/forge/liquidity/' },
+            ...(lan ? [{ id: 'settings-liquidity', label: 'Settings', href: `https://${ip}:3200/#liquidity` }] : []),
+        ],
+    };
+    const lending = {
+        id: 'lending', label: 'Lending Bot', group: true, items: [
+            { id: 'lending-dashboard', label: 'Dashboard', href: '/forge/lending/' },
+            ...(lan ? [{ id: 'settings-lending', label: 'Settings', href: `https://${ip}:3200/#lending` }] : []),
+        ],
+    };
+
+    // Message Center ist komplett LAN-only (läuft auf bots/settings, Port 3200).
+    // System/Support/Premium reservieren einen Badge-Slot (hasBadge) für die
+    // Ungelesen-Zähler, die früher im jetzt entfallenen Spalten-Menü von
+    // message.html standen – message.js aktualisiert sie live per setNavBadge().
+    const messageCenter = lan ? {
+        id: 'message', label: 'Message Center', group: true, items: [
+            { id: 'message-system',       label: 'System',   href: `https://${ip}:3200/message.html#system`,   hasBadge: true },
+            { id: 'message-support',      label: 'Support',  href: `https://${ip}:3200/message.html#support`,  hasBadge: true },
+            { id: 'message-premium',      label: 'Premium',  href: `https://${ip}:3200/message.html#premium`,  hasBadge: true },
+            { id: 'message-einstellungen', label: 'Settings', href: `https://${ip}:3200/message.html#einstellungen` },
+        ],
+    } : null;
+
+    const system = {
+        id: 'system', label: 'System', group: true, items: [
+            { id: 'health', label: 'Health Monitor', href: '/forge/health.html' },
+            // Port 3201 ist bewusst reines HTTP (kein TLS-Zertifikat gebunden, siehe
+            // bots/settings/server.js) – https:// hier würde am TLS-Handshake scheitern.
+            ...(lan ? [{ id: 'ssl-cert', label: 'SSL-Zertifikat', href: `http://${ip}:3201/` }] : []),
+            // Noch keine eigene Seite (Stand 2026-08-08) — Platzhalter, bis die System-Settings-Seite existiert.
+            ...(lan ? [{ id: 'system-settings', label: 'Settings', href: null }] : []),
+        ],
+    };
+
+    return [overview, liquidity, lending, messageCenter, system].filter(Boolean);
 }
 
 const CSS = `
@@ -106,11 +143,29 @@ const CSS = `
     padding: 16px;
     border-bottom: 1px solid var(--border, #475569);
 }
-.nav-panel-title {
+.nav-panel-title-group {
     flex: 1;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+}
+.nav-panel-title {
     font-weight: 600;
     font-size: 0.95rem;
     color: var(--text, #f1f5f9);
+}
+.nav-panel-version {
+    font-size: 0.7rem;
+    color: var(--text-muted, #94a3b8);
+}
+.nav-panel-version-pulse {
+    animation: nav-version-pulse 2.2s ease-in-out infinite;
+}
+@keyframes nav-version-pulse {
+    0%, 100% { color: var(--text-muted, #94a3b8); }
+    50%      { color: var(--accent, #00d4ff); }
 }
 .nav-panel-close {
     background: none;
@@ -164,6 +219,10 @@ a.nav-item:hover { color: var(--text, #f1f5f9); }
 .nav-item.nav-sub {
     padding-left: 32px;
 }
+.nav-item.nav-subsub {
+    padding-left: 44px;
+    font-size: 0.84rem;
+}
 .nav-item.nav-disabled:hover {
     background: transparent;
 }
@@ -171,15 +230,18 @@ a.nav-item:hover { color: var(--text, #f1f5f9); }
 .nav-label { flex: 1; }
 
 .nav-badge {
-    font-size: 0.62rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1;
     letter-spacing: 0.03em;
-    color: var(--text-muted, #94a3b8);
-    background: rgba(255,255,255,0.06);
-    border: 1px solid var(--border, #475569);
-    border-radius: 4px;
-    padding: 1px 6px;
+    color: var(--bg, #0f172a);
+    background: var(--accent, #00d4ff);
+    border-radius: 999px;
+    padding: 2px 7px;
     white-space: nowrap;
+    flex-shrink: 0;
 }
+.nav-badge.hidden { display: none; }
 
 .nav-separator {
     height: 1px;
@@ -228,8 +290,8 @@ a.nav-item:hover { color: var(--text, #f1f5f9); }
     max-height: 0;
     transition: max-height 0.22s ease;
 }
-.nav-group.open .nav-group-body {
-    max-height: 300px;
+.nav-group.open > .nav-group-body {
+    max-height: 700px;
 }
 
 /* ── Logo: im Header verstecken (lebt jetzt im Nav-Panel) */
@@ -290,6 +352,37 @@ a.nav-item:hover { color: var(--text, #f1f5f9); }
 }
 `;
 
+/**
+ * Aktualisiert den Badge-Slot eines Nav-Items (muss beim Bau des Baums mit
+ * hasBadge:true angelegt worden sein, siehe renderLeaf()). Kein Fehler, wenn
+ * initNav() noch nicht lief oder das Panel gerade geschlossen ist – der Slot
+ * existiert dann einfach noch nicht im DOM, der Aufrufer muss das nicht prüfen.
+ *
+ * @param {string} id  Item-ID ohne "nav-badge-"-Präfix, z.B. 'message-system'.
+ * @param {number} n   Ungelesen-Anzahl; 0/falsy versteckt den Badge wieder.
+ */
+export function setNavBadge(id, n) {
+    const el = document.getElementById(`nav-badge-${id}`);
+    if (!el) return;
+    el.textContent = n > 99 ? '99+' : String(n);
+    el.classList.toggle('hidden', !n);
+}
+
+/**
+ * Verschiebt die "Du bist hier"-Markierung auf ein anderes Item, ohne das
+ * Panel neu zu bauen – für Seiten mit In-Page-Navigation ohne Reload (z.B.
+ * message.html, das per hashchange zwischen System/Support/Premium/
+ * Einstellungen wechselt, aber initNav() nur einmal beim Laden aufruft).
+ * Kein Fehler, wenn das Panel gerade nicht existiert/geschlossen ist.
+ *
+ * @param {string} id  Item- oder Gruppen-ID, z.B. 'message-support'.
+ */
+export function setNavCurrent(id) {
+    document.querySelectorAll('.nav-panel [data-nav-id]').forEach(el => {
+        el.classList.toggle('nav-current', el.dataset.navId === id);
+    });
+}
+
 export function initNav({ current = '', logout = '' } = {}) {
     // CSS einmalig injizieren
     if (!document.getElementById('forge-nav-css')) {
@@ -321,84 +414,74 @@ export function initNav({ current = '', logout = '' } = {}) {
     const panel = document.createElement('div');
     panel.className = 'nav-panel';
 
-    const items = isLanAccess() ? [...NAV_ITEMS, ...lanItems()] : NAV_ITEMS;
+    const tree = buildNavTree();
 
-    /** Rendert ein einzelnes Nav-Item als HTML-String. */
-    function renderItem(item) {
+    /** Rendert ein einzelnes Blatt-Item (level 0 = Top, 1 = eingerückt, 2 = doppelt eingerückt). */
+    function renderLeaf(item, level) {
         const isCurrent  = item.id === current;
         const isDisabled = !item.href;
         const cls = ['nav-item',
-            item.sub   && 'nav-sub',
+            level === 1 && 'nav-sub',
+            level === 2 && 'nav-subsub',
             isCurrent  && 'nav-current',
             isDisabled && 'nav-disabled',
         ].filter(Boolean).join(' ');
-        const badge = item.badge
-            ? `<span class="nav-badge">${item.badge}</span>`
-            : '';
-        if (item.href && !isCurrent) {
-            return `<a href="${item.href}" class="${cls}"><span class="nav-label">${item.label}</span>${badge}</a>`;
+        // item.hasBadge reserviert einen leeren, versteckten Badge-Slot (fester DOM-Id
+        // "nav-badge-<id>"), den der Aufrufer später per setNavBadge() live befüllt
+        // (Zähler stehen erst nach einem async Fetch fest, initNav() rendert synchron).
+        const badge = item.hasBadge
+            ? `<span class="nav-badge hidden" id="nav-badge-${item.id}"></span>`
+            : (item.badge ? `<span class="nav-badge">${item.badge}</span>` : '');
+        // Auch als aktuell markierte Items bleiben ein echtes <a> (nicht mehr wie bis
+        // 2026-08-08 auf <div> umgeschaltet) – nötig, damit setNavCurrent() die
+        // Markierung später per Klassenwechsel verschieben kann, ohne den DOM-Knoten
+        // neu zu bauen (Seiten mit In-Page-Hash-Navigation wie message.html rufen
+        // initNav() nur einmal auf, current ändert sich danach aber mehrfach).
+        if (item.href) {
+            return `<a href="${item.href}" class="${cls}" data-nav-id="${item.id}"><span class="nav-label">${item.label}</span>${badge}</a>`;
         }
-        return `<div class="${cls}"><span class="nav-label">${item.label}</span>${badge}</div>`;
+        return `<div class="${cls}" data-nav-id="${item.id}"><span class="nav-label">${item.label}</span>${badge}</div>`;
     }
 
-    /**
-     * Baut die Nav-HTML mit Accordion-Gruppen.
-     * Ein Nicht-Sub-Item gefolgt von Sub-Items wird zu einer Gruppe zusammengefasst.
-     * Nur eine Gruppe ist gleichzeitig offen (Accordion).
-     * Initial offen: die Gruppe, die das aktuelle Item enthält; sonst die erste Gruppe.
-     */
-    function buildNavHtml(items) {
-        // Items in Gruppen und Einzelitems aufteilen
-        const segments = [];
-        let i = 0;
-        while (i < items.length) {
-            const item = items[i];
-            if (item.sep) { segments.push({ type: 'sep' }); i++; continue; }
-            if (!item.sub) {
-                const subs = [];
-                let j = i + 1;
-                while (j < items.length && !items[j].sep && items[j].sub) {
-                    subs.push(items[j]);
-                    j++;
-                }
-                if (subs.length > 0) {
-                    segments.push({ type: 'group', header: item, subs });
-                    i = j;
-                } else {
-                    segments.push({ type: 'item', item });
-                    i++;
-                }
-            } else {
-                segments.push({ type: 'item', item });
-                i++;
-            }
-        }
-
-        // Alle Gruppen immer offen
-        const groups = segments.filter(s => s.type === 'group');
-        const openGroupIds = new Set(groups.map(g => g.header.id));
-
-        return segments.map(seg => {
-            if (seg.type === 'sep')  return '<div class="nav-separator"></div>';
-            if (seg.type === 'item') return renderItem(seg.item);
-            // Gruppe
-            const { header, subs } = seg;
-            const isOpen = openGroupIds.has(header.id);
-            return `<div class="nav-group${isOpen ? ' open' : ''}" data-group="${header.id}">
-                <div class="nav-group-header">
-                    ${renderItem(header)}
-                    <button class="nav-group-toggle" aria-label="Erweitern/Einklappen">
-                        <i class="nav-chevron">›</i>
-                    </button>
-                </div>
-                <div class="nav-group-body">
-                    ${subs.map(s => renderItem(s)).join('')}
-                </div>
-            </div>`;
-        }).join('');
+    /** Prüft rekursiv, ob current irgendwo unterhalb dieses Knotens liegt. */
+    function containsCurrent(node) {
+        if (node.id === current) return true;
+        return node.group ? node.items.some(containsCurrent) : false;
     }
 
-    const itemsHtml = buildNavHtml(items);
+    // Von den vier Top-Level-Gruppen (Liquidity Bot/Lending Bot/Message Center/System)
+    // ist per Default nur eine offen: die, die die aktuelle Seite enthält – sonst die
+    // erste Gruppe. "Overview" ist bewusst kein Gruppen-Header mehr, sondern ein
+    // normaler Link auf gleicher Ebene (2026-08-08, eine Hierarchiestufe weniger).
+    const topGroups = tree.filter(n => n.group);
+    const defaultOpenId = (topGroups.find(containsCurrent) ?? topGroups[0])?.id;
+
+    /** Rendert eine Accordion-Gruppe (rekursiv, für verschachtelte Untergruppen). */
+    function renderGroup(group, level) {
+        const isOpen = level === 0 ? group.id === defaultOpenId : true;
+        const headerCls = ['nav-item',
+            level === 1 && 'nav-sub',
+            group.id === current && 'nav-current',
+        ].filter(Boolean).join(' ');
+        const bodyHtml = group.items
+            .map(it => it.group ? renderGroup(it, level + 1) : renderLeaf(it, level + 1))
+            .join('');
+        return `<div class="nav-group${isOpen ? ' open' : ''}" data-group="${group.id}">
+            <div class="nav-group-header">
+                <div class="${headerCls}" data-nav-id="${group.id}"><span class="nav-label">${group.label}</span></div>
+                <button class="nav-group-toggle" aria-label="Erweitern/Einklappen">
+                    <i class="nav-chevron">›</i>
+                </button>
+            </div>
+            <div class="nav-group-body">${bodyHtml}</div>
+        </div>`;
+    }
+
+    function buildNavHtml(nodes) {
+        return nodes.map(node => node.group ? renderGroup(node, 0) : renderLeaf(node, 0)).join('');
+    }
+
+    const itemsHtml = buildNavHtml(tree);
 
     // Logo-Bild aus dem Header lesen
     const logoImg = headerLogo?.querySelector('img');
@@ -415,7 +498,10 @@ export function initNav({ current = '', logout = '' } = {}) {
 
     panel.innerHTML = `
         <div class="nav-panel-header">
-            ${logoHtml}<span class="nav-panel-title">FORGE</span>
+            ${logoHtml}
+            <span class="nav-panel-title-group">
+                <span class="nav-panel-title">FORGE public</span><span class="nav-panel-version" id="navPanelVersion"></span>
+            </span>
             <button class="nav-panel-close">&#10005;</button>
         </div>
         <nav class="nav-panel-body">${itemsHtml}</nav>
@@ -423,12 +509,56 @@ export function initNav({ current = '', logout = '' } = {}) {
 
     document.body.appendChild(panel);
 
-    // Gruppen unabhängig ein-/ausklappen (kein Accordion)
-    panel.querySelectorAll('.nav-group-toggle').forEach(toggleBtn => {
-        toggleBtn.addEventListener('click', e => {
+    // Installierte FORGE.pub-Artefakt-Version anzeigen (nur auf einer per setup.sh
+    // installierten Fork-Instanz vorhanden, siehe tools/pub-export/build-artifact.js →
+    // html/version.json; auf dem Master gibt es kein Artefakt, fetch bleibt dann still
+    // erfolglos und das Feld bleibt leer statt einen Fehler zu zeigen).
+    fetch('/forge/version.json', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(v => {
+            if (v?.version) {
+                const el = document.getElementById('navPanelVersion');
+                if (el) el.textContent = `v${v.version}`;
+            }
+        })
+        .catch(() => {});
+
+    // Sanftes Pulsieren der Versionsnummer, wenn bin/update-check.js ein geprüftes,
+    // noch nicht eingespieltes Update gefunden hat — bewusst nur sichtbar, wenn das
+    // Nav-Panel ohnehin geöffnet ist, kein aufdringlicher globaler Hinweis. Relative
+    // API-Route, existiert nur wo bots/settings läuft
+    // (Fork: dieselbe Origin wie /forge/, Master: andere Origin → 404, still
+    // ignoriert, kein Fehler sichtbar — dort läuft update-check.js ohnehin nie).
+    fetch('/api/update/status', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(s => {
+            if (s?.available) {
+                document.getElementById('navPanelVersion')?.classList.add('nav-panel-version-pulse');
+            }
+        })
+        .catch(() => {});
+
+    // Top-Level-Gruppen (direkte Kinder von .nav-panel-body) sind ein echtes Accordion:
+    // nur eine gleichzeitig offen. Verschachtelte Untergruppen bleiben unabhängig
+    // voneinander umschaltbar, ohne Geschwister zu schließen.
+    //
+    // Klick-Ziel ist die ganze .nav-group-header-Zeile, nicht nur der 40px breite
+    // Chevron-Button (Bug 2026-08-08: Label sah per CSS-cursor klickbar aus, reagierte
+    // aber nicht – nur der schmale Pfeil hatte einen Listener).
+    const navPanelBody = panel.querySelector('.nav-panel-body');
+    panel.querySelectorAll('.nav-group-header').forEach(header => {
+        header.addEventListener('click', e => {
             e.stopPropagation();
             e.preventDefault();
-            toggleBtn.closest('.nav-group').classList.toggle('open');
+            const group = header.closest('.nav-group');
+            const isTopLevel = group.parentElement === navPanelBody;
+            const willOpen = !group.classList.contains('open');
+            if (isTopLevel && willOpen) {
+                navPanelBody.querySelectorAll(':scope > .nav-group.open').forEach(g => {
+                    if (g !== group) g.classList.remove('open');
+                });
+            }
+            group.classList.toggle('open');
         });
     });
 
@@ -439,6 +569,19 @@ export function initNav({ current = '', logout = '' } = {}) {
     btn.addEventListener('click', () => panel.classList.contains('open') ? close() : open());
     panel.querySelector('.nav-panel-close').addEventListener('click', close);
     overlay.addEventListener('click', close);
+
+    // Klick auf einen echten Nav-Link schließt das Panel sofort (Bug 2026-08-08:
+    // blieb offen, bis man daneben klickte). Betrifft nur <a>-Items, nicht die
+    // reinen Gruppen-Header (deren eigener Klick-Handler oben stoppt die
+    // Propagation ohnehin schon, damit Auf-/Zuklappen das Panel nicht schließt).
+    // Klick auf das bereits aktuelle Item navigiert nicht neu (kein Sinn, würde
+    // nur einen unnötigen vollen Reload auslösen), schließt das Panel aber trotzdem.
+    panel.addEventListener('click', e => {
+        const link = e.target.closest('a.nav-item');
+        if (!link) return;
+        if (link.classList.contains('nav-current')) e.preventDefault();
+        close();
+    });
 
     // Escape schließt das Menü
     document.addEventListener('keydown', e => {
@@ -460,6 +603,8 @@ export function initNav({ current = '', logout = '' } = {}) {
  * Findet automatisch #lastUpdate (Sub-Dashboards) oder #last-update (Übersichtsseite).
  *
  * @param {number|string|null} ts  Unix-Timestamp (ms), ISO-String oder null → "Kein Signal"
+ * @param {{disabled?: boolean}} [opts]  disabled:true → "Bots deaktiviert" statt Zeitstempel
+ *   (bewusst gestoppte Bots, z.B. forge-pub2-Testbetrieb — kein Fehlerzustand, daher eigene Farbe)
  */
 /**
  * Initialisiert den Footer mit einheitlichem Zweizeiler.
@@ -485,10 +630,16 @@ export function initFooter({ botName } = {}) {
         </div>`;
 }
 
-export function setLastUpdate(ts) {
+export function setLastUpdate(ts, { disabled = false } = {}) {
     const el = document.getElementById('lastUpdate')
             ?? document.getElementById('last-update');
     if (!el) return;
+
+    if (disabled) {
+        el.textContent = 'Bots deaktiviert';
+        el.className   = 'last-update disabled';
+        return;
+    }
 
     const tsMs = ts
         ? (typeof ts === 'number' ? ts : new Date(ts).getTime())

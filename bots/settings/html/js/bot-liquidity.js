@@ -10,7 +10,7 @@
  */
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
-import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260731c';
+import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 const SVC_ID = 'forge-liquiditybot';
@@ -174,6 +174,12 @@ function _premiumTabPanelHtml(status) {
                 Deaktivieren
             </button>
         </div>
+        <p style="margin:0.5rem 0 0;font-size:0.78rem;color:var(--text-muted);">
+            Voraussetzung: die aktuelle Version von FORGE.pub. Bei einer veralteten Version
+            wird der Premium Service automatisch deaktiviert. Wird der Liquidity Bot manuell
+            gestoppt, wird die automatische Zahlung mit deaktiviert (Premium liefert Daten
+            speziell für diesen Bot).
+        </p>
         <div class="modal-feedback" id="premium-modal-feedback"></div>`;
 }
 
@@ -470,7 +476,7 @@ async function _renderService(el) {
                     </td>
                 </tr>
                 <tr>
-                    <td class="wat-label">Premium &#128081;</td>
+                    <td class="wat-label">Premium &#128296;</td>
                     <td class="wat-info">
                         <span class="key-status" id="liquiditybot-premium-text">laden…</span>
                     </td>
@@ -508,7 +514,7 @@ function _openBotControlModal() {
             </div>
             <div class="bcm-row">
                 <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-stop">&#9632; Stop</button>
-                <span class="bcm-hint">Stoppt den Bot vollständig. Offene Positionen bleiben unverändert bestehen.</span>
+                <span class="bcm-hint">Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.</span>
             </div>
             <div class="bcm-row">
                 <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-restart">&#8635; Restart</button>
@@ -729,14 +735,52 @@ function _wireManuellTab(modalEl, mid, wrap) {
 }
 
 // ── Tab "Bester Pool": Ranking-Modus (oder Deaktiviert) konfigurieren ────────
-function _bestPoolHtml(bestPool, bestScore, bestName, threshold) {
+
+/**
+ * Pools, die gerade im Cleanup-Cooldown eines Risk-Management-Exits (Trailing Stop,
+ * TVL-Schutz oder Score-Limit) stecken (siehe bots/liquidity/bin/cleanup.js
+ * `_loadCleanupCooldownBlockedPools`), dürfen hier nicht als "aktuell bester Pool"
+ * auftauchen — sonst zeigt das Modal einen Kandidaten, den der Bot beim nächsten
+ * Lauf tatsächlich überspringt (Befund 2026-08-08: Kapital kurz zuvor per
+ * Trailing Stop aus genau diesem Pool abgezogen).
+ */
+function _cleanupEligiblePools(pools) {
+    return pools.filter(p => !p.cleanupCooldownUntil);
+}
+
+function _fmtCooldownUntil(ts) {
+    return new Date(ts).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+}
+
+function _bestPoolHtml(bestPool, bestScore, bestName, threshold, cooldownSkipped) {
+    const cooldownHint = cooldownSkipped
+        ? `<br><span style="color:var(--text-muted);font-size:0.78rem">${_esc(cooldownSkipped.name)} hätte Score ${cooldownSkipped.score}, ist aber bis ${_fmtCooldownUntil(cooldownSkipped.until)} im ${_esc(cooldownSkipped.reason)}-Cooldown und wird übersprungen.</span>`
+        : '';
     if (!bestPool || bestScore == null)
-        return `<span style="color:var(--text-muted)">— Keine Score-Daten verfügbar</span>`;
+        return `<span style="color:var(--text-muted)">— Keine Score-Daten verfügbar</span>${cooldownHint}`;
     const ok    = bestScore >= threshold;
     const color = ok ? 'var(--success)' : 'var(--danger)';
     const icon  = ok ? '✓' : '✗';
     const hint  = ok ? '' : `<br><span style="color:var(--text-muted);font-size:0.78rem">Minimum ${threshold} nicht erreicht → kein Investment</span>`;
-    return `<span style="color:var(--text)">${bestName}</span> — Score <strong style="color:${color}">${bestScore}</strong> <span style="color:${color}">${icon}</span>${hint}`;
+    return `<span style="color:var(--text)">${bestName}</span> — Score <strong style="color:${color}">${bestScore}</strong> <span style="color:${color}">${icon}</span>${hint}${cooldownHint}`;
+}
+
+/** Bester Pool + Info über den evtl. wegen Cooldown übersprungenen Spitzenreiter. */
+function _computeBestPool(pools) {
+    const eligible = _cleanupEligiblePools(pools);
+    const bestPool  = eligible.slice().sort((a, b) => (b.investScore?.value ?? -Infinity) - (a.investScore?.value ?? -Infinity))[0] ?? null;
+    const bestScore = bestPool?.investScore?.value ?? null;
+    const bestName  = bestPool ? _esc(bestPool.displayPair ?? bestPool.pair) : null;
+
+    const cooldownTop = pools
+        .filter(p => p.cleanupCooldownUntil)
+        .slice()
+        .sort((a, b) => (b.investScore?.value ?? -Infinity) - (a.investScore?.value ?? -Infinity))[0] ?? null;
+    const cooldownSkipped = (cooldownTop && (bestScore == null || (cooldownTop.investScore?.value ?? -Infinity) > bestScore))
+        ? { name: cooldownTop.displayPair ?? cooldownTop.pair, score: cooldownTop.investScore?.value ?? '?', until: cooldownTop.cleanupCooldownUntil, reason: cooldownTop.cleanupCooldownReason ?? 'Risk-Management' }
+        : null;
+
+    return { bestPool, bestScore, bestName, cooldownSkipped };
 }
 
 function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
@@ -754,11 +798,7 @@ function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
     }
 
     const { mode, minScore, maxDeposit, minDeposit } = cfgParsed;
-    const bestPool  = pools
-        .slice()
-        .sort((a, b) => (b.investScore?.value ?? -Infinity) - (a.investScore?.value ?? -Infinity))[0] ?? null;
-    const bestScore = bestPool?.investScore?.value ?? null;
-    const bestName  = bestPool ? _esc(bestPool.displayPair ?? bestPool.pair) : null;
+    const { bestPool, bestScore, bestName, cooldownSkipped } = _computeBestPool(pools);
 
     return `
         ${desc}
@@ -813,7 +853,7 @@ function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
             <p style="margin:-0.3rem 0 0;font-size:0.74rem;color:var(--text-muted)">10–10.000 bzw. 1–10.000 USDC &nbsp;·&nbsp; leer = kein Limit/Minimum</p>
             <div style="border-top:1px solid var(--border);padding-top:0.6rem">
                 <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:0.4rem">Aktuell bester Pool</div>
-                <div id="cu-bester-best-pool-row">${_bestPoolHtml(bestPool, bestScore, bestName, minScore)}</div>
+                <div id="cu-bester-best-pool-row">${_bestPoolHtml(bestPool, bestScore, bestName, minScore, cooldownSkipped)}</div>
             </div>
         </div>
         <div class="bot-actions" style="margin-top:0.6rem;">
@@ -823,18 +863,14 @@ function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
 }
 
 function _wireBesterPoolTab(modalEl, mid, wrap, pools) {
-    const bestPool  = pools
-        .slice()
-        .sort((a, b) => (b.investScore?.value ?? -Infinity) - (a.investScore?.value ?? -Infinity))[0] ?? null;
-    const bestScore = bestPool?.investScore?.value ?? null;
-    const bestName  = bestPool ? _esc(bestPool.displayPair ?? bestPool.pair) : null;
+    const { bestPool, bestScore, bestName, cooldownSkipped } = _computeBestPool(pools);
 
     const minScoreInput = modalEl.querySelector('#cu-bester-min-score');
     const bestRow       = modalEl.querySelector('#cu-bester-best-pool-row');
     if (minScoreInput && bestRow) {
         minScoreInput.addEventListener('input', () => {
             const t = Math.max(0, Math.min(100, parseInt(minScoreInput.value, 10) || 0));
-            bestRow.innerHTML = _bestPoolHtml(bestPool, bestScore, bestName, t);
+            bestRow.innerHTML = _bestPoolHtml(bestPool, bestScore, bestName, t, cooldownSkipped);
         });
     }
 
@@ -1091,8 +1127,18 @@ function _applyButtonStates(status) {
     // failed   → alle (Stop zum Aufräumen, Start + Restart zum Neustarten)
     // unknown  → alle gesperrt (Status unklar)
     const canStart   = status === 'inactive' || status === 'failed';
-    const canStop    = status === 'active'   || status === 'failed';
+    let   canStop    = status === 'active'   || status === 'failed';
     const canRestart = status === 'active'   || status === 'failed';
+
+    // Kapital-Sperre: Stop bleibt gesperrt, solange ein Pool eine offene Position
+    // hält — server-seitig ohnehin erzwungen (bots.js), hier nur die UI-Vorschau
+    // (kein unnötiger 409-Roundtrip). Restart bewusst NICHT gesperrt (transient,
+    // selbstheilend), siehe Kommentar in bots.js.
+    const hasCapital = _ctx.getHasCapital?.(SVC_ID) ?? false;
+    if (hasCapital) canStop = false;
+    btnStop.title = hasCapital
+        ? 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.'
+        : '';
 
     btnStart.disabled   = !canStart;
     btnStop.disabled    = !canStop;
@@ -2218,16 +2264,32 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
     const dryRunGate   = pool.settings?.dryRunGate ?? null;
     const gateBlocked  = isOfferPool && dryRunGate?.status !== 'passed';
 
+    // Tooltip-Text fürs (i)-Icon neben einem gesperrten Aktivieren-Button: wann + warum,
+    // damit ein gesperrter Pool nicht wie ein stiller Bug aussieht (Fund 2026-08-06:
+    // forge-pub1 PUMP/SOL ohne erkennbaren Grund deaktiviert, siehe setPoolEnabled()).
+    function disabledSinceTooltip() {
+        const when = pool.enabledChangedAt
+            ? new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+                .format(new Date(pool.enabledChangedAt))
+              + ' um ' + new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' })
+                .format(new Date(pool.enabledChangedAt)) + ' Uhr'
+            : 'unbekanntem Zeitpunkt';
+        const reason = pool.enabledReason ?? 'Grund nicht protokolliert';
+        return `<span class="info-tip-label pool-disabled-hint"
+            data-tooltip-title="🔒 Pool gesperrt"
+            data-tooltip-content="${_escTip(`Dieser Pool wurde am ${when} deaktiviert.\n\nGrund: ${reason}`)}">&#9432;</span>`;
+    }
+
     let enableBtnHtml;
     if (!poolEnabled && gateBlocked) {
         const gateTooltip = dryRunGate?.status === 'failed'
             ? `Dry-Run-Testlauf fehlgeschlagen: ${_esc(dryRunGate.error ?? 'unbekannter Fehler')}. Wird automatisch erneut versucht.`
             : 'Automatischer Testlauf (deposit.js --dry-run) läuft noch – wartet auf erste Pool-Daten (~1 Bot-Zyklus nach der Übernahme).';
-        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable" disabled
+        enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable" disabled
             data-tooltip-title="⏳ Dry-Run-Gate ausstehend"
             data-tooltip-content="${gateTooltip}">Aktivieren</button>`;
     } else if (!poolEnabled) {
-        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable">Aktivieren</button>`;
+        enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable">Aktivieren</button>`;
     } else if (hasBalance) {
         enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable" disabled
             data-tooltip-title="Deaktivieren nicht möglich"
@@ -4272,6 +4334,16 @@ async function _fetchPoolState(poolId) {
     } catch { return null; }
 }
 
+// Live On-Chain-Preis/Range-Status (dauert wegen RPC+Rate-Limiter spürbar länger als
+// _fetchPoolState) — bewusst separat, damit das Deposit-Modal nicht auf diesen Call
+// warten muss. Siehe pools-actions.js:/position-state/live.
+async function _fetchPoolStateLive(poolId) {
+    try {
+        const r = await fetch(`/api/pools/liquidity/${encodeURIComponent(poolId)}/position-state/live`);
+        return r.ok ? await r.json() : null;
+    } catch { return null; }
+}
+
 async function _fetchWalletBalanceFresh() {
     try {
         const r = await fetch(`/api/wallet/liquidity/balance?fresh=1&t=${Date.now()}`);
@@ -4913,6 +4985,10 @@ async function _openPoolDepositModal(pool) {
         econMax = _computeEconomicMax(walletASafe, walletBSafe, clmmRatio ?? price, isBtcPair);
 
         if (!getModal(mid)) return; // Modal in der Zwischenzeit geschlossen
+        // Läuft gerade Einzahlen/Auszahlen (oder die Retry-Wartezeit danach) – Refresh
+        // darf den gesperrten Submit-Button NICHT wieder freischalten (Fund 2026-08-07:
+        // der Button wurde während einer laufenden TX durch diesen Refresh reaktiviert).
+        if (backdrop._actionRunning) return;
         const oorEl = backdrop.querySelector('#pd-oor-banner');
         if (oorEl) oorEl.innerHTML = oorBannerHtml();
         const hintEl = backdrop.querySelector('#pd-usdc-hint');
@@ -4924,6 +5000,28 @@ async function _openPoolDepositModal(pool) {
         backdrop._revalidate?.();
     }
     const stopRefresh = _attachModalAutoRefresh(mid, _refreshDepositModal);
+
+    // Live On-Chain-Preis/Range einmalig im Hintergrund nachladen (dauert wegen
+    // RPC+Rate-Limiter ein paar Sekunden — das Modal öffnet daher sofort mit dem
+    // schnellen Cache-Wert aus _fetchPoolState oben und korrigiert sich hier still,
+    // sobald der Live-Wert da ist). Fund 2026-08-07: ein blockierender Live-Call
+    // beim Öffnen ließ das Modal ~30s hängen, bevor es überhaupt erschien.
+    _fetchPoolStateLive(pool.id).then(live => {
+        if (!live?.ok || !getModal(mid)) return;
+        // Wie bei _refreshDepositModal: läuft gerade eine Aktion, nicht in den
+        // gesperrten Submit-Button hineinfunken.
+        if (backdrop._actionRunning) return;
+        inRange = live.inRange;
+        prLower = live.priceLower ?? prLower;
+        prUpper = live.priceUpper ?? prUpper;
+        price   = live.currentPrice ?? price;
+        blockedOutOfRange = !isNew && inRange === false;
+        clmmRatio = isBtcPair ? null : _clmmDepositRatio(price, prLower, prUpper);
+        econMax   = _computeEconomicMax(walletASafe, walletBSafe, clmmRatio ?? price, isBtcPair);
+        const oorEl = backdrop.querySelector('#pd-oor-banner');
+        if (oorEl) oorEl.innerHTML = oorBannerHtml();
+        backdrop._revalidate?.();
+    });
 }
 
 // Berechnet das wirtschaftlich maximale Token-Paar aus Wallet + Pool-Preis.
@@ -5257,6 +5355,7 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
         inRange  = freshState.position?.inRange ?? null;
 
         if (!getModal(mid)) return; // Modal in der Zwischenzeit geschlossen
+        if (backdrop._actionRunning) return; // läuft gerade Aus-/Einzahlen — Button nicht vorzeitig freigeben
         const oorEl = backdrop.querySelector('#pw-oor-banner');
         if (oorEl) oorEl.innerHTML = oorWarningHtml();
         const posValEl = backdrop.querySelector('#pw-pos-value');
@@ -5337,6 +5436,7 @@ async function _runPoolPreview(mid, action, poolId, isNew) {
     const closeBtn = backdrop.querySelector('[data-mi="2"]');
     if (closeBtn) { closeBtn.disabled = true; closeBtn.style.opacity = '0.4'; closeBtn.style.cursor = 'not-allowed'; }
     _setSubmitDisabled(backdrop, true, 'Vorschau wird berechnet…');
+    backdrop._actionRunning = true;
 
     previewBox.innerHTML = '<div class="wallet-hint">Lade Vorschau…</div>';
     try {
@@ -5349,6 +5449,7 @@ async function _runPoolPreview(mid, action, poolId, isNew) {
     } catch (err) {
         previewBox.innerHTML = `<div class="modal-feedback err" style="display:block;">Vorschau-Fehler: ${_esc(err.message)}</div>`;
     } finally {
+        backdrop._actionRunning = false;
         if (closeBtn) { closeBtn.disabled = false; closeBtn.style.opacity = ''; closeBtn.style.cursor = ''; }
         backdrop._revalidate?.();
     }
@@ -5369,6 +5470,7 @@ function _startRetryCountdown(feedbackBox, backdrop, seconds) {
     (function tick() {
         if (remaining <= 0) {
             feedbackBox.textContent = 'Wallet-Balance konnte nicht gelesen werden. Bitte versuche es noch einmal.';
+            backdrop._actionRunning = false;
             _setSubmitDisabled(backdrop, false);
             backdrop._revalidate?.();
             return;
@@ -5396,6 +5498,7 @@ async function _runPoolAction(mid, action, poolId, isNew) {
     feedbackBox.textContent = `${action === 'deposit' ? 'Einzahlen' : 'Auszahlen'} läuft – das kann 30–60 Sekunden dauern…`;
     feedbackBox.style.display = 'block';
     _setSubmitDisabled(backdrop, true, `${action === 'deposit' ? 'Einzahlen' : 'Auszahlen'} läuft…`);
+    backdrop._actionRunning = true;
     let retryMode = false;
     try {
         const r = await fetch(`/api/pools/liquidity/${encodeURIComponent(poolId)}/${action}`, {
@@ -5426,8 +5529,11 @@ async function _runPoolAction(mid, action, poolId, isNew) {
         feedbackBox.textContent = `Netzwerk-Fehler: ${err.message}`;
     } finally {
         if (!retryMode) {
+            backdrop._actionRunning = false;
             _setSubmitDisabled(backdrop, false);
             backdrop._revalidate?.();
         }
+        // retryMode: _actionRunning bleibt true, bis _startRetryCountdown fertig ist
+        // (verhindert, dass ein zwischenzeitlicher Refresh den Button vorzeitig freigibt).
     }
 }

@@ -55,7 +55,7 @@ const PARTIAL_SLIPPAGE = Percentage.fromFraction(1, 200); // 0,5 % für decrease
 
 // ─── Settings-DB lesen ────────────────────────────────────────────────────────
 
-function loadTvlConfig(poolId) {
+export function loadTvlConfig(poolId) {
     try {
         const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
         const row = sdb.prepare(
@@ -330,7 +330,8 @@ export async function executeTvlProtection(pool, db) {
                 console.error(`[tvl-protection:${pool.id}] setPoolActive fehlgeschlagen: ${err.message}`);
             }
             try {
-                setPoolEnabled(pool.id, false);
+                setPoolEnabled(pool.id, false,
+                    `TVL-Schutz Stufe 2 (Voll-Exit): TVL ${(tvl/1e6).toFixed(2)}M unter Schwelle ${(threshold/1e6).toFixed(2)}M`);
                 console.log(`[tvl-protection:${pool.id}] Pool gesperrt (enabled=false) – manuelle Freigabe nötig`);
             } catch (err) {
                 console.error(`[tvl-protection:${pool.id}] setPoolEnabled fehlgeschlagen: ${err.message}`);

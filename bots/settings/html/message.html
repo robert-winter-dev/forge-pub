@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260731e">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/message.css?v=20260801a">
+    <link rel="stylesheet" href="css/message.css?v=20260809g">
 </head>
 <body>
 
@@ -30,14 +30,6 @@
 
 <main class="main-content mc-layout" id="mcLayout">
 
-    <!-- Spalte 1: Menü -->
-    <nav class="mc-menu" id="mcMenu" aria-label="Nachrichtenkategorien">
-        <button class="mc-menu-item" data-menu="system">System<span class="mc-menu-badge hidden" id="mcBadgeSystem">0</span></button>
-        <button class="mc-menu-item" data-menu="support">Support<span class="mc-menu-badge hidden" id="mcBadgeSupport">0</span></button>
-        <button class="mc-menu-item" data-menu="premium">Premium<span class="mc-menu-badge hidden" id="mcBadgePremium">0</span></button>
-        <button class="mc-menu-item" data-menu="einstellungen">Einstellungen</button>
-    </nav>
-
     <!-- Einstellungen: einzige verbleibende Nutzerin von mcDetail (volle Breite,
          siehe .mc-no-list) – System/Premium/Support haben je ein eigenes
          Vollbreite-Panel weiter unten. -->
@@ -47,15 +39,17 @@
         </div>
     </div>
 
-    <!-- System-Nachrichten: eigenständiges Vollbreite-Panel (ersetzt Spalte 2+3
-         nur wenn "System" aktiv ist, siehe selectMenu() in message.js) -->
+    <!-- System-Nachrichten: eigenständiges Vollbreite-Panel (ersetzt das
+         Einstellungen-Panel nur wenn "System" aktiv ist, siehe selectMenu()
+         in message.js) -->
     <div class="mc-system-panel" id="mcSystemPanel" hidden>
         <div class="mcs-toprow">
-            <div class="mcs-info">
+            <h2 class="mcs-title">Rubrik: System</h2>
+            <div class="mcs-toprow-right">
                 <input type="search" class="mcs-search" id="mcsSearchInput" placeholder="Suchen…" autocomplete="off">
             </div>
         </div>
-        <div class="mcs-grid" id="mcsGrid"></div>
+        <div id="mcsGrid"></div>
         <div class="mcs-bottomrow">
             <div class="mcs-pagination" id="mcsPagination"></div>
             <button class="mcs-page-btn" id="mcsMarkAllBtn"
@@ -65,14 +59,15 @@
     </div>
 
     <!-- Premium-Nachrichten: gleiches Vollbreite-Panel wie System, eigene IDs
-         (mcp*) und eigener Filter (Alle/Gesendet/Empfangen statt Absender) -->
+         (mcp*) -->
     <div class="mc-system-panel" id="mcPremiumPanel" hidden>
         <div class="mcs-toprow">
-            <div class="mcs-info">
+            <h2 class="mcs-title">Rubrik: Premium</h2>
+            <div class="mcs-toprow-right">
                 <input type="search" class="mcs-search" id="mcpSearchInput" placeholder="Suchen…" autocomplete="off">
             </div>
         </div>
-        <div class="mcs-grid" id="mcpGrid"></div>
+        <div id="mcpGrid"></div>
         <div class="mcs-bottomrow">
             <div class="mcs-pagination" id="mcpPagination"></div>
             <button class="mcs-page-btn" id="mcpMarkAllBtn"
@@ -82,15 +77,19 @@
     </div>
 
     <!-- Support-Nachrichten: gleiches Vollbreite-Panel wie System/Premium –
-         eine Box pro Konversation, Klick öffnet Thread + Antwortfeld im Modal. -->
+         eine Zeile pro Konversation, Klick öffnet Thread + Antwortfeld im Modal.
+         Löschen läuft (erstmal) nur über "Konversation löschen" im Thread-Modal,
+         keine eigene Spalte (2026-08-08: sonst keine gleiche Spaltenbreite über
+         alle drei Rubriken hinweg möglich, siehe .mct-table in message.css). -->
     <div class="mc-system-panel" id="mcSupportPanel" hidden>
         <div class="mcs-toprow">
-            <div class="mcs-info">
+            <h2 class="mcs-title">Rubrik: Support</h2>
+            <div class="mcs-toprow-right">
+                <button class="msg-new-btn" id="msgNewBtn" hidden>Neue Nachricht</button>
                 <input type="search" class="mcs-search" id="mcSupSearchInput" placeholder="Suchen…" autocomplete="off">
             </div>
-            <button class="msg-icon-btn msg-icon-btn-accent" id="msgNewBtn" title="Neue Nachricht" aria-label="Neue Nachricht" hidden>✎</button>
         </div>
-        <div class="mcs-grid" id="mcSupGrid"></div>
+        <div id="mcSupGrid"></div>
         <div class="mcs-bottomrow">
             <div class="mcs-pagination" id="mcSupPagination"></div>
             <button class="mcs-page-btn" id="mcSupMarkAllBtn"
@@ -105,6 +104,6 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/message.js?v=20260803b"></script>
+<script type="module" src="js/message.js?v=20260809f"></script>
 </body>
 </html>

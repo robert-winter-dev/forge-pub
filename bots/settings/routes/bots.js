@@ -14,6 +14,9 @@ import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { listBots } from '../../../lib/bot-registry.js';
+import { isForkInstance } from '../../../lib/premium-identity-context.js';
+import { isAutoPayEnabled, setAutoPayEnabled } from '../../../lib/premium-auto-pay-store.js';
+import { recordPremiumMessage } from '../../../core/premium/messages-db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -28,6 +31,42 @@ const SERVICES = listBots()
     .map(([, bot]) => ({ id: bot.service, label: bot.displayName }));
 
 const ALLOWED_ACTIONS = new Set(['start', 'stop', 'restart']);
+
+// ── Kapital-Sperre ────────────────────────────────────────────────────────────
+// Verhindert, dass Liquidity/Lending Bot über den Dienst-Schalter gestoppt
+// werden, solange irgendein Pool/Protokoll noch Kapital hält — sonst laufen
+// TVL-Schutz/Trailing-Stop nicht mehr, während echtes Geld exponiert bleibt.
+// Bewusst NUR für 'stop' (nicht 'restart'): ein Restart ist transient und
+// selbstheilend (Bot kommt nach wenigen Sekunden zurück), ein Stop lässt das
+// Kapital dagegen unbegrenzt lange unbeaufsichtigt. Dieselbe Unterscheidung
+// wie die bereits bestehende Pool-Einzel-Sperre in pools-actions.js/pools.js
+// (dort: kein Deaktivieren eines Pools mit offener Position).
+function liquidityHasCapital() {
+    try {
+        const db = new Database(PATHS.liquidityDb, { readonly: true, fileMustExist: true });
+        const row = db.prepare(`SELECT 1 FROM positions WHERE closed_at IS NULL LIMIT 1`).get();
+        db.close();
+        return !!row;
+    } catch {
+        return false;
+    }
+}
+
+function lendingHasCapital() {
+    try {
+        const db = new Database(PATHS.lendingDb, { readonly: true, fileMustExist: true });
+        const row = db.prepare(`SELECT 1 FROM positions WHERE closed_at IS NULL AND amount > 0 LIMIT 1`).get();
+        db.close();
+        return !!row;
+    } catch {
+        return false;
+    }
+}
+
+const CAPITAL_CHECKS = {
+    'forge-liquiditybot': liquidityHasCapital,
+    'forge-lendingbot':   lendingHasCapital,
+};
 
 function openDb() {
     const db = new Database(DB_PATH);
@@ -52,12 +91,13 @@ const router = Router();
 // ── GET /api/bots ─────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
     const results = await Promise.all(SERVICES.map(async (svc) => {
+        const hasCapital = CAPITAL_CHECKS[svc.id]?.() ?? false;
         try {
             const { stdout } = await execFileAsync('/usr/bin/systemctl', ['is-active', svc.id]);
-            return { ...svc, status: stdout.trim() };
+            return { ...svc, status: stdout.trim(), hasCapital };
         } catch (err) {
             // systemctl is-active gibt exit 3 zurück wenn inactive – kein echter Fehler
-            return { ...svc, status: err.stdout?.trim() || 'unknown' };
+            return { ...svc, status: err.stdout?.trim() || 'unknown', hasCapital };
         }
     }));
     res.json(results);
@@ -73,6 +113,26 @@ router.post('/:svc/:action', (req, res) => {
     }
     if (!ALLOWED_ACTIONS.has(action)) {
         return res.status(400).json({ error: `Unerlaubte Aktion: ${action}` });
+    }
+    if (action === 'stop' && CAPITAL_CHECKS[svc]?.()) {
+        return res.status(409).json({
+            error: 'Der Bot hat noch investiertes Kapital (offene Position) – erst auszahlen, dann den Dienst stoppen.',
+        });
+    }
+
+    // Manuelles Stoppen des Liquidity Bots deaktiviert auch die automatische
+    // Premium-Zahlung mit (Fund 2026-08-07): Premium liefert Daten speziell für
+    // diesen Bot, ihn für einen abgeschalteten Bot weiter zu bezahlen wäre sinnlos.
+    // Bewusst NUR bei diesem expliziten, vom Nutzer selbst ausgelösten Stop-Klick
+    // (dieselbe Route wie POST /disable in premium.js — identisches Verhalten,
+    // identische Message-Center-Meldung) — ein Update/Reboot stoppt den Dienst
+    // NICHT über diese Route (setup.sh ruft systemctl direkt auf), löst diesen
+    // Hook also nie versehentlich aus. Ein zeitweiliges Down durch ein länger
+    // laufendes Update wird stattdessen in premium-pay.js selbst abgefangen (dort
+    // OHNE enabled anzutasten, siehe Kommentar dort).
+    if (svc === 'forge-liquiditybot' && action === 'stop' && isForkInstance() && isAutoPayEnabled()) {
+        setAutoPayEnabled(false);
+        recordPremiumMessage(JSON.stringify({ cmd: 'premium-autopay-disabled', reason: 'liquiditybot-stopped' }));
     }
 
     const db = openDb();

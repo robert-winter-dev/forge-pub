@@ -32,6 +32,7 @@ import {
 } from '../lib/db.js';
 import { config } from '../lib/config.js';
 import { FORGE_TZ } from '../../../core/config.js';
+import { displayVersion } from '../../../lib/version.js';
 // PnL/Yield-Cashflowbereinigung: ausschließlich über die zentrale FORGE-Lib.
 // adjustForCashflows() besitzt die Cashflow- UND earningsOut-Logik; dieser Bot
 // liefert nur Wert-Anker + Zeitraum und behält seine Präsentations-Schicht
@@ -77,6 +78,14 @@ function txFeeFallback(protocol) {
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────
+/**
+ * 🔒 Kanonische Labels – wird live an data.json.positions[].protocolLabel und die
+ * Pool-Metriken-Tabelle weitergegeben. Bei Änderungen IMMER auch synchron halten mit:
+ *   - html/lending/js/app.js       (protocolLabel()-Map + ALL_KNOWN_PROTOCOLS)
+ *   - bots/settings/routes/lending-actions.js  (PROTOCOL_LABELS)
+ * Abweichende Labels lassen denselben Pool im Dashboard/Settings wie zwei
+ * verschiedene Pools aussehen (Befund 2026-08-09, siehe Changelog).
+ */
 function labelFor(protocol) {
     const labels = {
         'kamino':            'Kamino',
@@ -94,7 +103,7 @@ function labelFor(protocol) {
     };
     return labels[protocol] || protocol;
 }
-const VERSION        = readFileSync(resolve(__dirname, '../VERSION'), 'utf8').trim();
+const VERSION        = displayVersion();
 const DATA_DIR       = resolve(__dirname, '../../../html/lending/data');
 const DATA_FILE      = resolve(DATA_DIR, 'data.json');
 const HISTORY_FILE   = resolve(DATA_DIR, 'data-history.json');
@@ -163,6 +172,8 @@ export async function runExport() {
     // – amount:      Maximum (= on-chain Wert, nach Bot-Tick identisch für alle)
     // – current_apy: Erster nicht-null Wert
     // – started_at:  Ältester Wert (erster Deposit-Zeitpunkt)
+    // – entry_value: Maximum – konsistent zu amount (dieselbe on-chain-Position, also
+    //                dieselbe Kostenbasis) und im Zweifel die konservativere Anzeige.
     const mergedMap = new Map();
     for (const p of rawPositions) {
         if (!mergedMap.has(p.protocol)) {
@@ -173,6 +184,9 @@ export async function runExport() {
             if (m.current_apy == null && p.current_apy != null) m.current_apy = p.current_apy;
             if (p.started_at < m.started_at) m.started_at = p.started_at;
             if (p.last_updated_at > m.last_updated_at) m.last_updated_at = p.last_updated_at;
+            if (p.entry_value != null && (m.entry_value == null || p.entry_value > m.entry_value)) {
+                m.entry_value = p.entry_value;
+            }
         }
     }
     const mergedPositions = [...mergedMap.values()];
@@ -216,21 +230,32 @@ export async function runExport() {
             return s;
         }, 0);
 
-        // Yield (netInvested-Methode): aktueller Pool-Stand minus netto-investiertes Kapital.
-        // On-Chain verifizierbar (amount − Σ(deposits − withdrawals)) und selbstheilend.
-        // Erst ab 1 Stunde Laufzeit anzeigen – verhindert Kleinstwerte direkt nach Deposit.
+        // Yield: aktueller Pool-Stand minus Kostenbasis.
         //
+        // Kostenbasis ist der Einstiegs-Anker `entry_value` — der nach einem Cashflow
+        // tatsächlich GEMESSENE Positionswert (siehe Migration in lib/db.js und die
+        // Fortschreibung in bin/bot.js). Grund: Protokolle bewerten frisch eingezahltes
+        // Kapital sofort über pari (Loopscale +0,103 % binnen Minuten, ohne Zeitablauf).
+        // Die frühere netInvested-Methode (amount − Σ Einzahlungen) zählte diesen
+        // Aufschlag als Gewinn und wies den Lifetime-Yield dadurch deutlich zu hoch aus
+        // (forge-pub1 am 09.08.: 0,0607 statt 0,0366 USDC, +66 %).
+        //
+        // Fallback auf netInvested, solange kein Anker existiert (Position älter als die
+        // Migration und ohne Tages-Snapshot für den Backfill) — dann gilt das alte,
+        // leicht zu hohe Verhalten, statt einen Anker zu raten.
+        const costBasis = p.entry_value ?? netInvested;
+
         // LB#0161 – Phantom-Schutz: Ein `withdraw`-Eintrag, dessen On-Chain-Reduktion in
         // p.amount noch nicht reflektiert ist (Cooldown-Abschluss/Settlement-Lag), würde
-        // p.amount − netInvested sprunghaft um den Entnahmebetrag erhöhen. Realistischer
+        // p.amount − costBasis sprunghaft um den Entnahmebetrag erhöhen. Realistischer
         // Lifetime-Yield ist durch APY × Laufzeit begrenzt; Faktor 4 deckt APY-Spitzen
         // großzügig ab, deckelt aber Entnahme-Artefakte (≫ plausibler Yield).
         const apyForCap         = p.current_apy ?? latestApyMap.get(p.protocol) ?? 15;
-        const maxPlausibleYield = netInvested > 0
-            ? netInvested * (apyForCap / 100) * (elapsedMs / YEAR_MS) * 4
+        const maxPlausibleYield = costBasis > 0
+            ? costBasis * (apyForCap / 100) * (elapsedMs / YEAR_MS) * 4
             : Infinity;
-        const accruedYield = elapsedMs >= ONE_HOUR_MS && netInvested > 0
-            ? Math.min(Math.max(0, parseFloat((p.amount - netInvested).toFixed(6))), maxPlausibleYield)
+        const accruedYield = elapsedMs >= ONE_HOUR_MS && costBasis > 0
+            ? Math.min(Math.max(0, parseFloat((p.amount - costBasis).toFixed(6))), maxPlausibleYield)
             : 0;
 
         // ── Break-Even: Yield deckt alle TX-Gebühren seit Positionseröffnung + nächste Auszahlung ──
@@ -652,14 +677,21 @@ export async function runExport() {
     const feesYesterday = feesInPeriod(startOfYesterdayMs, startOfTodayMs);
     const feesMonth     = feesInPeriod(startOfMonthMs, null);
 
-    // rolling 24h: heute anteilig + gestern anteilig (Berlin-Tagesfraktion zum Export-Zeitpunkt)
+    // rolling 24h = voller Ertrag seit Mitternacht + der Teil von gestern, der noch im
+    // 24h-Fenster liegt (Berlin-Tagesfraktion zum Export-Zeitpunkt).
+    //
+    // 🔴 Fix 2026-08-09: Vorher stand hier `yToday * fracDay + yYesterday * (1 - fracDay)`.
+    //    `yToday` ist aber bereits der Teilbetrag von Mitternacht bis jetzt — also exakt
+    //    der Anteil des 24h-Fensters, der auf heute entfällt. Die zusätzliche Multiplikation
+    //    mit fracDay hat ihn ein zweites Mal gekürzt und den 24h-APR systematisch zu niedrig
+    //    ausgewiesen (Messung 09.08., 13:26 Uhr: 4,55 % statt 5,75 %).
     const berlinHM = new Intl.DateTimeFormat('en-GB', {
         timeZone: FORGE_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
     }).formatToParts(new Date());
     const bh = parseInt(berlinHM.find(p => p.type === 'hour').value, 10) % 24;
     const bm = parseInt(berlinHM.find(p => p.type === 'minute').value, 10);
     const fracDay  = (bh * 60 + bm) / 1440;
-    const yield24h = parseFloat((yToday * fracDay + yYesterday * (1 - fracDay)).toFixed(6));
+    const yield24h = parseFloat((yToday + yYesterday * (1 - fracDay)).toFixed(6));
 
     const statistics = {
         today:     todayYield,
@@ -701,6 +733,26 @@ export async function runExport() {
     // Wird von bin/bot.js gesetzt – hier nur auslesen
     const botState = kvGet('bot_state', 'offline');
 
+    // Aggregat für's Dashboard: hält IRGENDEIN Protokoll noch Kapital? Frisch
+    // nach der Installation (oder nach einem Voll-Exit ohne Wiedereinstieg) sind
+    // alle Protokolle leer — die Tabellen zeigen dann nur leere Platzhalter ohne
+    // Erklärung. Die vier betroffenen Boxen (APY/Yield/Pool-/Operative Metriken)
+    // zeigen in diesem Fall stattdessen einen "Bot inaktiv"-Hinweis (app.js).
+    // Bewusst positionsbasiert statt `botState` (Prozess-Flag) — robuster
+    // gegen einen abgestürzten/nicht sauber beendeten Bot-Prozess, und
+    // dieselbe Signalart wie beim Liquidity Bot (dort gibt es kein botState-
+    // Äquivalent, nur die pool-active-Flags).
+    const botActive = mergedPositions.some(p => (p.amount ?? 0) > 0);
+
+    // balance = currentValue (Pool-Positionen) + volles Wallet (USDC + SOL in USD).
+    // currentValue allein zählt Kapital NICHT, das gerade nicht investiert ist (z.B. nach
+    // einem Withdraw, bevor es redeployed wird) — für das FORGE-Overview (Gesamtguthaben-
+    // Summe/Chart über beide Bots) führte das zu einem künstlichen Einbruch, obwohl das
+    // Geld nachweislich im Wallet lag (walletUsdc). Analog zu `balance` beim Liquidity Bot
+    // (bots/liquidity/bin/export.js), das dort ebenfalls Pool + volles Wallet ist.
+    const walletSolUsd = solPrice != null ? (snap.wallet_sol ?? 0) * solPrice : 0;
+    const balance = Math.round((smoothedValue + wmWalletUsdc + walletSolUsd) * 100) / 100;
+
     // ── JSON zusammenbauen ────────────────────────────────────────────────────
     // Live-Daten: jede Minute geschrieben (~100–150 KB)
     const output = {
@@ -710,8 +762,10 @@ export async function runExport() {
             exportedAt: now,
             botState,
         },
+        botActive,
         portfolio: {
             currentValue: smoothedValue,
+            balance,
             totalYield,
             avgApy:       weightedAvgApy,
             walletUsdc:   wmWalletUsdc,

@@ -5,14 +5,15 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260731c';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260809b';
 import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260609a';
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
-import { ToastManager }                        from '../../js/toast.js?v=20260722b';
-import { initMessageBell }                     from '../../js/message-bell.js?v=20260803b';
-import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260731c';
+import { ToastManager }                        from '../../js/toast.js?v=20260809a';
+import { initMessageBell }                     from '../../js/message-bell.js?v=20260809a';
+import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
 import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20260727a';
+import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
 
 'use strict';
 
@@ -185,7 +186,7 @@ function renderRendite(p) {
         renditeEl.textContent = sign + Math.abs(apr).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         if (renditeGroup) renditeGroup.setAttribute('data-type', apr > 0 ? 'positive' : 'neutral');
     } else {
-        renditeEl.textContent = '—';
+        renditeEl.textContent = '0,00';
         if (renditeGroup) renditeGroup.setAttribute('data-type', 'neutral');
     }
 }
@@ -212,14 +213,19 @@ function renderMetrics(data) {
     const pnl24hEl  = $('pnl24hValue');
     const pnl24hUnit = $('pnl24hUnit');
     if (pnl24hEl) {
-        if (pnl24h != null) {
+        // Rundet auf die angezeigten 2 Nachkommastellen, bevor entschieden wird, ob
+        // Vorzeichen/Farbe gezeigt werden (Fund 2026-08-07): ein winziger Rest-Wert wie
+        // 0,00003 zeigte bisher "+0,00 USDC" in Grün — sieht wie ein Darstellungsfehler
+        // aus. Rundet der Wert auf 0,00, gilt er als neutral: kein Vorzeichen, keine Farbe.
+        const rounded = pnl24h != null ? Math.round(pnl24h * 100) / 100 : 0;
+        if (pnl24h != null && rounded !== 0) {
             const sign = pnl24h >= 0 ? '+' : '−';
             pnl24hEl.textContent = sign + fmtUsdc(Math.abs(pnl24h));
             const dtype = pnl24h >= 0 ? 'positive' : 'negative';
             pnl24hEl.setAttribute('data-type', dtype);
             if (pnl24hUnit) pnl24hUnit.setAttribute('data-type', dtype);
         } else {
-            pnl24hEl.textContent = '—';
+            pnl24hEl.textContent = '0,00';
             pnl24hEl.setAttribute('data-type', 'neutral');
             if (pnl24hUnit) pnl24hUnit.setAttribute('data-type', 'neutral');
         }
@@ -523,11 +529,19 @@ function renderOpportunityScores(data) {
         const unreachable = data?.scoreSource === 'delivered' && data?.scoreStale && data?.premiumOutagePaused;
         const waitingForFirstDelivery = !unreachable && data?.scoreSource === 'none'
             && (data?.premiumAutoPayEnabled || data?.premiumCoveredUntilMs != null);
-        const note = unreachable
-            ? 'Premium Service ist derzeit nicht erreichbar.'
+        // Überschrift richtet sich nach demselben Dreiwege-Unterschied wie der
+        // Zusatzhinweis: "inaktiv" ist nur bei "nie Premium gehabt" korrekt — bei
+        // einem echten Ausfall hat der Nutzer nichts deaktiviert, und wer gerade
+        // erst aktiviert hat/auf die ersten Daten wartet, hat Premium ebenfalls
+        // nicht "aus". Der Zusatzhinweis unter der Überschrift entfällt jetzt für
+        // "nicht erreichbar" (wäre reine Wiederholung), bleibt aber für "wartet
+        // auf erste Daten" bestehen.
+        const headline = unreachable
+            ? 'Premium Service derzeit nicht erreichbar'
             : waitingForFirstDelivery
-                ? 'Warte auf den ersten Premium-Datensatz.'
-                : '';
+                ? 'Premium Service wird aktiviert'
+                : 'Premium Service inaktiv';
+        const note = waitingForFirstDelivery ? 'Warte auf den ersten Premium-Datensatz.' : '';
 
         let panel = container.querySelector('.premium-locked-panel');
         if (!panel) {
@@ -536,7 +550,7 @@ function renderOpportunityScores(data) {
             container.appendChild(panel);
         }
         panel.innerHTML = '<div class="premium-locked-panel-main">'
-            + '<a class="premium-link" href="../../index.html#liquidity">Premium</a>'
+            + `<a class="premium-link" href="../../index.html#liquidity">${headline}</a>`
             + '<span class="premium-locked-crown"><img src="img/forge-logo.png?v=20260329a" alt="Premium"></span></div>'
             + (note ? `<div class="premium-locked-note">${note}</div>` : '');
         return;
@@ -890,6 +904,17 @@ function renderPools(data) {
     const emptyMsg  = $('poolsEmpty');
     if (!container) return;
 
+    const poolsSearchInputEl = document.getElementById('poolsSearchInput');
+    if (data?.botActive === false) {
+        if (emptyMsg) emptyMsg.style.display = 'none';
+        if (poolsSearchInputEl) poolsSearchInputEl.style.display = 'none';
+        container.querySelector('.pools-overview-table')?.remove();
+        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        return;
+    }
+    if (poolsSearchInputEl) poolsSearchInputEl.style.display = '';
+    removeBotInactivePanel(container);
+
     // Event-Delegation für Pool-Chart-Modal (einmalig binden – reserviert für künftige Icon-Spalte)
     if (!container.dataset.chartClickBound) {
         container.dataset.chartClickBound = '1';
@@ -1102,6 +1127,17 @@ function renderActivePositions(data) {
     const container = $('activePoolsContainer');
     const emptyMsg  = $('activePoolsEmpty');
     if (!container) return;
+
+    const activeSearchInputEl = document.getElementById('activePoolsSearchInput');
+    if (data?.botActive === false) {
+        if (emptyMsg) emptyMsg.style.display = 'none';
+        if (activeSearchInputEl) activeSearchInputEl.style.display = 'none';
+        container.querySelector('.active-pools-table')?.remove();
+        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        return;
+    }
+    if (activeSearchInputEl) activeSearchInputEl.style.display = '';
+    removeBotInactivePanel(container);
 
     // Sortierung nach InvestScore des zugehörigen Pools
     const _poolsById = Object.fromEntries((data?.pools ?? []).map(p => [p.id, p]));
@@ -1418,10 +1454,15 @@ function renderStatistics(data) {
     const apr24h   = p.apr24h ?? null;
     const topEl    = document.getElementById('renditeValue');
     const topGroup = document.getElementById('renditeGroup');
-    if (topEl && apr24h != null) {
-        const sign = apr24h >= 0 ? '+' : '−';
-        topEl.textContent = sign + Math.abs(apr24h).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-        topGroup?.setAttribute('data-type', apr24h > 0 ? 'positive' : apr24h < 0 ? 'negative' : 'neutral');
+    if (topEl) {
+        if (apr24h != null) {
+            const sign = apr24h >= 0 ? '+' : '−';
+            topEl.textContent = sign + Math.abs(apr24h).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            topGroup?.setAttribute('data-type', apr24h > 0 ? 'positive' : apr24h < 0 ? 'negative' : 'neutral');
+        } else {
+            topEl.textContent = '0,00';
+            topGroup?.setAttribute('data-type', 'neutral');
+        }
     }
 
     // Klick-Handler Payed Fees
@@ -1687,6 +1728,20 @@ function renderHeader(data) {
 
     const iconEl       = $('botStateIcon');
 
+    // Bewusst gestoppter Bot (bin/svc stop bzw. Settings-Toggle): bot.js schreibt
+    // 'offline' beim Graceful-Shutdown als letzten Export-Wert, bevor der Prozess
+    // endet (siehe SIGTERM-Handler). data.timestamp altert danach zwangsläufig —
+    // das ist dann aber kein Alarm, sondern erwartetes Verhalten. Statt des roten
+    // Blink-Dreiecks zeigen wir explizit "Bot deaktiviert", nichts blinkt mehr.
+    if (data?.botState === 'offline') {
+        el.textContent = 'Bot deaktiviert';
+        el.className   = 'last-update';
+        if (iconEl) { iconEl.textContent = '⏸'; iconEl.className = 'bot-state-icon state-paused'; }
+        if (titleEl) titleEl.className = '';
+        setVal('footerVersion', data.version ? 'v' + data.version : '');
+        return;
+    }
+
     if (!data?.timestamp) {
         setLastUpdate(null);
         if (iconEl) { iconEl.textContent = '⚠'; iconEl.className = 'bot-state-icon state-stale'; }
@@ -1706,11 +1761,11 @@ function renderHeader(data) {
         if (iconEl) { iconEl.textContent = '⚠'; iconEl.className = 'bot-state-icon state-stale'; }
     }
 
-    if (titleEl) {
-        if (ageSec > 900)      titleEl.className = 'health-critical';
-        else if (ageSec > 600) titleEl.className = 'health-warning';
-        else                   titleEl.className = '';
-    }
+    // Header-Titel blinkt/pulsiert bewusst NICHT mehr bei alten Daten (2026-08-07,
+    // Fund: ein absichtlich deaktivierter Bot lässt data.timestamp zwangsläufig
+    // altern — das sah wie ein Alarm aus, obwohl alles wie gewünscht lief). Der
+    // kleine Status-Icon (iconEl, oben) bleibt als dezenter Hinweis bestehen.
+    if (titleEl) titleEl.className = '';
 
     setVal('footerVersion', data.version ? 'v' + data.version : '');
 }
@@ -2138,6 +2193,7 @@ function renderFeeChart(data) {
     const fees = _getFeeData(data, _feeRange);
     if (fees.length === 0) {
         svg.style.display      = 'none';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Noch keine Fee-Daten';
         emptyMsg.style.display = 'block';
         return;
     }
@@ -2374,7 +2430,7 @@ function renderVolumeChart(data) {
     const poolId = _volSelectedPool ?? pools[0]?.id;
     if (!poolId) {
         svg.style.display = 'none';
-        if (emptyMsg) emptyMsg.textContent = 'Kein aktiver Pool';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Kein aktiver Pool';
         emptyMsg.style.display = 'block';
         return;
     }
@@ -4958,7 +5014,7 @@ function initTooltips() {
 // ── Init ─────────────────────────────────────────────────────────────────────
 
 
-initNav({ current: 'liquidity', logout: '../logout.php' });
+initNav({ current: 'liquidity-dashboard' });
 initFooter({ botName: 'Liquidity Bot' });
 initMessageBell();
 initTooltips();

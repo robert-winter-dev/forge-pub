@@ -1,0 +1,23 @@
+FORGE.pub – Installation
+=========================
+
+Was hier passiert:
+  install.sh ist der Installer für diesen Rechner. Er richtet FORGE.pub
+  vollständig ein: Systempakete, TLS-Zertifikat, Wallets, Dienste. Danach
+  laufen Liquidity Bot + Lending Bot lokal auf diesem Server.
+
+Vorher benötigt (beide kostenlos):
+  Jupiter API Key:  https://portal.jup.ag
+  Helius API Key:   https://helius.dev
+
+Start:
+  sudo bash install.sh
+
+Ohne Argument öffnet sich ein Menü (Installieren / Aktualisieren /
+Deinstallieren / Hilfe / Beenden). Muss als root laufen.
+
+Es werden KEINE automatischen Zahlungen ausgelöst, bevor du selbst ein
+Wallet befüllst und die entsprechenden Bots aktivierst.
+
+Alle Optionen (auch für automatisierte/nicht-interaktive Installation):
+  sudo bash install.sh help

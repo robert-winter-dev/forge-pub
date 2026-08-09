@@ -11,13 +11,21 @@
  *   info   → nur DB          (alle anderen)
  */
 
+import { existsSync }    from 'fs';
+import path              from 'path';
 import { describeError } from '../../../lib/error-messages.js';
 import { FORGE_TZ }      from '../../../core/config.js';
 import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
+import { PATHS }         from '../../../config/paths.js';
 
 const NEXUS_URL      = 'http://127.0.0.1:3100';
 const BOT_ID         = config.botId;
+// Gesetzt vom Installer (bin/setup-lib/common.sh update_notify_suppress_on)
+// zwischen Bot-Stop und -Neustart eines Updates. startup()/shutdown() prüfen
+// das bei jedem Aufruf frisch (kein Caching) – der Marker kann sich innerhalb
+// des Prozesslebens ändern.
+const UPDATE_SUPPRESS_FLAG = path.join(PATHS.data, 'update-notify-suppress');
 const { displayName: BOT_DISPLAY_NAME, service: SERVICE_NAME } = getBotConfig('liquidity');
 
 // ─── HTML → Markdown (für Telegram-kompatible Speicherung in nexus.db) ─────
@@ -69,7 +77,7 @@ const ACTION = {
     /** Endgültig gescheitert, Nutzer muss handeln. */
     manual:    'Bitte im Dashboard prüfen und den Pool danach von Hand wieder freigeben.',
     /** Wallet braucht Geld. */
-    topUp:     'Bitte Wallet aufladen.',
+    topUp:     'Bitte Wallet mit mindestens 0,15 SOL aufladen.',
     /** Konfiguration muss angepasst werden. */
     configure: 'Bitte die Einstellung im Dashboard unter Risk-Management neu setzen.',
     /** Verdacht auf Datenfehler/Angriff – nichts automatisch übernehmen. */
@@ -109,44 +117,58 @@ async function send(level, category, message, context = null, telegramOnly = fal
 
 /** Bot-Start */
 export async function startup() {
+    // Während eines Updates sendet do_update() (bin/setup-lib/lifecycle.sh) am
+    // Ende EINE Zusammenfassung statt der Einzelmeldung jedes neu gestarteten
+    // Bots (Fund 2026-08-09: bei mehreren Diensten kamen sonst mehrere fast
+    // gleichzeitige "gestartet"-Meldungen, die nichts zueinander in Bezug
+    // setzten). Ein Crash-Restart außerhalb eines Updates hat den Marker nicht
+    // gesetzt und meldet sich weiterhin wie bisher.
+    if (existsSync(UPDATE_SUPPRESS_FLAG)) return;
     await send('lifecycle', 'system',
         `🟢 *Liquidity Bot gestartet*\n${ACTION.fyi}`);
 }
 
 /** Neue CLMM-Position wurde geöffnet */
 export async function positionOpened(pool, position) {
+    const pair = pool.displayPair ?? pool.pair;
     await send('info', 'trade',
-        `<b>Position geöffnet</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>Position geöffnet</b> – ${pair}\n` +
         `Range: ${position.priceLower.toFixed(2)} – ${position.priceUpper.toFixed(2)} USDC\n` +
-        `${ACTION.fyi}`
+        `${ACTION.fyi}`,
+        { pair }
     );
 }
 
 /** Fees wurden geclaimed */
 export async function feesClaimed(pool, amountA, amountB, action, txHash, usdValue = null) {
+    const pair   = pool.displayPair ?? pool.pair;
     const val    = usdValue ?? amountB;
     const fmtVal = val >= 1 ? val.toFixed(2) : val >= 0.01 ? val.toFixed(4) : val.toFixed(6);
-    await send('info', 'trade', `${pool.displayPair ?? pool.pair}: +${fmtVal} USDC`);
+    await send('info', 'trade', `${pair}: +${fmtVal} USDC`, { pair });
 }
 
 /** Position ist out of range */
 export async function outOfRange(pool, currentPrice, priceLower, priceUpper) {
+    const pair = pool.displayPair ?? pool.pair;
     const side = currentPrice < priceLower ? 'unter' : 'über';
     await send('info', 'grid',
-        `<b>Out of Range</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>Out of Range</b> – ${pair}\n` +
         `Preis ${currentPrice.toFixed(2)} USDC ist ${side} der Range\n` +
         `Range: ${priceLower.toFixed(2)} – ${priceUpper.toFixed(2)} USDC\n` +
         `Solange der Preis draußen ist, verdient die Position keine Gebühren. ` +
-        `Es ist nichts zu tun – der Bot verschiebt die Range selbst, wenn sich das nicht von allein löst.`
+        `Es ist nichts zu tun – der Bot verschiebt die Range selbst, wenn sich das nicht von allein löst.`,
+        { pair }
     );
 }
 
 /** Position ist wieder in range */
 export async function backInRange(pool, currentPrice) {
+    const pair = pool.displayPair ?? pool.pair;
     await send('info', 'grid',
-        `<b>Wieder in Range</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>Wieder in Range</b> – ${pair}\n` +
         `Preis: ${currentPrice.toFixed(2)} USDC\n` +
-        `Die Position verdient wieder Gebühren. ${ACTION.fyi}`
+        `Die Position verdient wieder Gebühren. ${ACTION.fyi}`,
+        { pair }
     );
 }
 
@@ -202,6 +224,7 @@ export async function tierTransition(pool, oldTier, newTier, scoreData) {
                   'nächsten Cleanup-Lauf von selbst Kapital nach, wenn welches frei ist.'
                 : ACTION.observe),
         {
+            pair:              pool.displayPair ?? pool.pair,
             pool:              pool.displayPair ?? pool.pair,
             poolId:            pool.id,
             oldTier, newTier,
@@ -214,11 +237,13 @@ export async function tierTransition(pool, oldTier, newTier, scoreData) {
 
 /** APR unter Schwellenwert */
 export async function aprAlert(pool, currentApr, threshold) {
+    const pair = pool.displayPair ?? pool.pair;
     await send('warn', 'system',
-        `<b>APR-Alert</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>APR-Alert</b> – ${pair}\n` +
         `Aktueller APR: ${currentApr.toFixed(2)}% (Schwellenwert: ${threshold}%)\n` +
         `Pool-Aktivität könnte nachgelassen haben.\n` +
-        `${ACTION.observe}`
+        `${ACTION.observe}`,
+        { pair }
     );
 }
 
@@ -386,7 +411,7 @@ export async function solLow(solBalance) {
         await send('info', 'wallet',
             `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
             `Unter ${String(config.solReserve).replace('.', ',')} SOL werden keine neuen Positionen mehr eröffnet.\n` +
-            `Bitte Wallet aufladen oder warten, bis sich der SOL Bestand wieder erholt.`
+            `Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`
         );
     }
 }
@@ -422,24 +447,28 @@ export async function warn(context, err) {
 
 /** Manueller Deposit in eine bestehende oder neue Position */
 export async function depositAdded(pool, depositUsdc, amountA, amountB, txHash, isNew = false) {
+    const pair    = pool.displayPair ?? pool.pair;
     const tokenA  = pool.pair.split('/')[0];
     const action  = isNew ? 'Neue Position eröffnet' : 'Liquidität erhöht';
     await send('info', 'trade',
-        `<b>Deposit</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>Deposit</b> – ${pair}\n` +
         `${action}: ${amountA.toFixed(6)} ${tokenA} + ${amountB.toFixed(2)} USDC\n` +
         `Einzahlung: ${depositUsdc.toFixed(2)} USDC\n` +
-        `${ACTION.fyi}`
+        `${ACTION.fyi}`,
+        { pair }
     );
 }
 
 /** Manueller Withdraw aus einer bestehenden Position */
 export async function withdrawCompleted(pool, usdcRequested, amountA, amountB, fraction, txHash) {
+    const pair   = pool.displayPair ?? pool.pair;
     const tokenA = pool.pair.split('/')[0];
     await send('info', 'trade',
-        `<b>Auszahlung</b> – ${pool.displayPair ?? pool.pair}\n` +
+        `<b>Auszahlung</b> – ${pair}\n` +
         `Entnommen: ${amountA.toFixed(6)} ${tokenA} + ${amountB.toFixed(2)} USDC\n` +
         `Ziel: ${usdcRequested.toFixed(2)} USDC (${(fraction * 100).toFixed(2)}% der Position)\n` +
-        `${ACTION.inWallet}`
+        `${ACTION.inWallet}`,
+        { pair }
     );
 }
 
@@ -461,6 +490,7 @@ export async function minimumValueCleared(pool, oldMinValueUsd, reason = 'withdr
 
 /** Bot wird heruntergefahren */
 export async function shutdown(reason = 'SIGTERM') {
+    if (existsSync(UPDATE_SUPPRESS_FLAG)) return;
     // SIGTERM = geplanter Stop (Deployment, bin/svc). Alles andere ist ein Abbruch,
     // bei dem systemd zwar neu startet, ein Blick ins Log aber angebracht ist.
     const expected = reason === 'SIGTERM' || reason === 'SIGINT';

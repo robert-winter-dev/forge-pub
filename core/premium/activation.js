@@ -75,6 +75,34 @@ export function issueActivationToken(customerPubkeyHex, { dbPath = PATHS.premium
 }
 
 /**
+ * Zeitpunkt der letzten Token-Ausstellung für einen Kunden-Pubkey — WIDERRUFENE Tokens
+ * zählen mit (anders als lookupActivationToken/listActiveActivations), da es hier nur um
+ * "wann zuletzt ausgestellt" geht, nicht um "was ist gerade gültig". Grundlage für das
+ * Rate-Limit in handlePremiumCommand() (server.js): Fund 2026-08-08, eine wiederholte
+ * premium-activate-DM (Backlog-Replay, aber auch ein hektisch klickender echter Client)
+ * widerruft bei jeder Ausstellung sofort den vorherigen Token — ohne Bremse kann das laufende
+ * Zahlungen ins Leere laufen lassen und erzeugt sinnlosen DB-/Relay-Traffic.
+ *
+ * @param {string} customerPubkeyHex
+ * @param {object} [opts]
+ * @param {string} [opts.dbPath]
+ * @returns {number | null} `created_at` (ms) der letzten Ausstellung, oder null wenn noch nie.
+ */
+export function getLastIssuedAt(customerPubkeyHex, { dbPath = PATHS.premiumDb } = {}) {
+    const db = openDb(dbPath);
+    try {
+        const row = db.prepare(`
+            SELECT MAX(created_at) AS lastIssuedAt
+            FROM premium_activation_tokens
+            WHERE customer_pubkey = ?
+        `).get(customerPubkeyHex);
+        return row?.lastIssuedAt ?? null;
+    } finally {
+        db.close();
+    }
+}
+
+/**
  * Schlägt einen Token nach — genutzt vom Zahlungs-Watcher (Memo = T), um den Kunden-Pubkey
  * zu finden, an den K_H per Gift-Wrap-DM geliefert werden muss.
  *
@@ -154,6 +182,13 @@ export async function selfTest() {
 
         const unknown = lookupActivationToken(randomBytes(16).toString('hex'), { dbPath });
         if (unknown !== null) failures.push('Unbekannter Token liefert nicht null');
+
+        const lastIssued = getLastIssuedAt(pubkey, { dbPath });
+        if (lastIssued == null) failures.push('getLastIssuedAt liefert null nach zwei Ausstellungen');
+        const neverPubkey = randomBytes(32).toString('hex');
+        if (getLastIssuedAt(neverPubkey, { dbPath }) !== null) {
+            failures.push('getLastIssuedAt liefert nicht null für einen Pubkey ohne jede Ausstellung');
+        }
 
         const active = listActiveActivations({ dbPath });
         if (active.length !== 1 || active[0].customerPubkeyHex !== pubkey) {

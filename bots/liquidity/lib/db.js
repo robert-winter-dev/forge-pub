@@ -424,6 +424,15 @@ function initSchema(db) {
 
         CREATE INDEX IF NOT EXISTS idx_positions_pool_open
             ON positions(pool_id, closed_at);
+
+        -- Bot-Zustand (key-value store) – bisher nur für 'bot_state' genutzt:
+        -- markiert beim Graceful-Shutdown (SIGTERM/SIGINT), dass der Bot bewusst
+        -- gestoppt wurde, damit das Dashboard "Bot deaktiviert" statt eines
+        -- Alt-Daten-Alarms zeigen kann (siehe bot.js SIGTERM-Handler).
+        CREATE TABLE IF NOT EXISTS kv_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
     `);
 }
 
@@ -609,6 +618,18 @@ function migrateSchema(db) {
     if (!poolCols.includes('range_override_fixed_pct')) {
         db.exec(`ALTER TABLE pools ADD COLUMN range_override_fixed_pct REAL`);
         console.log('[db] Migration: pools.range_override_fixed_pct hinzugefügt.');
+    }
+    // enabled_changed_at/_reason: wann + warum wurde die Nutzer-Freigabe zuletzt geändert
+    // (manuell, TVL-Schutz, Emergency-Exit, Reaktivierung) – Settings-UI zeigt das im
+    // Tooltip am Aktivieren-Button, damit ein gesperrter Pool nicht wie ein stiller Bug
+    // aussieht (Fund 2026-08-06: forge-pub1 PUMP/SOL, ohne erkennbaren Grund deaktiviert).
+    if (!poolCols.includes('enabled_changed_at')) {
+        db.exec(`ALTER TABLE pools ADD COLUMN enabled_changed_at INTEGER`);
+        console.log('[db] Migration: pools.enabled_changed_at hinzugefügt.');
+    }
+    if (!poolCols.includes('enabled_reason')) {
+        db.exec(`ALTER TABLE pools ADD COLUMN enabled_reason TEXT`);
+        console.log('[db] Migration: pools.enabled_reason hinzugefügt.');
     }
 
     const posCols = db.prepare(`PRAGMA table_info(positions)`).all().map(c => c.name);
@@ -2194,6 +2215,14 @@ export function getIncompleteTsExecutions(db) {
     ).all();
 }
 
+/** Zeitpunkt der letzten Trailing-Stop-Auslösung für einen Pool (für Cleanup-Cooldown). */
+export function getLastTsExecutionAt(db, poolId) {
+    const row = db.prepare(
+        `SELECT MAX(triggered_at) AS last FROM ts_executions WHERE pool_id = ?`
+    ).get(poolId);
+    return row?.last ?? 0;
+}
+
 // ─── TVL-Schutz State-Machine ─────────────────────────────────────────────────
 
 export function createTvlExecution(db, { poolId, positionId, level, tvlUsd, thresholdUsd, withdrawPct, configSnapshot }) {
@@ -2267,4 +2296,25 @@ export function getIncompleteScoreLimitExecutions(db) {
     return db.prepare(
         `SELECT * FROM score_limit_executions WHERE step != 'complete' ORDER BY triggered_at ASC`
     ).all();
+}
+
+/** Zeitpunkt der letzten Score-Limit-Auslösung für einen Pool (für Cleanup-Cooldown). */
+export function getLastScoreLimitExecutionAt(db, poolId) {
+    const row = db.prepare(
+        `SELECT MAX(triggered_at) AS last FROM score_limit_executions WHERE pool_id = ?`
+    ).get(poolId);
+    return row?.last ?? 0;
+}
+
+// ─── KV Config ────────────────────────────────────────────────────────────────
+
+export function kvGet(db, key, fallback = null) {
+    const row = db.prepare('SELECT value FROM kv_config WHERE key = ?').get(key);
+    return row ? row.value : fallback;
+}
+
+export function kvSet(db, key, value) {
+    return db
+        .prepare('INSERT OR REPLACE INTO kv_config (key, value) VALUES (?, ?)')
+        .run(key, String(value));
 }

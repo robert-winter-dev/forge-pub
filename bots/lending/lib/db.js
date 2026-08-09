@@ -178,6 +178,114 @@ function initSchema(db) {
     try {
         db.exec(`ALTER TABLE portfolio_history ADD COLUMN sol_price REAL`);
     } catch { /* Spalte existiert bereits – kein Fehler */ }
+
+    // ── Migration: Einstiegs-Anker (entry_value) ────────────────────────────
+    // Hintergrund (2026-08-09): Protokolle bewerten frisch eingezahltes Kapital
+    // sofort über pari. Loopscale meldete für einen 20-USDC-Deposit binnen Minuten
+    // 20,020606 USDC (+0,103 %) — ohne Zeitablauf, also kein Ertrag. Zwei reale
+    // Withdraws zeigten, dass dieser Aufschlag beim Ausstieg nicht realisiert wird.
+    // Der bisherige Yield (amount − Σ Einzahlungen) zählte ihn als Gewinn mit.
+    //
+    // entry_value ist die zum letzten Bewertungszeitpunkt GEMESSENE Kostenbasis
+    // (statt der nominalen Einzahlungssumme), entry_valued_at der Zeitpunkt dazu.
+    // Fortgeschrieben wird beides ausschließlich in bin/bot.js beim Positions-Refresh
+    // — die Cashflow-Skripte (deposit/withdraw/move/auto-deposit) bleiben unberührt,
+    // weil sie ohnehin nach `transactions` schreiben und der Bot die Cashflows von
+    // dort ableitet.
+    try {
+        db.exec(`ALTER TABLE positions ADD COLUMN entry_value REAL`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+    try {
+        db.exec(`ALTER TABLE positions ADD COLUMN entry_valued_at INTEGER`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+
+    // Einmaliger Backfill für Positionen, die vor dieser Migration eröffnet wurden.
+    // Anker = frühester Tages-Snapshot der Position (der liegt bereits NACH dem
+    // Einstiegssprung, enthält aber noch fast keinen Zins) + alle Cashflows danach.
+    //
+    // 🔒 Nur wenn dieser Snapshot höchstens BACKFILL_MAX_LAG_MS nach dem Positionsstart
+    //    liegt. Sonst enthielte er bereits echten Ertrag, der dann dauerhaft als
+    //    Kostenbasis gälte und aus der Yield-Anzeige verschwände — beim Master traf das
+    //    `loopscale-genesis` (Start 25.03., frühester Snapshot 08.04. = 13 Tage Versatz,
+    //    ~6 USDC echter Ertrag). Ohne brauchbaren Snapshot bleibt entry_value NULL:
+    //    bin/export.js fällt dann auf die alte netInvested-Methode zurück (leicht zu hoch,
+    //    aber nicht falsch verankert), und bin/bot.js setzt beim nächsten Cashflow einen
+    //    korrekten Anker.
+    //
+    // 🔴 Fassung 2 (Korrektur vom 09.08.2026, selber Tag): Fassung 1 ließ
+    //    `entry_valued_at` leer, wenn kein brauchbarer Snapshot existierte. bin/bot.js
+    //    fiel dann auf `started_at` zurück und summierte beim ersten Refresh die
+    //    Cashflows der GESAMTEN Positionshistorie als vermeintlich neuen Zufluss —
+    //    obwohl die längst im DB-Wert stecken. Auf dem Master verankerte das
+    //    `loopscale-genesis` (80+ Cashflows seit März, Nettosumme −12,04) bei 2699,58
+    //    statt 2708,00 und wies ~8,4 USDC zu viel Ertrag aus. Deshalb setzt die
+    //    Migration `entry_valued_at` jetzt IMMER: Positionen ohne brauchbaren Anker
+    //    bekommen den Migrationszeitpunkt, wodurch alle historischen Cashflows sauber
+    //    außerhalb des Betrachtungsfensters liegen.
+    //
+    // 🔴 Fassung 3 (Korrektur vom 09.08.2026, Rollout auf forge-pub1): Die Flow-Abfrage
+    //    im "usable"-Zweig hat KEINE Obergrenze (`created_at > snap.recorded_at`, kein
+    //    `AND created_at <= now`) — sie rechnet also alle Cashflows bis zum Migrations-
+    //    zeitpunkt in `entry_value` ein, nicht nur die bis zum Snapshot. Trotzdem stand
+    //    `entry_valued_at` auf `snap.recorded_at`. bin/bot.js suchte beim ersten Tick
+    //    danach erneut nach Cashflows NACH diesem (zu frühen) Zeitpunkt und fand denselben
+    //    Deposit ein zweites Mal. Auf forge-pub1 hat das den Anker von `loopscale-onre`
+    //    (Deposit 20 vor dem Snapshot, Deposit 5 danach) von korrekt 25,02 auf 30,02 USDC
+    //    verschoben — höher als die Position selbst, Yield wurde negativ (von
+    //    export.js auf 0 gefloort, aber inhaltlich falsch). Im Master-Test nie aufgefallen,
+    //    weil die dort verankerte Position keinen Cashflow nach ihrem Snapshot hatte.
+    //    Fix: `entry_valued_at` im "usable"-Zweig auf denselben Migrationszeitpunkt `now`
+    //    setzen wie im Fallback-Zweig — konsistent mit dem, was `entry_value` tatsächlich
+    //    abdeckt.
+    //
+    // Idempotent über den kv_config-Marker: stellt einen definierten Zielzustand her
+    // und darf deshalb gefahrlos erneut laufen (repariert auch bereits mit Fassung 1/2
+    // falsch verankerte Positionen).
+    const BACKFILL_MAX_LAG_MS = 48 * 3_600_000;
+    const ANCHOR_MIGRATION_VERSION = '3';
+    try {
+        const marker = db.prepare(`SELECT value FROM kv_config WHERE key = ?`)
+                         .get('migration_entry_anchor')?.value;
+        if (marker !== ANCHOR_MIGRATION_VERSION) {
+            const now  = Date.now();
+            const open = db.prepare(
+                `SELECT id, protocol, started_at FROM positions WHERE closed_at IS NULL`
+            ).all();
+            for (const pos of open) {
+                const snap = db.prepare(`
+                    SELECT amount_usdc, recorded_at FROM daily_position_snapshots
+                     WHERE protocol = ? AND recorded_at >= ?
+                     ORDER BY recorded_at ASC LIMIT 1
+                `).get(pos.protocol, pos.started_at);
+
+                const usable = snap && (snap.recorded_at - pos.started_at) <= BACKFILL_MAX_LAG_MS;
+                if (usable) {
+                    const flow = db.prepare(`
+                        SELECT COALESCE(SUM(CASE WHEN type = 'deposit' THEN amount
+                                                 WHEN type = 'withdraw' THEN -amount
+                                                 ELSE 0 END), 0) AS net
+                          FROM transactions
+                         WHERE protocol = ? AND created_at > ? AND type IN ('deposit','withdraw')
+                    `).get(pos.protocol, snap.recorded_at);
+                    // entry_valued_at = now (Migrationszeitpunkt), NICHT snap.recorded_at:
+                    // der Flow oben deckt bereits alles bis jetzt ab (keine Obergrenze in
+                    // der Abfrage). Ein früherer Zeitpunkt hier würde bin/bot.js dieselben
+                    // Cashflows beim nächsten Tick ein zweites Mal zählen lassen.
+                    db.prepare(`UPDATE positions SET entry_value = ?, entry_valued_at = ? WHERE id = ?`)
+                      .run(snap.amount_usdc + (flow?.net ?? 0), now, pos.id);
+                } else {
+                    // Kein verlässlicher Anker ableitbar: entry_value bleibt leer
+                    // (bin/export.js nutzt dann die alte netInvested-Methode), aber der
+                    // Zeitpunkt wird gesetzt, damit die Historie nicht erneut einfließt.
+                    db.prepare(`UPDATE positions SET entry_value = NULL, entry_valued_at = ? WHERE id = ?`)
+                      .run(now, pos.id);
+                }
+            }
+            db.prepare(`INSERT INTO kv_config (key, value) VALUES (?, ?)
+                        ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+              .run('migration_entry_anchor', ANCHOR_MIGRATION_VERSION);
+        }
+    } catch { /* Best-Effort – ohne Anker greift der netInvested-Fallback */ }
 }
 
 // ─── Positions ────────────────────────────────────────────────────────────────
@@ -203,15 +311,22 @@ export function openPosition({ protocol, poolType, asset = 'USDC', amount, txHas
 /** Alias für openPosition – für Auto-Deposit und Rebalancer */
 export const addPosition = openPosition;
 
-/** Position aktualisieren (APY-Refresh, Wert-Update) */
-export function updatePosition(id, { amount, currentApy }) {
+/**
+ * Position aktualisieren (APY-Refresh, Wert-Update).
+ * `entryValue` optional: neu gemessene Kostenbasis (siehe Migration "Einstiegs-Anker").
+ * Wird nur geschrieben wenn übergeben – sonst bleibt der bestehende Anker stehen.
+ */
+export function updatePosition(id, { amount, currentApy, entryValue = null }) {
+    const now = Date.now();
     return getDb()
         .prepare(`UPDATE positions SET
             amount          = ?,
             current_apy     = COALESCE(?, current_apy),
+            entry_value     = COALESCE(?, entry_value),
+            entry_valued_at = CASE WHEN ? IS NULL THEN entry_valued_at ELSE ? END,
             last_updated_at = ?
             WHERE id = ?`)
-        .run(amount, currentApy ?? null, Date.now(), id);
+        .run(amount, currentApy ?? null, entryValue, entryValue, now, now, id);
 }
 
 /** Position schließen (Withdraw abgeschlossen) */

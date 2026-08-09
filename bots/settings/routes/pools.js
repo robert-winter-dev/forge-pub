@@ -221,10 +221,11 @@ const DEFAULT_SETTINGS = {
     //   swapToUsdc  – nach Close alle Coins in USDC tauschen
     //   sendTo      – optional, Empfänger-Adresse (leer = Wallet)
     scoreLimit: {
-        enabled:    false,
-        minScore:   30,
-        swapToUsdc: true,
-        sendTo:     '',
+        enabled:       false,
+        minScore:      30,
+        swapToUsdc:    true,
+        sendTo:        '',
+        cooldownHours: 1,      // Sperrfrist für automatisches Cleanup-Reinvest nach Score-Limit-Exit
     },
     // Ranking-Exit: Pool schließen wenn er X Stunden durchgehend als "bad" bewertet ist
     //  (Tab wurde 2026-05-22 aus dem UI entfernt — Funktion wird neu gebaut.
@@ -243,6 +244,7 @@ const DEFAULT_SETTINGS = {
         minimumValueUsd: null,   // Pool-Mindestwert in USDC; null = deaktiviert
         autoSwapToUSDC:  true,
         sendTo:          '',
+        cooldownHours:   1,      // Sperrfrist für automatisches Cleanup-Reinvest nach TS-Exit
     },
     // Cleanup-Berücksichtigung: nimmt der Pool am Ranking-basierten Cleanup teil?
     cleanup: {
@@ -334,6 +336,28 @@ function hasOpenPosition(poolId) {
 }
 
 /**
+ * Letzter Auslöse-Zeitpunkt je Pool für alle drei Risk-Management-Exits, die einen
+ * Cleanup-Cooldown kennen (ts_executions/tvl_executions/score_limit_executions,
+ * jeweils triggered_at, MAX) — Grundlage für den Cleanup-Cooldown (analog
+ * `_loadCleanupCooldownBlockedPools` im Liquidity Bot, bots/liquidity/bin/cleanup.js).
+ * Reiner Lesezugriff auf liquiditybot.db, wie überall sonst in dieser Datei (der Bot
+ * bleibt alleinige Schreibinstanz).
+ */
+function loadLastExitTriggerTimes() {
+    const tables = { trailingStop: 'ts_executions', tvlProtection: 'tvl_executions', scoreLimit: 'score_limit_executions' };
+    const result = { trailingStop: {}, tvlProtection: {}, scoreLimit: {} };
+    try {
+        const db = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
+        for (const [key, table] of Object.entries(tables)) {
+            const rows = db.prepare(`SELECT pool_id, MAX(triggered_at) AS last FROM ${table} GROUP BY pool_id`).all();
+            for (const r of rows) result[key][r.pool_id] = r.last;
+        }
+        db.close();
+    } catch { /* Tabelle(n) evtl. noch nicht migriert */ }
+    return result;
+}
+
+/**
  * pools.json ist seit Liquidity Bot v0.4.85 für `active`/`enabled`/`rangeOverride.fixedPct` nur
  * noch der Seed für neue Pools — bei bestehenden Pools ist die liquiditybot.db (Tabelle `pools`)
  * Single Source of Truth (siehe bots/liquidity/lib/config.js `loadPools()` /
@@ -347,7 +371,7 @@ function loadPools() {
     let db;
     try {
         db = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
-        const rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct FROM pools`).all();
+        const rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct, enabled_changed_at, enabled_reason FROM pools`).all();
         const byId = new Map(rows.map(r => [r.id, r]));
         for (const p of pools) {
             const row = byId.get(p.id);
@@ -356,6 +380,10 @@ function loadPools() {
             if (row.enabled !== null && row.enabled !== undefined) {
                 p.enabled = row.enabled === 1;
             }
+            // Fürs Aktivieren-Tooltip in der Settings-UI: wann + warum wurde die
+            // Freigabe zuletzt geändert (siehe setPoolEnabled() in lib/config.js).
+            p.enabledChangedAt = row.enabled_changed_at ?? null;
+            p.enabledReason    = row.enabled_reason ?? null;
             if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
                 && p.rangeOverride && typeof p.rangeOverride === 'object') {
                 p.rangeOverride.fixedPct = row.range_override_fixed_pct;
@@ -518,6 +546,7 @@ router.get('/liquidity', (req, res) => {
 
         const values         = loadCurrentValues();
         const tsStatus       = loadTrailingStopStatus();
+        const lastExitTrigger = loadLastExitTriggerTimes();
         const investScores   = loadInvestScores();
         const scoreState     = loadScoreState();
         const poolTvls       = loadPoolTvls();
@@ -552,6 +581,30 @@ router.get('/liquidity', (req, res) => {
                 checkIntervalMs,
             };
 
+            // Cleanup-Cooldown nach Risk-Management-Exit (Ticket 2026-08-08): solange einer
+            // der drei Exits (Trailing Stop, TVL-Schutz, Score-Limit) noch im Cooldown steht,
+            // ist der Pool für den automatischen "Bester Pool"-Cleanup gesperrt (siehe
+            // _loadCleanupCooldownBlockedPools in bots/liquidity/bin/cleanup.js) — muss hier
+            // gespiegelt werden, sonst zeigt das "Cleanup verwalten"-Modal einen Pool als
+            // Kandidaten, den der Bot tatsächlich übergeht. Bei mehreren gleichzeitig aktiven
+            // Cooldowns gewinnt der spätere (längste Sperre).
+            const cooldownSources = [
+                { reason: 'Trailing Stop', lastAt: lastExitTrigger.trailingStop[pool.id]  ?? null, hours: settings.trailingStop?.cooldownHours },
+                { reason: 'TVL-Schutz',    lastAt: lastExitTrigger.tvlProtection[pool.id] ?? null, hours: settings.tvlProtection?.cooldownHours },
+                { reason: 'Score-Limit',   lastAt: lastExitTrigger.scoreLimit[pool.id]    ?? null, hours: settings.scoreLimit?.cooldownHours },
+            ];
+            let cleanupCooldownUntil = null;
+            let cleanupCooldownReason = null;
+            for (const s of cooldownSources) {
+                if (s.lastAt == null) continue;
+                const hours = Number.isFinite(Number(s.hours)) ? Number(s.hours) : 1;
+                const until = s.lastAt + hours * 3_600_000;
+                if (Date.now() < until && (cleanupCooldownUntil == null || until > cleanupCooldownUntil)) {
+                    cleanupCooldownUntil = until;
+                    cleanupCooldownReason = s.reason;
+                }
+            }
+
             return {
                 id:                 pool.id,
                 pair:               pool.pair,
@@ -559,6 +612,8 @@ router.get('/liquidity', (req, res) => {
                 poolType:           pool.poolType ?? null,
                 active:             pool.active,
                 enabled:            pool.enabled !== false, // Benutzer-Freigabe (Default: freigegeben)
+                enabledChangedAt:   pool.enabledChangedAt ?? null,
+                enabledReason:      pool.enabledReason    ?? null,
                 btcPricePoolId:     pool.btcPricePoolId  ?? null,
                 usdcIsTokenA:       pool.usdcIsTokenA    ?? false,
                 volatilePair:       pool.volatilePair     ?? false,
@@ -573,6 +628,8 @@ router.get('/liquidity', (req, res) => {
                 tvlExitDefault:     pool.tvlExitThreshold ?? null,
                 settings,
                 trailingStopStatus: tsStatus[pool.id]    ?? null,
+                cleanupCooldownUntil,
+                cleanupCooldownReason,
                 scoreLimitState,
             };
         });

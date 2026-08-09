@@ -1,6 +1,6 @@
 {
   "name": "forge",
-  "version": "1.0.0",
+  "version": "0.9.4",
   "type": "module",
   "description": "FORGE – Shared libraries for FORGE bots",
   "dependencies": {

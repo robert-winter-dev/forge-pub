@@ -109,6 +109,14 @@ export class ToastManager {
         this._lastSeenTs = getTs(newItems[0]);
         localStorage.setItem(this._storageKey, String(this._lastSeenTs));
 
+        // Nur Ereignisse anzeigen, die gerade eben passiert sind. "Neu" heißt
+        // hier nur "neuer als lastSeenTs" – das kann beim ersten Aufruf nach
+        // längerer Abwesenheit auch Stunden zurückliegende Events umfassen.
+        // Ohne diese Altersgrenze poppen beim Seitenwechsel alte Meldungen auf.
+        const now        = Date.now();
+        const freshItems = newItems.filter(n => now - getTs(n) < 10_000);
+        if (!freshItems.length) return;
+
         // Panel-Zustand ermitteln wenn nicht explizit übergeben
         if (panelOpen === undefined) {
             const panel = document.getElementById(this._panelId);
@@ -116,7 +124,7 @@ export class ToastManager {
         }
 
         if (!panelOpen && !this._muted) {
-            newItems.slice(0, 3).forEach(n => this._show(n));
+            freshItems.slice(0, 3).forEach(n => this._show(n));
         }
     }
 

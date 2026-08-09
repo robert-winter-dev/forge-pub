@@ -10,7 +10,7 @@
  */
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
-import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260731c';
+import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 const SVC_ID = 'forge-lendingbot';
@@ -120,7 +120,7 @@ function _openBotControlModal() {
             </div>
             <div class="bcm-row">
                 <button class="btn btn-secondary btn-uniform" id="lb-btn-stop">&#9632; Stop</button>
-                <span class="bcm-hint">Stoppt den Bot vollständig. Offene Positionen bleiben unverändert bestehen.</span>
+                <span class="bcm-hint">Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.</span>
             </div>
             <div class="bcm-row">
                 <button class="btn btn-secondary btn-uniform" id="lb-btn-restart">&#8635; Restart</button>
@@ -668,8 +668,18 @@ function _applyButtonStates(status) {
     if (!btnStart) return;
 
     const canStart   = status === 'inactive' || status === 'failed';
-    const canStop    = status === 'active'   || status === 'failed';
+    let   canStop    = status === 'active'   || status === 'failed';
     const canRestart = status === 'active'   || status === 'failed';
+
+    // Kapital-Sperre: Stop bleibt gesperrt, solange ein Protokoll noch Kapital
+    // hält — server-seitig ohnehin erzwungen (bots.js), hier nur die UI-Vorschau
+    // (kein unnötiger 409-Roundtrip). Restart bewusst NICHT gesperrt (transient,
+    // selbstheilend), siehe Kommentar in bots.js.
+    const hasCapital = _ctx.getHasCapital?.(SVC_ID) ?? false;
+    if (hasCapital) canStop = false;
+    btnStop.title = hasCapital
+        ? 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.'
+        : '';
 
     btnStart.disabled   = !canStart;
     btnStop.disabled    = !canStop;

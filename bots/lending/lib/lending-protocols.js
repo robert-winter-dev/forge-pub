@@ -665,7 +665,7 @@ const LOOPSCALE_API = config.loopscale.apiBase;
 export class LoopscaleProtocol {
     /**
      * @param {string} name          – 'loopscale-onre' | 'loopscale-genesis'
-     * @param {string} label         – 'Loopscale OnRe' | 'Loopscale Genesis'
+     * @param {string} label         – 'Loopscale Public' | 'Loopscale Gen'
      * @param {string} vaultAddress  – Vault PublicKey (base58)
      */
     constructor({ name, label, vaultAddress }) {
@@ -754,7 +754,6 @@ export class LoopscaleProtocol {
 
     /**
      * APY und TVL in einem API-Call abfragen.
-     * APY-Format in der Loopscale API: cBPS (100 % = 1.000.000 cBPS).
      * TVL-Format: in Lamports (USDC = 6 Dezimalstellen) oder USDC.
      * @returns {Promise<{apy: number, tvl: number|null}>}
      */
@@ -763,45 +762,73 @@ export class LoopscaleProtocol {
         const strategy = vault.vaultStrategy?.strategy;
 
         // ── APY ──────────────────────────────────────────────────────────────
-        // Zwei Vault-Typen mit unterschiedlichen APY-Feldern:
+        // 🔴 `interestPerSecond` ist KEIN Prozentwert, sondern der laufende Zinsertrag
+        //    des Vaults in USDC-Lamports pro Sekunde (µUSDC/s) — ein ABSOLUTER Betrag,
+        //    der mit der Vault-Größe skaliert.
         //
-        // Typ A (z.B. USDC Public): interestPerSecond < 100 → direkt der APY in %
-        //   Beispiel: interestPerSecond = 7.93 → 7,93 % APY
+        //    Bis 2026-08-09 wurde er bei Werten < 100 fälschlich direkt als "APY in %"
+        //    übernommen. Bei "USDC Frontier" ergab das 58,6 % statt der tatsächlichen
+        //    ~8 % (Faktor ~7 zu hoch). Der Fehler blieb unentdeckt, weil der Rohwert bei
+        //    kleinen Vaults zufällig in der Größenordnung eines plausiblen APY liegt.
+        //    Nie wieder einen Rohwert übernehmen, nur weil seine Größenordnung passt.
         //
-        // Typ B (z.B. Genesis): interestPerSecond ist eine rohe interne Rate (>>100).
-        //   Korrekte Berechnung: gewichteter Durchschnitt der Borrower-APYs aus
-        //   vaultStrategy.terms.assetTerms, gewichtet nach currentAllocationAmount.
-        //   APY-Einheit in terms: cBPS (10.000 cBPS = 1,00 %)
-        let apy;
-        const ips = strategy?.interestPerSecond ?? 0;
-        if (ips > 0 && ips < 100) {
-            // Typ A: interestPerSecond ist direkt der APY in %
-            apy = ips;
-        } else {
-            // Typ B: gewichteter Durchschnitt aus terms.assetTerms
-            const assetTerms = vault.vaultStrategy?.terms?.assetTerms ?? {};
-            let weightedSum = 0;
-            let totalWeight = 0;
-            for (const term of Object.values(assetTerms)) {
-                // durationAndApys: [[{duration, durationType}, apyCBPS], ...]
-                const apyCBPS = term.durationAndApys?.[0]?.[1] ?? 0;
-                const weight  = parseFloat(term.allocationInfo?.currentAllocationAmount ?? 0);
-                weightedSum  += apyCBPS * weight;
-                totalWeight  += weight;
-            }
-            // cBPS → %: 10.000 cBPS = 1 %
-            apy = totalWeight > 0 ? (weightedSum / totalWeight) / 10_000 : 0;
+        // Herleitung (drei unabhängige Wege stimmten in der Prüfung auf ±0,8 % überein:
+        // diese Formel 8,18 % / gewichtete Borrower-Terms 7,57 % / real gemessener
+        // Ertrag aus den Tages-Snapshots 7,45 %):
+        //
+        //   Bruttozins p.a. = interestPerSecond × 31.536.000 (Sekunden/Jahr)
+        //   Lender-Anteil   = 1 − interestFee / 1e6   (Loopscale-Skala: 1e6 = 100 %)
+        //   Lender-Kapital  = tokenBalance + currentDeployedAmount + externalYieldAmount
+        //   APY             = Bruttozins × Lender-Anteil / Lender-Kapital × 100
+        //
+        // `tokenBalance` (noch nicht verliehene Liquidität) gehört bewusst in den Nenner:
+        // Sie verdient nichts, verwässert aber den Ertrag der LP-Shares. Ein Bezug allein
+        // auf currentDeployedAmount würde den für den Einzahler real erreichbaren Ertrag
+        // um den Leerlauf-Anteil überschätzen (bei "USDC Frontier" 18 % des Vaults).
+        //
+        // Gegenprobe "USDC Genesis": interestPerSecond = 12.926,3 → 4,6 %. Der alte Code
+        // nahm dort den Borrower-Terms-Zweig (6,46 %) und lag ebenfalls zu hoch, weil die
+        // Borrower-APYs die Vault-Auslastung nicht berücksichtigen.
+        //
+        // ⚠️ Offene Unsicherheit: Ob `interestPerSecond` brutto (vor interestFee) oder bereits
+        //    netto geliefert wird, ließ sich aus den API-Feldern nicht abschließend belegen.
+        //    Der Abzug ist bewusst die konservative Wahl — er untertreibt den APY im Zweifel
+        //    um 10 %, was bei einer Anlageentscheidung die sichere Richtung ist. Falsifizieren
+        //    lässt sich das nur über einen längeren Ist-Vergleich: liegt der real gemessene
+        //    Ertrag dauerhaft ~10 % über dem hier ausgewiesenen APY, ist ips bereits netto
+        //    und `lenderShare` gehört entfernt.
+        const ips = strategy?.interestPerSecond;
+        if (ips == null) {
+            // Feld fehlt = Datenlücke, kein "0 % APY". Werfen statt raten: der Aufrufer
+            // (bin/bot.js checkApys) überspringt das Protokoll dann und behält den
+            // letzten bekannten DB-Wert, statt eine Umschichtung auf Basis von 0 % auszulösen.
+            throw new Error(`${this.label}: interestPerSecond fehlt in der API-Antwort`);
         }
+        const SECONDS_PER_YEAR = 31_536_000;
+        const extYieldRaw  = parseFloat(strategy?.externalYieldAmount    ?? 0);
+        const deployedRaw  = parseFloat(strategy?.currentDeployedAmount  ?? 0);
+        const idleRaw      = parseFloat(strategy?.tokenBalance           ?? 0);
+        const interestFee  = parseFloat(strategy?.interestFee            ?? 0);
+
+        const lenderCapitalRaw = idleRaw + deployedRaw + extYieldRaw;
+        const lenderShare      = Math.max(0, 1 - interestFee / 1e6);
+        const apy = lenderCapitalRaw > 0
+            ? (ips * SECONDS_PER_YEAR * lenderShare) / lenderCapitalRaw * 100
+            : 0;
 
         // ── TVL ──────────────────────────────────────────────────────────────
         // Typ A: externalYieldAmount + currentDeployedAmount = Lender-Kapital (in USDC-μ)
         // Typ B: currentDeployedAmount zählt auch extern besichertes Kapital → überhöht.
         //        externalYieldInfo.balance ist das tatsächliche Lender-Kapital in USDC-μ.
         // Heuristik: wenn (ext+deployed) > 5× externalYieldInfo.balance → Typ B verwenden.
-        const extYield    = parseFloat(strategy?.externalYieldAmount ?? 0);
-        const deployed    = parseFloat(strategy?.currentDeployedAmount ?? 0);
+        //
+        // ⚠️ Bewusst NICHT mit umgestellt (2026-08-09): Der APY-Nenner oben zählt
+        //    zusätzlich `tokenBalance` mit, der TVL hier nicht — die beiden Werte sind
+        //    daher nicht deckungsgleich. Eine TVL-Korrektur würde den TVL-Schutz
+        //    (lib/tvl-guard.js) gegen historische DB-Werte laufen lassen und dort einen
+        //    künstlichen Sprung erzeugen; das gehört separat bewertet.
         const extInfoBal  = parseFloat(vault.vaultStrategy?.externalYieldInfo?.balance ?? 0);
-        const standardTvl = (extYield + deployed) / 1e6;
+        const standardTvl = (extYieldRaw + deployedRaw) / 1e6;
         const tvl = extInfoBal > 0 && standardTvl > (extInfoBal / 1e6) * 5
             ? extInfoBal / 1e6   // Typ B: externalYieldInfo.balance
             : standardTvl;       // Typ A: ext + deployed

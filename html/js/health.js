@@ -9,8 +9,8 @@
  *     (forge-nexus: zusätzlich Nexus-Statistiken)
  */
 
-import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260731c';
-import { initMessageBell } from './message-bell.js?v=20260803b';
+import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260809b';
+import { initMessageBell } from './message-bell.js?v=20260809a';
 
 const DATA_URL      = 'data/health-status.json';
 const REFRESH_MS    = 60_000;
@@ -21,7 +21,7 @@ const BOT_LABELS = {
     liq: 'Liquidity Bot',
 };
 
-initNav({ current: 'health', logout: 'logout.php' });
+initNav({ current: 'health' });
 initFooter();
 
 // ── Globaler Datensatz (für Modal-Zugriff) ────────────────────────────────────

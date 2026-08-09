@@ -8,7 +8,7 @@
     "pidFile": "data/liquiditybot.pid"
   },
   "lending": {
-    "displayName": "FORGE Lending Bot",
+    "displayName": "Lending Bot",
     "service": "forge-lendingbot",
     "dir": "bots/lending",
     "dbFile": "data/lendingbot.db",

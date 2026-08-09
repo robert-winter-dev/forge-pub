@@ -59,6 +59,13 @@ export function openMessagesDb() {
             processed_at  INTEGER NOT NULL
         );
     `);
+    // Gleiches Muster für premium-activate-Dedup (MASTER-ONLY) – siehe markActivationEventProcessed().
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS nostr_processed_activation_events (
+            event_id      TEXT PRIMARY KEY,
+            processed_at  INTEGER NOT NULL
+        );
+    `);
     // category/thread_id sind bereits auf allen laufenden Instanzen migriert
     // (2026-07-28 bzw. 2026-07-30) – Spalten-Check bleibt trotzdem idempotent
     // stehen, für den Fall einer frischen Installation aus einem alten Backup.
@@ -122,6 +129,25 @@ export function markBlobEventProcessed(db, eventId) {
     return info.changes === 1;
 }
 
+/**
+ * Dasselbe Muster wie markBlobEventProcessed(), nur für premium-activate-DMs (MASTER-ONLY,
+ * siehe handlePremiumCommand() in server.js). Fund 2026-08-08: der bisherige Dedup-Schutz
+ * für Aktivierungs-Reissue lief ausschließlich über INSERT OR IGNORE + event_id auf
+ * nostr_support_messages — nach Einführung des Rubriken-Cap-Prunings (pruneMessagesToLimit,
+ * 100er-Limit) fiel die uralte premium-activate-Zeile irgendwann aus der Tabelle, ein
+ * Relay-Backlog-Replay (Watchdog-Resubscribe, siehe lib/nostr-client.js) zählte danach als
+ * "neu" und löste alle ~20 Min einen frischen Token aus (widerrief dabei den vorherigen).
+ * Eigene, nie geprunte Tabelle entkoppelt den Protokoll-Dedup bewusst von der reinen
+ * Anzeige-Aufbewahrung im Message Center.
+ */
+export function markActivationEventProcessed(db, eventId) {
+    if (eventId == null) return true;
+    const info = db.prepare(
+        `INSERT OR IGNORE INTO nostr_processed_activation_events (event_id, processed_at) VALUES (?, ?)`
+    ).run(eventId, Date.now());
+    return info.changes === 1;
+}
+
 export function recordPremiumMessage(text) {
     const db = openMessagesDb();
     try {
@@ -129,7 +155,52 @@ export function recordPremiumMessage(text) {
             INSERT INTO nostr_support_messages (direction, timestamp, text, category, read)
             VALUES ('out', ?, ?, 'premium', 1)
         `).run(Date.now(), text);
+        pruneMessagesToLimit(db, 'premium');
     } finally {
         db.close();
+    }
+}
+
+// Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
+// je Rubrik an – hier hart begrenzt, analog zu MAX_NOTIFICATIONS in
+// core/nexus/notify-db.js für die System-Rubrik, damit die Tabelle nicht unbegrenzt
+// wächst und die UI-Grenze auch tatsächlich zutrifft, statt nur eine Auslese-
+// Obergrenze zu sein.
+const MAX_MESSAGES_PER_CATEGORY = 100;
+
+/**
+ * Kürzt eine Kategorie ('support' | 'premium') nach jedem Insert auf die 100
+ * neuesten Einträge – nach jedem Schreibzugriff auf nostr_support_messages
+ * aufzurufen (siehe die Aufrufer in server.js/premium-pay.js).
+ *
+ * 'support' zählt pro THREAD (peer_pubkey + thread_id), nicht pro Einzelnachricht:
+ * die Übersichtsliste zeigt eine Zeile pro Konversation (siehe GET /support/threads),
+ * also müssen ganze Threads gemeinsam aus- oder eingehen – sonst blieben angebrochene,
+ * unvollständige Verläufe übrig, deren älteste Nachrichten fehlen, neuere aber nicht.
+ * 'premium' ist eine flache Nachrichtenliste ohne Thread-Konzept (siehe GET /premium),
+ * dort zählt die Grenze pro Zeile.
+ */
+export function pruneMessagesToLimit(db, category) {
+    if (category === 'support') {
+        db.prepare(`
+            DELETE FROM nostr_support_messages
+            WHERE category = 'support'
+              AND (peer_pubkey, COALESCE(thread_id, '')) NOT IN (
+                  SELECT peer_pubkey, COALESCE(thread_id, '')
+                  FROM nostr_support_messages
+                  WHERE category = 'support'
+                  GROUP BY peer_pubkey, COALESCE(thread_id, '')
+                  ORDER BY MAX(timestamp) DESC
+                  LIMIT ?
+              )
+        `).run(MAX_MESSAGES_PER_CATEGORY);
+    } else {
+        db.prepare(`
+            DELETE FROM nostr_support_messages
+            WHERE category = ?
+              AND id NOT IN (
+                  SELECT id FROM nostr_support_messages WHERE category = ? ORDER BY timestamp DESC LIMIT ?
+              )
+        `).run(category, category, MAX_MESSAGES_PER_CATEGORY);
     }
 }

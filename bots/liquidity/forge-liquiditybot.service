@@ -10,7 +10,6 @@ User=forge
 WorkingDirectory=/opt/forge/app/bots/liquidity
 Environment=FORGE_ENV_DIR=/opt/forge/local/env
 
-ExecStartPre=/bin/sleep 30
 ExecStart=/usr/bin/node bin/bot.js
 
 # .env laden (Keypair-Pfad, RPC, Telegram, etc.)

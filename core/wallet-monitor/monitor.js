@@ -23,8 +23,8 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync } from 'child_process';
-import { isAutoPayEnabled } from '../../lib/premium-auto-pay-store.js';
 import { getBotConfig }     from '../../lib/bot-registry.js';
+import { isAutoPayEnabled } from '../../lib/premium-auto-pay-store.js';
 import { PATHS } from '../../config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -274,14 +274,6 @@ try {
 // 2. Pro Wallet: Balance lesen + in DB schreiben (sequenziell – Rate-Limit-freundlich)
 let successCount = 0;
 for (const wallet of config.wallets) {
-    // Premium-Wallet nur überwachen, solange der Premium-Dienst aktiv ist (Ein/Aus-
-    // Schalter Liquidity → Premium → Verwalten → Aktivieren). Ohne aktivierten
-    // Auto-Pay gibt es für diese Wallet nichts sinnvoll zu warnen — sie bewegt sich
-    // dann gar nicht mehr, ein Alert wäre irreführend.
-    if (wallet.id === 'premium' && !isAutoPayEnabled()) {
-        console.log(`[wallet-monitor] ${wallet.label}: Premium-Auto-Pay deaktiviert – Monitoring übersprungen.`);
-        continue;
-    }
     try {
         const { solBalance, usdcBalance, tokenBalances } = await fetchWalletSnapshot(wallet.address);
 
@@ -326,9 +318,15 @@ for (const wallet of config.wallets) {
         // SOL-Low-Alert (max. 1× pro Stunde pro Wallet)
         const isPremiumWallet = wallet.id === 'premium';
         const solLowThreshold = isPremiumWallet ? PREMIUM_SOL_LOW_THRESHOLD : SOL_LOW_THRESHOLD;
-        const botActive = isPremiumWallet || isBotServiceActive(wallet.id);
+        // Premium (core/premium, systemd forge-premium) läuft bewusst IMMER, auch für
+        // das Message Center — der systemd-Status ist hier also kein Signal. Was zählt,
+        // ist ob premium-pay.js überhaupt eine Zahlung versuchen würde: dieselbe Quelle
+        // (lib/premium-auto-pay-store.js), die auch dort geprüft wird, siehe a81bff7c
+        // (Zahlung an Liquidity-Bot-Status gekoppelt). Alles andere prüft weiter den
+        // eigenen systemd-Service.
+        const botActive = isPremiumWallet ? isAutoPayEnabled() : isBotServiceActive(wallet.id);
         if (solBalance < solLowThreshold && !botActive) {
-            console.log(`[wallet-monitor] SOL niedrig: ${wallet.label} (${solBalance.toFixed(4)} SOL) – Bot-Service gestoppt, Alert unterdrückt`);
+            console.log(`[wallet-monitor] SOL niedrig: ${wallet.label} (${solBalance.toFixed(4)} SOL) – Premium-Zahlung/Bot gestoppt, Alert unterdrückt`);
         } else if (solBalance < solLowThreshold) {
             const lastAlert = db.prepare(
                 'SELECT last_alerted_at FROM sol_low_alerts WHERE wallet_id = ?'
@@ -349,10 +347,10 @@ for (const wallet of config.wallets) {
                     ? `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
                       `Ohne SOL kann die stündliche Premium-Zahlung nicht mehr gesendet werden ` +
                       `und der Premium-Datenbezug endet.\n` +
-                      `Bitte Wallet aufladen. Der Bot läuft weiter, nur ohne Premium-Daten.`
+                      `Bitte Wallet mit mindestens 0,15 SOL aufladen. Der Bot läuft weiter, nur ohne Premium-Daten.`
                     : `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
                       `Unter 0,1 SOL werden keine neuen Positionen mehr eröffnet.\n` +
-                      `Bitte Wallet aufladen oder warten, bis sich der SOL Bestand wieder erholt.`;
+                      `Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`;
                 try {
                     await fetch(config.notifyUrl, {
                         method:  'POST',

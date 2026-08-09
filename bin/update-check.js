@@ -32,9 +32,21 @@
 // Test-/Entwicklungsmodus (kein GitHub nötig):
 //   node bin/update-check.js --source <verzeichnis-mit-manifest.json+.sig+tarball>
 //   [--dry-run]   bricht nach dem Entpacken ab, wendet nichts an, startet nichts neu
+//   [--confirm]   übergeht die Auto-Apply-Politik (autoApplyPatch/isPatchLevel) — für
+//                 den manuellen "Update"-Menüpunkt in bin/setup.sh, NICHT für Cron.
+//                 Signatur-/Hash-/Downgrade-Prüfung bleiben immer aktiv.
 //
 // FORGE_PUB_BASE_DIR (Env-Override): Basisverzeichnis statt /opt/forge — nur für
 // lokale Tests außerhalb einer echten Installation, niemals in Produktion setzen.
+//
+// FORGE_PUB_UPDATE_TOKEN (Env-Override): GitHub-Token, das an die Releases-API
+// und an Asset-Downloads angehängt wird — NUR damit dieser Pfad auch gegen ein
+// privates forge-pub-Repo testbar ist (Fund 2026-08-05: das Repo kurz auf
+// "public" zu schalten war die Alternative, ist aber echte, sofort auffindbare
+// Öffentlichkeit — keine "geheime URL", GitHub kennt kein Unlisted). Echte
+// Kunden setzen diese Variable nie (das öffentliche stable-Repo braucht keine
+// Auth) — bewusst kein Bestandteil von local/, keine Doku dafür in
+// GETTING-STARTED.txt, kein Setup-Schritt legt sie an.
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -186,6 +198,26 @@ function readPolicy() {
     try { return JSON.parse(readFileSync(policyPath, 'utf8')); } catch { return { autoApplyPatch: false }; }
 }
 
+// Merkt sich instanzweit "es liegt ein geprüftes, noch nicht eingespieltes Update
+// bereit" — Grundlage für das sanfte Pulsieren der Versionsnummer im Nav-Panel
+// (bots/settings/routes/update.js liest dieselbe Datei). Bewusst unter local/data/,
+// nicht unter app/: ein Update-Apply ersetzt app/ komplett, lokaler Zustand
+// überlebt das nur unter local/ (siehe config/paths.js-Kopfkommentar).
+const UPDATE_STATUS_PATH = path.join(LOCAL_DIR, 'data', 'update-status.json');
+
+function writeUpdateStatus(data) {
+    try {
+        mkdirSync(path.dirname(UPDATE_STATUS_PATH), { recursive: true });
+        writeFileSync(UPDATE_STATUS_PATH, JSON.stringify(data, null, 2) + '\n');
+    } catch (err) {
+        log(`update-status.json konnte nicht geschrieben werden: ${err.message}`);
+    }
+}
+
+function clearUpdateStatus() {
+    try { rmSync(UPDATE_STATUS_PATH, { force: true }); } catch { /* nichts zu tun */ }
+}
+
 function isActive(service) {
     const r = spawnSync('systemctl', ['is-active', service], { encoding: 'utf8' });
     return r.stdout.trim() === 'active';
@@ -206,10 +238,16 @@ async function fetchRelease({ repo, channel, sourceDir }) {
     if (sourceDir) {
         const manifestBuf = readFileSync(path.join(sourceDir, 'manifest.json'));
         const sigBuf = readFileSync(path.join(sourceDir, 'manifest.json.sig'));
-        return { manifestBuf, sigBuf, fetchTarball: async (name) => readFileSync(path.join(sourceDir, name)) };
+        // Kein echtes GitHub-Release im Testmodus — kein Changelog-Link verfügbar.
+        return { manifestBuf, sigBuf, releaseUrl: null, fetchTarball: async (name) => readFileSync(path.join(sourceDir, name)) };
     }
+    // Siehe FORGE_PUB_UPDATE_TOKEN im Kopfkommentar — nur für Tests gegen ein
+    // privates Repo gesetzt, bei echten Kunden immer undefined.
+    const token = process.env.FORGE_PUB_UPDATE_TOKEN;
+    const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+
     const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'forge-pub-update-check' },
+        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'forge-pub-update-check', ...authHeaders },
     });
     if (!res.ok) throw new Error(`GitHub-Releases-API: HTTP ${res.status}`);
     const releases = await res.json();
@@ -222,13 +260,25 @@ async function fetchRelease({ repo, channel, sourceDir }) {
         return a;
     };
     const download = async (asset) => {
-        const r = await fetch(asset.browser_download_url);
+        // 'browser_download_url' ist nur für ÖFFENTLICHE Repos ein direkter Link
+        // (funktioniert bei echten Kunden, kein API-Rate-Limit). Bei einem
+        // PRIVATEN Repo (nur mit FORGE_PUB_UPDATE_TOKEN im Testbetrieb) liefert
+        // dieselbe URL ohne Browser-Session nur 404 — dafür muss die API-URL
+        // 'asset.url' mit 'Accept: application/octet-stream' verwendet werden
+        // (sonst kämen JSON-Metadaten statt der Rohdatei zurück).
+        const url = token ? asset.url : asset.browser_download_url;
+        const r = await fetch(url, {
+            headers: token ? { Accept: 'application/octet-stream', ...authHeaders } : {},
+        });
         if (!r.ok) throw new Error(`Download ${asset.name}: HTTP ${r.status}`);
         return Buffer.from(await r.arrayBuffer());
     };
     const manifestBuf = await download(findAsset('manifest.json'));
     const sigBuf = await download(findAsset('manifest.json.sig'));
-    return { manifestBuf, sigBuf, fetchTarball: async (name) => download(findAsset(name)) };
+    // GitHub liefert html_url direkt in der Release-Antwort — kein zusätzlicher
+    // Aufbau nötig. Bei einem privaten Repo funktioniert der Link nur für
+    // eingeloggte Mitglieder des Repos (Testbetrieb), sonst öffentlich erreichbar.
+    return { manifestBuf, sigBuf, releaseUrl: candidate.html_url ?? null, fetchTarball: async (name) => download(findAsset(name)) };
 }
 
 async function main() {
@@ -236,6 +286,13 @@ async function main() {
     const sourceIdx = argv.indexOf('--source');
     const sourceDir = sourceIdx >= 0 ? path.resolve(argv[sourceIdx + 1]) : null;
     const dryRun = argv.includes('--dry-run');
+    // --confirm: manueller Aufruf durch einen Menschen (z.B. "Update" im setup.sh-Menü),
+    // der die Auto-Apply-Politik (autoApplyPatch/isPatchLevel) übergeht. Diese Politik
+    // existiert NUR, um den unbeaufsichtigten Cron-Lauf auf Patch-Level zu beschränken —
+    // ein Mensch, der gerade explizit "Update" ausgewählt hat, hat die dafür geforderte
+    // Entscheidung bereits getroffen. Signatur-, Hash- und Downgrade-Prüfung bleiben
+    // davon unberührt, die gelten immer.
+    const forceApply = argv.includes('--confirm');
 
     const { repo, channel } = readUpdateConfig();
     log(`Prüfe auf neues Release (channel=${channel}${sourceDir ? `, Quelle=${sourceDir} [TEST-MODUS]` : `, repo=${repo}`})`);
@@ -291,6 +348,9 @@ async function main() {
 
     if (installed.code !== null && manifest.versionCode <= installed.code) {
         log(`Kein neues Update (installiert: v${installed.code}, Release: v${manifest.versionCode}).`);
+        // Wir sind auf dem neuesten (oder einem neueren) Stand — ein evtl. zuvor
+        // gemeldetes, noch nicht eingespieltes Update gilt nicht mehr als offen.
+        clearUpdateStatus();
         // GLEICHE Version = täglicher Normalfall, dafür gibt es bewusst keine Meldung
         // (sonst Dauerspam). ÄLTERE Version ist etwas völlig anderes: der Kanal liefert
         // dann einen Stand, der HINTER dem installierten liegt — entweder hat der
@@ -330,7 +390,10 @@ async function main() {
     mkdirSync(stageTarget, { recursive: true });
     const tarPath = path.join(STAGING_DIR, manifest.artifact.name);
     writeFileSync(tarPath, tarballBuf);
-    execFileSync('tar', ['xzf', tarPath, '-C', stageTarget, '--strip-components=1']);
+    // Kein --strip-components mehr nötig (Fund 2026-08-06): das Artefakt-Tarball
+    // archiviert seit tools/pub-export/build-artifact.js den INHALT von 'current/',
+    // nicht mehr den Ordner selbst — es gibt keine Wrapper-Ebene mehr wegzuwerfen.
+    execFileSync('tar', ['xzf', tarPath, '-C', stageTarget]);
     rmSync(tarPath);
     // Zusätzlicher Sanity-Check gegen Tar-Traversal/Symlink-Tricks (GNU tar
     // verweigert Entpacken außerhalb des Zielverzeichnisses standardmäßig bereits
@@ -353,11 +416,20 @@ async function main() {
     const policy = readPolicy();
     const isPatchLevel = installed.version
         && installed.version.split('.').slice(0, 2).join('.') === manifest.version.split('.').slice(0, 2).join('.');
-    if (!policy.autoApplyPatch || !isPatchLevel) {
+    if (!forceApply && (!policy.autoApplyPatch || !isPatchLevel)) {
         log(`Update verfügbar (v${manifest.version}), Auto-Apply nicht aktiv oder kein Patch-Level — nur Meldung.`);
+        // Grundlage für das sanfte Pulsieren der Versionsnummer im Nav-Panel —
+        // siehe writeUpdateStatus()/UPDATE_STATUS_PATH oben.
+        writeUpdateStatus({
+            latestVersion: manifest.version,
+            latestVersionCode: manifest.versionCode,
+            releaseUrl: release.releaseUrl,
+            notifiedAt: Date.now(),
+        });
         await notify('info', CAT.available, `Update verfügbar – Version ${manifest.version}`,
             `Ein geprüftes, echtes Update des Herausgebers liegt bereit (installiert: ${installed.version ?? 'unbekannt'}). `
-            + 'Es wurde noch nichts verändert – das Einspielen wartet auf deine Freigabe.',
+            + 'Es wurde noch nichts verändert – das Einspielen wartet auf deine Freigabe.'
+            + (release.releaseUrl ? `\nChangelog: ${release.releaseUrl}` : ''),
             ACTION.confirm);
         return;
     }
@@ -402,6 +474,7 @@ async function main() {
         (preActive[i] && !isActive(s)) || restartCount(s) > preRestarts[i]);
     if (regressed.length === 0) {
         log('✓ Health-Check ok.');
+        clearUpdateStatus();
         await notify('info', CAT.apply, `Update eingespielt – Version ${manifest.version}`,
             'Das Update wurde installiert und alle Dienste laufen wieder normal.',
             ACTION.fyi);

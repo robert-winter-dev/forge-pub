@@ -47,7 +47,7 @@ function triggerPoolTypeAdvisorAsync() { /* Fork: Pool-Type-Advisor (#0219) ist 
 
 // ─── Settings lesen ───────────────────────────────────────────────────────────
 
-function loadConfig(poolId) {
+export function loadConfig(poolId) {
     try {
         const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
         const row = sdb.prepare(

@@ -26,7 +26,7 @@ import { dirname, resolve, join } from 'path';
 import { fileURLToPath }    from 'url';
 
 import { config, loadAutoDeployConfig } from '../lib/config.js';
-import { sendTelegram } from '../lib/notify.js';
+import { sendTelegram, isUpdateInProgress } from '../lib/notify.js';
 import { KaminoProtocol, /* DriftProtocol (DEAKTIVIERT 2026-04-02), */ LoopscaleProtocol, JupiterLendProtocol,
          createProtocolByName } from '../lib/lending-protocols.js';
 import { getSolBalance, getUsdcBalance, loadKeypair, signAndSend, sendUsdc, fetchFeeSol } from '../lib/wallet.js';
@@ -443,13 +443,17 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             );
             addNotification({ level: 'error', message: `🚨 Auto-Exit: ${protocolName} – ${fmt(exitAmount)} USDC entnommen (TVL ${tvlFmt})` });
         } catch (err) {
-            logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${err.message}`);
+            // Betriebs-Kanäle (Log/Telegram) bekommen bewusst die technischen Rohdaten
+            // (falls vorhanden) statt der nutzerfreundlichen Meldung aus wallet.js
+            // simulate() – hier braucht es die Diagnose, nicht die Beruhigung.
+            const detail = err.technicalDetail ?? err.message;
+            logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${detail}`);
             await sendTelegram(
                 `⚠️ *Auto-Exit fehlgeschlagen*\n`
                 + `Pool: ${protocolName} | TVL: ${tvlFmt}\n`
-                + `Fehler: ${err.message}`
+                + `Fehler: ${detail}`
             );
-            addNotification({ level: 'warn', message: `⚠️ Auto-Exit fehlgeschlagen: ${protocolName} – ${err.message}` });
+            addNotification({ level: 'warn', message: `⚠️ Auto-Exit fehlgeschlagen: ${protocolName} – ${detail}` });
         }
     }
 }
@@ -581,7 +585,59 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
                             totalValue -= pos.amount;   // wurde oben schon addiert – korrigieren
                             totalValue += prevAmount;
                         } else {
-                            updatePosition(dbPos.id, { amount: pos.amount, currentApy });
+                            // ── Einstiegs-Anker fortschreiben ────────────────────────
+                            // Protokolle bewerten frisch eingezahltes Kapital sofort über
+                            // pari (Loopscale: +0,103 % binnen Minuten, ohne Zeitablauf).
+                            // Dieser Aufschlag ist kein Ertrag — er wird beim Ausstieg nicht
+                            // realisiert. Deshalb zählt als Kostenbasis nicht der nominale
+                            // Einzahlbetrag, sondern der danach tatsächlich GEMESSENE Wert.
+                            //
+                            // `prevAmount` enthält bereits den Nominalbetrag (openPosition /
+                            // addToPosition schreiben ihn sofort). Der Positionswert vor dem
+                            // Cashflow ist also prevAmount − netFlow; der reale Zuwachs ist
+                            // die Differenz des ersten danach gemessenen API-Werts dazu:
+                            //
+                            //   entry_value += pos.amount − prevAmount + netFlow
+                            //
+                            // Beispiel forge-pub1, 2. Deposit über 5 USDC:
+                            //   prev 25,020636 | API 25,025917 | netFlow +5
+                            //   → Basis += 25,025917 − 25,020636 + 5 = 5,005281 (statt 5,00)
+                            let entryValue = null;
+                            const anchoredAt = dbPos.entry_valued_at;
+
+                            // Beim allerersten Anker zählt der eröffnende Deposit mit (`>=`),
+                            // danach nur noch echte Zuflüsse NACH der letzten Bewertung (`>`).
+                            // Wichtig: openPosition() und der transactions-Eintrag entstehen
+                            // im selben Vorgang, ihre Zeitstempel liegen wenige Millisekunden
+                            // auseinander (gemessen: 63 ms) — ein reines `>` gegen started_at
+                            // würde den eröffnenden Deposit verschlucken und die Position
+                            // dauerhaft ohne Anker lassen.
+                            const since = anchoredAt ?? dbPos.started_at;
+                            const netFlow = getTransactionsByProtocol(proto.name, since)
+                                .filter(tx => (tx.type === 'deposit' || tx.type === 'withdraw')
+                                           && (anchoredAt == null ? tx.created_at >= since
+                                                                  : tx.created_at >  since))
+                                .reduce((s, tx) => s + (tx.type === 'deposit' ? tx.amount : -tx.amount), 0);
+
+                            if (netFlow !== 0) {
+                                // Bisherige Basis: der gepflegte Anker. Fehlt er (Position
+                                // älter als die Migration, ohne brauchbaren Snapshot), ist
+                                // die nominale Einzahlungssumme ohne den aktuellen Cashflow
+                                // der beste verfügbare Schätzer — die alte Methode also,
+                                // aber ab jetzt sauber fortgeschrieben.
+                                const priorBasis = dbPos.entry_value ?? (
+                                    getTransactionsByProtocol(proto.name, dbPos.started_at)
+                                        .filter(tx => tx.type === 'deposit' || tx.type === 'withdraw')
+                                        .reduce((s, tx) => s + (tx.type === 'deposit' ? tx.amount : -tx.amount), 0)
+                                    - netFlow
+                                );
+                                entryValue = priorBasis + (pos.amount - prevAmount + netFlow);
+                                log(`  ${proto.label}: Einstiegs-Anker ${fmt(entryValue)} USDC `
+                                  + `(Cashflow ${netFlow >= 0 ? '+' : ''}${fmt(netFlow)} nominal, `
+                                  + `Bewertungsaufschlag ${fmt(pos.amount - prevAmount, 6)})`);
+                            }
+
+                            updatePosition(dbPos.id, { amount: pos.amount, currentApy, entryValue });
                         }
                     } catch (err) {
                         logErr(`DB updatePosition (${proto.name}): ${err.message}`);
@@ -839,8 +895,9 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
             });
             results.push(`  ✅ ${step.protocol}: +${fmt(step.amount)} USDC`);
         } catch (err) {
-            logErr(`Auto-Deploy fehlgeschlagen (${step.protocol}): ${err.message}`);
-            results.push(`  ❌ ${step.protocol}: ${err.message}`);
+            const detail = err.technicalDetail ?? err.message;
+            logErr(`Auto-Deploy fehlgeschlagen (${step.protocol}): ${detail}`);
+            results.push(`  ❌ ${step.protocol}: ${detail}`);
             allOk = false;
         }
     }
@@ -983,8 +1040,9 @@ async function checkAndTopupSol(walletAddress) {
         await sendTelegram(`🔋 *SOL-Topup ausgeführt*\n${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL\nReserve war: ${solBalance.toFixed(4)} SOL`);
         addNotification({ level: 'info', message: `🔋 SOL-Topup: ${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL` });
     } catch (err) {
-        logErr(`SOL-Topup fehlgeschlagen: ${err.message}`);
-        await sendTelegram(`🚨 *SOL-Topup fehlgeschlagen*\n${err.message}\nSOL-Balance: ${solBalance.toFixed(4)} SOL`);
+        const detail = err.technicalDetail ?? err.message;
+        logErr(`SOL-Topup fehlgeschlagen: ${detail}`);
+        await sendTelegram(`🚨 *SOL-Topup fehlgeschlagen*\n${detail}\nSOL-Balance: ${solBalance.toFixed(4)} SOL`);
     }
 }
 
@@ -1015,11 +1073,14 @@ async function start() {
     }
     log(`  Pools bekannt: ${allProtocols.map(p => p.label).join(', ')}`);
 
-    // Telegram: Startup-Nachricht
-    await sendTelegram(
-        `🟢 *${config.botDisplayName} gestartet*\n`
-        + `Pools: ${allProtocols.map(p => p.label).join(', ')}`
-    );
+    // Telegram: Startup-Nachricht (nicht während eines Updates – dort sendet
+    // do_update() stattdessen eine Zusammenfassung, s. lib/notify.js)
+    if (!isUpdateInProgress()) {
+        await sendTelegram(
+            `🟢 *${config.botDisplayName} gestartet*\n`
+            + `Pools: ${allProtocols.map(p => p.label).join(', ')}`
+        );
+    }
 
     // Graceful Shutdown
     let shuttingDown = false;
@@ -1028,7 +1089,9 @@ async function start() {
         shuttingDown = true;
         log(`[Signal] ${signal} empfangen – fahre herunter …`);
         kvSet('bot_state', 'offline');
-        await sendTelegram(`🔴 *${config.botDisplayName} gestoppt* (${signal})`);
+        if (!isUpdateInProgress()) {
+            await sendTelegram(`🔴 *${config.botDisplayName} gestoppt* (${signal})`);
+        }
 
         // Letzter Export vor dem Stopp
         try {
