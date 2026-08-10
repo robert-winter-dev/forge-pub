@@ -74,6 +74,11 @@ function buildNavTree() {
             ...(lan ? [{ id: 'ssl-cert', label: 'SSL-Zertifikat', href: `http://${ip}:3201/` }] : []),
             // Noch keine eigene Seite (Stand 2026-08-08) — Platzhalter, bis die System-Settings-Seite existiert.
             ...(lan ? [{ id: 'system-settings', label: 'Settings', href: null }] : []),
+            // forkOnly: nur auf einem FORGE.pub-Fork sinnvoll (nur er bezieht Releases
+            // von GitHub) – bleibt bis zum Fork-Nachweis per /forge/version.json
+            // versteckt (siehe renderLeaf() + die bestehende version.json-Abfrage
+            // weiter unten, die ohnehin schon genau diesen Fork-Nachweis liefert).
+            ...(lan ? [{ id: 'updates', label: 'Updates', href: `https://${ip}:3200/updates.html`, forkOnly: true }] : []),
         ],
     };
 
@@ -425,7 +430,12 @@ export function initNav({ current = '', logout = '' } = {}) {
             level === 2 && 'nav-subsub',
             isCurrent  && 'nav-current',
             isDisabled && 'nav-disabled',
+            item.forkOnly && 'nav-fork-only',
         ].filter(Boolean).join(' ');
+        // forkOnly-Items starten unsichtbar (Inline-Style statt CSS-Klasse, damit
+        // kein Stylesheet-Import nötig ist) — werden erst sichtbar, wenn die
+        // version.json-Abfrage weiter unten einen Fork nachweist.
+        const forkOnlyStyle = item.forkOnly ? ' style="display:none"' : '';
         // item.hasBadge reserviert einen leeren, versteckten Badge-Slot (fester DOM-Id
         // "nav-badge-<id>"), den der Aufrufer später per setNavBadge() live befüllt
         // (Zähler stehen erst nach einem async Fetch fest, initNav() rendert synchron).
@@ -438,9 +448,9 @@ export function initNav({ current = '', logout = '' } = {}) {
         // neu zu bauen (Seiten mit In-Page-Hash-Navigation wie message.html rufen
         // initNav() nur einmal auf, current ändert sich danach aber mehrfach).
         if (item.href) {
-            return `<a href="${item.href}" class="${cls}" data-nav-id="${item.id}"><span class="nav-label">${item.label}</span>${badge}</a>`;
+            return `<a href="${item.href}" class="${cls}" data-nav-id="${item.id}"${forkOnlyStyle}><span class="nav-label">${item.label}</span>${badge}</a>`;
         }
-        return `<div class="${cls}" data-nav-id="${item.id}"><span class="nav-label">${item.label}</span>${badge}</div>`;
+        return `<div class="${cls}" data-nav-id="${item.id}"${forkOnlyStyle}><span class="nav-label">${item.label}</span>${badge}</div>`;
     }
 
     /** Prüft rekursiv, ob current irgendwo unterhalb dieses Knotens liegt. */
@@ -519,6 +529,10 @@ export function initNav({ current = '', logout = '' } = {}) {
             if (v?.version) {
                 const el = document.getElementById('navPanelVersion');
                 if (el) el.textContent = `v${v.version}`;
+                // /forge/version.json existiert NUR auf einer per setup.sh installierten
+                // Fork-Instanz (siehe Kommentar oben) — ihr erfolgreiches Laden ist damit
+                // derselbe Fork-Nachweis, der forkOnly-Items (z.B. "Updates") einblendet.
+                panel.querySelectorAll('.nav-fork-only').forEach(el => { el.style.display = ''; });
             }
         })
         .catch(() => {});

@@ -25,8 +25,9 @@
 import { Transaction, SystemProgram, PublicKey, TransactionInstruction } from '@solana/web3.js';
 
 import { swapTokens, quoteTokens } from './swap.js';
-import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT } from './wallet.js';
+import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT, getTxFee } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
+import { insertTransaction } from './db.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
@@ -343,6 +344,51 @@ export async function prepareExitAndClaimFees(adapter, pool, position, db, { log
         console.warn(`${logPrefix} Fee-Claim fehlgeschlagen (nicht kritisch): ${err.message}`);
         return { amountA: 0, amountB: 0, skipped: true, sol: sol.sol };
     }
+}
+
+/**
+ * Schließt die on-chain Position und schreibt die close_position-Transaktion.
+ *
+ * Bündelt den im Withdraw-Step zuvor geclaimten Fee-Anteil (feesA/feesB) mit dem
+ * reinen Close-Betrag (closed.amountA/B) zusammen — beide zusammen ergeben, was die
+ * Position beim Ausstieg tatsächlich freigibt. Zuvor bauten trailing-stop.js,
+ * score-limit.js und ranking-exit.js diesen Block jeweils eigenständig nach und
+ * schrieben dabei versehentlich nur closed.amountA/B in die DB, wodurch der im
+ * selben Schritt geclaimte Fee-Anteil aus der Transaktionshistorie verschwand
+ * (sichtbar z.B. wenn die Position beim finalen Resume-Schritt bereits leer war
+ * und nur noch der Fee-Claim einen Restwert hatte).
+ *
+ * @param {Object} adapter   Pool-Adapter (getAdapter(pool))
+ * @param {Object} pool
+ * @param {Object} position  Zeile aus getOpenPosition() (braucht nft_mint)
+ * @param {Object} db
+ * @param {Object} opts
+ *   @param {number} opts.feesA      Im Withdraw-Step geclaimter Fee-Anteil Token A
+ *   @param {number} opts.feesB      Im Withdraw-Step geclaimter Fee-Anteil Token B
+ *   @param {string} opts.note       transactions.note, z.B. 'trailing-stop'
+ *   @param {string} opts.logPrefix  z.B. '[trailing-stop:liq-...]'
+ * @returns {Promise<{closed: Object, coinsA: number, coinsB: number}>}
+ */
+export async function finalizeClosePosition(adapter, pool, position, db, { feesA, feesB, note, logPrefix }) {
+    const closed = await adapter.closePosition(pool, position.nft_mint);
+    const coinsA = feesA + (closed.amountA ?? 0);
+    const coinsB = feesB + (closed.amountB ?? 0);
+
+    console.log(`${logPrefix} Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
+
+    const closeFee = await getTxFee(closed.txHash).catch(() => null);
+    insertTransaction(db, {
+        poolId:   pool.id,
+        type:     'close_position',
+        amountA:  coinsA,
+        amountB:  coinsB,
+        usdValue: null,
+        txHash:   closed.txHash,
+        txFeeSol: closeFee,
+        note,
+    });
+
+    return { closed, coinsA, coinsB };
 }
 
 /**

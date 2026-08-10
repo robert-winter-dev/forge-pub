@@ -87,6 +87,11 @@ LOG_RETENTION=10
 SERVICES=(forge-nexus forge-premium forge-settings forge-settings-daemon forge-liquiditybot forge-lendingbot)
 NOSTR_IDENTITY_NAME="forge-pub-nostr"
 
+# Unterprojekte mit eigener package.json ("" = App-Wurzel). EINE Quelle für
+# do_npm() und das Retten von node_modules über den Deploy (do_deploy) – liefen
+# die Listen auseinander, bliebe ein node_modules unbemerkt auf der Strecke.
+NPM_SUBPROJECTS=("" bots/liquidity bots/lending bots/settings core/nexus core/premium core/wallet-monitor)
+
 ARTIFACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ── Optionen (per CLI überschreibbar) ────────────────────────────────────────
@@ -103,6 +108,10 @@ OPT_RESTORE_FROM=""
 OPT_WALLETS="liquidity,lending,premium"
 OPT_KEEP_DATA=0
 OPT_ROLLBACK_VERSION=""
+# --renew-deps: node_modules verwerfen und komplett neu installieren. Normalfall
+# ist die Wiederverwendung (siehe do_deploy/do_npm) – dieser Schalter ist die
+# Notbremse für einen kaputten oder verdächtigen Abhängigkeitsbaum.
+OPT_RENEW_DEPS=0
 
 # ── Module laden ─────────────────────────────────────────────────────────────
 # setup-lib/ liegt immer als Geschwisterverzeichnis neben dieser Datei — egal
@@ -172,6 +181,7 @@ while [[ $# -gt 0 ]]; do
         --wallets)         OPT_WALLETS="$2"; shift ;;
         --from)            OPT_RESTORE_FROM="$2"; shift ;;
         --keep-data)       OPT_KEEP_DATA=1 ;;
+        --renew-deps)      OPT_RENEW_DEPS=1 ;;
         --to-version)      OPT_ROLLBACK_VERSION="$2"; shift ;;
         -h|--help)         show_help; exit 0 ;;
         *) die "Unbekannte Option: $1  (Hilfe: $0 help)" ;;

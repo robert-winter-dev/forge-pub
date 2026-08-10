@@ -18,6 +18,7 @@
  */
 
 import { config } from './config.js';
+import { getConnection } from './wallet.js';
 import { RateLimiter } from './rate-limiter.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
@@ -1056,6 +1057,67 @@ export class LoopscaleProtocol {
             const message = VersionedMessage.deserialize(bytes);
             const vTx     = new VersionedTransaction(message);
             return Buffer.from(vTx.serialize()).toString('base64');
+        }
+    }
+
+    /**
+     * Prüft, ob nach einem Withdraw ungestakte LP-Token im rohen Wallet-Token-Konto
+     * liegen geblieben sind – unabhängig von Loopscales eigenem Deposits-Index.
+     *
+     * Hintergrund (2026-08-09, Loopscale-Support/Discord): Bei einem Withdraw über
+     * diese API werden nicht ausgezahlte LP-Anteile nicht automatisch zurück-gestaked.
+     * Sie landen als normales SPL-Token-Guthaben in der Wallet – für Loopscales
+     * Index (worauf `getPosition()`/`/deposits` basiert) unsichtbar, obwohl der
+     * Wert on-chain weiterhin voll vorhanden ist. Beobachtet nach mehreren
+     * Teilauszahlungen kurz hintereinander; ob eine einzelne Vollauszahlung
+     * genauso betroffen sein kann, ist nicht geklärt – deshalb wird hier bewusst
+     * nach JEDEM Withdraw geprüft, nicht nur nach Teilbeträgen.
+     *
+     * Blockiert nichts, liefert nur einen Befund zum Loggen/Benachrichtigen –
+     * die Aufrufer (bin/withdraw.js, bin/move.js, bin/bot.js) entscheiden, wie sie
+     * darauf reagieren.
+     *
+     * @param {string} walletAddress  Base58
+     * @returns {Promise<{lpAmount: number, estimatedUsdc: number|null}|null>}
+     *          null wenn nichts gefunden wurde oder die Prüfung selbst fehlschlug
+     *          (z.B. RPC/API nicht erreichbar – wird bewusst verschluckt, ist ein
+     *          Best-Effort-Sicherheitsnetz, kein kritischer Pfad).
+     */
+    async checkLeftoverLp(walletAddress) {
+        try {
+            const { PublicKey } = await import('@solana/web3.js');
+            const vault  = await this._getVaultInfo();
+            const lpMint = vault.vault?.lpMint;
+            if (!lpMint) return null;
+
+            const accounts = await getConnection().getParsedTokenAccountsByOwner(
+                new PublicKey(walletAddress),
+                { mint: new PublicKey(lpMint) },
+            );
+            const lpAmount = accounts.value.reduce(
+                (sum, acc) => sum + (acc.account.data.parsed.info.tokenAmount.uiAmount ?? 0),
+                0,
+            );
+            if (lpAmount <= 0) return null;
+
+            // Grobe USDC-Schätzung über den aktuellen Vault-Kurs (Assets/lpSupply) –
+            // dieselbe Methode, mit der wir den Fund am 09.08.2026 manuell verifiziert
+            // haben. Rein informativ für die Notification, keine Grundlage für TX-Beträge.
+            const strategy    = vault.vaultStrategy?.strategy;
+            const lpSupply    = parseFloat(vault.vault?.lpSupply ?? 0);
+            const assetsRaw   = parseFloat(strategy?.tokenBalance ?? 0)
+                               + parseFloat(strategy?.currentDeployedAmount ?? 0)
+                               + parseFloat(strategy?.outstandingInterestAmount ?? 0)
+                               - parseFloat(strategy?.feeClaimable ?? 0);
+            const estimatedUsdc = lpSupply > 0
+                ? parseFloat((lpAmount * (assetsRaw / lpSupply)).toFixed(4))
+                : null;
+
+            return { lpAmount, estimatedUsdc };
+        } catch {
+            // Best-Effort – ein Fehler hier darf den eigentlichen Withdraw nicht
+            // nachträglich als fehlgeschlagen erscheinen lassen.
+            return null;
         }
     }
 }

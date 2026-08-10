@@ -33,16 +33,15 @@ import { fileURLToPath }   from 'url';
 
 import { setPoolActive, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
-import { getTxFee }        from './wallet.js';
 import { getAdapter }      from './pool-adapter/index.js';
 import {
-    insertTransaction, insertCapitalFlow, getOpenPosition, closePosition as markPositionClosedInDb,
+    insertCapitalFlow, getOpenPosition, closePosition as markPositionClosedInDb,
     getPoolScoreHistory, getBadStreakMs,
     createRkExecution, updateRkExecution, getIncompleteRkExecutions,
 } from './db.js';
 import { getActiveProfile } from './economic-scorer/config.js';
 import * as notify         from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname        = dirname(fileURLToPath(import.meta.url));
@@ -194,22 +193,10 @@ async function stepWithdraw(pool, db, execId) {
             console.log(`[ranking-exit:${pool.id}] Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
         }
 
-        const closed = await adapter.closePosition(pool, position.nft_mint);
-        const rkCoinsA = feesA + (closed.amountA ?? 0);
-        const rkCoinsB = feesB + (closed.amountB ?? 0);
-
-        console.log(`[ranking-exit:${pool.id}] Position geschlossen: ${rkCoinsA.toFixed(6)} A + ${rkCoinsB.toFixed(6)} B  TX: ${closed.txHash}`);
-
-        const closeFee = await getTxFee(closed.txHash).catch(() => null);
-        insertTransaction(db, {
-            poolId:   pool.id,
-            type:     'close_position',
-            amountA:  closed.amountA ?? 0,
-            amountB:  closed.amountB ?? 0,
-            usdValue: null,
-            txHash:   closed.txHash,
-            txFeeSol: closeFee,
-            note:     'ranking-exit',
+        const { closed, coinsA: rkCoinsA, coinsB: rkCoinsB } = await finalizeClosePosition(adapter, pool, position, db, {
+            feesA, feesB,
+            note:      'ranking-exit',
+            logPrefix: `[ranking-exit:${pool.id}]`,
         });
 
         markPositionClosedInDb(db, position.id, closed.txHash);

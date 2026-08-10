@@ -30,7 +30,19 @@ set -euo pipefail
 FORGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIQUIDITY="${FORGE_ROOT}/bots/liquidity"
 
-STATE_JSON="${FORGE_ROOT}/data/zombie-check-state.json"
+# Fork-Erkennung: identische Logik wie config/paths.js detectForkBase() (siehe
+# emergency-exit.sh) — Code liegt unter <base>/app, persistente Daten unter
+# <base>/local/data. Auf dem Master (kein 'app'-Verzeichnis als FORGE_ROOT)
+# bleibt STATE_JSON unverändert bei FORGE_ROOT/data.
+# Fund forge-pub#0287: STATE_JSON zeigte hier bisher fest auf
+# ${FORGE_ROOT}/data (= app/data auf dem Fork, existiert seit der
+# Verzeichnis-Restrukturierung nicht mehr) → Cron-Exit 1, obwohl der eigentliche
+# Zombie-Check fehlerfrei lief.
+DATA_DIR="${FORGE_ROOT}/data"
+if [[ "$(basename "${FORGE_ROOT}")" == "app" && -d "$(dirname "${FORGE_ROOT}")/local" ]]; then
+    DATA_DIR="$(dirname "${FORGE_ROOT}")/local/data"
+fi
+STATE_JSON="${FORGE_DATA_DIR:-${DATA_DIR}}/zombie-check-state.json"
 NEXUS_URL="${NEXUS_URL:-http://localhost:3100}"
 
 TS="$(date '+%Y-%m-%d %H:%M:%S')"

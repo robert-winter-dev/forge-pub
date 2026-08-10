@@ -65,7 +65,16 @@ do_user() {
             done
         done
         echo
-        echo "$INSTALL_USER ALL=(root) NOPASSWD: FORGE_SYSTEMCTL"
+        # Für den manuellen "Updates"-Menüpunkt im Webinterface (System > Updates):
+        # feste, vollständige Kommandozeilen ohne Wildcard-Argument — rollback-code
+        # bekommt bewusst kein --to-version übergeben (VERSIONS_RETENTION=1, es
+        # existiert also ohnehin höchstens ein archiviertes Vorgängerpaket, das
+        # rollback-code ohne Angabe automatisch selbst findet). bot-control-daemon.js
+        # ruft exakt diese drei Zeilen unverändert per execFile auf.
+        echo "Cmnd_Alias FORGE_UPDATE_CHECK = /usr/bin/node $APP_DIR/bin/update-check.js"
+        echo "Cmnd_Alias FORGE_UPDATE_APPLY = /usr/bin/node $APP_DIR/bin/update-check.js --confirm"
+        echo "Cmnd_Alias FORGE_UPDATE_ROLLBACK = /bin/bash $APP_DIR/bin/setup.sh rollback-code --non-interactive --yes"
+        echo "$INSTALL_USER ALL=(root) NOPASSWD: FORGE_SYSTEMCTL, FORGE_UPDATE_CHECK, FORGE_UPDATE_APPLY, FORGE_UPDATE_ROLLBACK"
     } > "$tmp"
     if visudo -c -f "$tmp" >/dev/null 2>&1; then
         install -m 0440 -o root -g root "$tmp" "$SUDOERS_FILE"

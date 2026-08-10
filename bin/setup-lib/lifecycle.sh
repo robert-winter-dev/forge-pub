@@ -307,6 +307,11 @@ do_repair() {
     do_services
     do_cron
     do_logrotate
+    # Regeneriert auch die sudoers-Regel (Cmnd_Alias FORGE_SYSTEMCTL/FORGE_UPDATE_*) —
+    # do_update() ruft do_user() bewusst nicht auf, ein Repair ist damit der einzige
+    # Weg, mit dem eine bereits laufende Installation eine NEU eingeführte
+    # sudoers-Regel nachträglich bekommt (z.B. System > Updates im Webinterface).
+    do_user
     fix_ownership
     c_ok "$(t LIFECYCLE_REPAIR_DONE)"
     do_status

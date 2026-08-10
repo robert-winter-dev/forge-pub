@@ -23,7 +23,8 @@ import { KaminoProtocol, JupiterLendProtocol, DriftProtocol, LoopscaleProtocol }
 import { loadKeypair, signAndSend, getSolBalance, fetchFeeSol } from '../lib/wallet.js';
 import { getDb, closePosition, updatePosition, getActivePositions,
          createPendingWithdrawal, recordTransaction, recordProtocolStat,
-         upsertWalletSnapshot, getWalletSnapshot } from '../lib/db.js';
+         upsertWalletSnapshot, getWalletSnapshot, addNotification } from '../lib/db.js';
+import { sendTelegram } from '../lib/notify.js';
 
 // ─── Argument-Parsing ─────────────────────────────────────────────────────────
 
@@ -299,6 +300,23 @@ async function main() {
         jlog(`  ⚠ DB-Update fehlgeschlagen (TX war erfolgreich): ${err.message}`);
     }
 
+    // ── Ungestakte LP-Reste erkennen (nur Loopscale) ──────────────────────────
+    // Siehe LoopscaleProtocol.checkLeftoverLp() für Hintergrund. Rein informativ –
+    // blockiert nichts, macht nur sichtbar was sonst unbemerkt im Wallet liegen bliebe.
+    let leftoverLp = null;
+    if (proto instanceof LoopscaleProtocol) {
+        leftoverLp = await proto.checkLeftoverLp(walletAddress);
+        if (leftoverLp) {
+            const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
+            const msg = `⚠️ ${protoLabel}: ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} `
+                      + `nach Withdraw im Wallet zurückgeblieben – bei Loopscale nicht mehr sichtbar, `
+                      + `aber on-chain vorhanden. Support kontaktieren (Restake nötig).`;
+            jlog(`  ${msg}`);
+            addNotification({ level: 'warn', message: msg });
+            await sendTelegram(`🟡 *${protoLabel}: LP-Reste nach Withdraw*\n${msg}`);
+        }
+    }
+
     // ── Ergebnis ──────────────────────────────────────────────────────────────
     const cooldown    = withdrawResult.cooldownSeconds ?? (withdrawResult.type === 'cooldown' ? 604800 : null);
     const readyAtMs   = cooldown ? Date.now() + cooldown * 1000 : null;
@@ -311,6 +329,7 @@ async function main() {
                 withdrawType:  withdrawResult.type,
                 cooldownSeconds: cooldown,
                 readyAt: readyAtMs,
+                leftoverLp,
             },
         });
     } else {
@@ -332,6 +351,12 @@ async function main() {
             console.log(`  Bereit ab   : ${new Date(readyAtMs).toLocaleString('de-DE')}`);
             console.log('');
             console.log('  ℹ Nach dem Cooldown: node bin/withdraw.js --protocol <p> --complete --id <ID>');
+        }
+        if (leftoverLp) {
+            console.log('');
+            console.log(`  ⚠️  ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token zurückgeblieben`
+                + (leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '')
+                + ' – siehe Notification.');
         }
         hr();
         console.log('');

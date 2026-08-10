@@ -33,8 +33,9 @@ import { loadKeypair, signAndSend, getSolBalance } from '../lib/wallet.js';
 import {
     getDb, openPosition, addToPosition, closePosition,
     getActivePositions, recordTransaction,
-    upsertWalletSnapshot, getWalletSnapshot,
+    upsertWalletSnapshot, getWalletSnapshot, addNotification,
 } from '../lib/db.js';
+import { sendTelegram } from '../lib/notify.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -271,6 +272,21 @@ async function main() {
         }
 
         console.log(`        ✅ Withdraw erfolgreich (${fmt(effectiveAmount)} USDC)`);
+
+        // Ungestakte LP-Reste erkennen (nur Loopscale) – siehe
+        // LoopscaleProtocol.checkLeftoverLp() in lib/lending-protocols.js für Hintergrund.
+        if (protoFrom instanceof LoopscaleProtocol) {
+            const leftoverLp = await protoFrom.checkLeftoverLp(walletAddress);
+            if (leftoverLp) {
+                const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
+                const msg = `⚠️ ${protoFrom.label}: ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} `
+                          + `nach Withdraw im Wallet zurückgeblieben – bei Loopscale nicht mehr sichtbar, `
+                          + `aber on-chain vorhanden. Support kontaktieren (Restake nötig).`;
+                console.log(`        ${msg}`);
+                try { addNotification({ level: 'warn', message: msg }); } catch { /* Best-Effort */ }
+                await sendTelegram(`🟡 *${protoFrom.label}: LP-Reste nach Withdraw*\n${msg}`);
+            }
+        }
         console.log('');
 
         // ── Schritt 2: Deposit ────────────────────────────────────────────────

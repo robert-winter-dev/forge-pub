@@ -411,6 +411,21 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
 
             log(`Auto-Exit ✅ ${protocolName}: ${fmt(exitAmount)} USDC → TX ${txSig}`);
 
+            // Ungestakte LP-Reste erkennen (nur Loopscale) – siehe
+            // LoopscaleProtocol.checkLeftoverLp() in lib/lending-protocols.js für Hintergrund.
+            // Auto-Exit withdrawt zwar immer 'all', ob eine Vollauszahlung genauso betroffen
+            // sein kann wie die beobachteten Teilauszahlungen ist ungeklärt – daher auch hier
+            // sicherheitshalber geprüft.
+            let leftoverNote = '';
+            if (proto instanceof LoopscaleProtocol) {
+                const leftoverLp = await proto.checkLeftoverLp(walletAddress);
+                if (leftoverLp) {
+                    const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
+                    leftoverNote = `\n⚠️ ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} im Wallet zurückgeblieben – Support kontaktieren (Restake nötig).`;
+                    logErr(`Auto-Exit ${protocolName}: LP-Reste zurückgeblieben – ${leftoverLp.lpAmount.toFixed(6)}${usdcStr}`);
+                }
+            }
+
             // Optionaler Versand an externe Adresse (echter Ausstieg statt Wallet/Reinvest).
             // Adresse pro Protokoll aus settings.db. Betrag auf tatsächliche Wallet-Balance
             // begrenzt (Yield/Slippage-Abweichung → kein InsufficientFunds).
@@ -439,9 +454,9 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
                 + `Pool: ${protocolName}\n`
                 + `Grund: TVL ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K\n`
                 + `Betrag: ${fmt(exitAmount)} USDC\n`
-                + `TX: ${txSig}${sendNote}`
+                + `TX: ${txSig}${sendNote}${leftoverNote}`
             );
-            addNotification({ level: 'error', message: `🚨 Auto-Exit: ${protocolName} – ${fmt(exitAmount)} USDC entnommen (TVL ${tvlFmt})` });
+            addNotification({ level: 'error', message: `🚨 Auto-Exit: ${protocolName} – ${fmt(exitAmount)} USDC entnommen (TVL ${tvlFmt})${leftoverNote}` });
         } catch (err) {
             // Betriebs-Kanäle (Log/Telegram) bekommen bewusst die technischen Rohdaten
             // (falls vorhanden) statt der nutzerfreundlichen Meldung aus wallet.js

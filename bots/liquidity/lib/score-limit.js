@@ -23,11 +23,10 @@ import { fileURLToPath }   from 'url';
 
 import { setPoolActive, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
-import { getTxFee, getKeypair, getConnection, getSolBalanceFresh } from './wallet.js';
+import { getKeypair, getConnection, getSolBalanceFresh } from './wallet.js';
 import { ensureWalletSol, SOL_TOPUP_TARGET } from './sol-topup.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
-    insertTransaction,
     insertCapitalFlow,
     createScoreLimitExecution,
     updateScoreLimitExecution,
@@ -36,7 +35,7 @@ import {
     closePosition as markPositionClosedInDb,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
@@ -240,22 +239,10 @@ async function stepWithdraw(pool, db, execId, cfg) {
             console.log(`[scoreLimit:${pool.id}] Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
         }
 
-        const closed  = await adapter.closePosition(pool, position.nft_mint);
-        const coinsA  = feesA + (closed.amountA ?? 0);
-        const coinsB  = feesB + (closed.amountB ?? 0);
-
-        console.log(`[scoreLimit:${pool.id}] Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
-
-        const closeFee = await getTxFee(closed.txHash).catch(() => null);
-        insertTransaction(db, {
-            poolId:   pool.id,
-            type:     'close_position',
-            amountA:  closed.amountA ?? 0,
-            amountB:  closed.amountB ?? 0,
-            usdValue: null,
-            txHash:   closed.txHash,
-            txFeeSol: closeFee,
-            note:     'score-limit',
+        const { closed, coinsA, coinsB } = await finalizeClosePosition(adapter, pool, position, db, {
+            feesA, feesB,
+            note:      'score-limit',
+            logPrefix: `[scoreLimit:${pool.id}]`,
         });
 
         markPositionClosedInDb(db, position.id, closed.txHash);

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FORGE – Updates</title>
+    <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
+    <link rel="stylesheet" href="css/settings.css?v=20260810a">
+    <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
+    <link rel="stylesheet" href="css/updates.css?v=20260810m">
+</head>
+<body>
+
+<header class="header">
+    <div class="header-content">
+        <div class="header-col header-logo">
+            <a href="/forge/" title="Zur Hauptseite">
+                <img src="/forge/img/forge-logo.png" alt="FORGE Logo" class="logo-icon">
+            </a>
+            <h1>Updates</h1>
+        </div>
+        <div class="header-right">
+            <span class="last-update" id="lastUpdate">–</span>
+            <button class="notif-bell" id="notifBell" title="Message Center">
+                <span class="notif-envelope">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M22 6l-10 7L2 6"></path></svg>
+                </span><span class="notif-badge hidden" id="notifBadge">0</span>
+            </button>
+        </div>
+    </div>
+</header>
+
+<main class="main-content">
+    <div class="up-grid">
+        <div class="settings-card">
+            <div class="settings-card-header">
+                <span class="sch-title">Versionen</span>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label">Core</span>
+                <span id="upCoreVersion">–</span>
+            </div>
+            <div class="settings-row" id="upAvailableRow" style="display:none;">
+                <span class="settings-label">Verfügbar</span>
+                <span id="upAvailableVersion">–</span>
+            </div>
+            <div class="settings-row" style="border:none;">
+                <span class="settings-label">Plugins</span>
+                <span class="up-plugins-hint">derzeit keine Plugins installiert</span>
+            </div>
+        </div>
+
+        <div class="settings-card">
+            <div class="settings-card-header">
+                <span class="sch-title">Update-Modus</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upModeManual" data-mode="manual">Manuell</button>
+                <span class="up-option-desc">Du entscheidest selbst, wann ein Update eingespielt wird.</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upModeAuto" data-mode="auto">Automatisch</button>
+                <span class="up-option-desc">Geprüfte Patch-Updates werden ohne Rückfrage eingespielt, inkl. Selbsttest und Rollback bei Problemen.</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="settings-card" id="upRollbackCard" style="display:none;border-color:var(--danger);margin-top:1rem;">
+        <div class="settings-card-header">
+            <span class="sch-title" style="color:var(--danger);">Letztes Update fehlgeschlagen</span>
+        </div>
+        <div class="settings-row" style="border:none;">
+            <span id="upRollbackInfo" style="color:var(--text-secondary);font-size:0.85rem;"></span>
+        </div>
+        <div class="settings-row" style="border:none;">
+            <button class="btn btn-stop" id="upRollbackBtn">Auf Vorgängerversion zurückrollen</button>
+        </div>
+    </div>
+
+    <div class="up-grid" style="margin-top:1rem;">
+        <div class="settings-card">
+            <div class="settings-card-header">
+                <span class="sch-title">Aktionen</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upCheckBtn">Jetzt prüfen</button>
+                <span class="up-option-desc">Prüft bei GitHub, ob eine neue Version bereitliegt.</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upApplyBtn">Update einspielen</button>
+                <span class="up-option-desc">Spielt ein geprüftes Update ein, inkl. automatischem Selbsttest.</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upSelftestBtn">Selbsttest</button>
+                <span class="up-option-desc">Prüft, ob alle Dienste normal laufen.</span>
+            </div>
+        </div>
+
+        <div class="settings-card" id="upProtocolCard">
+            <div class="settings-card-header">
+                <span class="sch-title">Protokoll</span>
+            </div>
+            <div class="up-checklist" id="upChecklist">
+                <span class="up-checklist-empty">Noch keine Aktion ausgeführt.</span>
+            </div>
+        </div>
+    </div>
+</main>
+
+<footer class="footer"></footer>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script type="module" src="js/updates.js?v=20260810m"></script>
+</body>
+</html>

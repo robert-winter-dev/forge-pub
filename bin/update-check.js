@@ -70,7 +70,11 @@ const SERVICES = ['forge-nexus', 'forge-premium', 'forge-settings', 'forge-setti
 // unter demselben Port laufenden PRODUKTIVEN forge-nexus mit Test-Meldungen treffen
 // (Fund 2026-08-03: erste Testläufe haben genau das getan, siehe Ticket-Kontext).
 const NEXUS_URL = process.env.FORGE_PUB_NEXUS_URL || 'http://127.0.0.1:3100';
+// Obergrenze der Beobachtung nach einem Update (siehe waitForStableServices).
 const HEALTH_WAIT_MS = 120_000;
+// Takt der Messung und Dauer, die am Stück unauffällig sein muss.
+const HEALTH_POLL_MS = 5_000;
+const HEALTH_STABLE_MS = 20_000;
 
 // ── Exit-Codes ───────────────────────────────────────────────────────────────
 // Zweiter, von Nexus UNABHÄNGIGER Signalweg (ergänzt 2026-08-04): bin/forge-cron.js
@@ -218,6 +222,25 @@ function clearUpdateStatus() {
     try { rmSync(UPDATE_STATUS_PATH, { force: true }); } catch { /* nichts zu tun */ }
 }
 
+// Dauerhafte Aufzeichnung des letzten Apply-Ausgangs — anders als
+// UPDATE_STATUS_PATH (nur "liegt bereit, noch nicht angewendet") wird diese
+// Datei bei JEDEM Terminal-Zustand eines Apply-Versuchs geschrieben, auch bei
+// Erfolg, und NICHT gelöscht. Grundlage für den manuellen Rollback-Button im
+// Webinterface (bots/settings/routes/update.js): der darf NUR erscheinen,
+// wenn status === 'rollback-failed' — bei 'stopped-migration' wäre ein
+// Rollback gefährlicher als der aktuelle Zustand (siehe hasMigrations-Zweig
+// unten), deshalb dort bewusst NICHT anbieten.
+const LAST_RESULT_PATH = path.join(LOCAL_DIR, 'data', 'last-update-result.json');
+
+function writeLastUpdateResult(data) {
+    try {
+        mkdirSync(path.dirname(LAST_RESULT_PATH), { recursive: true });
+        writeFileSync(LAST_RESULT_PATH, JSON.stringify({ timestamp: Date.now(), ...data }, null, 2) + '\n');
+    } catch (err) {
+        log(`last-update-result.json konnte nicht geschrieben werden: ${err.message}`);
+    }
+}
+
 function isActive(service) {
     const r = spawnSync('systemctl', ['is-active', service], { encoding: 'utf8' });
     return r.stdout.trim() === 'active';
@@ -226,6 +249,45 @@ function isActive(service) {
 function restartCount(service) {
     const r = spawnSync('systemctl', ['show', service, '-p', 'NRestarts', '--value'], { encoding: 'utf8' });
     return parseInt(r.stdout.trim(), 10) || 0;
+}
+
+/**
+ * Wartet, bis die Dienste nach dem Update nachweislich stabil laufen.
+ *
+ * Zwei Verschlechterungsarten zählen als Fehlschlag:
+ *   1. ein vorher laufender Dienst läuft nicht mehr
+ *   2. NRestarts gestiegen → Crash-Loop (fängt auch Dienste, die vorher standen
+ *      und jetzt von do_update gestartet wurden, aber sofort wegsterben —
+ *      'is-active' zeigt die zwischen zwei Restarts kurzzeitig als gesund)
+ *
+ * 🔴 Vorher: ein starres `sleep(120s)`. Das war der mit Abstand längste Teil des
+ * gesamten Updates (120 s von 204 s) — und dabei nicht einmal gründlicher als
+ * eine Messung, nur geduldiger. Jetzt wird alle HEALTH_POLL_MS geprüft und
+ * abgebrochen, sobald HEALTH_STABLE_MS am Stück nichts auffällig war
+ * (Normalfall: ~25 s). Zum Vergleich: der manuelle Terminal-Weg über
+ * setup.sh gewährt sich an dieser Stelle 8 s.
+ *
+ * Bei Auffälligkeiten wird NICHT früh abgebrochen: der Zähler beginnt von vorn
+ * und es wird bis HEALTH_WAIT_MS weiter beobachtet — ein Dienst, der sich noch
+ * fängt, soll nicht vorschnell einen automatischen Rollback auslösen.
+ */
+async function waitForStableServices(preActive, preRestarts) {
+    const deadline = Date.now() + HEALTH_WAIT_MS;
+    let stableSince = null;
+    let lastRegressed = [];
+    while (Date.now() < deadline) {
+        await sleep(HEALTH_POLL_MS);
+        lastRegressed = SERVICES.filter((s, i) =>
+            (preActive[i] && !isActive(s)) || restartCount(s) > preRestarts[i]);
+        if (lastRegressed.length > 0) {
+            if (stableSince !== null) log(`   … noch nicht stabil (${lastRegressed.join(', ')}), beobachte weiter`);
+            stableSince = null;
+            continue;
+        }
+        stableSince ??= Date.now();
+        if (Date.now() - stableSince >= HEALTH_STABLE_MS) return [];
+    }
+    return lastRegressed;
 }
 
 /**
@@ -463,30 +525,25 @@ async function main() {
     // an (live gefunden: forge-pub1 nach dem ersten echten Apply-Test, 2026-08-03).
     try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker fürs Health-Gate */ }
 
-    log(`Warte ${HEALTH_WAIT_MS / 1000}s auf Health-Gate …`);
-    await sleep(HEALTH_WAIT_MS);
-    // Zwei Verschlechterungsarten, beide sind ein Fehlschlag:
-    //   1. ein vorher laufender Dienst läuft nicht mehr
-    //   2. NRestarts gestiegen → Crash-Loop (fängt auch Dienste, die vorher standen
-    //      und jetzt von do_update gestartet wurden, aber sofort wegsterben —
-    //      'is-active' zeigt die zwischen zwei Restarts kurzzeitig als gesund)
-    const regressed = SERVICES.filter((s, i) =>
-        (preActive[i] && !isActive(s)) || restartCount(s) > preRestarts[i]);
+    log('Prüfe, ob alle Dienste stabil laufen …');
+    const regressed = await waitForStableServices(preActive, preRestarts);
     if (regressed.length === 0) {
-        log('✓ Health-Check ok.');
+        log('✓ Alle Dienste laufen stabil.');
         clearUpdateStatus();
+        writeLastUpdateResult({ status: 'ok', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: manifest.hasMigrations, problems: [] });
         await notify('info', CAT.apply, `Update eingespielt – Version ${manifest.version}`,
             'Das Update wurde installiert und alle Dienste laufen wieder normal.',
             ACTION.fyi);
         return;
     }
 
-    log(`🔴 Health-Check fehlgeschlagen — betroffen: ${regressed.join(', ')}`);
+    log(`🔴 Dienste laufen nach dem Update nicht stabil: ${regressed.join(', ')}`);
     process.exitCode = EXIT.applyFailed;
     const betroffen = `Betroffene Dienste: ${regressed.join(', ')}.`;
     if (manifest.hasMigrations) {
-        log('   hasMigrations=true — KEIN Auto-Rollback (Vorversion wäre inkompatibel mit migriertem Datenstand). Dienste werden gestoppt.');
+        log('   Dieses Update hat die Datenbank umgestellt – ein automatisches Zurückrollen wäre gefährlicher als der jetzige Zustand. Dienste werden gestoppt.');
         for (const s of SERVICES) spawnSync('systemctl', ['stop', s]);
+        writeLastUpdateResult({ status: 'stopped-migration', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: true, problems: regressed });
         await notify('error', CAT.rollback, `Update fehlgeschlagen – automatische Rückkehr nicht möglich (v${manifest.version})`,
             `Nach dem Update laufen die Dienste nicht korrekt. ${betroffen} Dieses Update hat die Datenbank `
             + 'umgestellt, deshalb wäre ein automatisches Zurückrollen gefährlicher als der jetzige Zustand – '
@@ -494,15 +551,17 @@ async function main() {
             ACTION.urgent);
         return;
     }
-    log(`   Auto-Rollback auf v${installed.code} …`);
+    log(`   Stelle die vorherige Version wieder her (v${installed.code}) …`);
     const rollback = spawnSync('bash', [SETUP_SH, 'rollback-code', '--to-version', String(installed.code), '--non-interactive', '--yes'], { stdio: 'inherit' });
     if (rollback.status === 0) {
+        writeLastUpdateResult({ status: 'auto-rolled-back', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: false, problems: regressed });
         await notify('warn', CAT.rollback, `Update zurückgenommen – Version ${manifest.version}`,
             `Nach dem Update liefen die Dienste nicht korrekt. ${betroffen} Die vorherige Version `
             + `(${installed.version ?? `v${installed.code}`}) wurde automatisch wiederhergestellt. `
             + 'Deine Daten, Einstellungen und Wallet-Schlüssel waren davon nicht betroffen.',
             ACTION.afterRollback);
     } else {
+        writeLastUpdateResult({ status: 'rollback-failed', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: false, problems: regressed });
         await notify('error', CAT.rollback, `Update fehlgeschlagen und Rücknahme misslungen (v${manifest.version})`,
             'Nach dem Update liefen die Dienste nicht korrekt, und die Wiederherstellung der Vorversion '
             + 'ist ebenfalls fehlgeschlagen.',

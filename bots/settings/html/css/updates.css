@@ -1,0 +1,139 @@
+/* FORGE – System > Updates: Grid-Layout + Checklisten-Animation */
+
+/* Flexbox statt Grid für die Höhen-Angleichung: align-items:stretch auf einem
+   Flex-Container macht beide Kinder OHNE Umweg über eine prozentuale Höhe exakt
+   gleich hoch (Grid + height:100% ist fragiler – die Zeilenhöhe wird beim
+   Grid-Auto-Tracking VOR dem Stretch anhand des Intrinsic-Contents berechnet,
+   eine Prozenthöhe auf dem Kind kann sich damit je nach Browser/Inhalt leicht
+   verschieben; Flex-Stretch braucht das nicht, funktioniert direkt). */
+.up-grid {
+    display: flex;
+    gap: 1rem;
+    align-items: stretch;
+}
+
+.up-grid > .settings-card {
+    flex: 1 1 0;
+    min-width: 0; /* verhindert, dass eine lange Beschreibung die Box breiter zieht als die Spalte */
+    display: flex;
+    flex-direction: column;
+    box-sizing: border-box;
+}
+
+/* 🔴 Ursache des lange gesuchten Höhenversatzes (2026-08-10): settings.css hat
+   die Regel `.settings-card + .settings-card { margin-top: 1rem }` – gedacht für
+   UNTEREINANDER gestapelte Karten. Hier stehen die Karten NEBENeinander, die
+   zweite ist aber trotzdem ein Nachbar-Element und bekam dadurch 16px margin-top:
+   sie startete 16px tiefer, wurde von align-items:stretch bis zur Unterkante
+   gezogen und war damit exakt 16px kürzer (Symptom: unten bündig, oben versetzt).
+   Höhere Spezifität (0,3,0) als die Ursprungsregel (0,2,0), damit der Reset
+   unabhängig von der Ladereihenfolge der Stylesheets gewinnt. */
+.up-grid > .settings-card + .settings-card { margin-top: 0; }
+
+@media (max-width: 720px) {
+    .up-grid { flex-direction: column; }
+}
+
+/* ── Zeile aus Button + Erklärungstext (Update-Modus UND Aktionen) ──────────── */
+.up-option-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.4rem 0;
+}
+.up-option-row + .up-option-row { border-top: 1px solid var(--border); }
+
+.up-option-btn {
+    flex: 0 0 auto;
+    min-width: 9.5rem;
+    padding: 0.5rem 0.9rem;
+    border-radius: var(--radius, 12px);
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: inherit;
+    font-weight: 700;
+    font-size: 0.85rem;
+}
+
+.up-option-btn:hover:not(:disabled) { border-color: var(--accent); }
+.up-option-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.up-option-btn.active {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+    color: var(--text);
+}
+
+.up-option-desc { font-size: 0.78rem; color: var(--text-muted); line-height: 1.3; }
+
+/* ── Plugins-Hinweis ──────────────────────────────────────────────────────── */
+.up-plugins-hint { color: var(--text-muted); font-style: italic; }
+
+/* ── Core-Versionszeile: Aktuell/Update-verfügbar-Symbol ─────────────────────── */
+.up-version-status.current  { color: var(--success); font-weight: 600; }
+.up-version-status.outdated { color: var(--danger); font-weight: 600; }
+
+/* ── Protokoll: Checkliste ────────────────────────────────────────────────── */
+/* Card ist per .up-grid > .settings-card bereits eine Flex-Spalte auf voller
+   Zellhöhe (= Höhe der Aktionen-Box, da diese natürlicherweise höher ist) –
+   die Checkliste füllt den Rest und wächst NICHT mit dem Inhalt, sondern
+   scrollt (Box-Größe bleibt bewusst stabil, statt mit dem Inhalt zu wachsen). */
+.up-checklist {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 3rem;
+    max-height: 12rem;
+    overflow-y: auto;
+    overflow-x: hidden; /* ohne das erzwingt der Browser auto auch für die X-Achse, sobald overflow-y != visible – kurzer waagerechter Scrollbalken während der Einblend-Animation */
+}
+
+.up-checklist-empty { color: var(--text-muted); font-size: 0.85rem; }
+
+/* Bewusst KEIN display:flex auf .up-checklist-list ODER .up-step – ein <li>
+   mit display:flex verliert seinen Aufzählungspunkt in den meisten Browsern.
+   Der Zeilenabstand kommt deshalb über margin auf .up-step, nicht über einen
+   Flex-gap. */
+.up-checklist-list {
+    list-style: disc;
+    margin: 0;
+    padding-left: 1.2rem;
+}
+
+.up-step {
+    font-size: 0.85rem;
+    opacity: 0;
+    animation: up-step-in 0.25s ease-out forwards;
+    margin-bottom: 0.45rem;
+}
+.up-step:last-child { margin-bottom: 0; }
+
+@keyframes up-step-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+.up-step-icon {
+    text-align: center;
+}
+
+.up-step.state-pending .up-step-icon {
+    display: inline-block;
+    animation: up-step-spin 1s linear infinite;
+}
+
+@keyframes up-step-spin {
+    to { transform: rotate(360deg); }
+}
+
+.up-step.state-done    .up-step-icon { color: var(--success); }
+.up-step.state-failed  .up-step-icon { color: var(--danger); }
+.up-step.state-neutral .up-step-icon { color: var(--text-muted); }
+
+.up-step.state-failed { color: var(--danger); }
+
+/* Zeile, die bereits stand und nur ihren Zustand gewechselt hat: KEINE erneute
+   Einblend-Animation (sonst blinkt sie bei jeder Aktualisierung, Fix 2026-08-10). */
+.up-step.up-step-settled { animation: none; opacity: 1; }

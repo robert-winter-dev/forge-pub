@@ -10,6 +10,13 @@ Environment=FORGE_ENV_DIR=/opt/forge/local/env
 ExecStart=/usr/bin/node bin/bot-control-daemon.js
 Restart=always
 RestartSec=5
+# Ohne das killt systemd beim Stoppen dieses Dienstes den gesamten Cgroup-Prozessbaum
+# (Default: KillMode=control-group). Dieser Daemon führt Update-Aktionen als Kind-
+# Prozess aus, und ein Update stoppt u.a. genau diesen Dienst selbst — ohne diese
+# Zeile würde sich der laufende Update-Vorgang dabei mittendrin selbst abschießen
+# (real passiert 2026-08-10, mitten im Backup-Schritt). Mit KillMode=process
+# bekommt nur der Hauptprozess das Stop-Signal, Kind-Prozesse laufen unbeeinflusst weiter.
+KillMode=process
 
 StandardOutput=journal
 StandardError=journal
