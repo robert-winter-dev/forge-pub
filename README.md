@@ -38,10 +38,13 @@ working without you having to.
   across all of them.
 - **A local dashboard** to watch positions, PnL, and yield — reachable only
   inside your own network, never exposed to the internet.
-- **Self-hosted on minimal hardware** — runs entirely on your own machine,
-  no cloud dependency: a mini PC with as little as 2 CPU cores / 2 GB RAM
-  is enough; the only requirement is an internet connection (for RPC/API
-  access).
+- **Self-hosted on your own hardware** — runs entirely on your own machine,
+  no cloud dependency. A mini PC with 4 CPU cores, 4 GB RAM, and roughly
+  256 GB of storage behind your own router is plenty. No port forwarding to
+  the machine FORGE runs on is required: FORGE.pub is never contacted from
+  outside, all connections (RPC, exchange APIs) are strictly outbound — so
+  your private key never leaves your home. The only requirement is a
+  working internet connection.
 
 ## What FORGE.pub is not
 
@@ -72,10 +75,17 @@ without it.
 - A small VM or machine is enough — successfully tested on 2 cores / 2 GB
   RAM; 4 cores / 4 GB is more comfortable, especially during installation
   (native dependency compilation is the heaviest part).
-- A Solana RPC provider API key (e.g. Helius) and a Jupiter API key — both
-  have workable free tiers.
+- **Two API keys are required — the installer cannot complete without
+  both:**
+  - A Solana RPC provider API key, e.g. from [Helius](https://www.helius.dev/)
+    (free tier available)
+  - A Jupiter API key from the [Jupiter API Portal](https://portal.jup.ag/)
+    (free tier available)
 
 ## Installation
+
+> **Before you start:** have both API keys from the section above ready —
+> the installer will ask for them and cannot finish without them.
 
 ```bash
 git clone <this-repo>
