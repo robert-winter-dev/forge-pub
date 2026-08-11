@@ -102,6 +102,7 @@ JSON_OUT=0
 LOG_FILE=""
 OPT_JUPITER_KEY=""
 OPT_HELIUS_KEY=""
+OPT_TIMEZONE=""
 OPT_LAN_IP=""
 OPT_NOSTR_ALIAS=""
 OPT_RESTORE_FROM=""
@@ -176,6 +177,7 @@ while [[ $# -gt 0 ]]; do
         --lang)             shift ;;  # bereits von resolve_language() ausgewertet
         --jupiter-key)     OPT_JUPITER_KEY="$2"; shift ;;
         --helius-key)      OPT_HELIUS_KEY="$2"; shift ;;
+        --timezone)        OPT_TIMEZONE="$2"; shift ;;
         --lan-ip)          OPT_LAN_IP="$2"; shift ;;
         --nostr-alias)     OPT_NOSTR_ALIAS="$2"; shift ;;
         --wallets)         OPT_WALLETS="$2"; shift ;;

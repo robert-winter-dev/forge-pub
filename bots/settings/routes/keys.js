@@ -14,6 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { PATHS, envFile } from '../../../config/paths.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -76,7 +77,7 @@ const router = Router();
 // ── GET /api/keys/:bot ────────────────────────────────────────────────────────
 router.get('/:bot', (req, res) => {
     const cfg = BOT_KEY_CONFIG[req.params.bot];
-    if (!cfg) return res.status(404).json({ error: 'Unbekannter Bot' });
+    if (!cfg) return res.status(404).json({ error: t('api.common.unknown_bot') });
 
     const result = cfg.fields.map(({ field, label, type }) => {
         const value = readEnvField(cfg.envPath, field);
@@ -95,19 +96,19 @@ router.get('/:bot', (req, res) => {
 // ── PUT /api/keys/:bot ────────────────────────────────────────────────────────
 router.put('/:bot', (req, res) => {
     const cfg = BOT_KEY_CONFIG[req.params.bot];
-    if (!cfg) return res.status(404).json({ error: 'Unbekannter Bot' });
+    if (!cfg) return res.status(404).json({ error: t('api.common.unknown_bot') });
 
     const { field, value } = req.body;
     if (!field || typeof field !== 'string') {
-        return res.status(400).json({ error: 'field fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'field' }) });
     }
     if (!value || typeof value !== 'string') {
-        return res.status(400).json({ error: 'value fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'value' }) });
     }
 
     const known = cfg.fields.find(f => f.field === field);
     if (!known) {
-        return res.status(400).json({ error: `Unbekanntes Feld: ${field}` });
+        return res.status(400).json({ error: t('api.keys.unknown_field', { field }) });
     }
 
     writeEnvField(cfg.envPath, field, value.trim());
@@ -118,7 +119,7 @@ router.put('/:bot', (req, res) => {
 // Gibt die vollständigen Werte zurück (für Export-Funktion).
 router.get('/:bot/export', (req, res) => {
     const cfg = BOT_KEY_CONFIG[req.params.bot];
-    if (!cfg) return res.status(404).json({ error: 'Unbekannter Bot' });
+    if (!cfg) return res.status(404).json({ error: t('api.common.unknown_bot') });
 
     const result = cfg.fields.map(({ field, label, type }) => {
         const value = readEnvField(cfg.envPath, field);

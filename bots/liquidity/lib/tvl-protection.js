@@ -47,6 +47,7 @@ import * as notify from './notify.js';
 import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees } from './exit-finalizer.js';
 import { Percentage } from '@orca-so/common-sdk';
 import { PATHS } from '../../../config/paths.js';
+import { reasonPayload } from '../../../lib/pool-reason.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
@@ -330,8 +331,9 @@ export async function executeTvlProtection(pool, db) {
                 console.error(`[tvl-protection:${pool.id}] setPoolActive fehlgeschlagen: ${err.message}`);
             }
             try {
-                setPoolEnabled(pool.id, false,
-                    `TVL-Schutz Stufe 2 (Voll-Exit): TVL ${(tvl/1e6).toFixed(2)}M unter Schwelle ${(threshold/1e6).toFixed(2)}M`);
+                setPoolEnabled(pool.id, false, reasonPayload('reason.tvl_full_exit', {
+                    tvl: (tvl / 1e6).toFixed(2), threshold: (threshold / 1e6).toFixed(2),
+                }));
                 console.log(`[tvl-protection:${pool.id}] Pool gesperrt (enabled=false) – manuelle Freigabe nötig`);
             } catch (err) {
                 console.error(`[tvl-protection:${pool.id}] setPoolEnabled fehlgeschlagen: ${err.message}`);

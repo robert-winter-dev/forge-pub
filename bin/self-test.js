@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { t } from '../lib/i18n.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.join(__dirname, '..');
@@ -56,7 +57,7 @@ function runSelfTest() {
         const active = enabled ? isActive(service) : null;
         checked.push({ service, enabled, active });
         if (enabled && !active) {
-            problems.push(`${service}: aktiviert, läuft aber nicht – prüfen mit "journalctl -u ${service} -n 50"`);
+            problems.push(t('cli.selftest.problem', { service }));
         }
     }
 
@@ -73,14 +74,14 @@ const result = runSelfTest();
 if (process.argv.includes('--json')) {
     console.log(JSON.stringify(result));
 } else {
-    console.log(`[self-test] Version: ${result.version ?? 'unbekannt'}`);
+    console.log(`[self-test] Version: ${result.version ?? t('cli.selftest.unknown')}`);
     for (const c of result.checked) {
-        console.log(`[self-test] ${c.service}: ${c.enabled ? (c.active ? 'aktiv' : '🔴 NICHT aktiv') : 'deaktiviert (übersprungen)'}`);
+        console.log(`[self-test] ${c.service}: ${c.enabled ? (c.active ? t('cli.selftest.active') : `🔴 ${t('cli.selftest.not_active')}`) : t('cli.selftest.disabled_skipped')}`);
     }
     if (result.ok) {
-        console.log('[self-test] ✓ Keine Auffälligkeiten.');
+        console.log(`[self-test] ✓ ${t('cli.selftest.all_ok')}`);
     } else {
-        console.log(`[self-test] 🔴 ${result.problems.length} Problem(e):`);
+        console.log(`[self-test] 🔴 ${t('cli.selftest.problem_count', { count: result.problems.length })}`);
         for (const p of result.problems) console.log(`[self-test]   - ${p}`);
     }
 }

@@ -48,6 +48,7 @@ import { createRequire }  from 'node:module';
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..');
 import { PATHS } from '../config/paths.js';
+import { t } from '../lib/i18n.js';
 const require    = createRequire(import.meta.url);
 
 // better-sqlite3 aus dem Liquidity-Projekt laden (liegt dort in node_modules)
@@ -135,22 +136,26 @@ function normalizeToken(sym) {
 // Struktur: 'TOKEN_A/TOKEN_B' (alphabetisch sortiert) → Array von Hops
 // Jeder Hop: { poolId, address, feeTier (%), correlated }
 
+// Übersetzbare Verbindungswörter der Routen-Labels — Pool-Namen und Fee-Tiers
+// darin sind kanonisch (E11) und bleiben in beiden Sprachen identisch.
+const RW = { direct: t('cli.est.route_direct'), est: t('cli.est.route_estimated') };
+
 const SWAP_ROUTES = {
     // ── Direkte Routen (1 Hop) ─────────────────────────────────────────────
     'EURC/USDC': {
-        label: 'EURC ↔ USDC — direkt (Orca EURC/USDC 0.01%)',
+        label: `EURC ↔ USDC — ${RW.direct} (Orca EURC/USDC 0.01%)`,
         hops: [{ poolId: 'liq-eurc-usdc',  address: 'ArisQNcbjXPJD7RgPRvysatX3xcfHPTbcTkfD8kDoZ9i', feeTier: 0.01, correlated: true }],
     },
     'SOL/USDC': {
-        label: 'SOL ↔ USDC — direkt (Orca SOL/USDC 0.04%)',
+        label: `SOL ↔ USDC — ${RW.direct} (Orca SOL/USDC 0.04%)`,
         hops: [{ poolId: 'liq-sol-usdc',   address: 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE', feeTier: 0.04, correlated: false }],
     },
     'USDC/cbBTC': {
-        label: 'cbBTC ↔ USDC — direkt (Orca cbBTC/USDC 0.04%)',
+        label: `cbBTC ↔ USDC — ${RW.direct} (Orca cbBTC/USDC 0.04%)`,
         hops: [{ poolId: 'liq-btc-usdc',   address: 'HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM', feeTier: 0.04, correlated: false }],
     },
     'WBTC/cbBTC': {
-        label: 'cbBTC ↔ WBTC — direkt (Orca cbBTC/WBTC 0.01%)',
+        label: `cbBTC ↔ WBTC — ${RW.direct} (Orca cbBTC/WBTC 0.01%)`,
         hops: [{ poolId: 'liq-cbtc-wbtc',  address: '4v8ufj8Hj7UvFgtofQJAtzUud5xomwZfEqfCTHZ4wM72', feeTier: 0.01, correlated: true }],
     },
     'USDC/WBTC': {
@@ -183,7 +188,7 @@ const SWAP_ROUTES = {
         ],
     },
     'SOL/WBTC': {
-        label: 'SOL ↔ WBTC — 3 Hops: SOL/USDC + cbBTC/USDC + cbBTC/WBTC (geschätzt)',
+        label: `SOL ↔ WBTC — 3 Hops: SOL/USDC + cbBTC/USDC + cbBTC/WBTC (${RW.est})`,
         hops: [
             { poolId: 'liq-sol-usdc',   address: 'Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE', feeTier: 0.04, correlated: false },
             { poolId: 'liq-btc-usdc',   address: 'HxA6SKW5qA4o12fjVgTpXdq2YnZ5Zv1s7SB4FFomsyLM', feeTier: 0.04, correlated: false },
@@ -191,7 +196,7 @@ const SWAP_ROUTES = {
         ],
     },
     'HYPE/SOL': {
-        label: 'HYPE ↔ SOL — direkt (Orca HYPE/SOL 0.30%)',
+        label: `HYPE ↔ SOL — ${RW.direct} (Orca HYPE/SOL 0.30%)`,
         hops: [{ poolId: 'liq-hype-sol', address: '31KrYUDzgEQhEgr1JSNVfHAknWACcF97CtUaU8enKQsy', feeTier: 0.30, correlated: false }],
     },
     'HYPE/USDC': {
@@ -202,7 +207,7 @@ const SWAP_ROUTES = {
         ],
     },
     'ORCA/SOL': {
-        label: 'ORCA ↔ SOL — direkt (Orca ORCA/SOL 0.16%)',
+        label: `ORCA ↔ SOL — ${RW.direct} (Orca ORCA/SOL 0.16%)`,
         hops: [{ poolId: 'liq-orca-sol', address: 'Hxw77h9fEx598afiiZunwHaX3vYu9UskDk9EpPNZp1mG', feeTier: 0.16, correlated: false }],
     },
     'ORCA/USDC': {
@@ -499,11 +504,11 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                 swapAmount  = effectiveCapital * 0.5;
                 protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
                 slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
-                notes.push(`Swap ~50% des Kapitals ($${swapAmount.toFixed(2)}) im ${pool.feeTier}%-Pool`);
+                notes.push(t('cli.est.note_rebalance_swap', { usd: swapAmount.toFixed(2), feeTier: pool.feeTier }));
             } else {
-                unknown.push('Kapital unbekannt → --amount angeben für Swap-Kostenschätzung');
+                unknown.push(t('cli.est.unknown_capital_swap'));
             }
-            notes.push('TX-Reihenfolge: collectFees → decreaseLiquidity → close → swap → open');
+            notes.push(t('cli.est.note_tx_order'));
             break;
 
         case 'open':
@@ -511,9 +516,9 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                 swapAmount  = effectiveCapital * 0.5;
                 protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
                 slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
-                notes.push(`Jupiter-Swap ~50% ($${swapAmount.toFixed(2)}) für Token-Split`);
+                notes.push(t('cli.est.note_open_swap', { usd: swapAmount.toFixed(2) }));
             } else {
-                unknown.push('Kapital unbekannt → --amount angeben');
+                unknown.push(t('cli.est.unknown_capital'));
             }
             break;
 
@@ -537,11 +542,11 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                     slippage = slipBase
                         ? { pct: slipBase.pct * 2, usd: Math.round(slipBase.usd * 2 * 10_000) / 10_000 }
                         : null;
-                    notes.push(`Pre-Swap A: $${halfAmount.toFixed(2)} USDC → ${pool.tokenA} (${routeA?.label ?? 'Route unbekannt'})`);
-                    notes.push(`Pre-Swap B: $${halfAmount.toFixed(2)} USDC → ${pool.tokenB} (${routeB?.label ?? 'Route unbekannt'})`);
-                    notes.push('Slippage als Summe beider Routen veranschlagt.');
+                    notes.push(t('cli.est.note_preswap', { ab: 'A', usd: halfAmount.toFixed(2), token: pool.tokenA, route: routeA?.label ?? t('cli.est.route_unknown') }));
+                    notes.push(t('cli.est.note_preswap', { ab: 'B', usd: halfAmount.toFixed(2), token: pool.tokenB, route: routeB?.label ?? t('cli.est.route_unknown') }));
+                    notes.push(t('cli.est.note_slip_sum'));
                 } else {
-                    unknown.push('Kapital unbekannt → --amount angeben für Swap-Kostenschätzung');
+                    unknown.push(t('cli.est.unknown_capital_swap'));
                 }
             } else if (SOL_POOLS.has(poolName) || PRESWAP_POOLS.has(poolName)) {
                 // SOL/USDC + ZEC/USDC: ~50% des Betrags muss vorab von USDC → TokenA geswappt werden
@@ -552,31 +557,31 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                     swapAmount  = effectiveCapital * 0.5;
                     protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
                     slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
-                    notes.push(`Vor-Swap ~50% ($${swapAmount.toFixed(2)}) USDC → ${swapTarget} (Jupiter, ${pool.feeTier}%-Pool)`);
+                    notes.push(t('cli.est.note_preswap_half', { usd: swapAmount.toFixed(2), token: swapTarget, feeTier: pool.feeTier }));
                 } else {
-                    unknown.push('Kapital unbekannt → --amount angeben für Swap-Kostenschätzung');
+                    unknown.push(t('cli.est.unknown_capital_swap'));
                 }
             } else {
                 // Andere Pools (cbBTC/USDC, EURC/USDC, cbBTC/WBTC): Tokens im Wallet, kein Swap nötig
-                notes.push('Kein Swap — Tokens müssen bereits im Wallet in korrekter Ratio vorliegen');
-                notes.push('Slippage minimal (nur Token-Ratio-Abweichung durch Tick-Rounding)');
-                if (!effectiveCapital) unknown.push('Betrag unbekannt → --amount angeben');
+                notes.push(t('cli.est.note_no_swap_ratio'));
+                notes.push(t('cli.est.note_slip_minimal'));
+                if (!effectiveCapital) unknown.push(t('cli.est.unknown_amount'));
             }
             break;
 
         case 'close':
         case 'withdraw':
             // Kein Swap: Tokens kommen unkonvertiert zurück
-            notes.push('Kein Swap — Tokens werden unkonvertiert zurückgegeben');
-            notes.push('Slippage vernachlässigbar (decreaseLiquidity ist rein proportional)');
+            notes.push(t('cli.est.note_no_swap_return'));
+            notes.push(t('cli.est.note_slip_negligible'));
             break;
 
         case 'close-reopen':
             // Abhängig davon, ob ein Swap nötig ist:
             // Bei Range-Neuzentrierung um aktuellen Preis → kein Swap nötig
             // Bei starker Preisbewegung → evtl. Swap nötig (wie rebalance)
-            notes.push('Kein Swap wenn neue Range um aktuellen Preis zentriert bleibt');
-            notes.push('Falls Preis stark außerhalb der neuen Range: wie rebalance kalkulieren');
+            notes.push(t('cli.est.note_no_swap_centered'));
+            notes.push(t('cli.est.note_like_rebalance'));
             if (effectiveCapital) {
                 slippage = estimateSlippage(effectiveCapital * 0.01, tvl, pool.correlated);
             }
@@ -602,7 +607,7 @@ async function calcSwapCosts({ fromToken, toToken, amount, solPrice, db }) {
         return {
             found: false,
             fromToken, toToken, amount, txFeeUsd,
-            unknown: [`Keine bekannte Route für ${fromToken} → ${toToken}. Jupiter findet ggf. eine andere Route — Kosten manuell schätzen.`],
+            unknown: [t('cli.est.no_route', { from: fromToken, to: toToken })],
         };
     }
 
@@ -645,7 +650,7 @@ async function calcSwapCosts({ fromToken, toToken, amount, solPrice, db }) {
     }
 
     if (route.hops.length > 1) {
-        notes.push(`Multi-Hop: ${route.hops.length} Pools — TX-Count evtl. ${TX_COUNT.swap + 1}`);
+        notes.push(t('cli.est.note_multihop', { pools: route.hops.length, txs: TX_COUNT.swap + 1 }));
     }
     notes.push(route.label);
 
@@ -665,7 +670,7 @@ async function calcSwapCosts({ fromToken, toToken, amount, solPrice, db }) {
 async function calcWithdrawAndSwapCosts({ pool, amount, solPrice, btcPrice, db }) {
     const snap = getPositionSnapshot(db, pool.id);
     if (!snap?.lp_value_usd) {
-        return { error: 'Kein Positions-Snapshot verfügbar — bitte zuerst den Bot starten.' };
+        return { error: t('cli.est.no_snapshot') };
     }
 
     const posValue = snap.lp_value_usd;
@@ -733,19 +738,19 @@ function printWithdrawAndSwapReport({ pool, poolName, amount, result, solPrice, 
     const btcStr = result.isBtcPair ? ` | BTC $${btcPrice.toFixed(0)}` : '';
 
     console.log(`┌${SEP}┐`);
-    console.log(`│ ${'Kostenabschätzung – Withdraw + Swap zu USDC'.padEnd(W - 2)} │`);
-    console.log(`│ ${`Pool: ${poolName}  Anfrage: ${amount.toFixed(2)} USDC`.padEnd(W - 2)} │`);
-    console.log(`│ ${`SOL $${solPrice.toFixed(2)}${btcStr} | Positionswert ~${result.posValue.toFixed(2)} USDC`.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_withdraw_swap').padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_pool_request', { pool: poolName, usd: amount.toFixed(2) }).padEnd(W - 2)} │`);
+    console.log(`│ ${`SOL $${solPrice.toFixed(2)}${btcStr} | ${t('cli.est.position_value', { usd: result.posValue.toFixed(2) })}`.padEnd(W - 2)} │`);
     console.log(`├${SEP}┤`);
 
-    console.log(`│ ${'Entnahme aus Pool'.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.withdrawal_from_pool').padEnd(W - 2)} │`);
     if (result.amtA > 0) {
         console.log(row(`  ~${result.amtA.toFixed(6)} ${pool.tokenA}`, `~$${result.usdA.toFixed(2)} USDC`));
     }
     if (result.amtB > 0) {
         console.log(row(`  ~${result.amtB.toFixed(6)} ${pool.tokenB}`, `~$${result.usdB.toFixed(2)} USDC`));
     }
-    console.log(row('  Anteil', `${(result.fraction * 100).toFixed(2)}% der Position`));
+    console.log(row(`  ${t('cli.est.share')}`, t('cli.est.share_of_position', { pct: (result.fraction * 100).toFixed(2) })));
 
     for (const swap of result.swaps) {
         console.log(`├${SEP}┤`);
@@ -754,14 +759,14 @@ function printWithdrawAndSwapReport({ pool, poolName, amount, result, solPrice, 
             const routeStr  = ('Swap: ' + routeNote.replace('↔', '→')).slice(0, W - 2);
             console.log(`│ ${routeStr.padEnd(W - 2)} │`);
             for (const hop of swap.swapResult.hopDetails) {
-                const tvlStr = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : 'TVL n/v';
-                console.log(row(`  Protokoll-Fee (${hop.feeTier}%, ${tvlStr})`, `$${hop.fee.toFixed(4)} USDC`));
+                const tvlStr = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : t('cli.est.tvl_na');
+                console.log(row(`  ${t('cli.est.protocol_fee')} (${hop.feeTier}%, ${tvlStr})`, `$${hop.fee.toFixed(4)} USDC`));
                 if (hop.slip) {
                     console.log(row(`  Slippage (est. ${hop.slip.pct.toFixed(4)}%)`, `$${hop.slip.usd.toFixed(4)} USDC`));
                 }
             }
         } else {
-            console.log(row(`Swap ${swap.token} → USDC`, 'Route nicht modelliert'));
+            console.log(row(`Swap ${swap.token} → USDC`, t('cli.est.route_not_modeled')));
         }
     }
 
@@ -770,16 +775,16 @@ function printWithdrawAndSwapReport({ pool, poolName, amount, result, solPrice, 
     console.log(row(`TX-Fees (${totalTxs} TXs × ${SOL_PER_TX} SOL × $${solPrice.toFixed(0)})`, `$${result.totalTxFee.toFixed(4)} USDC`));
     console.log(`├${SEP}┤`);
 
-    const confidenceStr = result.confidence === 'live'   ? '★★★ HOCH    (Live-TVL)'
-                        : result.confidence === 'cached' ? '★★☆ MITTEL  (gecachter TVL)'
-                        :                                  '★☆☆ NIEDRIG (kein TVL)';
-    console.log(row('Gesamtkosten', `~$${result.totalCosts.toFixed(4)} USDC`));
-    console.log(row('NETTO erhalten', `~${result.netUsdc.toFixed(2)} USDC`));
-    console.log(row('Konfidenz', confidenceStr));
+    const confidenceStr = result.confidence === 'live'   ? t('cli.est.conf_high')
+                        : result.confidence === 'cached' ? t('cli.est.conf_med')
+                        :                                  t('cli.est.conf_low');
+    console.log(row(t('cli.est.total_costs'), `~$${result.totalCosts.toFixed(4)} USDC`));
+    console.log(row(t('cli.est.net_received'), `~${result.netUsdc.toFixed(2)} USDC`));
+    console.log(row(t('cli.est.confidence'), confidenceStr));
     console.log(`└${SEP}┘`);
-    console.log('  Hinweise:');
-    console.log('    • Token-Mengen aus letztem Positions-Snapshot (Näherung)');
-    console.log('    • Echte Mengen können leicht abweichen durch Preisentwicklung');
+    console.log(`  ${t('cli.est.hints')}`);
+    console.log(`    • ${t('cli.est.hint_snapshot_approx')}`);
+    console.log(`    • ${t('cli.est.hint_amounts_vary')}`);
     console.log();
 }
 
@@ -796,13 +801,13 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
     };
 
     const tvlStr = tvl != null
-        ? `$${(tvl / 1_000).toFixed(0)}K${tvlSource === 'cached' ? ' (gecacht)' : ''}`
+        ? `$${(tvl / 1_000).toFixed(0)}K${tvlSource === 'cached' ? ` (${t('cli.est.cached')})` : ''}`
         : 'n/v';
-    const ageStr = dataAge ? ` | Daten: ${dataAge}` : '';
+    const ageStr = dataAge ? ` | ${t('cli.est.data_age', { age: dataAge })}` : '';
 
     console.log(`┌${SEP}┐`);
-    console.log(`│ ${'Kostenabschätzung'.padEnd(W - 2)} │`);
-    console.log(`│ ${`Aktion: ${action.toUpperCase()}  Pool: ${poolName}`.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr').padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_action_pool', { action: action.toUpperCase(), pool: poolName }).padEnd(W - 2)} │`);
     console.log(`│ ${`SOL $${solPrice.toFixed(2)} | BTC $${btcPrice.toFixed(0)} | TVL ${tvlStr}${ageStr}`.padEnd(W - 2)} │`);
     console.log(`├${SEP}┤`);
 
@@ -812,26 +817,26 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
         const tA    = pool.tokenA ?? 'TokenA';
         const tB    = pool.tokenB ?? 'TokenB';
         console.log(`├${SEP}┤`);
-        console.log(`│ ${'Deposit-Zusammensetzung (--amount-a)'.padEnd(W - 2)} │`);
+        console.log(`│ ${t('cli.est.deposit_composition').padEnd(W - 2)} │`);
         if (ri.outOfRange === 'above') {
-            console.log(row(`⚠ Preis ÜBER Range`, `nur ${tB} möglich`));
-            console.log(row(`  ${tA} nicht einzahlbar`, `Position wäre 100% ${tB}`));
+            console.log(row(`⚠ ${t('cli.est.price_above_range')}`, t('cli.est.only_token', { token: tB })));
+            console.log(row(`  ${t('cli.est.token_not_depositable', { token: tA })}`, t('cli.est.position_would_be', { token: tB })));
         } else if (ri.outOfRange === 'below') {
-            console.log(row(`${amountA} ${tA}`, `100% ${tA} (kein ${tB} nötig)`));
-            console.log(row(`Gesamtwert`, `~$${ri.totalUsdcValue.toFixed(2)} USDC`));
+            console.log(row(`${amountA} ${tA}`, t('cli.est.all_token_a', { tokenA: tA, tokenB: tB })));
+            console.log(row(t('cli.est.total_value'), `~$${ri.totalUsdcValue.toFixed(2)} USDC`));
         } else {
             const shareA = ri.tokenASharePct?.toFixed(1) ?? '?';
             const shareB = (100 - parseFloat(shareA)).toFixed(1);
-            console.log(row(`${amountA} ${tA} einzahlen`, `~$${(amountA * currentPrice).toFixed(2)} USDC`));
-            console.log(row(`${ri.requiredB.toFixed(2)} ${tB} beigemischt`, `~$${ri.requiredB.toFixed(2)} USDC`));
-            console.log(row(`Gesamtwert Deposit`, `~$${ri.totalUsdcValue.toFixed(2)} USDC`));
+            console.log(row(t('cli.est.deposit_amount_token', { n: amountA, token: tA }), `~$${(amountA * currentPrice).toFixed(2)} USDC`));
+            console.log(row(t('cli.est.token_mixed_in', { n: ri.requiredB.toFixed(2), token: tB }), `~$${ri.requiredB.toFixed(2)} USDC`));
+            console.log(row(t('cli.est.total_value_deposit'), `~$${ri.totalUsdcValue.toFixed(2)} USDC`));
             console.log(row(`Ratio (${tA} / ${tB})`, `${shareA}% / ${shareB}%`));
         }
         console.log(`├${SEP}┤`);
     } else {
         const effectiveCapital = amount ?? capital;
         if (effectiveCapital) {
-            console.log(row('Kapital / Betrag', `$${effectiveCapital.toFixed(2)} USDC`));
+            console.log(row(t('cli.est.capital_amount'), `$${effectiveCapital.toFixed(2)} USDC`));
         }
     }
 
@@ -851,16 +856,16 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
                 `$${costs.slippage.usd.toFixed(4)} USDC`
             ));
         } else {
-            console.log(row('Slippage', 'n/v — TVL nicht verfügbar'));
+            console.log(row('Slippage', t('cli.est.na_no_tvl')));
         }
     }
 
     console.log(`├${SEP}┤`);
-    const confidence = tvlSource === 'live'   ? '★★★ HOCH    (Live-TVL)'
-                     : tvlSource === 'cached' ? '★★☆ MITTEL  (gecachter TVL)'
-                     :                          '★☆☆ NIEDRIG (kein TVL)';
-    console.log(row('GESAMT (geschätzt)', `~$${costs.total.toFixed(4)} USDC`));
-    console.log(row('Konfidenz', confidence));
+    const confidence = tvlSource === 'live'   ? t('cli.est.conf_high')
+                     : tvlSource === 'cached' ? t('cli.est.conf_med')
+                     :                          t('cli.est.conf_low');
+    console.log(row(t('cli.est.total_estimated'), `~$${costs.total.toFixed(4)} USDC`));
+    console.log(row(t('cli.est.confidence'), confidence));
     console.log(`└${SEP}┘`);
 
     // ── SOL-Reserve-Prüfung ────────────────────────────────────────────────────
@@ -869,33 +874,33 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
         // Schätzung: ~50% des Deposit-Betrags wird als SOL benötigt
         const solNeeded  = effectiveAmount * 0.5 / solPrice;
         const solAfter   = walletSol != null ? walletSol - solNeeded : null;
-        const solDisplay = walletSol != null ? walletSol.toFixed(4) : 'unbekannt';
+        const solDisplay = walletSol != null ? walletSol.toFixed(4) : t('cli.est.unknown_word');
 
         console.log();
-        console.log(`  SOL-Reserve-Prüfung (Minimum: ${MIN_SOL_RESERVE} SOL):`);
-        console.log(`    Wallet aktuell : ${solDisplay} SOL`);
-        console.log(`    Geschätzt nötig: ~${solNeeded.toFixed(4)} SOL (50% des Betrags)`);
+        console.log(`  ${t('cli.est.sol_reserve_check', { min: MIN_SOL_RESERVE })}`);
+        console.log(`    ${t('cli.est.wallet_current', { sol: solDisplay })}`);
+        console.log(`    ${t('cli.est.estimated_needed', { sol: solNeeded.toFixed(4) })}`);
 
         if (walletSol != null) {
-            console.log(`    Nach Aktion    : ~${solAfter.toFixed(4)} SOL`);
+            console.log(`    ${t('cli.est.after_action', { sol: solAfter.toFixed(4) })}`);
             if (solAfter < MIN_SOL_RESERVE) {
                 const maxSafeUsdc = Math.floor((walletSol - MIN_SOL_RESERVE) * solPrice * 2);
-                console.log(`    🚨 WARNUNG: Reserve würde auf ${solAfter.toFixed(4)} SOL fallen — unter Minimum!`);
-                console.log(`    💡 Max. sicherer Betrag: ~$${maxSafeUsdc} USDC`);
+                console.log(`    🚨 ${t('cli.est.reserve_warning', { sol: solAfter.toFixed(4) })}`);
+                console.log(`    💡 ${t('cli.est.max_safe_amount', { usd: maxSafeUsdc })}`);
             } else {
-                console.log(`    ✅ Reserve OK (${solAfter.toFixed(4)} SOL > ${MIN_SOL_RESERVE} SOL Minimum)`);
+                console.log(`    ✅ ${t('cli.est.reserve_ok', { sol: solAfter.toFixed(4), min: MIN_SOL_RESERVE })}`);
             }
         } else {
-            console.log(`    ⚠ SOL-Balance nicht abrufbar — Reserve manuell prüfen!`);
+            console.log(`    ⚠ ${t('cli.est.sol_not_readable')}`);
         }
     }
 
     if (costs.notes.length > 0) {
-        console.log('  Hinweise:');
+        console.log(`  ${t('cli.est.hints')}`);
         costs.notes.forEach(n => console.log(`    • ${n}`));
     }
     if (costs.unknown.length > 0) {
-        console.log('  ⚠ Unbekannte Größen (Schätzung unvollständig):');
+        console.log(`  ⚠ ${t('cli.est.unknown_factors_full')}`);
         costs.unknown.forEach(u => console.log(`    ! ${u}`));
     }
     console.log();
@@ -912,13 +917,13 @@ function printSwapReport(result, solPrice) {
     };
 
     console.log(`┌${SEP}┐`);
-    console.log(`│ ${'Kostenabschätzung'.padEnd(W - 2)} │`);
-    console.log(`│ ${`Aktion: SWAP  ${result.fromToken} → ${result.toToken}`.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr').padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_action_swap', { from: result.fromToken, to: result.toToken }).padEnd(W - 2)} │`);
     console.log(`│ ${`SOL $${solPrice.toFixed(2)}`.padEnd(W - 2)} │`);
     console.log(`├${SEP}┤`);
 
     if (result.amount) {
-        console.log(row('Swap-Betrag', `$${result.amount.toFixed(2)} USDC`));
+        console.log(row(t('cli.est.swap_amount'), `$${result.amount.toFixed(2)} USDC`));
     }
     console.log(row(
         `TX-Fees  (${TX_COUNT.swap} TX × ${SOL_PER_TX} SOL × $${solPrice.toFixed(0)})`,
@@ -928,9 +933,9 @@ function printSwapReport(result, solPrice) {
     if (result.found && result.hopDetails) {
         for (const [i, hop] of result.hopDetails.entries()) {
             const hopLabel = result.hopDetails.length > 1 ? ` Hop ${i + 1}` : '';
-            const tvlStr   = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : 'TVL n/v';
+            const tvlStr   = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : t('cli.est.tvl_na');
             console.log(row(
-                `Protokoll-Fee${hopLabel} (${hop.feeTier}%, ${tvlStr})`,
+                `${t('cli.est.protocol_fee')}${hopLabel} (${hop.feeTier}%, ${tvlStr})`,
                 `$${hop.fee.toFixed(4)} USDC`
             ));
             if (hop.slip) {
@@ -939,7 +944,7 @@ function printSwapReport(result, solPrice) {
                     `$${hop.slip.usd.toFixed(4)} USDC`
                 ));
             } else {
-                console.log(row(`  Slippage${hopLabel}`, 'n/v — kein TVL'));
+                console.log(row(`  Slippage${hopLabel}`, t('cli.est.na_no_tvl_short')));
             }
         }
     }
@@ -947,23 +952,23 @@ function printSwapReport(result, solPrice) {
     console.log(`├${SEP}┤`);
 
     if (result.found) {
-        const confidence = result.confidence === 'live'   ? '★★★ HOCH    (Live-TVL)'
-                         : result.confidence === 'cached' ? '★★☆ MITTEL  (gecachter TVL)'
-                         :                                  '★☆☆ NIEDRIG (kein TVL)';
-        console.log(row('GESAMT (geschätzt)', `~$${result.total.toFixed(4)} USDC`));
-        console.log(row('Konfidenz', confidence));
+        const confidence = result.confidence === 'live'   ? t('cli.est.conf_high')
+                         : result.confidence === 'cached' ? t('cli.est.conf_med')
+                         :                                  t('cli.est.conf_low');
+        console.log(row(t('cli.est.total_estimated'), `~$${result.total.toFixed(4)} USDC`));
+        console.log(row(t('cli.est.confidence'), confidence));
     } else {
-        console.log(row('GESAMT', 'unbekannt — Route nicht modelliert'));
-        console.log(row('Konfidenz', '★☆☆ NIEDRIG'));
+        console.log(row(t('cli.est.total'), t('cli.est.unknown_route_not_modeled')));
+        console.log(row(t('cli.est.confidence'), t('cli.est.conf_low_bare')));
     }
     console.log(`└${SEP}┘`);
 
     if (result.notes?.length > 0) {
-        console.log('  Hinweise:');
+        console.log(`  ${t('cli.est.hints')}`);
         result.notes.forEach(n => console.log(`    • ${n}`));
     }
     if (result.unknown?.length > 0) {
-        console.log('  ⚠ Unbekannte Größen:');
+        console.log(`  ⚠ ${t('cli.est.unknown_factors')}`);
         result.unknown.forEach(u => console.log(`    ! ${u}`));
     }
     console.log();
@@ -1003,32 +1008,32 @@ function printLbReport({ protocolId, proto, action, amount, solPrice, position }
     const feeCooldown  = r4(txsCooldown  * proto.feeSol * solPrice);
 
     console.log(`┌${SEP}┐`);
-    console.log(`│ ${'Kostenabschätzung – LendingBot'.padEnd(W - 2)} │`);
-    console.log(`│ ${`Aktion: ${action.toUpperCase()}  Protokoll: ${proto.label}`.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_lending').padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.hdr_action_protocol', { action: action.toUpperCase(), label: proto.label }).padEnd(W - 2)} │`);
     console.log(`│ ${`SOL $${solPrice.toFixed(2)}`.padEnd(W - 2)} │`);
     console.log(`├${SEP}┤`);
 
     if (amount != null) {
-        console.log(row('Betrag', `${amount.toFixed(2)} USDC`));
+        console.log(row(t('cli.est.amount'), `${amount.toFixed(2)} USDC`));
     }
 
     // Aktuelle Position aus data.json anzeigen
     if (position) {
-        console.log(row('Position aktuell', `${position.amount.toFixed(2)} USDC`));
-        console.log(row('  davon investiert', `${position.netInvested.toFixed(2)} USDC`));
-        console.log(row('  davon Yield', `${position.accruedYield.toFixed(4)} USDC`));
+        console.log(row(t('cli.est.position_current'), `${position.amount.toFixed(2)} USDC`));
+        console.log(row(`  ${t('cli.est.of_which_invested')}`, `${position.netInvested.toFixed(2)} USDC`));
+        console.log(row(`  ${t('cli.est.of_which_yield')}`, `${position.accruedYield.toFixed(4)} USDC`));
         if (action === 'withdraw' && amount != null) {
             const remaining = position.amount - amount;
-            console.log(row('Position danach (ca.)', `${remaining.toFixed(2)} USDC`));
+            console.log(row(t('cli.est.position_after'), `${remaining.toFixed(2)} USDC`));
         }
         if (action === 'deposit' && amount != null) {
             const newTotal = position.amount + amount;
-            console.log(row('Position danach (ca.)', `${newTotal.toFixed(2)} USDC`));
+            console.log(row(t('cli.est.position_after'), `${newTotal.toFixed(2)} USDC`));
         }
     }
 
     console.log(`├${SEP}┤`);
-    console.log(`│ ${'TX-Kosten'.padEnd(W - 2)} │`);
+    console.log(`│ ${t('cli.est.tx_costs').padEnd(W - 2)} │`);
 
     if (proto.cooldown === false) {
         // Kein Cooldown – immer sofortige TX
@@ -1037,27 +1042,27 @@ function printLbReport({ protocolId, proto, action, amount, solPrice, position }
             fmtUsdc(feeImmediate)
         ));
         console.log(`├${SEP}┤`);
-        console.log(row('GESAMT', fmtUsdc(feeImmediate)));
-        console.log(row('Konfidenz', '★★★ HOCH  (feste TX-Gebühr, kein Swap)'));
+        console.log(row(t('cli.est.total'), fmtUsdc(feeImmediate)));
+        console.log(row(t('cli.est.confidence'), t('cli.est.conf_high_fixed')));
     } else {
         // Loopscale: immediate oder 7-Tage-Cooldown – erst bei TX-Ausführung bekannt
-        console.log(row(`  Sofort  (1 TX × ${proto.feeSol} SOL × $${solPrice.toFixed(0)})`, fmtUsdc(feeImmediate)));
-        console.log(row(`  Cooldown (2 TX × ${proto.feeSol} SOL × $${solPrice.toFixed(0)})`, fmtUsdc(feeCooldown)));
+        console.log(row(`  ${t('cli.est.immediate_tx', { fee: proto.feeSol, sol: solPrice.toFixed(0) })}`, fmtUsdc(feeImmediate)));
+        console.log(row(`  ${t('cli.est.cooldown_tx', { fee: proto.feeSol, sol: solPrice.toFixed(0) })}`, fmtUsdc(feeCooldown)));
         console.log(`├${SEP}┤`);
-        console.log(row('GESAMT sofort / Cooldown', `${fmtUsdc(feeImmediate)} / ${fmtUsdc(feeCooldown)}`));
-        console.log(row('Konfidenz', '★★★ HOCH  (feste TX-Gebühr, kein Swap)'));
+        console.log(row(t('cli.est.total_now_cooldown'), `${fmtUsdc(feeImmediate)} / ${fmtUsdc(feeCooldown)}`));
+        console.log(row(t('cli.est.confidence'), t('cli.est.conf_high_fixed')));
         console.log(`└${SEP}┘`);
-        console.log('  Hinweise:');
-        console.log('    • Loopscale entscheidet bei TX-Ausführung ob sofort oder Cooldown');
-        console.log('    • Cooldown: 7 Tage bis Geld im Wallet verfügbar');
+        console.log(`  ${t('cli.est.hints')}`);
+        console.log(`    • ${t('cli.est.hint_loopscale_decides')}`);
+        console.log(`    • ${t('cli.est.hint_cooldown_days')}`);
         console.log();
         return;
     }
 
     console.log(`└${SEP}┘`);
     if (proto.cooldown === false) {
-        console.log('  Hinweise:');
-        console.log('    • Kein Swap, keine Slippage – reine TX-Gebühr');
+        console.log(`  ${t('cli.est.hints')}`);
+        console.log(`    • ${t('cli.est.hint_no_swap_fee_only')}`);
     }
     console.log();
 }
@@ -1106,21 +1111,21 @@ if (args.bot && !CONFIGURED_BOTS.includes(args.bot.toLowerCase())) {
 
 if (!args.action) {
     console.error([
-        'Verwendung: node FORGE/bin/estimate-costs.js --action <aktion> [--pool <paar>] [--amount <usdc>]',
-        '            node FORGE/bin/estimate-costs.js --action swap --from <token> --to <token> [--amount <usdc>]',
+        t('cli.est.usage_line1'),
+        t('cli.est.usage_line2'),
         '',
-        'Aktionen:  rebalance | deposit | open | close | withdraw | close-reopen | swap',
-        'Pools:     "SOL/USDC" | "cbBTC/USDC" | "EURC/USDC" | "cbBTC/WBTC" | "ZEC/USDC" | "HYPE/SOL"',
-        'Tokens:    SOL | USDC | EURC | cbBTC | WBTC | ZEC | HYPE',
+        `${t('cli.est.usage_actions')}  rebalance | deposit | open | close | withdraw | close-reopen | swap`,
+        `${t('cli.est.usage_pools')}     "SOL/USDC" | "cbBTC/USDC" | "EURC/USDC" | "cbBTC/WBTC" | "ZEC/USDC" | "HYPE/SOL"`,
+        `${t('cli.est.usage_tokens')}    SOL | USDC | EURC | cbBTC | WBTC | ZEC | HYPE`,
         '',
-        'Ohne --pool: Schätzung für alle bekannten Liquidity-Pools.',
+        t('cli.est.usage_all_pools'),
     ].join('\n'));
     process.exit(1);
 }
 
 const action = args.action.toLowerCase().replace('_', '-');
 if (!TX_COUNT[action]) {
-    console.error(`Unbekannte Aktion: "${action}"\nBekannt: ${Object.keys(TX_COUNT).join(' | ')}`);
+    console.error(t('cli.est.unknown_action', { action, list: Object.keys(TX_COUNT).join(' | ') }));
     process.exit(1);
 }
 
@@ -1141,8 +1146,8 @@ const walletSol     = needsSolCheck ? await getWalletSolBalance() : null;
 // ── Swap-Aktion ────────────────────────────────────────────────────────────────
 if (action === 'swap') {
     if (!args.from || !args.to) {
-        console.error('Für --action swap sind --from <token> und --to <token> erforderlich.');
-        console.error('Bekannte Tokens: SOL | USDC | EURC | cbBTC | WBTC | ZEC | HYPE');
+        console.error(t('cli.est.swap_needs_from_to'));
+        console.error(`${t('cli.est.known_tokens')} SOL | USDC | EURC | cbBTC | WBTC | ZEC | HYPE`);
         process.exit(1);
     }
     const fromToken = normalizeToken(args.from);
@@ -1159,20 +1164,20 @@ if (action === 'swap') {
 if (args.bot && ['lendingbot', 'lb'].includes(args.bot.toLowerCase())) {
     const lbAction = action === 'deposit' || action === 'withdraw' ? action : null;
     if (!lbAction) {
-        console.error(`LendingBot unterstützt nur: deposit | withdraw\nAngegeben: "${action}"`);
+        console.error(t('cli.est.lb_actions_only', { action }));
         process.exit(1);
     }
     if (!args.pool) {
         console.error([
-            'Für --bot lendingbot ist --pool <protokoll> erforderlich.',
-            `Bekannte Protokolle: ${Object.keys(LB_PROTOCOLS).join(' | ')}`,
+            t('cli.est.lb_needs_pool'),
+            `${t('cli.est.known_protocols')} ${Object.keys(LB_PROTOCOLS).join(' | ')}`,
         ].join('\n'));
         process.exit(1);
     }
     const protocolId = args.pool.toLowerCase();
     const proto      = LB_PROTOCOLS[protocolId];
     if (!proto) {
-        console.error(`Unbekanntes LendingBot-Protokoll: "${args.pool}"\nBekannt: ${Object.keys(LB_PROTOCOLS).join(' | ')}`);
+        console.error(t('cli.est.unknown_lb_protocol', { pool: args.pool, list: Object.keys(LB_PROTOCOLS).join(' | ') }));
         process.exit(1);
     }
 
@@ -1188,16 +1193,16 @@ if (args.bot && ['lendingbot', 'lb'].includes(args.bot.toLowerCase())) {
 // ── Withdraw-and-Swap ──────────────────────────────────────────────────────────
 if (action === 'withdraw-and-swap') {
     if (!args.pool) {
-        console.error('Für --action withdraw-and-swap ist --pool <paar> erforderlich.');
+        console.error(t('cli.est.ws_needs_pool'));
         process.exit(1);
     }
     const wsPool = POOLS[args.pool];
     if (!wsPool) {
-        console.error(`Unbekannter Pool: "${args.pool}"\nBekannt: ${Object.keys(POOLS).join(' | ')}`);
+        console.error(t('cli.est.unknown_pool', { pool: args.pool, list: Object.keys(POOLS).join(' | ') }));
         process.exit(1);
     }
     if (!amount) {
-        console.error('Für --action withdraw-and-swap ist --amount <usdc> erforderlich.');
+        console.error(t('cli.est.ws_needs_amount'));
         process.exit(1);
     }
     const wsResult = await calcWithdrawAndSwapCosts({ pool: wsPool, amount, solPrice, btcPrice, db });
@@ -1209,7 +1214,7 @@ if (action === 'withdraw-and-swap') {
 // ── Pool-Aktionen ──────────────────────────────────────────────────────────────
 const specifiedPool = args.pool ? POOLS[args.pool] : null;
 if (args.pool && !specifiedPool) {
-    console.error(`Unbekannter Pool: "${args.pool}"\nBekannt: ${Object.keys(POOLS).join(' | ')}`);
+    console.error(t('cli.est.unknown_pool', { pool: args.pool, list: Object.keys(POOLS).join(' | ') }));
     process.exit(1);
 }
 

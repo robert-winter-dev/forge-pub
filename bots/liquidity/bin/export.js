@@ -14,6 +14,7 @@
  */
 
 import Database          from 'better-sqlite3';
+import { notificationText } from '../../../lib/notify-render.js';
 import { readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'fs';
 import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
@@ -42,6 +43,7 @@ import { clmmLpValue as _clmmLpValue, clmmLpReturn as _clmmLpReturn,
 import { VOLUME_DUST_USD as VOLUME_MALUS_DUST_USD } from '../lib/volume-dust.js';
 import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS as BTC_EMA_SPANS } from '../lib/btc-trend/index.js';
 import { PATHS } from '../../../config/paths.js';
+import { writeFrontendBundle } from '../../../lib/i18n.js';
 import { displayVersion } from '../../../lib/version.js';
 
 // Zentraler Formatter für FORGE_TZ-Day-Keys (YYYY-MM-DD)
@@ -1260,7 +1262,8 @@ let nexusNotifs = [];
 try {
     const nexusDb = new Database(NEXUS_DB_PATH, { readonly: true });
     const nexusRows = nexusDb.prepare(`
-        SELECT id, level, category, message, context, timestamp AS created_at
+        SELECT id, level, category, message, context, timestamp AS created_at,
+               timestamp, display_name, msg_key, msg_params
         FROM notifications
         WHERE bot_id = ?
           AND timestamp >= ?
@@ -1273,7 +1276,9 @@ try {
         return {
             id:      `nx-${n.id}`,
             level:   n.level,
-            message: n.message.replace(/\nTX:[^\n]*/g, '').trim(),
+            // Text erst hier erzeugen (Mehrsprachigkeit Schritt 5) – Altzeilen
+            // ohne msg_key fallen auf den gespeicherten Text zurück.
+            message: notificationText(n).replace(/\nTX:[^\n]*/g, '').trim(),
             ts:      n.created_at,
             pool,
         };
@@ -2729,4 +2734,12 @@ if (historyAgeMs >= HISTORY_MAX_AGE_MS) {
 }
 
 db.close();
+// Frontend-Sprachbundle (html/i18n/active.js) auffrischen.
+//
+// Hier und nicht nur beim Setzen der Sprache: html/ wird bei jedem Update komplett
+// ersetzt, das generierte Bundle ist danach weg. Ohne diese Selbstheilung liefe
+// eine englische Installation nach jedem Update wieder auf Deutsch. Schreibt nur
+// bei echter Änderung — bin/sync.sh rsync't html/ jede Minute.
+try { writeFrontendBundle(); } catch (err) { console.warn(`export.js: i18n-Bundle nicht aktualisierbar – ${err.message}`); }
+
 console.log(`export.js: data.json geschrieben (${positionsOut.filter(p=>p.active).length} aktive Positionen)`);

@@ -27,6 +27,7 @@ import { getCurrentPricing } from '../../../lib/premium-pricing-store.js';
 import { getMyActivationToken } from '../../../lib/premium-token-store.js';
 import { isAutoPayEnabled, setAutoPayEnabled, setPayFailureNotified } from '../../../lib/premium-auto-pay-store.js';
 import { recordPremiumMessage } from '../../../core/premium/messages-db.js';
+import { t } from '../../../lib/i18n.js';
 
 const execFileAsync = promisify(execFile);
 const router = Router();
@@ -64,7 +65,7 @@ async function triggerImmediatePayment() {
         if (err.stdout) {
             try { return JSON.parse(err.stdout); } catch { /* fällt durch zu unten */ }
         }
-        return { ok: false, error: err.killed ? 'Zeitüberschreitung bei der Zahlung' : err.message };
+        return { ok: false, error: err.killed ? t('api.premium.payment_timeout') : err.message };
     }
 }
 
@@ -110,10 +111,10 @@ router.get('/status', async (_req, res) => {
 });
 
 router.post('/enable', async (_req, res) => {
-    if (!isForkInstance()) return res.status(403).json({ error: 'nur auf einem FORGE.pub-Fork verfügbar' });
-    if (!walletExists()) return res.status(422).json({ error: 'kein Premium-Wallet konfiguriert' });
-    if (getMyActivationToken() == null) return res.status(422).json({ error: 'noch kein Aktivierungs-Token – erst aktivieren' });
-    if (getCurrentPricing() == null) return res.status(422).json({ error: 'noch keine geprüfte Preisliste vorhanden' });
+    if (!isForkInstance()) return res.status(403).json({ error: t('api.premium.fork_only') });
+    if (!walletExists()) return res.status(422).json({ error: t('api.premium.no_wallet') });
+    if (getMyActivationToken() == null) return res.status(422).json({ error: t('api.premium.no_token') });
+    if (getCurrentPricing() == null) return res.status(422).json({ error: t('api.premium.no_pricing') });
     setAutoPayEnabled(true);
     setPayFailureNotified(false); // frischer Start – ein altes Guthabenproblem gilt hier als quittiert
     recordPremiumMessage(JSON.stringify({ cmd: 'premium-autopay-enabled' }));
@@ -122,7 +123,7 @@ router.post('/enable', async (_req, res) => {
 });
 
 router.post('/disable', (_req, res) => {
-    if (!isForkInstance()) return res.status(403).json({ error: 'nur auf einem FORGE.pub-Fork verfügbar' });
+    if (!isForkInstance()) return res.status(403).json({ error: t('api.premium.fork_only') });
     setAutoPayEnabled(false);
     recordPremiumMessage(JSON.stringify({ cmd: 'premium-autopay-disabled' }));
     res.json({ ok: true, enabled: false });

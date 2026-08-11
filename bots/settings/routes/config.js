@@ -9,12 +9,10 @@
 
 import { Router } from 'express';
 import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import Database from 'better-sqlite3';
-import { PATHS, envFile } from '../../../config/paths.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import { envFile } from '../../../config/paths.js';
+import { t } from '../../../lib/i18n.js';
+import { parseEnv, serializeEnv } from '../lib/env-file.js';
+import { enqueueRestart } from '../lib/task-queue.js';
 
 // .env-Pfade über envFile() (move-agnostisch + fork-aware: im Fork liegt die
 // .env unter local/env/<bot>.env statt neben dem Dienst, siehe config/paths.js).
@@ -51,19 +49,6 @@ const NO_RESTART_KEYS = new Set([
     'FIXED_AUTO_DEPLOY_MAX_DEPOSIT',
 ]);
 
-const DB_PATH = PATHS.settingsDb;
-
-function enqueueRestart(service) {
-    try {
-        const db = new Database(DB_PATH);
-        db.prepare(`
-            INSERT INTO tasks (created_at, status, action, target)
-            VALUES (?, 'pending', 'restart', ?)
-        `).run(Date.now(), service);
-        db.close();
-    } catch { /* DB noch nicht bereit – ignorieren */ }
-}
-
 // Diese Felder nie über /api/config ausliefern oder schreiben
 const SENSITIVE_KEYS = new Set([
     'PRIVATE_KEY',
@@ -76,56 +61,13 @@ const SENSITIVE_KEYS = new Set([
     'JUPITER_API_KEY',
 ]);
 
-function parseEnv(content) {
-    const result = {};
-    for (const line of content.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) continue;
-        const idx = trimmed.indexOf('=');
-        if (idx === -1) continue;
-        const key = trimmed.slice(0, idx).trim();
-        const val = trimmed.slice(idx + 1).trim();
-        result[key] = val;
-    }
-    return result;
-}
-
-function serializeEnv(existing, updates) {
-    // Bestehende Datei zeilenweise durchgehen und bekannte Keys updaten,
-    // um Kommentare und Reihenfolge zu erhalten.
-    const lines = existing.split('\n');
-    const applied = new Set();
-
-    const updated = lines.map(line => {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) return line;
-        const idx = trimmed.indexOf('=');
-        if (idx === -1) return line;
-        const key = trimmed.slice(0, idx).trim();
-        if (key in updates && !SENSITIVE_KEYS.has(key)) {
-            applied.add(key);
-            return `${key}=${updates[key]}`;
-        }
-        return line;
-    });
-
-    // Neue Keys ans Ende (die noch nicht in der Datei waren)
-    for (const [k, v] of Object.entries(updates)) {
-        if (!applied.has(k) && !SENSITIVE_KEYS.has(k)) {
-            updated.push(`${k}=${v}`);
-        }
-    }
-
-    return updated.join('\n');
-}
-
 const router = Router();
 
 // ── GET /api/config/:bot ──────────────────────────────────────────────────────
 router.get('/:bot', (req, res) => {
     const envPath = BOT_CONFIGS[req.params.bot];
-    if (!envPath) return res.status(404).json({ error: 'Unbekannter Bot' });
-    if (!fs.existsSync(envPath)) return res.status(404).json({ error: '.env nicht gefunden' });
+    if (!envPath) return res.status(404).json({ error: t('api.common.unknown_bot') });
+    if (!fs.existsSync(envPath)) return res.status(404).json({ error: t('api.common.env_not_found') });
 
     const raw = fs.readFileSync(envPath, 'utf8');
     const parsed = parseEnv(raw);
@@ -143,18 +85,18 @@ router.get('/:bot', (req, res) => {
 // ── PUT /api/config/:bot ──────────────────────────────────────────────────────
 router.put('/:bot', (req, res) => {
     const envPath = BOT_CONFIGS[req.params.bot];
-    if (!envPath) return res.status(404).json({ error: 'Unbekannter Bot' });
-    if (!fs.existsSync(envPath)) return res.status(404).json({ error: '.env nicht gefunden' });
+    if (!envPath) return res.status(404).json({ error: t('api.common.unknown_bot') });
+    if (!fs.existsSync(envPath)) return res.status(404).json({ error: t('api.common.env_not_found') });
 
     const updates = req.body;
     if (typeof updates !== 'object' || Array.isArray(updates)) {
-        return res.status(400).json({ error: 'Body muss ein Objekt sein' });
+        return res.status(400).json({ error: t('api.common.body_object') });
     }
 
     // Sicherstellen dass keine sensitive Keys überschrieben werden
     for (const k of Object.keys(updates)) {
         if (SENSITIVE_KEYS.has(k) || /KEY|SECRET|TOKEN|PASSWORD/i.test(k)) {
-            return res.status(400).json({ error: `Feld '${k}' darf hier nicht gesetzt werden. Nutze /api/keys.` });
+            return res.status(400).json({ error: t('api.config.field_forbidden', { field: k }) });
         }
     }
 

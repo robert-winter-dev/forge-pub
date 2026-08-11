@@ -50,6 +50,7 @@ import {
 } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
 import { matchErrorCode, describeError } from '../../../lib/error-messages.js';
+import { t } from '../../../lib/i18n.js';
 import * as notify           from '../lib/notify.js';
 import { getTokenUsdPrice }  from '../lib/deposit-lib.js';
 import { getSplTokensUsd }   from '../lib/wallet-monitor-client.js';
@@ -92,36 +93,7 @@ const { values: args } = parseArgs({
 
 // Muss vor jedem Seiteneffekt (openDatabase() weiter unten) geprüft werden.
 if (args.help) {
-    console.log(`
-FORGE Liquidity – Manuelles Entnehmen aus einem Pool (bin/withdraw.js)
-
-Entnimmt einen Teil der Liquidität einer bestehenden Position via
-decreaseLiquidity. Die Position bleibt offen — nur der angegebene Betrag
-wird herausgenommen. KEIN Dry-Run per Default – jeder Aufruf ohne
---dry-run führt echte On-Chain-Transaktionen aus.
-
-Verwendung:
-  node bin/withdraw.js --pool "SOL/USDC"   --usdc 100
-  node bin/withdraw.js --pool "cbBTC/USDC" --usdc 200
-  node bin/withdraw.js --pool "cbBTC/WBTC" --usdc 100 --dry-run
-  node bin/withdraw.js --pool "SOL/USDC"   --token SOL --amount 0.5    (Modus B)
-
-Optionen:
-  --pool <pair>     Pool-Paar (Pflicht)
-  --usdc <betrag>   Modus A: zu entnehmender USDC-Wert
-  --token <symbol>  Modus B: Anker-Token (TokenA oder TokenB des Pools)
-  --amount <betrag> Modus B: Menge des Anker-Tokens
-  Genau eines von --usdc oder (--token + --amount) ist Pflicht.
-  --dry-run         Simulation: Checks + Berechnung, keine On-Chain-TX
-  --json            Maschinenlesbarer Output (für UI-Integration)
-  --swap-to-usdc    Entnommene Coins nach der Auszahlung automatisch in USDC tauschen
-  --send-to <addr>  Entnommene Coins (bzw. bei --swap-to-usdc: USDC) an diese Adresse
-                     senden; ohne diese Option verbleiben die Coins im Wallet.
-  --help, -h        Dieser Text, kein Withdraw-Lauf
-
-Hinweis: Funktioniert auch out-of-range — man erhält dann nur den
-verbliebenen Token zurück (der andere ist bereits vollständig konvertiert).
-`);
+    console.log(t('cli.lw.help'));
     process.exit(0);
 }
 
@@ -148,7 +120,7 @@ const hasUsdc  = args.usdc != null;
 const hasModeB = args.token != null && args.amount != null;
 const useFull  = args.full === true;
 if (!args.pool || (!useFull && hasUsdc === hasModeB)) {
-    const errMsg = 'Verwendung: --pool <pair> + (--usdc <n> | --token <sym> --amount <n> | --full) [--dry-run] [--json]';
+    const errMsg = t('cli.lw.usage');
     if (jsonMode) { emitJson(false, errMsg); process.exit(1); }
     console.error(errMsg);
     process.exit(1);
@@ -161,13 +133,13 @@ const modeBAmount  = useModeB ? parseFloat(args.amount) : NaN;
 let   withdrawUsdc = hasUsdc ? parseFloat(args.usdc) : 0;  // wird bei Modus B/--full aus Position berechnet
 
 if (hasUsdc && (isNaN(withdrawUsdc) || withdrawUsdc <= 0)) {
-    const msg = `Ungültiger USDC-Betrag: "${args.usdc}"`;
+    const msg = t('cli.liq.invalid_usdc', { value: args.usdc });
     if (jsonMode) { emitJson(false, msg); process.exit(1); }
     console.error(`[withdraw] ${msg}`);
     process.exit(1);
 }
 if (useModeB && (isNaN(modeBAmount) || modeBAmount <= 0)) {
-    const msg = `Ungültige Token-Menge: "${args.amount}"`;
+    const msg = t('cli.liq.invalid_token_amount', { value: args.amount });
     if (jsonMode) { emitJson(false, msg); process.exit(1); }
     console.error(`[withdraw] ${msg}`);
     process.exit(1);
@@ -179,7 +151,7 @@ if (sendToAddr) {
     try {
         new PublicKey(sendToAddr);
     } catch {
-        const msg = `Ungültige Empfänger-Adresse: "${sendToAddr}"`;
+        const msg = t('cli.liq.invalid_recipient', { value: sendToAddr });
         if (jsonMode) { emitJson(false, msg); process.exit(1); }
         console.error(`[withdraw] ${msg}`);
         process.exit(1);
@@ -205,11 +177,11 @@ function isInsufficientFundsError(err) {
 async function _describeInsufficientFundsWithdraw(kp) {
     const freshSol = await getSolBalanceFresh(kp.publicKey).catch(() => null);
     if (freshSol == null) {
-        return `Nicht genug Guthaben für die Auszahlung (SOL-Stand konnte nicht geprüft werden). Bitte erneut versuchen.`;
+        return t('cli.lw.insufficient_unknown_sol');
     }
     return freshSol < 0.05
-        ? `Nicht genug SOL für die Transaktion: nur noch ${freshSol.toFixed(4)} SOL im Wallet (TX-Fees/Rent). Bitte Wallet mit SOL auffüllen und erneut versuchen.`
-        : `Nicht genug Guthaben für die Auszahlung. SOL-Stand (${freshSol.toFixed(4)}) ist ausreichend, vermutlich hat sich der Wallet-/Positionsstand seit Beginn der Auszahlung geändert (z.B. durch einen zwischenzeitlichen Cleanup-Lauf). Bitte erneut versuchen.`;
+        ? t('cli.lw.insufficient_low_sol', { sol: freshSol.toFixed(4) })
+        : t('cli.lw.insufficient_sol_ok', { sol: freshSol.toFixed(4) });
 }
 
 /**
@@ -226,7 +198,7 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     ).get();
     const solPrice = solPriceRow?.price ?? 0;
     if (solPrice <= 0) {
-        console.warn(`[withdraw] SOL-Top-Up: SOL-Preis nicht verfügbar – Top-Up übersprungen`);
+        console.warn(`[withdraw] ${t('cli.liq.topup_no_price')}`);
         return currentBalance;
     }
     const target     = minNeeded + 0.01; // kleiner Extra-Puffer
@@ -234,10 +206,10 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     const neededUsdc = neededSol * solPrice * 1.02; // +2% Slippage-Puffer
     const usdcBal    = await getTokenBalanceFresh(getKeypair().publicKey, USDC_MINT, 6);
     if (usdcBal < neededUsdc) {
-        console.warn(`[withdraw] SOL-Top-Up: nicht genug USDC (${usdcBal.toFixed(2)} < ${neededUsdc.toFixed(2)} USDC) – kein Auto-Swap möglich`);
+        console.warn(`[withdraw] ${t('cli.liq.topup_no_usdc', { have: usdcBal.toFixed(2), need: neededUsdc.toFixed(2) })}`);
         return currentBalance;
     }
-    console.log(`[withdraw] SOL-Top-Up: ${currentBalance.toFixed(4)} SOL < ${minNeeded.toFixed(4)} – tausche ~${neededUsdc.toFixed(2)} USDC → SOL`);
+    console.log(`[withdraw] ${t('cli.liq.topup_swapping', { sol: currentBalance.toFixed(4), min: minNeeded.toFixed(4), usdc: neededUsdc.toFixed(2) })}`);
     try {
         await swapTokens({
             inputMint:      USDC_MINT,
@@ -249,10 +221,10 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
             connection:     getConnection(),
         });
         const newBalance = await getUsableSolBalanceFresh(getKeypair().publicKey);
-        console.log(`[withdraw] SOL-Top-Up OK: jetzt ${newBalance.toFixed(4)} SOL`);
+        console.log(`[withdraw] ${t('cli.liq.topup_ok', { sol: newBalance.toFixed(4) })}`);
         return newBalance;
     } catch (err) {
-        console.warn(`[withdraw] SOL-Top-Up fehlgeschlagen: ${err.message}`);
+        console.warn(`[withdraw] ${t('cli.liq.topup_failed', { error: err.message })}`);
         return currentBalance;
     }
 }
@@ -263,7 +235,7 @@ function abort(msg) {
         emitJson(false, msg);
         process.exit(1);
     }
-    console.error(`[withdraw] FEHLER: ${msg}`);
+    console.error(`[withdraw] ${t('cli.liq.error_word')}: ${msg}`);
     try { releaseManualLock(); } catch {}
     process.exit(1);
 }
@@ -279,7 +251,7 @@ function _fatalHandler(err) {
     try { releaseManualLock(); } catch {}
     const msg = err?.message ?? String(err);
     _origErr('[withdraw] Fatal:', msg);
-    if (jsonMode) { emitJson(false, `Unerwarteter Fehler: ${msg}`); }
+    if (jsonMode) { emitJson(false, t('cli.common.unexpected', { error: msg })); }
     process.exit(1);
 }
 process.on('uncaughtException',  _fatalHandler);
@@ -288,11 +260,11 @@ process.on('unhandledRejection', _fatalHandler);
 // ─── Manual-Lock acquire (im dry-run nicht nötig) ─────────────────────────────
 
 if (!dryRun) {
-    if (isCleanupRunning()) abort('Cleanup läuft – bitte ~30 s warten und erneut versuchen.');
-    if (isSlLocked())         abort('Stop-Loss/Take-Profit-Flow läuft – bitte warten.');
+    if (isCleanupRunning()) abort(t('cli.liq.lock_cleanup'));
+    if (isSlLocked())         abort(t('cli.liq.lock_sl'));
     // Bot hat Vorrang: warten bis Claim/Reinvest/Rebalancing fertig sind.
     if (!(await waitForBotToFinish())) {
-        abort('Bot ist gerade aktiv (Claim/Reinvest/Rebalance) – bitte in ~1 Min erneut versuchen.');
+        abort(t('cli.liq.lock_bot_active'));
     }
     acquireManualLock({ action: 'withdraw', pool: args.pool });
     for (const sig of ['SIGTERM', 'SIGINT']) {
@@ -300,7 +272,7 @@ if (!dryRun) {
     }
     // TOCTOU: Bot könnte zwischen Wait und Lock gestartet haben → erneut warten.
     if (!(await waitForBotToFinish())) {
-        abort('Bot-Aktion dauert an – bitte erneut versuchen.');
+        abort(t('cli.liq.lock_bot_busy'));
     }
 }
 
@@ -314,23 +286,23 @@ syncPools(db, config.pools.all);
 const pool = config.pools.all.find(p => p.pair === args.pool);
 if (!pool) {
     const available = config.pools.all.map(p => p.pair).join(', ');
-    abort(`Pool "${args.pool}" nicht gefunden. Verfügbare Pools: ${available}`);
+    abort(t('cli.liq.pool_not_found_list', { pool: args.pool, list: available }));
 }
 
 console.log(`[withdraw] Pool:    ${pool.pair} (${pool.id})`);
 if (useModeB) {
-    console.log(`[withdraw] Anker:   ${modeBAmount} ${modeBToken} (Modus B)`);
+    console.log(`[withdraw] ${t('cli.lw.head_anchor', { amount: modeBAmount, token: modeBToken })}`);
 } else if (useFull) {
-    console.log(`[withdraw] Modus:   --full (Vollentnahme)`);
+    console.log(`[withdraw] ${t('cli.lw.head_full')}`);
 } else {
-    console.log(`[withdraw] Betrag:  ${withdrawUsdc.toFixed(2)} USDC`);
+    console.log(`[withdraw] ${t('cli.liq.head_amount', { v: `${withdrawUsdc.toFixed(2)} USDC` })}`);
 }
 
 // ─── Position prüfen ─────────────────────────────────────────────────────────
 
 const position = getOpenPosition(db, pool.id);
 if (!position) {
-    abort(`Keine offene Position für "${pool.pair}".`);
+    abort(t('cli.lw.no_position', { pool: pool.pair }));
 }
 
 console.log(`[withdraw] Position: ${position.nft_mint}`);
@@ -343,19 +315,19 @@ let stats;
 try {
     stats = await adapter.getPoolStats(pool);
 } catch (err) {
-    abort(`Pool-Preis nicht abrufbar: ${err.message}`);
+    abort(t('cli.liq.price_unavailable', { error: err.message }));
 }
 
 const currentPrice = stats.price;
 const tokenALabel  = pool.usdcIsTokenA ? pool.pair.split('/')[1] : pool.pair.split('/')[0];
 const tokenBLabel  = pool.usdcIsTokenA ? pool.pair.split('/')[0] : pool.pair.split('/')[1];
-console.log(`[withdraw] Preis:   ${currentPrice.toFixed(4)} USDC/${tokenALabel}`);
+console.log(`[withdraw] ${t('cli.liq.head_price', { v: `${currentPrice.toFixed(4)} USDC/${tokenALabel}` })}`);
 
 // Quote-Preis für volatilePair-Pools (z.B. cbBTC/WBTC) aus pool_stats laden
 let refPriceUsdWd = 0;
 if (pool.volatilePair) {
     refPriceUsdWd = getTokenUsdPrice(pool.quoteTokenMint, db);
-    if (refPriceUsdWd <= 0) abort(`Quote-Preis nicht verfügbar für ${pool.quoteTokenMint}. Bitte zuerst den Bot starten (pool_stats werden benötigt).`);
+    if (refPriceUsdWd <= 0) abort(t('cli.liq.quote_price_missing', { mint: pool.quoteTokenMint }));
     const quoteIsTokenA = pool.quoteTokenMint === pool.tokenA;
     const refLabel = quoteIsTokenA ? tokenALabel : tokenBLabel;
     console.log(`[withdraw] Quote: ${refPriceUsdWd.toFixed(2)} USDC/${refLabel}`);
@@ -365,17 +337,13 @@ let state;
 try {
     state = await adapter.getPositionState(pool, position.nft_mint);
 } catch (err) {
-    abort(`Position-State nicht abrufbar: ${err.message}`);
+    abort(t('cli.liq.state_unavailable', { error: err.message }));
 }
 
 if (!state.inRange) {
-    console.warn(
-        `[withdraw] ⚠ Position ist außerhalb der Range ` +
-        `(${state.priceLower.toFixed(4)} – ${state.priceUpper.toFixed(4)} USDC). ` +
-        `Entnahme trotzdem möglich – es wird nur der verfügbare Token zurückgegeben.`
-    );
+    console.warn(`[withdraw] ⚠ ${t('cli.lw.oor_warning', { lower: state.priceLower.toFixed(4), upper: state.priceUpper.toFixed(4) })}`);
 } else {
-    console.log(`[withdraw] Range:   ${state.priceLower.toFixed(4)} – ${state.priceUpper.toFixed(4)} USDC  ✓ in Range`);
+    console.log(`[withdraw] ${t('cli.liq.head_range_ok', { lower: state.priceLower.toFixed(4), upper: state.priceUpper.toFixed(4) })}`);
 }
 
 // ─── Betrag gegen Positionswert prüfen ───────────────────────────────────────
@@ -399,32 +367,28 @@ if (useModeB) {
     const posB = snapPos?.amount_b ?? 0;
     let fraction;
     if (symUp === symAUp) {
-        if (posA <= 0) abort(`Modus B: Position enthält aktuell 0 ${tokenALabel} (out-of-range). Bitte ${tokenBLabel} als Anker oder Modus A nutzen.`);
+        if (posA <= 0) abort(t('cli.lw.mode_b_zero', { zero: tokenALabel, other: tokenBLabel }));
         fraction = modeBAmount / posA;
     } else if (symUp === symBUp) {
-        if (posB <= 0) abort(`Modus B: Position enthält aktuell 0 ${tokenBLabel} (out-of-range). Bitte ${tokenALabel} als Anker oder Modus A nutzen.`);
+        if (posB <= 0) abort(t('cli.lw.mode_b_zero', { zero: tokenBLabel, other: tokenALabel }));
         fraction = modeBAmount / posB;
     } else {
-        abort(`Modus B: --token "${modeBToken}" ist keiner der Pool-Tokens (${tokenALabel} / ${tokenBLabel}).`);
+        abort(t('cli.liq.mode_b_wrong_token', { token: modeBToken, tokenA: tokenALabel, tokenB: tokenBLabel }));
     }
     if (fraction > 1.0001) {
-        abort(`Modus B: ${modeBAmount} ${modeBToken} übersteigt Position-Anteil (${(symUp === symAUp ? posA : posB).toFixed(6)} verfügbar).`);
+        abort(t('cli.lw.mode_b_exceeds', { amount: modeBAmount, token: modeBToken, available: (symUp === symAUp ? posA : posB).toFixed(6) }));
     }
     withdrawUsdc = fraction * posValueEstimate;
-    console.log(`[withdraw] Modus B: ~${(fraction * 100).toFixed(2)}% der Position → ${withdrawUsdc.toFixed(2)} USDC-Äquivalent`);
+    console.log(`[withdraw] ${t('cli.lw.mode_b_fraction', { pct: (fraction * 100).toFixed(2), usdc: withdrawUsdc.toFixed(2) })}`);
 }
 
 // --full: Snapshot-Betrag ist nur eine Schätzung; On-Chain-Wert ist maßgeblich.
 // Wir übergeben einen sehr großen Betrag → orca.js cappt fraction auf 1.0.
 if (useFull) {
     withdrawUsdc = (posValueEstimate > 0 ? posValueEstimate : 1) * 1000;
-    console.log(`[withdraw] --full: Vollentnahme (posValueEstimate ≈ ${posValueEstimate.toFixed(2)} USDC)`);
+    console.log(`[withdraw] ${t('cli.lw.full_estimate', { usdc: posValueEstimate.toFixed(2) })}`);
 } else if (withdrawUsdc > posValueEstimate * 1.1) {
-    abort(
-        `Betrag (${withdrawUsdc.toFixed(2)} USDC) übersteigt den geschätzten Positionswert ` +
-        `(${posValueEstimate.toFixed(2)} USDC).\n` +
-        `         Zum vollständigen Schließen bitte --full verwenden.`
-    );
+    abort(t('cli.lw.exceeds_position', { amount: withdrawUsdc.toFixed(2), value: posValueEstimate.toFixed(2) }));
 }
 
 // ─── Dry-Run: Schätzung ausgeben, keine TX ────────────────────────────────────
@@ -445,11 +409,11 @@ if (dryRun) {
     }
 
     console.log(`[withdraw] ── DRY-RUN ─────────────────────────────────────────`);
-    console.log(`[withdraw] Positionswert: ~${posValueEstimate.toFixed(2)} USDC (letzter Snapshot)`);
-    console.log(`[withdraw] Anteil:        ${(fraction * 100).toFixed(2)}%`);
-    console.log(`[withdraw] Erwartet:      ~${estA.toFixed(6)} ${tokenALabel} + ~${estB.toFixed(6)} ${tokenBLabel}`);
-    console.log(`[withdraw] USD-Wert:      ~${estUsdc.toFixed(2)} USDC`);
-    console.log(`[withdraw] ── Keine Transaktion ausgeführt (--dry-run) ─────────`);
+    console.log(`[withdraw] ${t('cli.lw.dry_pos_value', { usdc: posValueEstimate.toFixed(2) })}`);
+    console.log(`[withdraw] ${t('cli.lw.dry_fraction', { pct: (fraction * 100).toFixed(2) })}`);
+    console.log(`[withdraw] ${t('cli.lw.dry_expected', { a: estA.toFixed(6), tokenA: tokenALabel, b: estB.toFixed(6), tokenB: tokenBLabel })}`);
+    console.log(`[withdraw] ${t('cli.lw.dry_usd_value', { usdc: estUsdc.toFixed(2) })}`);
+    console.log(`[withdraw] ── ${t('cli.liq.dry_no_tx')} ─────────`);
     Object.assign(jsonResult, {
         mode: 'decreaseLiquidity', dryRun: true,
         fraction, posValueEstimate,
@@ -464,7 +428,7 @@ if (dryRun) {
 
 const walletUsdc = await getUsdcBalance(keypair.publicKey);
 const walletSol  = await getUsableSolBalance(keypair.publicKey);
-console.log(`[withdraw] Wallet:  ${walletSol.toFixed(6)} SOL (nutzbar) + ${walletUsdc.toFixed(2)} USDC`);
+console.log(`[withdraw] ${t('cli.lw.head_wallet', { sol: walletSol.toFixed(6), usdc: walletUsdc.toFixed(2) })}`);
 console.log(`[withdraw] Slippage: ${SLIPPAGE_PCT_STR}`);
 
 // ─── decreaseLiquidity ausführen ──────────────────────────────────────────────
@@ -475,7 +439,7 @@ try {
 } catch (err) {
     if (err.solBalance !== undefined) {
         // Selbstheilung wie bei deposit.js: erst USDC→SOL nachtanken, dann retryen.
-        console.warn(`[withdraw] decreaseLiquidity: zu wenig SOL (${err.solBalance.toFixed(4)}) – versuche Selbstheilung...`);
+        console.warn(`[withdraw] ${t('cli.liq.low_sol_selfheal', { step: 'decreaseLiquidity', sol: err.solBalance.toFixed(4) })}`);
         const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
         // Retry auch dann, wenn das Topup die Reserve NICHT erreicht hat: ein
         // Withdraw gibt Kapital frei und darf nie an der Reserve scheitern —
@@ -483,10 +447,10 @@ try {
         // in lib/wallet.js). Der Adapter hat jetzt seinen eigenen, physikalischen
         // Boden; landet die TX wirklich nicht, scheitert sie dort mit klarer Meldung.
         if (healedSol < config.solReserve) {
-            console.warn(`[withdraw] Topup hat die Reserve nicht erreicht (${healedSol.toFixed(4)} SOL) – Retry trotzdem, Ausstieg hat Vorrang`);
+            console.warn(`[withdraw] ${t('cli.lw.topup_below_reserve', { sol: healedSol.toFixed(4) })}`);
             await notify.solLow(healedSol).catch(() => {});
         } else {
-            console.log(`[withdraw] SOL-Selbstheilung OK (${healedSol.toFixed(4)} SOL) – Retry decreaseLiquidity...`);
+            console.log(`[withdraw] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'decreaseLiquidity' })}`);
         }
         try {
             result = await adapter.decreaseLiquidity(pool, position.nft_mint, withdrawUsdc, WITHDRAW_SLIPPAGE, refPriceUsdWd);
@@ -498,15 +462,13 @@ try {
     } else {
         let msg;
         if (isSlippageError(err)) {
-            msg =
-                `SLIPPAGE-FEHLER (>${SLIPPAGE_PCT_STR}): Preis hat sich während der Transaktion ` +
-                `zu stark bewegt. Erneut versuchen oder --usdc-Betrag anpassen.`;
+            msg = t('cli.liq.slippage_error', { slip: SLIPPAGE_PCT_STR });
         } else if (isInsufficientFundsError(err)) {
             msg = await _describeInsufficientFundsWithdraw(keypair);
         } else {
             logActionError(`withdraw decreaseLiquidity ${pool.pair}`, err);
-            const { reason, detail } = describeError(err);
-            msg = `decreaseLiquidity fehlgeschlagen – ${reason}\n${detail}`;
+            const { reasonKey, reasonParams, detail } = describeError(err);
+            msg = t('cli.liq.step_failed', { step: 'decreaseLiquidity', reason: t(reasonKey, reasonParams), detail });
         }
         await notify.errorRaw(`withdraw ${pool.pair}`, msg);
         db.close();
@@ -567,9 +529,9 @@ insertTransaction(db, {
 // Position als geschlossen markieren wenn 100% entnommen
 if (isFull) {
     closePosition(db, position.id, result.txHash);
-    console.log(`[withdraw] Position als geschlossen markiert (closed_at gesetzt).`);
+    console.log(`[withdraw] ${t('cli.lw.position_closed')}`);
     if (setPoolActive(pool.id, false)) {
-        console.log(`[withdraw] Pool ${pool.id} auf active=false gesetzt (DB).`);
+        console.log(`[withdraw] ${t('cli.liq.pool_deactivated', { pool: pool.id })}`);
     }
 }
 
@@ -577,14 +539,14 @@ if (isFull) {
 // wird im nächsten Bot-Snapshot etabliert. Bei Vollentnahme entfällt dies (Position closed).
 if (!isFull) {
     db.prepare('UPDATE positions SET hwm_usd = NULL, hwm_at = NULL, hwm_base_adjustment = NULL WHERE pool_id = ? AND closed_at IS NULL').run(pool.id);
-    console.log(`[withdraw] HWM zurückgesetzt – wird beim nächsten Snapshot neu etabliert`);
+    console.log(`[withdraw] ${t('cli.liq.hwm_reset')}`);
 }
 
 // Pool Mindestwert deaktivieren: Nach einer Auszahlung ist der konfigurierte Wert
 // nicht mehr sinnvoll (Kapital hat sich verändert). User muss neu konfigurieren.
 const clearedMinValue = clearMinimumValue(pool.id);
 if (clearedMinValue != null) {
-    console.log(`[withdraw] Pool Mindestwert (${Math.round(clearedMinValue)} USDC) deaktiviert – Auszahlung hat Kapital verändert`);
+    console.log(`[withdraw] ${t('cli.lw.min_value_cleared', { usdc: Math.round(clearedMinValue) })}`);
 }
 
 // ─── Swap → USDC / Senden an (optional) ───────────────────────────────────────
@@ -597,7 +559,7 @@ let followUpError  = null;
 if (swapToUsdcFlag || sendToAddr) {
     try {
         if (swapToUsdcFlag) {
-            console.log(`[withdraw] Swap → USDC gestartet…`);
+            console.log(`[withdraw] ${t('cli.lw.swap_started')}`);
             swappedUsdc = await executeSwapStep(pool, {
                 coinsA: result.tokenEstA,
                 coinsB: result.tokenEstB,
@@ -618,18 +580,18 @@ if (swapToUsdcFlag || sendToAddr) {
         }
     } catch (err) {
         followUpError = err.message ?? String(err);
-        console.error(`[withdraw] Swap/Transfer fehlgeschlagen: ${followUpError} – Coins verbleiben im Wallet.`);
+        console.error(`[withdraw] ${t('cli.lw.followup_failed', { error: followUpError })}`);
         await notify.error(`withdraw ${pool.pair} (Swap/Transfer)`, err);
     }
 }
 
 // ─── Ergebnis ─────────────────────────────────────────────────────────────────
 
-console.log(`[withdraw] ✓ Entnahme erfolgreich`);
+console.log(`[withdraw] ✓ ${t('cli.lw.success')}`);
 console.log(`[withdraw] TX:       ${result.txHash}`);
-console.log(`[withdraw] Erhalten: ${result.tokenEstA.toFixed(6)} ${tokenALabel} + ${result.tokenEstB.toFixed(6)} ${tokenBLabel}`);
-console.log(`[withdraw] Wert:     ~${withdrawnUsdc.toFixed(2)} USDC (${(result.fraction * 100).toFixed(2)}% der Position)`);
-console.log(`[withdraw] Kapital:  ${oldCapital.toFixed(2)} → ${newCapital.toFixed(2)} USDC`);
+console.log(`[withdraw] ${t('cli.lw.received', { a: result.tokenEstA.toFixed(6), tokenA: tokenALabel, b: result.tokenEstB.toFixed(6), tokenB: tokenBLabel })}`);
+console.log(`[withdraw] ${t('cli.lw.value', { usdc: withdrawnUsdc.toFixed(2), pct: (result.fraction * 100).toFixed(2) })}`);
+console.log(`[withdraw] ${t('cli.liq.head_capital_change', { old: oldCapital.toFixed(2), new: newCapital.toFixed(2) })}`);
 
 await notify.withdrawCompleted(pool, withdrawUsdc, result.tokenEstA, result.tokenEstB, result.fraction, result.txHash);
 if (clearedMinValue != null) {

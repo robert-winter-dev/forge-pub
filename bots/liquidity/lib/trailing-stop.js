@@ -407,8 +407,8 @@ export async function executeTs(pool, db) {
         // Phase 5: Abschluss
         updateTsExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         const execLabel = triggeredByMin
-            ? `Mindestwert (${minValueUsd.toFixed(0)} USDC)`
-            : `Trailing Stop (${thresholdPct}%)`;
+            ? { k: 'notify.liq.rm_label_min_value', p: { usdc: minValueUsd.toFixed(0) } }
+            : { k: 'notify.liq.rm_label_trailing', p: { pct: thresholdPct } };
         await notify.rmExecuted(pool, execLabel, currentUsd).catch(() => {});
 
         // Mindestwert nach Mindestwert-Exit nullen, damit eine Wiedereröffnung nicht

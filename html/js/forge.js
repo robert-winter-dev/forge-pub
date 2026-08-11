@@ -6,9 +6,12 @@
     const { renderNotifItem }   = await import('./notifications.js');
     const { NotifHub }          = await import('./notif-hub.js?v=20260720a');
     const { initMessageBell }   = await import('./message-bell.js?v=20260809a');
-    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260809b');
+    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260811b');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
+    // Zahlen-/Datumsformate folgen der Sprache (siehe js/i18n.js). t() wird hier
+    // bewusst NICHT importiert: `t` ist in dieser Datei durchgängig ein Timestamp.
+    const { NUM_LOCALE, dayMonth, hourLabel } = await import('./i18n.js?v=20260811a');
 
     initNav({ current: 'overview' });
     initFooter();
@@ -25,7 +28,6 @@
     const hub = new NotifHub();
     hub.startPolling('liquidity/data/data.json', 'lending/data/data.json');
 
-    const MONTHS_DE = ['Jan','Feb','Mär','Apr','Mai','Jun','Jul','Aug','Sep','Okt','Nov','Dez'];
     const RANGE_MS  = { '1D': 86_400_000, '1W': 7*86_400_000, '1M': 30*86_400_000 };
 
     // persistierter Zustand
@@ -50,13 +52,13 @@
 
     function fmt2(v) {
         if (v == null || isNaN(v)) return '–';
-        return v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function fmtSigned(v, dec = 2) {
         if (v == null || isNaN(v)) return '–';
         const sign = v >= 0 ? '+' : '';
-        return sign + v.toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u00A0USDC';
+        return sign + v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u00A0USDC';
     }
 
     // ── Portfolio-History aggregieren ─────────────────────────────────────────
@@ -216,7 +218,7 @@
         const yGrid = Array.from({ length: 4 }, (_, i) => yMin + (yMax - yMin) * i / 3);
         const gridLines = yGrid.map(v =>
             `<line x1="${PAD_L}" y1="${sy(v).toFixed(1)}" x2="${(PAD_L+cW).toFixed(1)}" y2="${sy(v).toFixed(1)}" class="ov-chart-grid"/>` +
-            `<text x="${(PAD_L-4).toFixed(1)}" y="${sy(v).toFixed(1)}" class="ov-chart-label ov-chart-label-y" dominant-baseline="middle">${v.toLocaleString('de-DE',{minimumFractionDigits:decimals,maximumFractionDigits:decimals})}</text>`
+            `<text x="${(PAD_L-4).toFixed(1)}" y="${sy(v).toFixed(1)}" class="ov-chart-label ov-chart-label-y" dominant-baseline="middle">${v.toLocaleString(NUM_LOCALE,{minimumFractionDigits:decimals,maximumFractionDigits:decimals})}</text>`
         ).join('');
 
         const spanMs = tMax - tMin;
@@ -227,7 +229,7 @@
             const p = partsInTZ(t);
             const label = spanMs < 48*3_600_000
                 ? `${String(p.hour).padStart(2,'0')}:${String(p.minute).padStart(2,'0')}`
-                : `${p.day}. ${MONTHS_DE[p.month - 1]}`;
+                : dayMonth(p.day, p.month - 1);
             return `<text x="${sx(t).toFixed(1)}" y="${(PAD_T+cH+16).toFixed(1)}" class="ov-chart-label ov-chart-label-x">${label}</text>`;
         }).join('');
 
@@ -250,7 +252,7 @@
             <path d="${lineD}" class="ov-chart-line" stroke="var(--accent)" stroke-linejoin="round" stroke-linecap="round"/>`;
 
         const geo = { tMin, tMax, spanMs, PAD_L, PAD_T, cW, cH, yMin, yMax,
-            formatY: v => v.toLocaleString('de-DE', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) };
+            formatY: v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 0, maximumFractionDigits: 0 }) };
         if (attachHover) attachHoverOverlay(svgEl, geo);
         return geo;
     }
@@ -310,7 +312,7 @@
 
         // Grid (3 Stufen)
         const gridLines = [0, maxV * 0.5, maxV].map(v => {
-            const label = v.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+            const label = v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
             return `<line x1="${PAD_L}" y1="${sy(v).toFixed(1)}" x2="${(PAD_L+cW).toFixed(1)}" y2="${sy(v).toFixed(1)}" class="ov-chart-grid"/>` +
                    `<text x="${(PAD_L-4).toFixed(1)}" y="${sy(v).toFixed(1)}" class="ov-chart-label ov-chart-label-y" dominant-baseline="middle">${label}</text>`;
         }).join('');
@@ -335,7 +337,7 @@
             }
 
             const labelTxt = b.date.includes(':') ? b.date
-                : (() => { const d = new Date(b.date + 'T12:00:00'); return `${d.getDate()}. ${MONTHS_DE[d.getMonth()]}`; })();
+                : (() => { const d = new Date(b.date + 'T12:00:00'); return dayMonth(d.getDate(), d.getMonth()); })();
             const lblStep  = labelTxt.includes(':') ? 3 : Math.ceil(bars.length / Math.max(2, Math.floor(cW / 40)));
             const showLabel = i % lblStep === 0;
             const xLabel = showLabel
@@ -350,10 +352,10 @@
         // Tooltip-Legende
         attachBarTooltip(svgEl, wrapEl, 'rect[data-date]', bar => {
             const ds    = bar.dataset.date;
-            const label = ds.includes(':') ? `${ds} Uhr`
-                : (() => { const d = new Date(ds + 'T12:00:00'); return `${d.getDate()}. ${MONTHS_DE[d.getMonth()]}`; })();
+            const label = ds.includes(':') ? hourLabel(ds)
+                : (() => { const d = new Date(ds + 'T12:00:00'); return dayMonth(d.getDate(), d.getMonth()); })();
             const total = parseFloat(bar.dataset.total);
-            return `${label}: ${total.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`;
+            return `${label}: ${total.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`;
         });
     }
 
@@ -412,7 +414,7 @@
         const curVal = liveTotal > 0 ? liveTotal : (points.length > 0 ? points[points.length - 1].v : null);
         if (curVal != null) {
             const el = document.getElementById('portfolioCurrentVal');
-            if (el) el.textContent = curVal.toLocaleString('de-DE', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + '\u00A0USDC';
+            if (el) el.textContent = curVal.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + '\u00A0USDC';
         }
 
         // Liniendiagramm – kein Fadenkreuz im Inline-Chart
@@ -484,7 +486,7 @@
             const a    = r.apr;
             const aCls = a == null ? 'bt-neu' : a >= 0 ? 'bt-pos' : 'bt-neg';
             const aTxt = a == null ? '0,0\u00A0%'
-                : (a >= 0 ? '+' : '') + a.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '\u00A0%';
+                : (a >= 0 ? '+' : '') + a.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '\u00A0%';
 
             return `<tr>
                 <td><a href="${r.href}" class="bt-name">${r.label}</a></td>

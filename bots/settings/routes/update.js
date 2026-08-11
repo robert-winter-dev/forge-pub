@@ -26,6 +26,7 @@ import { promisify } from 'util';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { ensureUpdateSchema, readLog, finalizeIfFinished } from '../lib/update-tasks.js';
+import { t } from '../../../lib/i18n.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -104,7 +105,7 @@ router.get('/policy', (_req, res) => {
 router.post('/policy', (req, res) => {
     const { autoApplyPatch } = req.body ?? {};
     if (typeof autoApplyPatch !== 'boolean') {
-        return res.status(400).json({ error: 'autoApplyPatch muss ein Boolean sein' });
+        return res.status(400).json({ error: t('api.update.autoapply_boolean') });
     }
     try {
         mkdirSync(path.dirname(POLICY_PATH), { recursive: true });
@@ -127,7 +128,7 @@ function enqueueUpdateTask(action, res) {
         ).get();
         if (active) active = finalizeIfFinished(db, active);
         if (active && (active.status === 'pending' || active.status === 'running')) {
-            return res.status(409).json({ error: `Es läuft bereits eine Update-Aktion (${active.action}) – bitte abwarten.`, taskId: active.id });
+            return res.status(409).json({ error: t('api.update.already_running', { action: active.action }), taskId: active.id });
         }
         const result = db.prepare(
             `INSERT INTO update_tasks (created_at, status, action) VALUES (?, 'pending', ?)`
@@ -151,7 +152,7 @@ router.post('/apply', (_req, res) => enqueueUpdateTask('apply', res));
 // Zustand – dieselbe Grenze wie in bin/update-check.js (hasMigrations-Zweig).
 router.post('/rollback', (_req, res) => {
     if (!existsSync(LAST_RESULT_PATH)) {
-        return res.status(409).json({ error: 'Kein Update-Ergebnis vorhanden – Rollback nicht möglich.' });
+        return res.status(409).json({ error: t('api.update.no_result') });
     }
     let lastResult;
     try {
@@ -161,7 +162,7 @@ router.post('/rollback', (_req, res) => {
     }
     if (lastResult.status !== 'rollback-failed') {
         return res.status(409).json({
-            error: 'Rollback ist nur verfügbar, wenn der letzte automatische Rückroll-Versuch fehlgeschlagen ist.',
+            error: t('api.update.rollback_only_after_failure'),
             status: lastResult.status,
         });
     }
@@ -193,7 +194,7 @@ router.get('/tasks/:id', (req, res) => {
     const db = openDb();
     try {
         let task = db.prepare('SELECT * FROM update_tasks WHERE id = ?').get(Number(req.params.id));
-        if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+        if (!task) return res.status(404).json({ error: t('api.common.task_not_found') });
         task = finalizeIfFinished(db, task);
         res.json({ ...task, output: readLog(task.id) || task.output || '' });
     } finally {

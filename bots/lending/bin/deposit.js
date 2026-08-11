@@ -20,6 +20,7 @@
 
 import { createInterface }      from 'readline';
 import { config } from '../lib/config.js';
+import { t, numLocale } from '../../../lib/i18n.js';
 import { KaminoProtocol, JupiterLendProtocol, DriftProtocol, LoopscaleProtocol } from '../lib/lending-protocols.js';
 import { loadKeypair, signAndSend, assertSufficientSol, getSolBalance, fetchFeeSol } from '../lib/wallet.js';
 import { getDb, openPosition, addToPosition, getActivePositions,
@@ -53,14 +54,14 @@ const VALID_PROTOCOLS = [
     ...Object.keys(config.loopscale.vaults),         // loopscale-onre, loopscale-genesis, ...
 ];
 if (!protocol || !VALID_PROTOCOLS.includes(protocol)) {
-    if (jsonMode) jout({ ok: false, error: `Unbekanntes Protokoll: ${protocol}` });
-    else console.error(`Fehler: --protocol ${VALID_PROTOCOLS.join('|')} ist Pflicht.`);
+    if (jsonMode) jout({ ok: false, error: t('cli.lend.unknown_protocol', { protocol }) });
+    else console.error(t('cli.lend.protocol_required', { list: VALID_PROTOCOLS.join('|') }));
     process.exit(1);
 }
 
 if (!amount || isNaN(amount) || amount <= 0) {
-    if (jsonMode) jout({ ok: false, error: `--amount muss eine positive Zahl sein` });
-    else console.error('Fehler: --amount muss eine positive Zahl sein (z.B. --amount 500).');
+    if (jsonMode) jout({ ok: false, error: t('cli.lend.amount_positive') });
+    else console.error(t('cli.lend.amount_positive_hint'));
     process.exit(1);
 }
 
@@ -68,7 +69,7 @@ if (!amount || isNaN(amount) || amount <= 0) {
 
 function fmt(n, decimals = 2) {
     if (n == null || isNaN(n)) return '—';
-    return Number(n).toLocaleString('de-DE', {
+    return Number(n).toLocaleString(numLocale(), {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
     });
@@ -114,32 +115,32 @@ async function main() {
                      label:        loopscaleVault.label,
                      vaultAddress: loopscaleVault.address,
                  })
-               : (() => { throw new Error(`Unbekanntes Protokoll: ${protocol}`); })();
+               : (() => { throw new Error(t('cli.lend.unknown_protocol', { protocol })); })();
 
     const protoLabel = proto.label;
     const poolType   = proto.poolType ?? proto.name;
 
     if (!jsonMode) {
-        console.log(`  Protokoll : ${protoLabel}`);
+        console.log(t('cli.lend.head_protocol', { v: protoLabel }));
         console.log(`  Wallet    : ${walletAddress}`);
-        console.log(`  Betrag    : ${fmt(amount)} USDC`);
-        if (dryRun) console.log('  Modus     : 🔍 DRY-RUN (keine TX wird gesendet)');
+        console.log(t('cli.lend.head_amount', { v: `${fmt(amount)} USDC` }));
+        if (dryRun) console.log(t('cli.lend.head_mode_dry'));
         hr();
     }
 
     // ── SOL-Balance prüfen ────────────────────────────────────────────────────
-    jlog('  SOL-Balance prüfen …');
+    jlog(`  ${t('cli.lend.step_sol')}`);
     const solBalance = await getSolBalance(walletAddress);
 
     if (solBalance < config.solReserve) {
-        if (jsonMode) jout({ ok: false, error: `Zu wenig SOL für Fees (${fmt(solBalance, 4)} SOL, Minimum: ${config.solReserve})` });
-        else { console.error(`\n  ❌ Fehler: Zu wenig SOL für Fees.`); console.error(`     Vorhanden: ${fmt(solBalance, 4)} SOL`); }
+        if (jsonMode) jout({ ok: false, error: t('cli.lend.low_sol', { sol: fmt(solBalance, 4), min: config.solReserve }) });
+        else { console.error(`\n  ❌ ${t('cli.lend.low_sol_hdr')}`); console.error(`     ${t('cli.lend.low_sol_have', { sol: fmt(solBalance, 4) })}`); }
         process.exit(1);
     }
     if (!jsonMode) console.log(`     → ${fmt(solBalance, 4)} SOL`);
 
     // ── Aktuellen APY + TVL abfragen ─────────────────────────────────────────
-    jlog('  Aktueller APY …');
+    jlog(`  ${t('cli.lend.step_apy')}`);
     let currentApy = null;
     let currentTvl = null;
     try {
@@ -148,17 +149,17 @@ async function main() {
         currentTvl = stats.tvl ?? null;
         if (!jsonMode) console.log(`     → ${fmt(currentApy, 2)} %`);
     } catch (err) {
-        if (!jsonMode) console.log(`     → ⚠ Nicht verfügbar (${err.message})`);
+        if (!jsonMode) console.log(`     → ⚠ ${t('cli.lend.not_available', { error: err.message })}`);
     }
 
     // ── Bestehende Position abfragen ──────────────────────────────────────────
-    jlog('  Bestehende Position …');
+    jlog(`  ${t('cli.lend.step_position')}`);
     let existingPosition;
     try {
         existingPosition = await proto.getPosition(walletAddress);
-        if (!jsonMode) console.log(existingPosition ? `     → ${fmt(existingPosition.amount)} USDC` : '     → keine');
+        if (!jsonMode) console.log(existingPosition ? `     → ${fmt(existingPosition.amount)} USDC` : `     → ${t('cli.lend.none')}`);
     } catch (err) {
-        if (!jsonMode) console.log(`     → ⚠ Nicht abfragbar (${err.message})`);
+        if (!jsonMode) console.log(`     → ⚠ ${t('cli.lend.not_queryable', { error: err.message })}`);
         existingPosition = null;
     }
 
@@ -176,12 +177,12 @@ async function main() {
             });
         } else {
             hr();
-            console.log('  📋 Vorschau:');
+            console.log(`  📋 ${t('cli.lend.preview')}`);
             console.log(`     ${fmt(amount)} USDC → ${protoLabel}`);
             if (currentApy) {
-                console.log(`     Erwarteter Jahres-Yield: ~${fmt(amount * (currentApy / 100), 2)} USDC (${fmt(currentApy, 2)} % APY)`);
+                console.log(`     ${t('cli.lend.preview_yearly', { usdc: fmt(amount * (currentApy / 100), 2), apy: fmt(currentApy, 2) })}`);
             }
-            console.log('\n  ℹ Dry-Run: keine Transaktion gesendet.');
+            console.log(`\n  ℹ ${t('cli.lend.dryrun_no_tx')}`);
         }
         process.exit(0);
     }
@@ -189,28 +190,28 @@ async function main() {
     // ── Bestätigung einholen (nur im interaktiven Modus) ─────────────────────
     if (!jsonMode) {
         hr();
-        console.log(`  ${fmt(amount)} USDC werden in ${protoLabel} depositiert.`);
-        if (currentApy) console.log(`  Erwarteter APY: ${fmt(currentApy, 2)} %`);
+        console.log(`  ${t('cli.lend.confirm_deposit', { usdc: fmt(amount), label: protoLabel })}`);
+        if (currentApy) console.log(`  ${t('cli.lend.expected_apy', { apy: fmt(currentApy, 2) })}`);
         console.log('');
-        const ok = await confirm('  Fortfahren? [j/N] ');
-        if (!ok) { console.log('\n  Abgebrochen.'); process.exit(0); }
+        const ok = await confirm(`  ${t('cli.lend.proceed')} `);
+        if (!ok) { console.log(`\n  ${t('cli.lend.aborted')}`); process.exit(0); }
         console.log('');
     }
 
     // ── TX bauen ──────────────────────────────────────────────────────────────
-    jlog('  TX wird erstellt …');
+    jlog(`  ${t('cli.lend.step_build_tx')}`);
     const isLoopscale = proto instanceof LoopscaleProtocol;
     let base64Tx;
     try {
         base64Tx = await proto.buildDepositTx(walletAddress, amount);
     } catch (err) {
-        if (jsonMode) jout({ ok: false, error: `TX-Erstellung fehlgeschlagen: ${err.message}` });
-        else console.error(`\n  ❌ TX-Erstellung fehlgeschlagen: ${err.message}`);
+        if (jsonMode) jout({ ok: false, error: t('cli.lend.build_tx_failed', { error: err.message }) });
+        else console.error(`\n  ❌ ${t('cli.lend.build_tx_failed', { error: err.message })}`);
         process.exit(1);
     }
 
     // ── TX signieren + senden ─────────────────────────────────────────────────
-    jlog('  TX signieren + senden …');
+    jlog(`  ${t('cli.lend.step_sign_send')}`);
     const keypair = loadKeypair();
     let txSig;
     try {
@@ -220,7 +221,7 @@ async function main() {
         // Siehe withdraw.js: err.technicalDetail = err.message ist bereits vollständig
         // formuliert (aus lib/wallet.js simulate()), kein zusätzlicher Präfix davor.
         if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
-        const userMsg = err.technicalDetail ? err.message : `TX fehlgeschlagen: ${err.message}`;
+        const userMsg = err.technicalDetail ? err.message : t('cli.lend.tx_failed', { error: err.message });
         if (jsonMode) jout({ ok: false, error: userMsg });
         else console.error(`\n  ❌ ${userMsg}`);
         process.exit(1);
@@ -253,7 +254,7 @@ async function main() {
         });
     } catch (err) {
         // DB-Fehler nicht fatal – TX ist bereits bestätigt
-        jlog(`  ⚠ DB-Update fehlgeschlagen (TX war erfolgreich): ${err.message}`);
+        jlog(`  ⚠ ${t('cli.lend.db_update_failed', { error: err.message })}`);
     }
 
     // ── Ergebnis ──────────────────────────────────────────────────────────────
@@ -261,10 +262,10 @@ async function main() {
         jout({ ok: true, result: { protocol, protoLabel, amount, txSig, currentApy } });
     } else {
         hr();
-        console.log('  ✅ Deposit erfolgreich!');
+        console.log(`  ✅ ${t('cli.lend.deposit_ok')}`);
         console.log('');
-        console.log(`  Betrag    : ${fmt(amount)} USDC`);
-        console.log(`  Protokoll : ${protoLabel}`);
+        console.log(t('cli.lend.head_amount', { v: `${fmt(amount)} USDC` }));
+        console.log(t('cli.lend.head_protocol', { v: protoLabel }));
         console.log(`  TX        : ${txSig}`);
         console.log(`  Solscan   : https://solscan.io/tx/${txSig}`);
         hr();
@@ -274,6 +275,6 @@ async function main() {
 
 main().catch(err => {
     if (jsonMode) jout({ ok: false, error: err.message });
-    else console.error(`\n  ❌ Unerwarteter Fehler: ${err.message}`);
+    else console.error(`\n  ❌ ${t('cli.lend.unexpected', { error: err.message })}`);
     process.exit(1);
 });

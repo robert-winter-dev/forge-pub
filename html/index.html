@@ -3,11 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE - public: Dashboard</title>
+    <title data-i18n="overview.page_title">FORGE - public: Dashboard</title>
     <link rel="icon" type="image/png" href="img/forge-logo.png">
     <link rel="stylesheet" href="css/forge.css?v=20260809b">
     <link rel="stylesheet" href="css/toast.css?v=20260722b">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
+    <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Bewusst synchron und vor allen
+         Modulen: sonst würde die Seite erst deutsch rendern und dann sichtbar
+         umgeschrieben. Fehlt die Datei, bleibt alles deutsch (siehe js/i18n.js). -->
+    <script src="i18n/active.js"></script>
 </head>
 <body>
 
@@ -21,9 +25,9 @@
             <div class="status-indicator" id="statusIndicator">
                 <span class="status-text">
                     <span class="bot-state-icon" id="botStateIcon"></span>
-                    <span class="last-update offline" id="last-update">Kein Signal</span>
+                    <span class="last-update offline" id="last-update" data-i18n="status.no_signal">Kein Signal</span>
                 </span>
-                <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                <button class="notif-bell" id="notifBell" title="Benachrichtigungen" data-i18n-attr="title:notif.title">
                     <span class="notif-envelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
                 </button>
             </div>
@@ -33,14 +37,14 @@
 
 <div class="notif-panel hidden" id="notifPanel">
     <div class="notif-panel-header">
-        <span class="notif-panel-title">Benachrichtigungen</span>
-        <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound deaktivieren">🔊</button>
-        <button class="notif-panel-close" id="notifToastToggle" title="Popups deaktivieren">🔔</button>
-        <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden">🗑</button>
+        <span class="notif-panel-title" data-i18n="notif.title">Benachrichtigungen</span>
+        <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound deaktivieren" data-i18n-attr="title:notif.sound_off">🔊</button>
+        <button class="notif-panel-close" id="notifToastToggle" title="Popups deaktivieren" data-i18n-attr="title:notif.toast_off">🔔</button>
+        <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden" data-i18n-attr="title:notif.hide_all">🗑</button>
         <button class="notif-panel-close" id="notifPanelClose">✕</button>
     </div>
     <div class="notif-panel-body" id="notifPanelBody">
-        <div class="notif-empty">Keine Benachrichtigungen</div>
+        <div class="notif-empty" data-i18n="notif.empty">Keine Benachrichtigungen</div>
     </div>
 </div>
 
@@ -52,7 +56,7 @@
         <div class="ov-card ov-card-clickable" id="portfolioCard">
             <div class="ov-header">
                 <div class="ov-title-group">
-                    <span class="ov-title">Gesamtguthaben</span>
+                    <span class="ov-title" data-i18n="overview.total_balance">Gesamtguthaben</span>
                     <span class="ov-current-val" id="portfolioCurrentVal"></span>
                 </div>
                 <div class="ov-controls">
@@ -65,7 +69,7 @@
             </div>
             <div class="ov-chart-wrap" id="portfolioChartWrap">
                 <svg class="ov-chart" id="portfolioChartSvg" height="140"></svg>
-                <div class="ov-empty" id="portfolioEmpty">Keine Daten für diesen Zeitraum</div>
+                <div class="ov-empty" id="portfolioEmpty" data-i18n="overview.no_data_range">Keine Daten für diesen Zeitraum</div>
             </div>
         </div>
 
@@ -73,7 +77,7 @@
         <div class="ov-card ov-card-clickable" id="earningsCard">
             <div class="ov-header">
                 <div class="ov-title-group">
-                    <span class="ov-title">PnL</span>
+                    <span class="ov-title" data-i18n="overview.pnl">PnL</span>
                     <span class="ov-current-val" id="earningsCurrentVal"></span>
                 </div>
                 <div class="ov-controls">
@@ -86,7 +90,7 @@
             </div>
             <div class="ov-chart-wrap" id="earningsChartWrap">
                 <svg class="ov-chart" id="earningsChartSvg" height="140"></svg>
-                <div class="ov-empty" id="earningsEmpty">Keine Daten für diesen Zeitraum</div>
+                <div class="ov-empty" id="earningsEmpty" data-i18n="overview.no_data_range">Keine Daten für diesen Zeitraum</div>
             </div>
         </div>
 
@@ -94,25 +98,25 @@
 
     <!-- Zeile 2: Bot-Tabelle -->
     <div class="section-title-row">
-        <p class="section-title">FORGE Bots: 24h</p>
+        <p class="section-title" data-i18n="overview.bots_24h">FORGE Bots: 24h</p>
     </div>
 
     <div class="bot-table-wrap">
         <table class="bot-table">
             <thead>
                 <tr>
-                    <th>Bot</th>
-                    <th>Gesamtguthaben</th>
-                    <th data-tooltip-title="PnL 24h" data-tooltip="Gewinn/Verlust der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard.">PnL 24h</th>
-                    <th data-tooltip-title="APR 24h" data-tooltip="Annualisierte Rendite auf Basis der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard.">APR 24h</th>
+                    <th data-i18n="overview.col.bot">Bot</th>
+                    <th data-i18n="overview.total_balance">Gesamtguthaben</th>
+                    <th data-tooltip-title="PnL 24h" data-tooltip="Gewinn/Verlust der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard." data-i18n="overview.col.pnl24h" data-i18n-attr="data-tooltip-title:overview.tip.pnl24h.title,data-tooltip:overview.tip.pnl24h">PnL 24h</th>
+                    <th data-tooltip-title="APR 24h" data-tooltip="Annualisierte Rendite auf Basis der letzten 24 Stunden (rollendes Fenster), direkt aus dem jeweiligen Bot-Dashboard." data-i18n="overview.col.apr24h" data-i18n-attr="data-tooltip-title:overview.tip.apr24h.title,data-tooltip:overview.tip.apr24h">APR 24h</th>
                 </tr>
             </thead>
             <tbody id="botTableBody">
-                <tr><td colspan="4" class="tbl-loading">Laden …</td></tr>
+                <tr><td colspan="4" class="tbl-loading" data-i18n="common.loading">Laden …</td></tr>
             </tbody>
             <tfoot>
                 <tr>
-                    <td>Gesamt</td>
+                    <td data-i18n="overview.total">Gesamt</td>
                     <td id="totalGesamt">–</td>
                     <td id="totalProfit">–</td>
                     <td></td>
@@ -126,13 +130,13 @@
 <div class="ov-modal-overlay" id="portfolioModal" style="display:none">
     <div class="ov-modal-dialog">
         <div class="ov-modal-header">
-            <span class="ov-modal-title">Gesamtguthaben – Verlauf</span>
+            <span class="ov-modal-title" data-i18n="overview.modal.portfolio">Gesamtguthaben – Verlauf</span>
             <div class="ov-range-btns" id="ovModalRangeBtns">
                 <button class="ov-range-btn" data-range="1D">1D</button>
                 <button class="ov-range-btn" data-range="1W">1W</button>
                 <button class="ov-range-btn active" data-range="1M">1M</button>
             </div>
-            <button class="ov-modal-close" id="portfolioModalClose" title="Schließen">&times;</button>
+            <button class="ov-modal-close" id="portfolioModalClose" title="Schließen" data-i18n-attr="title:common.close">&times;</button>
         </div>
         <div class="ov-modal-body" id="portfolioModalBody">
             <svg class="ov-modal-svg" id="portfolioModalSvg"></svg>
@@ -144,13 +148,13 @@
 <div class="ov-modal-overlay" id="earningsModal" style="display:none">
     <div class="ov-modal-dialog">
         <div class="ov-modal-header">
-            <span class="ov-modal-title">PnL – Verlauf</span>
+            <span class="ov-modal-title" data-i18n="overview.modal.pnl">PnL – Verlauf</span>
             <div class="ov-range-btns" id="earModalRangeBtns">
                 <button class="ov-range-btn" data-range="1D">1D</button>
                 <button class="ov-range-btn" data-range="1W">1W</button>
                 <button class="ov-range-btn active" data-range="1M">1M</button>
             </div>
-            <button class="ov-modal-close" id="earningsModalClose" title="Schließen">&times;</button>
+            <button class="ov-modal-close" id="earningsModalClose" title="Schließen" data-i18n-attr="title:common.close">&times;</button>
         </div>
         <div class="ov-modal-body" id="earningsModalBody">
             <svg class="ov-modal-svg" id="earningsModalSvg"></svg>
@@ -164,7 +168,7 @@
 <div class="toast-container" id="toastContainer"></div>
 <div id="fgt"></div>
 
-<script type="module" src="js/forge.js?v=20260809b"></script>
+<script type="module" src="js/forge.js?v=20260811a"></script>
 
 </body>
 </html>

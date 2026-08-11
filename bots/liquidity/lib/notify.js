@@ -9,6 +9,27 @@
  *   error  → DB + Telegram 🚨 (tvlWarnAlert, tvlExitAlert, error)
  *   warn   → nur DB          (aprAlert)
  *   info   → nur DB          (alle anderen)
+ *
+ * ── Mehrsprachigkeit (Schritt 5, Core/forge-pub/i18n.md E4) ─────
+ *
+ * 🔒 Hier steht KEIN Meldungstext mehr. Jede Funktion liefert einen
+ * Katalogschlüssel (`notify.liq.*` in lib/i18n/<lang>.json) und die Daten dazu;
+ * der Satz entsteht erst beim Anzeigen (lib/notify-render.js). Vorher wurde
+ * fertiger deutscher Fließtext in nexus.db geschrieben — eine Sprachumschaltung
+ * hätte diese Texte nie erreicht.
+ *
+ * Regeln für neue Meldungen:
+ *   - Text in beide Katalogdateien, hier nur Key + Daten.
+ *   - Die Handlungsaufforderung ist ein eigener Key in `_action` (ACTION unten).
+ *   - Optionale Zeilen: Parameter weglassen — die Zeile fällt dann automatisch
+ *     weg (Konvention 1 in notify-render.js), kein zweiter Katalogeintrag nötig.
+ *   - Ein Textbaustein aus dem Code wird als `{ k, p }` übergeben, nicht als
+ *     fertiger Satz.
+ *
+ * Bewusste Ausnahme: Freitext, den ein AUFRUFER formuliert (info(), rangeHint(),
+ * opportunityParamCheck(), Begründungen des Premium-Datendienstes), wird
+ * unverändert durchgereicht. Diese Texte entstehen außerhalb dieser Datei; sie zu
+ * übersetzen ist Aufgabe der jeweiligen Quelle, nicht dieser Fassade.
  */
 
 import { existsSync }    from 'fs';
@@ -18,6 +39,8 @@ import { FORGE_TZ }      from '../../../core/config.js';
 import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
 import { PATHS }         from '../../../config/paths.js';
+import { renderNotification } from '../../../lib/notify-render.js';
+import { getLang, t }    from '../../../lib/i18n.js';
 
 const NEXUS_URL      = 'http://127.0.0.1:3100';
 const BOT_ID         = config.botId;
@@ -28,29 +51,33 @@ const BOT_ID         = config.botId;
 const UPDATE_SUPPRESS_FLAG = path.join(PATHS.data, 'update-notify-suppress');
 const { displayName: BOT_DISPLAY_NAME, service: SERVICE_NAME } = getBotConfig('liquidity');
 
-// ─── HTML → Markdown (für Telegram-kompatible Speicherung in nexus.db) ─────
-
 /**
- * Baut den anzuhängenden Detail-Teil einer Fehler-Meldung aus describeError().
- *   'none'   → nichts anhängen, der reason-Satz reicht.
- *   'inline' → voller Rohtext (bisheriges Verhalten).
+ * Baut den Detail-Teil einer Fehler-Meldung aus describeError() als optionale Zeile.
+ *   'none'   → keine Zeile, der reason-Satz reicht.
+ *   'inline' → voller Rohtext.
  *   'logref' → neutraler Verweis aufs Service-Log statt unlesbarem Rohtext-Dump.
  * `detail` bleibt in jedem Fall vollständig im `context` (DB) erhalten — nur die
  * Nutzer-Meldung wird gekürzt.
+ *
+ * @returns {string|{k: string, p: object}|undefined} undefined = Zeile entfällt
  */
-function detailSuffix(detail, detailMode) {
-    if (detailMode === 'inline') return `\n${detail}`;
+function detailLine(detail, detailMode) {
+    if (detailMode === 'inline') return detail;
     if (detailMode === 'logref') {
         const now = new Date().toLocaleTimeString('de-DE', { timeZone: FORGE_TZ, hour: '2-digit', minute: '2-digit' });
-        return `\nZu technisch für eine Kurzmeldung – Details: \`journalctl -u ${SERVICE_NAME} --since '${now}'\``;
+        return { k: 'notify.common.logref', p: { cmd: `journalctl -u ${SERVICE_NAME} --since '${now}'` } };
     }
-    return '';
+    return undefined;
 }
 
-function htmlToMd(text) {
-    return text
-        .replace(/<b>([\s\S]*?)<\/b>/g, '*$1*')
-        .replace(/<code>([\s\S]*?)<\/code>/g, '`$1`');
+/** describeError() → Meldungsbausteine (Grund als Katalog-Verweis, Detailzeile). */
+function errorParts(err) {
+    const { reasonKey, reasonParams, detail, detailMode } = describeError(err);
+    return {
+        reason: { k: reasonKey, p: reasonParams },
+        detail: detailLine(detail, detailMode),
+        raw:    detail,
+    };
 }
 
 // ─── Handlungsaufforderungen ──────────────────────────────────────────────────
@@ -60,56 +87,65 @@ function htmlToMd(text) {
 // ist kein IT-Fachmann: eine Meldung, die nur einen Befund nennt ("TVL unter
 // Schwelle"), lässt ihn ratlos zurück und wird auf Dauer ignoriert.
 //
-// Die Bausteine stehen hier zentral, damit die Formulierungen über alle Meldungen
-// hinweg gleich klingen und an EINER Stelle nachgeschärft werden können. Neue
-// Meldung = passenden Baustein anhängen, keinen neuen Freitext erfinden.
+// Die Bausteine stehen als eigene Katalog-Keys da, damit die Formulierungen über
+// alle Meldungen hinweg gleich klingen und an EINER Stelle nachgeschärft werden
+// können. Neue Meldung = passenden Baustein referenzieren, keinen neuen Freitext.
 const ACTION = {
     /** Bot löst das selbst, es ist nichts zu tun. */
-    selfHeal:  'Es ist nichts zu tun – der Bot holt das im nächsten Zyklus automatisch nach.',
+    selfHeal:  'notify.act.self_heal',
     /** Lage im Blick behalten, noch keine Handlung nötig. */
-    observe:   'Es ist nichts zu tun. Beobachte den Pool im Dashboard – der Bot greift selbst ein, wenn es nötig wird.',
+    observe:   'notify.act.observe',
     /** Rein informativ, abgeschlossenes Ereignis. */
-    fyi:       'Es ist nichts zu tun, diese Meldung dient nur zur Information.',
+    fyi:       'notify.act.fyi',
     /** Position/Kapital wurde bewegt, Geld liegt in der Wallet. */
-    inWallet:  'Es ist nichts zu tun. Das Kapital liegt in deiner Wallet – du kannst es dort lassen oder neu anlegen.',
+    inWallet:  'notify.act.in_wallet',
     /** Bot versucht es erneut; wenn es bleibt, ist ein Blick nötig. */
-    retrying:  'Der Bot versucht es erneut. Kommt diese Meldung mehrfach hintereinander, starte den Bot neu.',
+    retrying:  'notify.act.retrying',
     /** Endgültig gescheitert, Nutzer muss handeln. */
-    manual:    'Bitte im Dashboard prüfen und den Pool danach von Hand wieder freigeben.',
+    manual:    'notify.act.manual',
     /** Wallet braucht Geld. */
-    topUp:     'Bitte Wallet mit mindestens 0,15 SOL aufladen.',
+    topUp:     'notify.act.top_up',
     /** Konfiguration muss angepasst werden. */
-    configure: 'Bitte die Einstellung im Dashboard unter Risk-Management neu setzen.',
+    configure: 'notify.act.configure',
     /** Verdacht auf Datenfehler/Angriff – nichts automatisch übernehmen. */
-    verify:    'Es wurde nichts automatisch übernommen. Bitte die Angaben prüfen, bevor du dem Pool weiter Kapital gibst.',
+    verify:    'notify.act.verify',
 };
+
+/** Handlungsaufforderung mitten im Satz (statt als eigene Schlusszeile). */
+const inline = key => ({ k: key });
 
 // ─── Interner Sender ──────────────────────────────────────────────────────────
 
-// Kopfzeile (Datum/Uhrzeit + Bot) auf JEDE Nachricht, egal wo sie später angezeigt
-// wird (Message Center, Telegram, Roh-DB-Dump) – der Pool steht bereits in fast
-// jedem Nachrichtentext selbst (siehe die einzelnen send()-Aufrufer unten), ohne
-// Datum/Bot wusste man in Telegram aber oft nicht mehr, wann/von wem eine Meldung kam.
-function fmtNotifyTimestamp() {
-    return new Intl.DateTimeFormat('de-DE', {
-        timeZone: FORGE_TZ, day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
-    }).format(new Date());
-}
-
-async function send(level, category, message, context = null, telegramOnly = false) {
-    const msg = `📅 ${fmtNotifyTimestamp()} · ${BOT_DISPLAY_NAME}\n${htmlToMd(message)}`;
+/**
+ * @param {string} level     'info' | 'warn' | 'error' | 'lifecycle'
+ * @param {string} category  Dedup-/Routing-Kategorie
+ * @param {string} msgKey    Katalogschlüssel (lib/i18n/<lang>.json)
+ * @param {object} params    Daten für die Platzhalter (siehe notify-render.js)
+ * @param {object|null} context  Forensik-Daten für die DB
+ * @param {boolean} telegramOnly
+ */
+async function send(level, category, msgKey, params = {}, context = null, telegramOnly = false) {
+    // Der gerenderte Text geht als `message` mit: Telegram verschickt ihn sofort,
+    // und für Zeilen ohne Katalogtreffer bleibt er der Fallback in der DB.
+    const message = renderNotification(
+        { msgKey, params, displayName: BOT_DISPLAY_NAME, timestamp: Date.now() },
+        getLang(),
+    );
     try {
         const res = await fetch(`${NEXUS_URL}/notify`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ botId: BOT_ID, displayName: BOT_DISPLAY_NAME, level, category, message: msg, context, telegramOnly }),
+            body:    JSON.stringify({
+                botId: BOT_ID, displayName: BOT_DISPLAY_NAME, level, category,
+                message, context, telegramOnly, msgKey, params,
+            }),
         });
         if (!res.ok) {
             const errText = await res.text();
             console.error(`[notify] Nexus-Fehler: HTTP ${res.status} – ${errText}`);
         }
     } catch (err) {
-        console.error(`[notify] Nexus nicht erreichbar: ${err.message} | ${level} | ${category} | ${msg.slice(0, 80)}`);
+        console.error(`[notify] Nexus nicht erreichbar: ${err.message} | ${level} | ${category} | ${msgKey}`);
     }
 }
 
@@ -124,19 +160,18 @@ export async function startup() {
     // setzten). Ein Crash-Restart außerhalb eines Updates hat den Marker nicht
     // gesetzt und meldet sich weiterhin wie bisher.
     if (existsSync(UPDATE_SUPPRESS_FLAG)) return;
-    await send('lifecycle', 'system',
-        `🟢 *Liquidity Bot gestartet*\n${ACTION.fyi}`);
+    await send('lifecycle', 'system', 'notify.liq.startup', { _action: ACTION.fyi });
 }
 
 /** Neue CLMM-Position wurde geöffnet */
 export async function positionOpened(pool, position) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('info', 'trade',
-        `<b>Position geöffnet</b> – ${pair}\n` +
-        `Range: ${position.priceLower.toFixed(2)} – ${position.priceUpper.toFixed(2)} USDC\n` +
-        `${ACTION.fyi}`,
-        { pair }
-    );
+    await send('info', 'trade', 'notify.liq.position_opened', {
+        pair,
+        lower: position.priceLower.toFixed(2),
+        upper: position.priceUpper.toFixed(2),
+        _action: ACTION.fyi,
+    }, { pair });
 }
 
 /** Fees wurden geclaimed */
@@ -144,32 +179,29 @@ export async function feesClaimed(pool, amountA, amountB, action, txHash, usdVal
     const pair   = pool.displayPair ?? pool.pair;
     const val    = usdValue ?? amountB;
     const fmtVal = val >= 1 ? val.toFixed(2) : val >= 0.01 ? val.toFixed(4) : val.toFixed(6);
-    await send('info', 'trade', `${pair}: +${fmtVal} USDC`, { pair });
+    await send('info', 'trade', 'notify.liq.fees_claimed', { pair, value: fmtVal }, { pair });
 }
 
 /** Position ist out of range */
 export async function outOfRange(pool, currentPrice, priceLower, priceUpper) {
     const pair = pool.displayPair ?? pool.pair;
-    const side = currentPrice < priceLower ? 'unter' : 'über';
-    await send('info', 'grid',
-        `<b>Out of Range</b> – ${pair}\n` +
-        `Preis ${currentPrice.toFixed(2)} USDC ist ${side} der Range\n` +
-        `Range: ${priceLower.toFixed(2)} – ${priceUpper.toFixed(2)} USDC\n` +
-        `Solange der Preis draußen ist, verdient die Position keine Gebühren. ` +
-        `Es ist nichts zu tun – der Bot verschiebt die Range selbst, wenn sich das nicht von allein löst.`,
-        { pair }
-    );
+    await send('info', 'grid', 'notify.liq.out_of_range', {
+        pair,
+        price: currentPrice.toFixed(2),
+        side:  inline(currentPrice < priceLower ? 'notify.common.below' : 'notify.common.above'),
+        lower: priceLower.toFixed(2),
+        upper: priceUpper.toFixed(2),
+    }, { pair });
 }
 
 /** Position ist wieder in range */
 export async function backInRange(pool, currentPrice) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('info', 'grid',
-        `<b>Wieder in Range</b> – ${pair}\n` +
-        `Preis: ${currentPrice.toFixed(2)} USDC\n` +
-        `Die Position verdient wieder Gebühren. ${ACTION.fyi}`,
-        { pair }
-    );
+    await send('info', 'grid', 'notify.liq.back_in_range', {
+        pair,
+        price:  currentPrice.toFixed(2),
+        action: inline(ACTION.fyi),
+    }, { pair });
 }
 
 /**
@@ -185,66 +217,55 @@ export async function backInRange(pool, currentPrice) {
  *   → andere    → info  (nur DB), Übergänge die nicht gesondert melden
  */
 export async function tierTransition(pool, oldTier, newTier, scoreData) {
-    const TIER_LABEL = {
-        invest:   '🟢 INVESTIEREN',
-        hold:     '🟡 HALTEN',
-        withdraw: '🔴 ABZIEHEN',
-        // Alt-Tier: kommt nur noch bei Übergängen aus dem alten Schema vor (vor 2026-05-18)
-        observe:  '⚪ HALTEN',
-    };
+    // Alt-Tier `observe`: kommt nur noch bei Übergängen aus dem alten Schema
+    // vor (vor 2026-05-18) und wird wie `hold` angezeigt.
+    const tierLabel = tier => ({ k: `notify.tier.${tier}` });
+    const known     = t => ['invest', 'hold', 'withdraw', 'observe'].includes(t);
+
     const level = newTier === 'withdraw' ? 'error'
                 : newTier === 'invest'   ? 'warn'
                                           : 'info';
 
     const totalReturn = scoreData.totalReturnAprPct ?? scoreData.netEconPct;
-    const totalLine = totalReturn != null
-        ? `Total Return: ${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(1)}% p.a.`
-        : '';
-    const dailyPnl = scoreData.dailyPnlPct;
-    const dailyLine = (dailyPnl != null)
-        ? `PnL 1D: ${dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}%`
-        : '';
-    const triggerLine = scoreData.withdrawTriggers?.length
-        ? `Auslöser: ${scoreData.withdrawTriggers.join(', ')}`
-        : '';
+    const dailyPnl    = scoreData.dailyPnlPct;
 
-    await send(level, 'ranking',
-        `<b>Tier-Wechsel</b> – ${pool.displayPair ?? pool.pair}\n` +
-        `${TIER_LABEL[oldTier] ?? oldTier} → ${TIER_LABEL[newTier] ?? newTier}\n` +
-        (totalLine ? `${totalLine}\n` : '') +
-        (dailyLine ? `${dailyLine}\n` : '') +
-        (triggerLine ? `${triggerLine}\n` : '') +
-        `Konfidenz: ${scoreData.confidence?.toFixed?.(0) ?? '?'}%\n` +
-        (newTier === 'withdraw'
-            ? 'Die Bewertung des Pools ist auf ABZIEHEN gefallen. Der Bot schließt die ' +
-              'Position automatisch, sobald das Risk-Management greift – du kannst sie im ' +
-              'Dashboard auch sofort selbst schließen.'
-            : newTier === 'invest'
-                ? 'Der Pool ist wieder attraktiv. Es ist nichts zu tun – der Bot legt beim ' +
-                  'nächsten Cleanup-Lauf von selbst Kapital nach, wenn welches frei ist.'
-                : ACTION.observe),
-        {
-            pair:              pool.displayPair ?? pool.pair,
-            pool:              pool.displayPair ?? pool.pair,
-            poolId:            pool.id,
-            oldTier, newTier,
-            totalReturnAprPct: scoreData.totalReturnAprPct,
-            dailyPnlPct:       scoreData.dailyPnlPct,
-            withdrawTriggers:  scoreData.withdrawTriggers,
-        },
-    );
+    const tail = newTier === 'withdraw' ? 'notify.liq.tier_tail_withdraw'
+               : newTier === 'invest'   ? 'notify.liq.tier_tail_invest'
+                                        : ACTION.observe;
+
+    await send(level, 'ranking', 'notify.liq.tier_transition', {
+        pair:     pool.displayPair ?? pool.pair,
+        oldLabel: known(oldTier) ? tierLabel(oldTier) : oldTier,
+        newLabel: known(newTier) ? tierLabel(newTier) : newTier,
+        totalLine: totalReturn != null
+            ? { k: 'notify.liq.tier_total', p: { value: `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(1)}` } }
+            : undefined,
+        dailyLine: dailyPnl != null
+            ? { k: 'notify.liq.tier_daily', p: { value: `${dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}` } }
+            : undefined,
+        triggerLine: scoreData.withdrawTriggers?.length
+            ? { k: 'notify.liq.tier_triggers', p: { triggers: scoreData.withdrawTriggers.join(', ') } }
+            : undefined,
+        confidence: scoreData.confidence?.toFixed?.(0) ?? '?',
+        _action:    tail,
+    }, {
+        pair:              pool.displayPair ?? pool.pair,
+        pool:              pool.displayPair ?? pool.pair,
+        poolId:            pool.id,
+        oldTier, newTier,
+        totalReturnAprPct: scoreData.totalReturnAprPct,
+        dailyPnlPct:       scoreData.dailyPnlPct,
+        withdrawTriggers:  scoreData.withdrawTriggers,
+    });
 }
 
 /** APR unter Schwellenwert */
 export async function aprAlert(pool, currentApr, threshold) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'system',
-        `<b>APR-Alert</b> – ${pair}\n` +
-        `Aktueller APR: ${currentApr.toFixed(2)}% (Schwellenwert: ${threshold}%)\n` +
-        `Pool-Aktivität könnte nachgelassen haben.\n` +
-        `${ACTION.observe}`,
-        { pair }
-    );
+    await send('warn', 'system', 'notify.liq.apr_alert', {
+        pair, apr: currentApr.toFixed(2), threshold,
+        _action: ACTION.observe,
+    }, { pair });
 }
 
 // ─── TVL-Hilfsfunktion ────────────────────────────────────────────────────────
@@ -254,48 +275,36 @@ const fmtM = v => (v >= 1_000_000 ? (v / 1_000_000).toFixed(1) + 'M' : (v / 1000
 /** TVL unter Warnschwelle (Stufe 1) */
 export async function tvlWarnAlert(pool, currentTvl, threshold) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('error', 'tvl',
-        `⚠️ <b>TVL-Warnschwelle</b> – ${pair}\n` +
-        `Aktuell: ${fmtM(currentTvl)} USDC (Schwelle: ${fmtM(threshold)} USDC)\n` +
-        `Im Pool liegt weniger Fremdkapital als erwartet – das drückt die Gebühren ` +
-        `und erschwert den Ausstieg.\n` +
-        `Es ist noch nichts zu tun. Fällt der Wert weiter, zieht der Bot das Kapital ` +
-        `automatisch ab; du kannst die Position im Dashboard auch vorher schließen.`,
-        { pair }
-    );
+    await send('error', 'tvl', 'notify.liq.tvl_warn', {
+        pair, current: fmtM(currentTvl), threshold: fmtM(threshold),
+    }, { pair });
 }
 
 /** TVL unter Exit-Schwelle (Stufe 2) – Notfall-Exit wird ausgelöst */
 export async function tvlExitAlert(pool, currentTvl, threshold) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('error', 'tvl',
-        `🚨 <b>NOTFALL-EXIT</b> – ${pair}\n` +
-        `TVL ${fmtM(currentTvl)} USDC unter Exit-Schwelle ${fmtM(threshold)} USDC!\n` +
-        `Position wird sofort geschlossen.\n` +
-        `${ACTION.inWallet}`,
-        { pair }
-    );
+    await send('error', 'tvl', 'notify.liq.tvl_exit', {
+        pair, current: fmtM(currentTvl), threshold: fmtM(threshold),
+        _action: ACTION.inWallet,
+    }, { pair });
 }
 
 /**
  * Allgemeine Info-Meldung.
  * Der Aufrufer liefert den Sachverhalt, die Handlungsaufforderung kommt von hier —
  * eine Info ist definitionsgemäß nichts, wofür der Nutzer etwas tun muss.
+ * `context`/`message` sind Freitext des Aufrufers (siehe Kopfkommentar).
  */
 export async function info(context, message) {
-    await send('info', 'system',
-        `<b>Info</b> – ${context}\n${message}\n${ACTION.fyi}`,
-        { context, message }
-    );
+    await send('info', 'system', 'notify.liq.info', {
+        context, message, _action: ACTION.fyi,
+    }, { context, message });
 }
 
 /** Range Advisor – bessere Range verfügbar → warn+range-hint → DB + Telegram */
 export async function rangeHint(context, message) {
-    await send('warn', 'range-hint',
-        `📐 *${context}*\n${message}\n` +
-        `Es ist nichts zu tun – der Bot stellt die Range beim nächsten Rebalancing selbst um.`,
-        { context, message }
-    );
+    await send('warn', 'range-hint', 'notify.liq.range_hint', { context, message },
+        { context, message });
 }
 
 /**
@@ -305,10 +314,9 @@ export async function rangeHint(context, message) {
  * Klassifizierung durch error(), die den fertigen Text erneut interpretieren würde.
  */
 export async function errorRaw(context, message) {
-    await send('error', 'system',
-        `<b>Fehler</b> – ${context}\n${message}\n${ACTION.retrying}`,
-        { context, message }
-    );
+    await send('error', 'system', 'notify.liq.error_raw', {
+        context, message, _action: ACTION.retrying,
+    }, { context, message });
 }
 
 /**
@@ -320,27 +328,24 @@ export async function error(context, err) {
     // Manche Callsites (z.B. score-advisor.js) übergeben einen fertig formulierten String
     // statt eines Error-Objekts — kein Fehler zum Klassifizieren, direkt durchreichen.
     if (typeof err === 'string') return errorRaw(context, err);
-    const { reason, detail, detailMode } = describeError(err);
+    const { reason, detail, raw } = errorParts(err);
     // SOL-Balance-Fehler sind selbstheilend (SOL-Topup in cleanup.js) → warn statt error
     const level = err?.solBalance !== undefined ? 'warn' : 'error';
     // SOL-Fehler heilen sich über den Topup selbst — dort wäre "starte den Bot neu"
     // ein falscher Rat (der Neustart ändert nichts am SOL-Bestand).
     const action = err?.solBalance !== undefined ? ACTION.selfHeal : ACTION.retrying;
-    await send(level, 'system',
-        `<b>Fehler</b> – ${context} – ${reason}${detailSuffix(detail, detailMode)}\n${action}`,
-        { context, errorMessage: detail, errorStack: err?.stack }
-    );
+    await send(level, 'system', 'notify.liq.error', {
+        context, reason, detail, _action: action,
+    }, { context, errorMessage: raw, errorStack: err?.stack });
 }
 
 /** Reinvest (increaseLiquidity) fehlgeschlagen → DB + Telegram. */
 export async function reinvestError(pool, err) {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'system',
-        `${pair}: Reinvest fehlgeschlagen – ${reason}${detailSuffix(detail, detailMode)}\n` +
-        `Die Gebühren bleiben in der Position, es geht nichts verloren. ${ACTION.selfHeal}`,
-        { context: pair, errorMessage: detail, errorStack: err?.stack }
-    );
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'system', 'notify.liq.reinvest_error', {
+        pair, reason, detail, action: inline(ACTION.selfHeal),
+    }, { context: pair, errorMessage: raw, errorStack: err?.stack });
 }
 
 /**
@@ -349,12 +354,21 @@ export async function reinvestError(pool, err) {
  */
 export async function openPositionError(pool, err, context = 'beim Öffnen') {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'system',
-        `${pair}: Position-Öffnung fehlgeschlagen (${context}) – ${reason}${detailSuffix(detail, detailMode)}\n` +
-        `Das Kapital liegt weiter in deiner Wallet. ${ACTION.selfHeal}`,
-        { context: pair, errorMessage: detail, errorStack: err?.stack }
-    );
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'system', 'notify.liq.open_position_error', {
+        pair, context: openContext(context), reason, detail, action: inline(ACTION.selfHeal),
+    }, { context: pair, errorMessage: raw, errorStack: err?.stack });
+}
+
+/**
+ * Die beiden bekannten Kontexte von openPosition* sind Textbausteine, keine Daten —
+ * sie kommen als deutsche Literale aus bin/bot.js. Bekannte Werte werden auf einen
+ * Katalog-Key abgebildet, alles andere unverändert durchgereicht.
+ */
+function openContext(context) {
+    if (context === 'nach Rebalancing') return { k: 'notify.common.after_rebalance' };
+    if (context === 'beim Öffnen')      return { k: 'notify.common.while_opening' };
+    return context;
 }
 
 /**
@@ -367,13 +381,11 @@ export async function openPositionError(pool, err, context = 'beim Öffnen') {
  */
 export async function openPositionGaveUp(pool, err, context, fails) {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'system',
-        `${pair}: Automatische Öffnung nach ${fails} Fehlversuchen gestoppt (${context}) – ${reason}. ` +
-        `Der Pool wurde deaktiviert, das Kapital liegt in deiner Wallet.${detailSuffix(detail, detailMode)}\n` +
-        `${ACTION.manual}`,
-        { context: pair, errorMessage: detail, errorStack: err?.stack }
-    );
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'system', 'notify.liq.open_position_gave_up', {
+        pair, fails, context: openContext(context), reason, detail,
+        _action: ACTION.manual,
+    }, { context: pair, errorMessage: raw, errorStack: err?.stack });
 }
 
 // Cooldown für solLow() (2026-07-29): die Funktion wird von vielen Call-Sites
@@ -401,18 +413,14 @@ export async function solLow(solBalance) {
     if (Date.now() - _lastSolLowNotifyAt < SOL_LOW_COOLDOWN_MS) return;
     _lastSolLowNotifyAt = Date.now();
     if (solBalance < 0.05) {
-        await send('error', 'wallet',
-            `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
-            `Der Bot kann sich aus eigener Kraft nicht mehr auffüllen – für den Tausch ` +
-            `in SOL fehlt ihm selbst das Geld für die Transaktionsgebühr.\n` +
-            `${ACTION.topUp}`
-        );
+        await send('error', 'wallet', 'notify.liq.sol_low_critical', {
+            sol: solBalance.toFixed(4), _action: ACTION.topUp,
+        });
     } else {
-        await send('info', 'wallet',
-            `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
-            `Unter ${String(config.solReserve).replace('.', ',')} SOL werden keine neuen Positionen mehr eröffnet.\n` +
-            `Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`
-        );
+        await send('info', 'wallet', 'notify.liq.sol_low', {
+            sol:     solBalance.toFixed(4),
+            reserve: String(config.solReserve).replace('.', ','),
+        });
     }
 }
 
@@ -427,65 +435,60 @@ export async function solLow(solBalance) {
  */
 export async function solTopupFailed(pool, phase, solAfter) {
     const pair = pool.displayPair ?? pool.pair;
-    const when = phase === 'pre' ? 'vor der Liquidierung' : 'nach der Liquidierung';
-    await send('error', 'wallet',
-        `🔴 *Zu wenig SOL*\n` +
-        `Konnte ${when} nicht genug SOL beschaffen (aktuell ${solAfter.toFixed(4)} SOL). ` +
-        `Es liegt kein Guthaben in der Wallet, das sich in SOL tauschen ließe.\n` +
-        `${ACTION.topUp} Ohne SOL kann der Bot die Position nicht schließen.`,
-        { pair, phase, solAfter });
+    await send('error', 'wallet', 'notify.liq.sol_topup_failed', {
+        when:   inline(phase === 'pre' ? 'notify.common.before_liquidation' : 'notify.common.after_liquidation'),
+        sol:    solAfter.toFixed(4),
+        action: inline(ACTION.topUp),
+    }, { pair, phase, solAfter });
 }
 
 /** Allgemeine Warnung (nur DB, kein Telegram) */
 export async function warn(context, err) {
-    const { reason, detail } = describeError(err);
-    await send('warn', 'system',
-        `<b>Warnung</b> – ${context} wegen ${reason} abgebrochen.\n${ACTION.selfHeal}`,
-        { context, errorMessage: detail, errorStack: err.stack }
-    );
+    const { reason, raw } = errorParts(err);
+    await send('warn', 'system', 'notify.liq.warn', {
+        context, reason, _action: ACTION.selfHeal,
+    }, { context, errorMessage: raw, errorStack: err.stack });
 }
 
 /** Manueller Deposit in eine bestehende oder neue Position */
 export async function depositAdded(pool, depositUsdc, amountA, amountB, txHash, isNew = false) {
     const pair    = pool.displayPair ?? pool.pair;
     const tokenA  = pool.pair.split('/')[0];
-    const action  = isNew ? 'Neue Position eröffnet' : 'Liquidität erhöht';
-    await send('info', 'trade',
-        `<b>Deposit</b> – ${pair}\n` +
-        `${action}: ${amountA.toFixed(6)} ${tokenA} + ${amountB.toFixed(2)} USDC\n` +
-        `Einzahlung: ${depositUsdc.toFixed(2)} USDC\n` +
-        `${ACTION.fyi}`,
-        { pair }
-    );
+    await send('info', 'trade', 'notify.liq.deposit_added', {
+        pair,
+        what:    inline(isNew ? 'notify.liq.deposit_new' : 'notify.liq.deposit_increase'),
+        amountA: amountA.toFixed(6),
+        tokenA,
+        amountB: amountB.toFixed(2),
+        deposit: depositUsdc.toFixed(2),
+        _action: ACTION.fyi,
+    }, { pair });
 }
 
 /** Manueller Withdraw aus einer bestehenden Position */
 export async function withdrawCompleted(pool, usdcRequested, amountA, amountB, fraction, txHash) {
     const pair   = pool.displayPair ?? pool.pair;
     const tokenA = pool.pair.split('/')[0];
-    await send('info', 'trade',
-        `<b>Auszahlung</b> – ${pair}\n` +
-        `Entnommen: ${amountA.toFixed(6)} ${tokenA} + ${amountB.toFixed(2)} USDC\n` +
-        `Ziel: ${usdcRequested.toFixed(2)} USDC (${(fraction * 100).toFixed(2)}% der Position)\n` +
-        `${ACTION.inWallet}`,
-        { pair }
-    );
+    await send('info', 'trade', 'notify.liq.withdraw_completed', {
+        pair,
+        amountA: amountA.toFixed(6),
+        tokenA,
+        amountB: amountB.toFixed(2),
+        target:  usdcRequested.toFixed(2),
+        pct:     (fraction * 100).toFixed(2),
+        _action: ACTION.inWallet,
+    }, { pair });
 }
 
 /** Pool Mindestwert wurde deaktiviert – User muss neu konfigurieren.
  *  reason: 'withdraw' | 'rebalance' */
 export async function minimumValueCleared(pool, oldMinValueUsd, reason = 'withdraw') {
     const pair = pool.displayPair ?? pool.pair;
-    const causeText = reason === 'rebalance'
-        ? 'da der Pool-Wert nach dem Rebalancing zu nah am Mindestwert liegt'
-        : 'da Coins aus dem Pool abgezogen wurden';
-    await send('warn', 'trailing-stop',
-        `Pool Mindestwert (${Math.round(oldMinValueUsd)} USDC) wurde beim Trailing Stop deaktiviert, ` +
-        `${causeText}.\n` +
-        `Solange der Mindestwert nicht gesetzt ist, greift diese Schutzschwelle nicht. ` +
-        `${ACTION.configure}`,
-        { pair, oldMinValueUsd, reason }
-    );
+    await send('warn', 'trailing-stop', 'notify.liq.min_value_cleared', {
+        value:  Math.round(oldMinValueUsd),
+        cause:  inline(reason === 'rebalance' ? 'notify.liq.min_value_cause_rebalance' : 'notify.liq.min_value_cause_withdraw'),
+        action: inline(ACTION.configure),
+    }, { pair, oldMinValueUsd, reason });
 }
 
 /** Bot wird heruntergefahren */
@@ -495,12 +498,8 @@ export async function shutdown(reason = 'SIGTERM') {
     // bei dem systemd zwar neu startet, ein Blick ins Log aber angebracht ist.
     const expected = reason === 'SIGTERM' || reason === 'SIGINT';
     await send('lifecycle', 'system',
-        `🔴 *Liquidity Bot gestoppt* (${reason})\n` +
-        (expected
-            ? 'Offene Positionen bleiben bestehen, es wird nur nicht mehr nachgesteuert. ' +
-              'Es ist nichts zu tun, wenn du den Stop selbst ausgelöst hast.'
-            : 'Der Stop war nicht geplant. Es ist nichts zu tun – der Dienst startet automatisch ' +
-              'neu. Bleibt eine Startmeldung aus, bitte den Bot-Status im Dashboard prüfen.'));
+        expected ? 'notify.liq.shutdown_expected' : 'notify.liq.shutdown_unexpected',
+        { reason });
 }
 
 /**
@@ -509,12 +508,9 @@ export async function shutdown(reason = 'SIGTERM') {
  */
 export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('error', 'rm-warning',
-        `⚠️ *Risk-Management: Ereignis steht bevor*\n` +
-        `*${scenarioLabel}* erreicht.\n` +
-        `Der Bot schließt die Position gleich automatisch und tauscht den Erlös in USDC. ` +
-        `Es ist nichts zu tun – greif nur ein, wenn du die Position bewusst halten willst.`,
-        { pair });
+    await send('error', 'rm-warning', 'notify.liq.rm_warning', {
+        scenario: rmScenario(scenarioLabel),
+    }, { pair });
 }
 
 /**
@@ -523,87 +519,100 @@ export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
  */
 export async function rmExecuted(pool, scenarioLabel, lpValueUsd) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'rm-executed',
-        `🔴 *Risk-Management: Ereignis eingetreten*\n` +
-        `*${scenarioLabel}* unterschritten: Position geschlossen.\n` +
-        `${ACTION.inWallet}`,
-        { pair });
+    await send('warn', 'rm-executed', 'notify.liq.rm_executed', {
+        scenario: rmScenario(scenarioLabel),
+        _action:  ACTION.inWallet,
+    }, { pair });
+}
+
+/**
+ * Szenario-Bezeichner der Risk-Management-Meldungen.
+ *
+ * Die Aufrufer (trailing-stop.js, score-limit.js, ranking-exit.js) liefern ihn
+ * seit Schritt 5 als Katalog-Verweis `{ k, p }` — das Label enthält Zahlen
+ * ("Trailing Stop (33%)") und lässt sich deshalb nicht über eine feste Tabelle
+ * übersetzen. Ein einfacher String wird unverändert durchgereicht, damit ein
+ * neuer Aufrufer nicht sofort eine leere Meldung erzeugt.
+ */
+function rmScenario(label) {
+    return label;
 }
 
 /** Score Limit unterschritten – Position wurde geschlossen */
 export async function scoreLimitTriggered(pool, score, minScore) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'score-limit',
-        `Risk-Management: Opportunity Score <${minScore}\n` +
-        `Die Bewertung des Pools ist unter deine Mindestschwelle gefallen, ` +
-        `die Position wurde geschlossen.\n` +
-        `${ACTION.inWallet}`,
-        { pair });
+    await send('warn', 'score-limit', 'notify.liq.score_limit_triggered', {
+        minScore, _action: ACTION.inWallet,
+    }, { pair });
 }
 
 /**
- * Gemeinsamer Rumpf der drei Exit-Abschlussmeldungen (Score-Limit, Ranking-Exit,
- * Trailing Stop). Vorher dreimal wortgleich kopiert — mit der neuen
- * Handlungsaufforderung wären es drei Stellen gewesen, die auseinanderdriften.
+ * Gemeinsame Parameter der drei Exit-Abschlussmeldungen (Score-Limit,
+ * Ranking-Exit, Trailing Stop) — der Rumpf steht als EIN Katalogeintrag
+ * (`notify.liq.exit_done`), die Überschrift kommt vom Aufrufer.
+ *
+ * Die beiden Varianten "an Adresse gesendet" / "bleibt im Wallet" unterscheiden
+ * sich in genau zwei Zeilen; beide werden als Katalog-Verweis übergeben, damit
+ * der Rumpf nicht dreimal existieren muss.
  */
-function exitDoneBody(pool, headline, { coinsA, coinsB, swappedUsdc, sentTo }) {
+function exitDoneParams(pool, headline, { coinsA, coinsB, swappedUsdc, sentTo }) {
     const [symA, symB] = pool.pair.split('/');
-    let body = `${headline}\n`;
-    body += `Entnommen: ${coinsA.toFixed(6)} ${symA} + ${coinsB.toFixed(6)} ${symB}\n`;
-    if (swappedUsdc != null) body += `Getauscht: ${swappedUsdc.toFixed(2)} USDC\n`;
-    if (sentTo) {
-        body += `Gesendet an: \`${sentTo.slice(0, 8)}…\`\n`;
-        body += `Es ist nichts zu tun. Das Kapital wurde an die von dir hinterlegte Adresse überwiesen.`;
-    } else {
-        body += `Kapital verbleibt im Wallet\n${ACTION.inWallet}`;
-    }
-    return body;
+    return {
+        headline,
+        coinsA: coinsA.toFixed(6), symA,
+        coinsB: coinsB.toFixed(6), symB,
+        swappedLine: swappedUsdc != null
+            ? { k: 'notify.liq.exit_swapped', p: { usdc: swappedUsdc.toFixed(2) } }
+            : undefined,
+        destLine: sentTo
+            ? { k: 'notify.liq.exit_sent_to', p: { addr: sentTo.slice(0, 8) } }
+            : { k: 'notify.liq.exit_stays_in_wallet' },
+        _action: sentTo ? 'notify.liq.exit_sent_action' : ACTION.inWallet,
+    };
 }
 
 /** Score Limit vollständig abgeschlossen */
 export async function scoreLimitCompleted(pool, { score, coinsA, coinsB, swappedUsdc, sentTo }) {
     const pair = pool.displayPair ?? pool.pair;
-    const body = exitDoneBody(pool, `Risk-Management: Opportunity Score ${score} – abgeschlossen`,
-        { coinsA, coinsB, swappedUsdc, sentTo });
-    await send('warn', 'score-limit-done', body, { pair });
+    await send('warn', 'score-limit-done', 'notify.liq.exit_done',
+        exitDoneParams(pool, { k: 'notify.liq.exit_head_score_limit', p: { score } },
+            { coinsA, coinsB, swappedUsdc, sentTo }),
+        { pair });
 }
 
 /** Score Limit fehlgeschlagen */
 export async function scoreLimitError(pool, step, err) {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'score-limit',
-        `Risk-Management: Fehler (Schritt: ${step}) – ${reason}${detailSuffix(detail, detailMode)}\n` +
-        `${ACTION.retrying}`,
-        { pair, errorMessage: detail });
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'score-limit', 'notify.liq.score_limit_error', {
+        step, reason, detail, _action: ACTION.retrying,
+    }, { pair, errorMessage: raw });
 }
 
 /** Ranking-Exit hat Schwelle erreicht – Ausführung beginnt */
 export async function rankingExitTriggered(pool, streakHours, badDurationHours) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'ranking-exit',
-        `Ranking: Pool seit ${streakHours.toFixed(1)}h durchgehend schwach\n` +
-        `Andere Pools sind seit über ${streakHours.toFixed(0)} Stunden durchgehend besser bewertet, ` +
-        `die Position wird geschlossen.\n` +
-        `Es ist nichts zu tun – der Erlös landet in deiner Wallet, die Abschlussmeldung folgt.`,
-        { pair });
+    await send('warn', 'ranking-exit', 'notify.liq.ranking_exit_triggered', {
+        hours:      streakHours.toFixed(1),
+        hoursRound: streakHours.toFixed(0),
+    }, { pair });
 }
 
 /** Ranking-Exit vollständig abgeschlossen */
 export async function rankingExitCompleted(pool, { coinsA, coinsB, swappedUsdc, sentTo }) {
     const pair = pool.displayPair ?? pool.pair;
-    const body = exitDoneBody(pool, 'Ranking: Abgeschlossen', { coinsA, coinsB, swappedUsdc, sentTo });
-    await send('warn', 'ranking-exit-done', body, { pair });
+    await send('warn', 'ranking-exit-done', 'notify.liq.exit_done',
+        exitDoneParams(pool, { k: 'notify.liq.exit_head_ranking' }, { coinsA, coinsB, swappedUsdc, sentTo }),
+        { pair });
 }
 
 /** Ranking-Exit fehlgeschlagen */
 export async function rankingExitError(pool, step, err) {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'ranking-exit',
-        `Ranking: Fehler (Schritt: ${step}) – ${reason}${detailSuffix(detail, detailMode)}\n` +
-        `${ACTION.retrying}`,
-        { pair, errorMessage: detail });
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'ranking-exit', 'notify.liq.ranking_exit_error', {
+        step, reason, detail, _action: ACTION.retrying,
+    }, { pair, errorMessage: raw });
 }
 
 // ─── Trailing Stop ────────────────────────────────────────────────────────────
@@ -611,27 +620,26 @@ export async function rankingExitError(pool, step, err) {
 export async function trailingStopTriggered(pool, hwmUsd, currentUsd, thresholdPct) {
     const pair = pool.displayPair ?? pool.pair;
     const drawdownPct = hwmUsd > 0 ? ((hwmUsd - currentUsd) / hwmUsd) * 100 : 0;
-    await send('warn', 'trailing-stop',
-        `Trailing Stop: ${drawdownPct.toFixed(1)}% Wertverlust seit Höchststand\n` +
-        `Höchststand: ${hwmUsd.toFixed(2)} USDC → Aktuell: ${currentUsd.toFixed(2)} USDC\n` +
-        `Die von dir gesetzte Verlustgrenze ist erreicht, die Position wird geschlossen.\n` +
-        `Es ist nichts zu tun – der Erlös landet in deiner Wallet, die Abschlussmeldung folgt.`,
-        { pair });
+    await send('warn', 'trailing-stop', 'notify.liq.trailing_stop_triggered', {
+        drawdown: drawdownPct.toFixed(1),
+        hwm:      hwmUsd.toFixed(2),
+        current:  currentUsd.toFixed(2),
+    }, { pair });
 }
 
 export async function trailingStopCompleted(pool, { coinsA, coinsB, swappedUsdc, sentTo }) {
     const pair = pool.displayPair ?? pool.pair;
-    const body = exitDoneBody(pool, 'Trailing Stop: Abgeschlossen', { coinsA, coinsB, swappedUsdc, sentTo });
-    await send('warn', 'trailing-stop-done', body, { pair });
+    await send('warn', 'trailing-stop-done', 'notify.liq.exit_done',
+        exitDoneParams(pool, { k: 'notify.liq.exit_head_trailing_stop' }, { coinsA, coinsB, swappedUsdc, sentTo }),
+        { pair });
 }
 
 export async function trailingStopError(pool, step, err) {
     const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, detailMode } = describeError(err);
-    await send('error', 'trailing-stop',
-        `Trailing Stop: Fehler (Schritt: ${step}) – ${reason}${detailSuffix(detail, detailMode)}\n` +
-        `${ACTION.retrying}`,
-        { pair, errorMessage: detail });
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'trailing-stop', 'notify.liq.trailing_stop_error', {
+        step, reason, detail, _action: ACTION.retrying,
+    }, { pair, errorMessage: raw });
 }
 
 /**
@@ -643,21 +651,17 @@ export async function trailingStopError(pool, step, err) {
  *   'update_recommended' → error → DB + Telegram (Degradation > 15%)
  *
  * @param {'ok'|'warn'|'update_recommended'} status
- * @param {string} summary  Einzeilige Zusammenfassung
+ * @param {string} summary  Einzeilige Zusammenfassung (Freitext des Aufrufers)
  * @param {object} details  Strukturierte Details für DB-Context
  */
 export async function opportunityParamCheck(status, summary, details) {
     if (status === 'ok') return;
-    const level = status === 'update_recommended' ? 'error' : 'warn';
-    const icon  = status === 'update_recommended' ? '⚠️' : 'ℹ️';
-    await send(level, 'opportunity-score',
-        `${icon} *Opportunity-Score Param-Check*\n${summary}\n` +
-        (status === 'update_recommended'
-            ? 'Die Bewertungsparameter passen nicht mehr gut zum Marktverhalten. ' +
-              'Bitte im Dashboard den Score-Adviser aufrufen und die vorgeschlagenen Werte prüfen.'
-            : ACTION.observe),
-        details,
-    );
+    const recommend = status === 'update_recommended';
+    await send(recommend ? 'error' : 'warn', 'opportunity-score', 'notify.liq.param_check', {
+        icon:    recommend ? '⚠️' : 'ℹ️',
+        summary,
+        _action: recommend ? 'notify.liq.param_check_action' : ACTION.observe,
+    }, details);
 }
 
 // ─── FORGE.pub Premium: Pool-Offer-Lebenszyklus ──────────────────────────────
@@ -669,72 +673,61 @@ export async function opportunityParamCheck(status, summary, details) {
  */
 export async function premiumPoolRetired(pool, { reason, kind, confirmHours }) {
     const pair = pool.displayPair ?? pool.pair;
-    const wie = kind === 'absent'
-        ? 'Er fehlt in der Angebotsliste des Datendienstes.'
-        : 'Der Datendienst hat ihn ausdrücklich zurückgestuft.';
-    await send('warn', 'premium-offer',
-        `📉 <b>Pool zurückgestuft</b> – ${pair}\n` +
-        `${wie}\n${reason}\n\n` +
-        `Bleibt das ${confirmHours}h stabil, wird die Position automatisch geschlossen und ` +
-        `der Erlös in USDC getauscht (er bleibt in deiner Wallet). ` +
-        `Bis dahin passiert nichts – du kannst den Pool vorher selbst schließen oder behalten.`,
-        { pair, reason, kind }
-    );
+    await send('warn', 'premium-offer', 'notify.liq.premium_retired', {
+        pair,
+        how:    inline(kind === 'absent' ? 'notify.liq.premium_retired_absent' : 'notify.liq.premium_retired_explicit'),
+        reason,
+        hours:  confirmHours,
+    }, { pair, reason, kind });
 }
 
 /** Rückstufung zurückgenommen, bevor der Exit lief. */
 export async function premiumPoolReinstated(pool) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('info', 'premium-offer',
-        `<b>Rückstufung aufgehoben</b> – ${pair}\n` +
-        `Der Datendienst bietet den Pool wieder an. Der geplante automatische Exit entfällt.\n` +
-        `${ACTION.fyi}`,
-        { pair }
-    );
+    await send('info', 'premium-offer', 'notify.liq.premium_reinstated', {
+        pair, _action: ACTION.fyi,
+    }, { pair });
 }
 
 /** Kapital wurde wegen der Rückstufung aus dem Pool gezogen → DB + Telegram. */
 export async function premiumPoolExitDone(pool, { reason, swappedUsdc, observedTvlUsd }) {
     const pair = pool.displayPair ?? pool.pair;
-    const erlös = swappedUsdc > 0 ? `${swappedUsdc.toFixed(2)} USDC` : 'kein Erlös (Position war leer)';
-    const eigen = observedTvlUsd > 0
-        ? `\nEigene Messung zum Zeitpunkt des Exits: Pool-TVL ${fmtM(observedTvlUsd)} USDC.`
-        : '';
-    await send('error', 'premium-offer',
-        `🚪 <b>Pool verlassen (zurückgestuft)</b> – ${pair}\n` +
-        `${reason}\n` +
-        `Position geschlossen, Erlös: ${erlös} – in deiner Wallet.${eigen}\n` +
-        `Der Pool ist jetzt gesperrt und wird nicht automatisch neu bestückt.\n` +
-        `${ACTION.inWallet}`,
-        { pair, reason, swappedUsdc }
-    );
+    await send('error', 'premium-offer', 'notify.liq.premium_exit_done', {
+        pair,
+        reason,
+        proceeds: swappedUsdc > 0
+            ? { k: 'notify.liq.premium_proceeds', p: { usdc: swappedUsdc.toFixed(2) } }
+            : { k: 'notify.liq.premium_no_proceeds' },
+        ownTvlLine: observedTvlUsd > 0
+            ? { k: 'notify.liq.premium_own_tvl', p: { tvl: fmtM(observedTvlUsd) } }
+            : undefined,
+        _action: ACTION.inWallet,
+    }, { pair, reason, swappedUsdc });
 }
 
 export async function premiumPoolExitError(pool, err) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('error', 'premium-offer',
-        `🚨 <b>Exit nach Rückstufung fehlgeschlagen</b> – ${pair}\n` +
-        `${err.message}\nDer Pool bleibt gesperrt, das Kapital liegt noch in der Position.\n` +
-        `${ACTION.retrying}`,
-        { pair, error: err.message }
-    );
+    await send('error', 'premium-offer', 'notify.liq.premium_exit_error', {
+        pair, error: err.message, _action: ACTION.retrying,
+    }, { pair, error: err.message });
 }
 
 /** Übernommene Feldänderungen eines bestehenden Pools (alt → neu, im Klartext). */
 export async function premiumPoolUpdated(pool, { applied, deferred }) {
     const pair = pool.displayPair ?? pool.pair;
-    const fmt = v => (v === null || v === undefined || v === '') ? 'no data' : String(v);
+    const fmt   = v => (v === null || v === undefined || v === '') ? 'no data' : String(v);
     const lines = applied.map(c => `• ${c.label}: ${fmt(c.from)} → ${fmt(c.to)}`).join('\n');
-    const rest = deferred.length > 0
-        ? `\n\nAufgeschoben, solange Kapital im Pool liegt (ändert die Berechnung laufender ` +
-          `Positionen):\n${deferred.map(c => `• ${c.label}: ${fmt(c.from)} → ${fmt(c.to)}`).join('\n')}`
-        : '';
-    await send('info', 'premium-offer',
-        `🔄 <b>Pool-Angaben aktualisiert</b> – ${pair}\n${lines}${rest}\n\n` +
-        `Betrifft nur die Vorschlagswerte. Eigene Einstellungen im Risk-Management bleiben unverändert.\n` +
-        `${ACTION.fyi}`,
-        { pair, applied, deferred }
-    );
+    await send('info', 'premium-offer', 'notify.liq.premium_updated', {
+        pair,
+        lines,
+        deferredLine: deferred.length > 0
+            ? {
+                k: 'notify.liq.premium_updated_deferred',
+                p: { lines: deferred.map(c => `• ${c.label}: ${fmt(c.from)} → ${fmt(c.to)}`).join('\n') },
+              }
+            : undefined,
+        _action: ACTION.fyi,
+    }, { pair, applied, deferred });
 }
 
 /**
@@ -743,13 +736,16 @@ export async function premiumPoolUpdated(pool, { applied, deferred }) {
  */
 export async function premiumPoolIdentityMismatch(pool, changes) {
     const pair = pool.displayPair ?? pool.pair;
-    const lines = changes.map(c => `• ${c.field}: lokal ${c.local} ≠ geliefert ${c.offered}`).join('\n');
-    await send('error', 'premium-offer',
-        `🚨 <b>Angebot passt nicht zum bekannten Pool</b> – ${pair}\n${lines}\n\n` +
-        `Entweder hat der Datendienst einen Fehler, oder die Lieferung wurde verändert.\n` +
-        `${ACTION.verify}`,
-        { pair, changes }
-    );
+    // Die Zeilenliste ist dynamisch — sie kann nicht als EIN Katalogeintrag stehen.
+    // Deshalb wird die Zeilenvorlage hier schon aufgelöst; sie friert damit in der
+    // Sprache ein, die beim Erzeugen aktiv war (dieselbe bewusste Grenze wie bei
+    // allen anderen Listen, siehe Kopfkommentar).
+    const lines = changes
+        .map(c => t('notify.liq.premium_mismatch_line', { field: c.field, local: c.local, offered: c.offered }))
+        .join('\n');
+    await send('error', 'premium-offer', 'notify.liq.premium_identity_mismatch', {
+        pair, lines, _action: ACTION.verify,
+    }, { pair, changes });
 }
 
 /** Neue Orca-Pools über Fees24h- und TVL-Schwelle, noch nicht in pools.json */
@@ -757,11 +753,12 @@ export async function newPoolsFound(pools, feesThresholdUsdc, tvlThresholdUsdc) 
     const lines = pools.map(p =>
         `${p.pair} – Fees24h ${p.fees24h.toFixed(0)} USDC, TVL ${p.tvlUsd.toFixed(0)} USDC\n\`${p.address}\``
     ).join('\n\n');
-    await send('warn', 'new-pool-alert',
-        `🆕 *Neue Orca-Pool(s)* – Fees24h ≥ ${feesThresholdUsdc.toLocaleString('de-DE')} USDC, TVL ≥ ${tvlThresholdUsdc.toLocaleString('de-DE')} USDC\n\n${lines}\n\n` +
-        `Es ist nichts zu tun. Wenn du einen der Pools nutzen willst, musst du ihn selbst anlegen — ` +
-        `der Bot investiert nicht von allein in unbekannte Pools.`,
-        { pools: pools.map(p => p.address) },
-        true, // telegramOnly – nur Erinnerung, keine Dashboard-Notification
+    await send('warn', 'new-pool-alert', 'notify.liq.new_pools', {
+        fees: feesThresholdUsdc.toLocaleString('de-DE'),
+        tvl:  tvlThresholdUsdc.toLocaleString('de-DE'),
+        lines,
+    },
+    { pools: pools.map(p => p.address) },
+    true, // telegramOnly – nur Erinnerung, keine Dashboard-Notification
     );
 }

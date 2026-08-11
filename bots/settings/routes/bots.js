@@ -17,6 +17,7 @@ import { listBots } from '../../../lib/bot-registry.js';
 import { isForkInstance } from '../../../lib/premium-identity-context.js';
 import { isAutoPayEnabled, setAutoPayEnabled } from '../../../lib/premium-auto-pay-store.js';
 import { recordPremiumMessage } from '../../../core/premium/messages-db.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -109,14 +110,14 @@ router.post('/:svc/:action', (req, res) => {
 
     const known = SERVICES.find(s => s.id === svc);
     if (!known) {
-        return res.status(400).json({ error: `Unbekannter Service: ${svc}` });
+        return res.status(400).json({ error: t('api.bots.unknown_service', { service: svc }) });
     }
     if (!ALLOWED_ACTIONS.has(action)) {
-        return res.status(400).json({ error: `Unerlaubte Aktion: ${action}` });
+        return res.status(400).json({ error: t('api.bots.action_not_allowed', { action }) });
     }
     if (action === 'stop' && CAPITAL_CHECKS[svc]?.()) {
         return res.status(409).json({
-            error: 'Der Bot hat noch investiertes Kapital (offene Position) – erst auszahlen, dann den Dienst stoppen.',
+            error: t('api.bots.capital_open'),
         });
     }
 
@@ -151,7 +152,7 @@ router.get('/tasks/:id', (req, res) => {
     const task = db.prepare('SELECT * FROM tasks WHERE id = ?').get(Number(req.params.id));
     db.close();
 
-    if (!task) return res.status(404).json({ error: 'Task nicht gefunden' });
+    if (!task) return res.status(404).json({ error: t('api.common.task_not_found') });
     res.json(task);
 });
 

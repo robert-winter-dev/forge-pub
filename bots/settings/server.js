@@ -37,6 +37,8 @@ import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
 import updateRouter   from './routes/update.js';
+import i18nRouter     from './routes/i18n.js';
+import timezoneRouter from './routes/timezone.js';
 import { displayVersion } from '../../lib/version.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -67,6 +69,8 @@ app.use(express.json());
 
 // API
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION }));
+app.use('/api/i18n',      i18nRouter);
+app.use('/api/timezone',  timezoneRouter);
 app.use('/api/bots',      botsRouter);
 app.use('/api/config',    configRouter);
 app.use('/api/keys',      keysRouter);
@@ -457,7 +461,7 @@ caApp.get('/', (req, res) => {
   });
 </script>
 <script type="module">
-  import { initNav } from '/forge/js/nav.js?v=20260808h';
+  import { initNav } from '/forge/js/nav.js?v=20260811b';
   initNav({ current: 'ssl-cert' });
 </script>
 </body>

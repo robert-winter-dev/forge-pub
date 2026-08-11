@@ -161,8 +161,8 @@ export async function checkScoreLimitWarning(pool, db, isInRange = true) {
     const lpUsd = snap?.lp_value_usd ?? 0;
 
     _slWarnSentAt.set(pool.id, Date.now());
-    const label = `Score-Limit (Score ${score} < ${minScore})`;
-    console.log(`[scoreLimit:${pool.id}] Vorwarnung: ${label}, LP ${lpUsd.toFixed(2)} USDC`);
+    const label = { k: 'notify.liq.rm_label_score', p: { score, min: minScore } };
+    console.log(`[scoreLimit:${pool.id}] Vorwarnung: Score-Limit (Score ${score} < ${minScore}), LP ${lpUsd.toFixed(2)} USDC`);
     await notify.rmWarning(pool, label, lpUsd).catch(() => {});
 }
 
@@ -344,7 +344,7 @@ export async function executeScoreLimit(pool, db) {
         updateScoreLimitExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         console.log(`[scoreLimit:${pool.id}] Score Limit vollständig abgeschlossen.`);
         const snap = db.prepare(`SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(pool.id);
-        await notify.rmExecuted(pool, `Score-Limit (Score ${score} < ${minScore})`, snap?.lp_value_usd ?? 0).catch(() => {});
+        await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_score', p: { score, min: minScore } }, snap?.lp_value_usd ?? 0).catch(() => {});
         triggerPoolTypeAdvisorAsync(pool.id);
 
         // ── SOL-Nachsicherung ────────────────────────────────────────────────

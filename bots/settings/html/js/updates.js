@@ -4,18 +4,22 @@
  * Bedient bots/settings/routes/update.js. check/apply/rollback laufen über
  * eine Task-Queue (bot-control-daemon.js). Bei apply/rollback schreibt der
  * Daemon die Ausgabe von setup.sh laufend in die DB (siehe dort
- * runUpdateTask()) – das Protokoll pollt daher während des Laufs und rendert
- * bei jedem Poll neu aus dem bis dahin gesammelten Output. check/selftest
- * sind kurze, abgeschlossene Ergebnisse und werden nur gestaffelt eingeblendet.
+ * runUpdateTask()) – die Checkliste pollt daher während des Laufs und rendert
+ * bei jedem Poll neu aus dem bis dahin gesammelten Output. "Jetzt prüfen" ist
+ * kurz und abgeschlossen, zeigt daher ein festes 3-Zeilen-Ergebnis statt
+ * live zu pollen (siehe runCheck()).
  */
 
-import { initNav, initFooter }        from '/forge/js/nav.js?v=20260808h';
+import { initNav, initFooter }        from '/forge/js/nav.js?v=20260811b';
+import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast }                  from '/forge/js/toast.js?v=20260722b';
-import { showModal, closeModal }      from '/forge/js/modal.js?v=20260731a';
+import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { initMessageBell }            from '/forge/js/message-bell.js?v=20260809a';
+import { initForgeTooltip }           from './tooltip.js?v=20260811a';
 
 initNav({ current: 'updates' });
-initFooter({ botName: 'Updates' });
+initFooter({ botName: tr('upd.updates', 'Settings') });
+initForgeTooltip();
 // Ungelesen-Zähler im Kopf – gleiche Einbindung wie index.html/message.html.
 // Fehlte hier bis 2026-08-10: ein Update erzeugt eine System-Nachricht
 // ("Update eingespielt – Version X"), ohne den Briefumschlag blieb sie auf
@@ -29,22 +33,29 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function fmtTime(ts) {
     if (!ts) return 'nie';
     const d = new Date(ts);
-    return `${d.toLocaleDateString('de-DE')} ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr`;
+    return tr('time.hour_label', '{time} Uhr', {
+        time: `${d.toLocaleDateString(NUM_LOCALE)} ${d.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' })}`,
+    });
 }
 
 function fmtDate(ts) {
     if (!ts) return 'unbekannt';
-    return new Date(ts).toLocaleDateString('de-DE');
+    return new Date(ts).toLocaleDateString(NUM_LOCALE);
 }
 
 function setLastUpdate() {
     const el = $('lastUpdate');
-    if (el) el.textContent = `Zuletzt geladen: ${new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr`;
+    if (el) el.textContent = tr('upd.last_loaded', 'Zuletzt geladen: {time} Uhr', {
+        time: new Date().toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' }),
+    });
 }
 
 // ── Checkliste (Protokoll) ────────────────────────────────────────────────────
-// steps: [{ label, state: 'pending'|'done'|'failed'|'neutral' }]
-const ICON = { pending: '◌', done: '✓', failed: '✗', neutral: '·' };
+// steps: [{ label, state: 'pending'|'done'|'failed'|'neutral'|'info' }]
+// 'info' bewusst OHNE Icon (leerer String) – für reine Ergebniszeilen wie
+// "Kein neues Update verfügbar.", die kein Prüfschritt sind und daher weder
+// Haken noch Punkt tragen sollen (Feedback 2026-08-11).
+const ICON = { pending: '◌', done: '✓', failed: '✗', neutral: '·', info: '' };
 
 // 🔴 INKREMENTELL, bewusst kein innerHTML-Neuaufbau (Fix 2026-08-10): Das
 // Protokoll wird während eines Updates alle 2s neu gezeichnet. Wurde dabei die
@@ -63,15 +74,25 @@ function stepHtml(s) {
 
 function resetChecklist() {
     _renderedSteps = [];
-    $('upChecklist').innerHTML = '';
+    const container = $('upChecklist');
+    if (container) container.innerHTML = '';
 }
 
+// Zuletzt bekannter Stand, unabhängig davon ob das Protokoll-Modal gerade offen
+// ist – #upChecklist existiert nur, während das Modal offen ist (openLogModal()).
+// Läuft eine Aktion weiter, während das Modal geschlossen wird, merkt sich
+// renderChecklist() den Fortschritt trotzdem und rendert beim nächsten Öffnen
+// einmal komplett neu nach.
+let _lastSteps = [];
+
 function renderChecklist(steps) {
+    _lastSteps = steps;
     const container = $('upChecklist');
+    if (!container) return; // Modal gerade geschlossen – nur Modell pflegen
 
     if (!steps.length) {
         _renderedSteps = [];
-        container.innerHTML = '<span class="up-checklist-empty">Noch keine Aktion ausgeführt.</span>';
+        container.innerHTML = '';
         return;
     }
 
@@ -103,15 +124,6 @@ function renderChecklist(steps) {
     _renderedSteps = steps.map(s => ({ ...s }));
     // Immer die neueste Zeile im Blick behalten (Box scrollt, statt zu wachsen).
     list.lastElementChild?.scrollIntoView({ block: 'nearest' });
-}
-
-async function renderChecklistStaggered(steps, delayMs = 250) {
-    const revealed = [];
-    for (const step of steps) {
-        revealed.push(step);
-        renderChecklist(revealed);
-        await sleep(delayMs);
-    }
 }
 
 // Verwandelt die rohe update-check.js-Ausgabe ("[update-check] <Text>" pro
@@ -157,7 +169,11 @@ function parseSetupPhases(output, taskStatus) {
             continue;
         }
         if (!current) pushPhase('Vorbereitung');
-        if (/🔴|fehlgeschlagen|FEHLER/i.test(line)) current.failed = true;
+        // 🔴 Sprachunabhängige Marker zuerst (🔴 aus update-check.js, ✗ aus setup.sh
+        // c_err seit i18n Schritt 7) — die Wortliste deckt nur noch ALTE Logs ab, in
+        // denen die Marker fehlen. Neue Fehlerpfade MÜSSEN einen Marker tragen, sonst
+        // fiele die Erkennung auf einer englischen Installation still aus (i18n.md §3f).
+        if (/🔴|✗|fehlgeschlagen|FEHLER|\bfailed\b|\bERROR\b/.test(line)) current.failed = true;
     }
     phases.forEach((p, i) => {
         const isLast = i === phases.length - 1;
@@ -168,6 +184,11 @@ function parseSetupPhases(output, taskStatus) {
     });
     return phases.map(({ label, state }) => ({ label, state }));
 }
+
+// Merkt sich den zuletzt geladenen Update-Status, damit setButtonsDisabled()
+// den "Update einspielen"-Button nach einer Aktion nicht versehentlich wieder
+// aktiviert, obwohl (weiterhin) kein Update vorliegt.
+let _updateAvailable = false;
 
 // ── Version + Status laden ────────────────────────────────────────────────────
 async function loadStatus() {
@@ -195,8 +216,11 @@ async function loadStatus() {
         const icon = updateAvailable ? '&#10007;' : '&#10003;';
         $('upCoreVersion').innerHTML = `<span class="up-version-status ${statusClass}">${versionText} ${icon}</span>`;
 
-        // "Update einspielen" nur hervorheben, wenn wirklich ein geprüftes Update bereitliegt.
+        // "Update einspielen" nur hervorheben UND nur anklickbar, wenn wirklich
+        // ein geprüftes Update bereitliegt – sonst ausgegraut/deaktiviert.
+        _updateAvailable = updateAvailable;
         $('upApplyBtn').classList.toggle('active', updateAvailable);
+        $('upApplyBtn').disabled = !updateAvailable;
     } catch (err) {
         console.error('[updates] Status konnte nicht geladen werden:', err);
     }
@@ -257,7 +281,7 @@ async function setMode(autoApplyPatch) {
         });
         if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
         setModeButtons(autoApplyPatch);
-        showToast(autoApplyPatch ? 'Automatisch aktiviert' : 'Manuell aktiviert', 'success');
+        showToast(autoApplyPatch ? tr('upd.auto_enabled', 'Automatisch aktiviert') : tr('upd.manual_enabled', 'Manuell aktiviert'), 'success');
     } catch (err) {
         showToast(`Policy konnte nicht gespeichert werden: ${err.message}`, 'error');
     }
@@ -267,22 +291,24 @@ $('upModeAuto').addEventListener('click', () => setMode(true));
 $('upModeManual').addEventListener('click', () => setMode(false));
 
 // ── Task-Polling (apply/rollback: echter Live-Fortschritt) ────────────────────
-const ACTION_LABEL = { check: 'Prüfung', apply: 'Update', rollback: 'Rollback' };
+const ACTION_LABEL = { check: tr('upd.check', 'Prüfung'), apply: 'Update', rollback: 'Rollback' };
 
 // Toast-Texte je Aktion. Bewusst ganze Sätze in Alltagssprache: der Toast ist
 // oft das Einzige, was jemand mitbekommt, der die Seite nebenbei offen hat.
 const ACTION_TOAST = {
-    check:    { start: 'Prüfung gestartet – suche nach einer neuen Version …',
-                done:  'Prüfung abgeschlossen.' },
-    apply:    { start: 'Update gestartet – die Bots werden dabei kurz neu gestartet.',
-                done:  'Update fertig eingespielt – alle Dienste laufen wieder.' },
-    rollback: { start: 'Rückkehr zur vorherigen Version gestartet – die Bots werden dabei kurz neu gestartet.',
-                done:  'Vorherige Version wiederhergestellt – alle Dienste laufen wieder.' },
+    check:    { start: tr('upd.check_started', 'Prüfung gestartet – suche nach einer neuen Version …'),
+                done:  tr('upd.check_done', 'Prüfung abgeschlossen.') },
+    apply:    { start: tr('upd.install_started', 'Update gestartet – die Bots werden dabei kurz neu gestartet.'),
+                done:  tr('upd.install_done', 'Update fertig eingespielt – alle Dienste laufen wieder.') },
+    rollback: { start: tr('upd.rollback_started', 'Rückkehr zur vorherigen Version gestartet – die Bots werden dabei kurz neu gestartet.'),
+                done:  tr('upd.rollback_done', 'Vorherige Version wiederhergestellt – alle Dienste laufen wieder.') },
 };
 
 function setButtonsDisabled(disabled) {
     $('upCheckBtn').disabled = disabled;
-    $('upApplyBtn').disabled = disabled;
+    // Beim Wieder-Freigeben (disabled=false) bleibt "Update einspielen" trotzdem
+    // gesperrt, solange laut letztem Status kein Update vorliegt.
+    $('upApplyBtn').disabled = disabled || !_updateAvailable;
     $('upRollbackBtn').disabled = disabled;
 }
 
@@ -325,8 +351,25 @@ async function pollUntilDone(taskId) {
     }
 }
 
+// Protokoll-Modal – öffnet sich automatisch bei Aktionsstart (triggerUpdateAction()/
+// runCheck()), kein eigener "Protokoll anzeigen"-Button mehr (Feedback
+// 2026-08-11). Rendert beim Öffnen sofort den zuletzt bekannten Stand nach
+// (_lastSteps), damit ein Neuöffnen nach dem Schließen nicht mit einer leeren
+// Liste startet.
+function openLogModal() {
+    if (getModal('up-log')) return;
+    showModal({
+        id: 'up-log',
+        title: tr('upd.protocol', 'Protokoll'),
+        body: '<div class="up-checklist" id="upChecklist"></div>',
+        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('up-log') }],
+    });
+    renderChecklist(_lastSteps);
+}
+
 async function triggerUpdateAction(action, endpoint) {
     setButtonsDisabled(true);
+    openLogModal();
     renderChecklist([{ label: `${ACTION_LABEL[action]} wird eingereiht …`, state: 'pending' }]);
     try {
         const res = await fetch(endpoint, { method: 'POST' });
@@ -341,25 +384,56 @@ async function triggerUpdateAction(action, endpoint) {
         // beim Klick, sonst behauptet der Toast einen Start, den ein 409
         // (läuft bereits) gerade abgelehnt hat.
         showToast(ACTION_TOAST[action]?.start ?? `${ACTION_LABEL[action]} gestartet`, 'info');
-
-        if (action === 'check') {
-            const task = await pollUntilDone(body.taskId);
-            setButtonsDisabled(false);
-            if (task.status === 'done') {
-                await renderChecklistStaggered(parseLogLines(task.output));
-                showToast(ACTION_TOAST.check.done, 'success');
-            } else {
-                renderChecklist(parseLogLines(task.output).concat([{ label: task.error ?? 'unbekannter Fehler', state: 'failed' }]));
-                showToast('Prüfung fehlgeschlagen', 'error');
-            }
-            await loadStatus();
-        } else {
-            pollLiveTask(body.taskId, action);
-        }
+        pollLiveTask(body.taskId, action);
     } catch (err) {
         setButtonsDisabled(false);
         renderChecklist([{ label: err.message, state: 'failed' }]);
         showToast(`${ACTION_LABEL[action]} fehlgeschlagen: ${err.message}`, 'error');
+    }
+}
+
+// "Jetzt prüfen" ist kein Live-Poll wie apply/rollback (kurze, abgeschlossene
+// Aktion), sondern zeigt drei feste Zeilen: die beiden Prüfschritte, die eine
+// erfolgreiche check.js-Ausführung IMMER in dieser Reihenfolge durchläuft
+// (Release abrufen, Signatur prüfen — schlägt einer fehl, bricht der Task ab,
+// beide sind also entweder gemeinsam ok oder der Task ist 'failed'), plus das
+// eigentliche Ergebnis (verfügbar/nicht verfügbar). Bei einem Fehlschlag zeigt
+// der rohe Log (parseLogLines) den tatsächlichen Grund, statt zu raten, welcher
+// der beiden Schritte genau gescheitert ist.
+async function runCheck() {
+    $('upCheckBtn').disabled = true;
+    openLogModal();
+    renderChecklist([{ label: tr('upd.check_step_release', 'Prüfe auf neues Release.'), state: 'pending' }]);
+    try {
+        const res = await fetch('/api/update/check', { method: 'POST' });
+        const body = await res.json();
+        if (!res.ok) {
+            renderChecklist([{ label: body.error || tr('upd.check_failed', 'Prüfung fehlgeschlagen'), state: 'failed' }]);
+            showToast(body.error || tr('upd.check_failed', 'Prüfung fehlgeschlagen'), 'error');
+            return;
+        }
+        showToast(ACTION_TOAST.check.start, 'info');
+        const task = await pollUntilDone(body.taskId);
+        if (task.status === 'done') {
+            await loadStatus(); // aktualisiert _updateAvailable + #upAvailableVersion
+            const line3 = _updateAvailable
+                ? tr('upd.check_update_available', 'Es ist ein neues Update auf Version {version} verfügbar.', { version: $('upAvailableVersion').textContent })
+                : tr('upd.check_no_update', 'Kein neues Update verfügbar.');
+            renderChecklist([
+                { label: tr('upd.check_step_release', 'Prüfe auf neues Release.'), state: 'done' },
+                { label: tr('upd.check_step_signature', 'Prüfe Signatur.'), state: 'done' },
+                { label: line3, state: 'info' },
+            ]);
+            showToast(ACTION_TOAST.check.done, 'success');
+        } else {
+            renderChecklist(parseLogLines(task.output).concat([{ label: task.error ?? tr('upd.check_failed', 'Prüfung fehlgeschlagen'), state: 'failed' }]));
+            showToast(tr('upd.check_failed', 'Prüfung fehlgeschlagen'), 'error');
+        }
+    } catch (err) {
+        renderChecklist([{ label: err.message, state: 'failed' }]);
+        showToast(`${ACTION_LABEL.check} fehlgeschlagen: ${err.message}`, 'error');
+    } finally {
+        $('upCheckBtn').disabled = false;
     }
 }
 
@@ -375,12 +449,12 @@ function confirmAction({ id, title, body, confirmLabel, onConfirm }) {
     });
 }
 
-$('upCheckBtn').addEventListener('click', () => triggerUpdateAction('check', '/api/update/check'));
+$('upCheckBtn').addEventListener('click', runCheck);
 $('upApplyBtn').addEventListener('click', () => {
     confirmAction({
         id: 'up-confirm-apply',
-        title: 'Update jetzt einspielen?',
-        body: '<p style="margin:0;">Die Bots werden dafür kurz gestoppt und neu gestartet.</p>',
+        title: tr('upd.install_confirm', 'Update jetzt einspielen?'),
+        body: '<p style="margin:0;">' + tr('upd.bots_restart_note', 'Die Bots werden dafür kurz gestoppt und neu gestartet.') + '</p>',
         confirmLabel: 'Einspielen',
         onConfirm: () => triggerUpdateAction('apply', '/api/update/apply'),
     });
@@ -388,30 +462,111 @@ $('upApplyBtn').addEventListener('click', () => {
 $('upRollbackBtn').addEventListener('click', () => {
     confirmAction({
         id: 'up-confirm-rollback',
-        title: 'Auf die vorherige Version zurückrollen?',
-        body: '<p style="margin:0;">Die Bots werden dafür kurz gestoppt und neu gestartet.</p>',
-        confirmLabel: 'Zurückrollen',
+        title: tr('upd.rollback_confirm', 'Auf die vorherige Version zurückrollen?'),
+        body: '<p style="margin:0;">' + tr('upd.bots_restart_note', 'Die Bots werden dafür kurz gestoppt und neu gestartet.') + '</p>',
+        confirmLabel: tr('upd.rollback', 'Zurückrollen'),
         onConfirm: () => triggerUpdateAction('rollback', '/api/update/rollback'),
     });
 });
 
-// ── Selbsttest (synchron, keine Queue) – echte Prüfpunkte, gestaffelt gezeigt ──
-$('upSelftestBtn').addEventListener('click', async () => {
-    $('upSelftestBtn').disabled = true;
-    renderChecklist([{ label: 'Selbsttest läuft …', state: 'pending' }]);
+// ── Sprache + Zeitzone ─────────────────────────────────────────────────────────
+// Gelten pro Installation, nicht pro Nutzer – auf dem FORGE Master gesperrt
+// (masterLocked kommt vom Backend, lib/master-lock.js: die Master-Nostr-Identität
+// existiert nur dort), auf einem FORGE.pub-Fork editierbar. Gesperrt wird als
+// reiner Text gerendert statt als deaktiviertes Feld, damit auf einen Blick klar
+// ist, dass hier nichts einzustellen ist (kein "warum reagiert das nicht?").
+async function loadLanguage() {
     try {
-        const result = await fetch('/api/update/selftest', { method: 'POST' }).then(r => r.json());
-        const steps = (result.checked ?? []).map(c => ({
-            label: `Prüfe ${c.service} …`,
-            state: !c.enabled ? 'neutral' : (c.active ? 'done' : 'failed'),
-        }));
-        await renderChecklistStaggered(steps);
-        showToast(result.ok ? 'Selbsttest ok' : 'Selbsttest hat ein Problem gefunden', result.ok ? 'success' : 'warn');
+        const d = await fetch('/api/i18n', { cache: 'no-store' }).then(r => r.json());
+        const text = $('upLangText');
+        const select = $('upLangSelect');
+        if (d.masterLocked) {
+            text.textContent = d.lang === 'en' ? 'English' : 'Deutsch';
+            text.title = tr('upd.master_locked_note', 'Auf dem FORGE Master gesperrt.');
+            text.style.display = '';
+            select.style.display = 'none';
+        } else {
+            select.value = d.lang;
+            select.style.display = '';
+            text.style.display = 'none';
+        }
     } catch (err) {
-        renderChecklist([{ label: `Selbsttest fehlgeschlagen: ${err.message}`, state: 'failed' }]);
-        showToast('Selbsttest fehlgeschlagen', 'error');
-    } finally {
-        $('upSelftestBtn').disabled = false;
+        console.error('[updates] Sprache konnte nicht geladen werden:', err);
+    }
+}
+
+// Reload nach dem Speichern nötig, siehe settings.js: der Katalog wird synchron
+// im <head> geladen (html/i18n/active.js), ein Umschalten ohne Reload erwischt
+// nur die Hälfte der Oberfläche.
+$('upLangSelect').addEventListener('change', async () => {
+    const lang = $('upLangSelect').value;
+    try {
+        const r = await fetch('/api/i18n', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lang }),
+        });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+        showToast(tr('upd.language_saved', 'Sprache gespeichert.'), 'success');
+        setTimeout(() => location.reload(), 700); // Toast kurz sichtbar lassen, bevor der Reload ihn wegräumt
+    } catch (err) {
+        showToast(tr('set.language_failed', 'Sprache konnte nicht gesetzt werden: {error}', { error: err.message }), 'error');
+    }
+});
+
+// Suchbare Zeitzonen-Auswahl über <datalist> (Freitext-Input mit Browser-Autocomplete,
+// kein eigenes Widget nötig). Intl.supportedValuesOf('timeZone') ist Node genauso wie
+// modernen Browsern bekannt (dieselbe API validiert bereits serverseitig in
+// routes/timezone.js) – ohne Unterstützung bleibt der Input einfach ein Freitextfeld.
+function populateTimezoneList() {
+    const list = $('upTzList');
+    if (!list) return;
+    try {
+        list.innerHTML = Intl.supportedValuesOf('timeZone').map(z => `<option value="${z}"></option>`).join('');
+    } catch { /* Browser ohne Intl.supportedValuesOf – Input bleibt Freitext */ }
+}
+
+let _lastGoodTz = null;
+
+async function loadTimezone() {
+    try {
+        const d = await fetch('/api/timezone', { cache: 'no-store' }).then(r => r.json());
+        _lastGoodTz = d.tz;
+        const text = $('upTzText');
+        const input = $('upTzInput');
+        if (d.masterLocked) {
+            text.textContent = d.tz;
+            text.title = tr('upd.master_locked_note', 'Auf dem FORGE Master gesperrt.');
+            text.style.display = '';
+            input.style.display = 'none';
+        } else {
+            input.value = d.tz;
+            input.style.display = '';
+            text.style.display = 'none';
+        }
+    } catch (err) {
+        console.error('[updates] Zeitzone konnte nicht geladen werden:', err);
+    }
+}
+
+// Kein Reload nötig (anders als bei der Sprache) – FORGE_TZ wirkt nur auf
+// Bot-Prozesse/Datumsgrenzen, nicht auf diese Oberfläche selbst.
+$('upTzInput').addEventListener('change', async () => {
+    const tz = $('upTzInput').value.trim();
+    if (!tz || tz === _lastGoodTz) return;
+    try {
+        const r = await fetch('/api/timezone', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tz }),
+        });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(body.error ?? tr('upd.timezone_invalid', 'Ungültige Zeitzone. Bitte einen IANA-Namen eingeben, z.B. "Europe/Berlin".'));
+        _lastGoodTz = tz;
+        showToast(tr('upd.timezone_saved', 'Zeitzone gespeichert – Dienste werden neu gestartet.'), 'success');
+    } catch (err) {
+        $('upTzInput').value = _lastGoodTz ?? '';
+        showToast(err.message, 'error');
     }
 });
 
@@ -419,3 +574,6 @@ setLastUpdate();
 loadStatus();
 loadPolicy();
 loadRollbackAvailability();
+loadLanguage();
+loadTimezone();
+populateTimezoneList();

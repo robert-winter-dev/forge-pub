@@ -26,7 +26,9 @@ import { dirname, resolve, join } from 'path';
 import { fileURLToPath }    from 'url';
 
 import { config, loadAutoDeployConfig } from '../lib/config.js';
-import { sendTelegram, isUpdateInProgress } from '../lib/notify.js';
+import * as notify from '../lib/notify.js';
+import { isUpdateInProgress } from '../lib/notify.js';
+import { t } from '../../../lib/i18n.js';
 import { KaminoProtocol, /* DriftProtocol (DEAKTIVIERT 2026-04-02), */ LoopscaleProtocol, JupiterLendProtocol,
          createProtocolByName } from '../lib/lending-protocols.js';
 import { getSolBalance, getUsdcBalance, loadKeypair, signAndSend, sendUsdc, fetchFeeSol } from '../lib/wallet.js';
@@ -152,11 +154,15 @@ const ZERO_BALANCE_CONFIRM_TICKS = 2;
 function noteFail(key, label, err, { escalateAt = 2 } = {}) {
     const fails = (_failCounts.get(key) ?? 0) + 1;
     _failCounts.set(key, fails);
+    // `label` ist ein Katalog-Verweis { k, p } — fürs Log wird er deutsch
+    // aufgelöst (Logs sind Betriebsdaten und bleiben einsprachig), für die
+    // Meldung geht er unaufgelöst weiter und wird beim Anzeigen übersetzt.
+    const labelDe = typeof label === 'string' ? label : t(label.k, label.p, { lang: 'de' });
     if (fails >= escalateAt) {
-        logErr(`${label} (${fails}× in Folge): ${err.message}`);
-        sendTelegram(`⚠️ *${label} fehlgeschlagen* (${fails}× in Folge): ${err.message}`).catch(() => {});
+        logErr(`${labelDe} (${fails}× in Folge): ${err.message}`);
+        notify.taskFailed(label, fails, err.message).catch(() => {});
     } else {
-        log(`⚠ ${label} transient (${fails}/${escalateAt} – warte auf Bestätigung im nächsten Zyklus): ${err.message}`);
+        log(`⚠ ${labelDe} transient (${fails}/${escalateAt} – warte auf Bestätigung im nächsten Zyklus): ${err.message}`);
     }
 }
 
@@ -248,17 +254,13 @@ async function checkAlerts(proto, currentApy, currentTvl) {
                     ? `$${(currentTvl / 1e6).toFixed(2)}M`
                     : `$${(currentTvl / 1e3).toFixed(0)}K`;
                 if (prev.tvl < threshold && currentTvl >= threshold) {
-                    await sendTelegram(
-                        `📈 *${proto.label}* TVL über ${tLabel}\n`
-                        + `Jetzt: ${tvlFmt}`
-                    );
-                    addNotification({ level: 'warn', message: `📈 ${proto.label} TVL über ${tLabel} – Jetzt: ${tvlFmt}` });
+                    await notify.tvlAbove(proto.label, tLabel, tvlFmt);
+                    addNotification({ level: 'warn', msgKey: 'notify.len.tvl_above_short',
+                        params: { pool: proto.label, threshold: tLabel, tvl: tvlFmt } });
                 } else if (prev.tvl >= threshold && currentTvl < threshold) {
-                    await sendTelegram(
-                        `📉 *${proto.label}* TVL unter ${tLabel}\n`
-                        + `Jetzt: ${tvlFmt}`
-                    );
-                    addNotification({ level: 'warn', message: `📉 ${proto.label} TVL unter ${tLabel} – Jetzt: ${tvlFmt}` });
+                    await notify.tvlBelow(proto.label, tLabel, tvlFmt);
+                    addNotification({ level: 'warn', msgKey: 'notify.len.tvl_below_short',
+                        params: { pool: proto.label, threshold: tLabel, tvl: tvlFmt } });
                 }
             }
         }
@@ -291,7 +293,7 @@ async function checkApys(protocols) {
             apyMap.set(proto.name, apy);
             resetFail(`apy:${proto.name}`);
         } catch (err) {
-            noteFail(`apy:${proto.name}`, `APY ${proto.label} nicht abrufbar`, err);
+            noteFail(`apy:${proto.name}`, { k: 'notify.len.task_apy', p: { pool: proto.label } }, err);
             continue;
         }
 
@@ -416,12 +418,14 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             // Auto-Exit withdrawt zwar immer 'all', ob eine Vollauszahlung genauso betroffen
             // sein kann wie die beobachteten Teilauszahlungen ist ungeklärt – daher auch hier
             // sicherheitshalber geprüft.
-            let leftoverNote = '';
+            let leftoverLpAmount = null;
+            let leftoverLpUsdc   = null;
             if (proto instanceof LoopscaleProtocol) {
                 const leftoverLp = await proto.checkLeftoverLp(walletAddress);
                 if (leftoverLp) {
                     const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
-                    leftoverNote = `\n⚠️ ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} im Wallet zurückgeblieben – Support kontaktieren (Restake nötig).`;
+                    leftoverLpAmount = leftoverLp.lpAmount.toFixed(6);
+                    leftoverLpUsdc   = usdcStr;   // " (~12,34 USDC)" oder "" – sprachneutral
                     logErr(`Auto-Exit ${protocolName}: LP-Reste zurückgeblieben – ${leftoverLp.lpAmount.toFixed(6)}${usdcStr}`);
                 }
             }
@@ -429,7 +433,9 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             // Optionaler Versand an externe Adresse (echter Ausstieg statt Wallet/Reinvest).
             // Adresse pro Protokoll aus settings.db. Betrag auf tatsächliche Wallet-Balance
             // begrenzt (Yield/Slippage-Abweichung → kein InsufficientFunds).
-            let sendNote = '';
+            let sentToAddr    = null;
+            let sentAmountFmt = null;
+            let sentTxSig     = null;
             const sendTo = guard.sendTo;
             if (sendTo) {
                 try {
@@ -437,38 +443,43 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
                     const transferAmount = Math.min(exitAmount, walletUsdc);
                     if (transferAmount > 0) {
                         const sendSig = await sendUsdc(keypair, sendTo, transferAmount);
-                        sendNote = `\nVersand: ${fmt(transferAmount)} USDC → ${sendTo.slice(0, 8)}… (TX ${sendSig})`;
+                        sentToAddr    = sendTo;
+                        sentAmountFmt = fmt(transferAmount);
+                        sentTxSig     = sendSig;
                         log(`Auto-Exit Versand ✅ ${fmt(transferAmount)} USDC → ${sendTo} (TX ${sendSig})`);
                     } else {
                         log(`Auto-Exit Versand übersprungen: Wallet-USDC = ${fmt(walletUsdc)}`);
                     }
                 } catch (sendErr) {
                     logErr(`Auto-Exit Versand fehlgeschlagen (${protocolName}): ${sendErr.message}`);
-                    await sendTelegram(`⚠️ *Auto-Exit Versand fehlgeschlagen*\nPool: ${protocolName}\nFehler: ${sendErr.message}`);
-                    addNotification({ level: 'warn', message: `⚠️ Auto-Exit Versand fehlgeschlagen: ${protocolName} – ${sendErr.message}` });
+                    await notify.autoExitSendFailed(protocolName, sendErr.message);
+                    addNotification({ level: 'warn', msgKey: 'notify.len.auto_exit_send_failed_short',
+                        params: { pool: protocolName, message: sendErr.message } });
                 }
             }
 
-            await sendTelegram(
-                `🚨 *Auto-Exit ausgeführt*\n`
-                + `Pool: ${protocolName}\n`
-                + `Grund: TVL ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K\n`
-                + `Betrag: ${fmt(exitAmount)} USDC\n`
-                + `TX: ${txSig}${sendNote}${leftoverNote}`
-            );
-            addNotification({ level: 'error', message: `🚨 Auto-Exit: ${protocolName} – ${fmt(exitAmount)} USDC entnommen (TVL ${tvlFmt})${leftoverNote}` });
+            await notify.autoExitExecuted(protocolName, {
+                tvl:       tvlFmt,
+                threshold: `$${(exitThreshold / 1_000).toFixed(0)}K`,
+                amount:    fmt(exitAmount),
+                tx:        txSig,
+                sentTo:    sentToAddr,
+                sentAmount: sentAmountFmt,
+                sentTx:    sentTxSig,
+                leftoverLp:   leftoverLpAmount,
+                leftoverUsdc: leftoverLpUsdc,
+            });
+            addNotification({ level: 'error', msgKey: 'notify.len.auto_exit_short',
+                params: { pool: protocolName, amount: fmt(exitAmount), tvl: tvlFmt } });
         } catch (err) {
             // Betriebs-Kanäle (Log/Telegram) bekommen bewusst die technischen Rohdaten
             // (falls vorhanden) statt der nutzerfreundlichen Meldung aus wallet.js
             // simulate() – hier braucht es die Diagnose, nicht die Beruhigung.
             const detail = err.technicalDetail ?? err.message;
             logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${detail}`);
-            await sendTelegram(
-                `⚠️ *Auto-Exit fehlgeschlagen*\n`
-                + `Pool: ${protocolName} | TVL: ${tvlFmt}\n`
-                + `Fehler: ${detail}`
-            );
-            addNotification({ level: 'warn', message: `⚠️ Auto-Exit fehlgeschlagen: ${protocolName} – ${detail}` });
+            await notify.autoExitFailed(protocolName, tvlFmt, detail);
+            addNotification({ level: 'warn', msgKey: 'notify.len.auto_exit_failed_short',
+                params: { pool: protocolName, message: detail } });
         }
     }
 }
@@ -517,13 +528,13 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
         solBalance = await getSolBalance(walletAddress);
         resetFail('sol-balance');
     } catch (err) {
-        noteFail('sol-balance', 'SOL-Balance', err);
+        noteFail('sol-balance', { k: 'notify.len.task_sol_balance' }, err);
     }
     try {
         usdcBalance = await getUsdcBalance(walletAddress);
         resetFail('usdc-balance');
     } catch (err) {
-        noteFail('usdc-balance', 'USDC-Balance', err);
+        noteFail('usdc-balance', { k: 'notify.len.task_usdc_balance' }, err);
     }
 
     // Positionen aus API abfragen und summieren
@@ -665,7 +676,7 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
             if (dbPositions.length > 0) {
                 totalValue += Math.max(...dbPositions.map(p => p.amount ?? 0));
             }
-            noteFail(`position:${proto.name}`, `Position ${proto.label} aus API`, err);
+            noteFail(`position:${proto.name}`, { k: 'notify.len.task_position', p: { pool: proto.label } }, err);
         }
     }
 
@@ -836,14 +847,14 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
             createProtocolByName(protocolId); // Verfügbarkeits-Check
         } catch {
             log(`⚠️  Auto-Deploy: Protokoll "${protocolId}" nicht verfügbar – übersprungen`);
-            await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\nProtokoll "${protocolId}" nicht verfügbar (Modus: Invest in X).`);
+            await notify.autoDeploySkippedUnavailable(protocolId);
             return;
         }
         // Pool-Freigabe prüfen – vom Nutzer deaktiviert oder durch TVL-Schutz
         // automatisch deaktiviert (siehe checkAndAutoExit/disablePool)
         if (!isPoolEnabled(protocolId)) {
             log(`Auto-Deploy übersprungen: ${protocolId} ist deaktiviert (Pool-Freigabe)`);
-            await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\nPool "${protocolId}" ist deaktiviert – im Settings-UI wieder aktivieren, falls gewünscht.`);
+            await notify.autoDeploySkippedDisabled(protocolId);
             return;
         }
         // APY-Schwelle für festes Protokoll prüfen
@@ -868,7 +879,7 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
 
     if (plan.length === 0) {
         log('⚠️  Auto-Deploy: kein Deposit-Plan – keine qualifizierten Pools?');
-        await sendTelegram(`⚠️ *Auto-Deploy übersprungen*\n+${fmt(deployFunds)} USDC erkannt, aber keine qualifizierten Pools verfügbar.`);
+        await notify.autoDeploySkippedNoPools(fmt(deployFunds));
         return;
     }
 
@@ -919,22 +930,12 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
 
     // Telegram-Alert
     const total     = plan.reduce((s, p) => s + p.amount, 0);
-    const cappedMsg = deployFunds < newFunds
-        ? ` (gedeckelt von ${fmt(newFunds)} USDC, Rest bleibt für den nächsten Lauf im Wallet)`
-        : '';
-    if (allOk) {
-        await sendTelegram(
-            `💰 *Auto-Deploy abgeschlossen*\n`
-            + `${fmt(newFunds)} USDC erkannt, ${fmt(total)} USDC investiert${cappedMsg}:\n`
-            + results.join('\n')
-        );
-    } else {
-        await sendTelegram(
-            `⚠️ *Auto-Deploy teilweise fehlgeschlagen*\n`
-            + `${fmt(newFunds)} USDC erkannt, ${fmt(total)} USDC geplant${cappedMsg}:\n`
-            + results.join('\n')
-        );
-    }
+    await notify.autoDeployDone(allOk, {
+        detected: fmt(newFunds),
+        invested: fmt(total),
+        capped:   deployFunds < newFunds ? fmt(newFunds) : null,
+        results:  results.join('\n'),
+    });
 
     // Wallet-Snapshot sofort anpassen: deployFunds wurden vom Wallet abgezogen.
     // takePortfolioSnapshot lief VOR dem Deposit → wallet_snapshot.wallet_usdc ist veraltet.
@@ -989,7 +990,7 @@ async function checkAndTopupSol(walletAddress) {
     if (usdcBalance < 0.5) {
         log(`⚠️  SOL-Topup: zu wenig USDC im Wallet (${usdcBalance.toFixed(2)} USDC) – warte auf Akkumulation`);
         if (solBalance < SOL_WARN_TRIGGER) {
-            await sendTelegram(`⚠️ *SOL-Reserve kritisch*\n${solBalance.toFixed(4)} SOL im Wallet – zu wenig USDC für automatischen Topup (${usdcBalance.toFixed(2)} USDC).`);
+            await notify.solReserveCritical(solBalance.toFixed(4), usdcBalance.toFixed(2));
         }
         return;
     }
@@ -1052,12 +1053,13 @@ async function checkAndTopupSol(walletAddress) {
         const solReceived = parseFloat(quote.outAmount) / 10 ** SOL_DECIMALS;
 
         log(`SOL-Topup ✅ ${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL | TX: ${txSig}`);
-        await sendTelegram(`🔋 *SOL-Topup ausgeführt*\n${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL\nReserve war: ${solBalance.toFixed(4)} SOL`);
-        addNotification({ level: 'info', message: `🔋 SOL-Topup: ${neededUsdc.toFixed(2)} USDC → ${solReceived.toFixed(4)} SOL` });
+        await notify.solTopupDone(neededUsdc.toFixed(2), solReceived.toFixed(4), solBalance.toFixed(4));
+        addNotification({ level: 'info', msgKey: 'notify.len.sol_topup_short',
+            params: { usdc: neededUsdc.toFixed(2), sol: solReceived.toFixed(4) } });
     } catch (err) {
         const detail = err.technicalDetail ?? err.message;
         logErr(`SOL-Topup fehlgeschlagen: ${detail}`);
-        await sendTelegram(`🚨 *SOL-Topup fehlgeschlagen*\n${detail}\nSOL-Balance: ${solBalance.toFixed(4)} SOL`);
+        await notify.solTopupFailed(detail, solBalance.toFixed(4));
     }
 }
 
@@ -1091,10 +1093,7 @@ async function start() {
     // Telegram: Startup-Nachricht (nicht während eines Updates – dort sendet
     // do_update() stattdessen eine Zusammenfassung, s. lib/notify.js)
     if (!isUpdateInProgress()) {
-        await sendTelegram(
-            `🟢 *${config.botDisplayName} gestartet*\n`
-            + `Pools: ${allProtocols.map(p => p.label).join(', ')}`
-        );
+        await notify.startup(allProtocols.map(p => p.label).join(', '));
     }
 
     // Graceful Shutdown
@@ -1105,7 +1104,7 @@ async function start() {
         log(`[Signal] ${signal} empfangen – fahre herunter …`);
         kvSet('bot_state', 'offline');
         if (!isUpdateInProgress()) {
-            await sendTelegram(`🔴 *${config.botDisplayName} gestoppt* (${signal})`);
+            await notify.shutdown(signal);
         }
 
         // Letzter Export vor dem Stopp
@@ -1122,7 +1121,7 @@ async function start() {
     process.on('unhandledRejection', async (reason) => {
         const msg = reason instanceof Error ? reason.message : String(reason);
         log(`[bot] Unbehandelte Promise-Rejection (kein Crash): ${msg}`);
-        await sendTelegram(`🚨 UnhandledRejection (kein Crash): ${msg}`).catch(() => {});
+        await notify.unhandledRejection(msg).catch(() => {});
     });
 
     // ── Erster Tick sofort ────────────────────────────────────────────────────

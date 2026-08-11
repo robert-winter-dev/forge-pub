@@ -3,10 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE - public: Settings</title>
+    <title data-i18n="set.title">FORGE - public: Settings</title>
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260806a">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
+    <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
+         damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
+    <script src="/forge/i18n/active.js"></script>
 </head>
 <body>
 
@@ -14,16 +17,23 @@
     <!-- Zeile 1: Logo + Letztes Update -->
     <div class="header-content">
         <div class="header-col header-logo">
-            <a href="/forge/" title="Zur Hauptseite">
+            <a href="/forge/" title="Zur Hauptseite" data-i18n-attr="title:liq.to_main">
                 <img src="/forge/img/forge-logo.png" alt="FORGE Logo" class="logo-icon">
             </a>
-            <h1>Settings</h1>
+            <h1 data-i18n="set.settings">Settings</h1>
             <span class="premium-status-icon has-tooltip hidden" id="premiumStatusIcon"
-                  data-tooltip-title="Premium" data-tooltip-content=""><img src="/forge/img/forge-logo.png" alt="Premium"></span>
+                  data-tooltip-title="Premium" data-tooltip-content="" data-i18n-attr="title:nav.message.premium,data-tooltip-title:nav.message.premium"><img src="/forge/img/forge-logo.png" alt="Premium"></span>
         </div>
         <div class="header-right">
+            <!-- Sprache der Installation (gilt für Backend UND Oberfläche, nicht pro
+                 Nutzer – FORGE.pub ist Single-Tenant). Bewusst im Header und nicht in
+                 einem Bot-Tab: die Einstellung ist bot-übergreifend. -->
+            <select class="lang-select" id="langSelect" title="Sprache" data-i18n-attr="title:set.language">
+                <option value="de">Deutsch</option>
+                <option value="en">English</option>
+            </select>
             <span class="last-update" id="lastUpdate">–</span>
-            <button class="notif-bell" id="notifBell" title="Message Center">
+            <button class="notif-bell" id="notifBell" title="Message Center" data-i18n-attr="title:nav.message_center">
                 <span class="notif-envelope">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M22 6l-10 7L2 6"></path></svg>
                 </span><span class="notif-badge hidden" id="notifBadge">0</span>
@@ -48,6 +58,6 @@
     </table>
 </div>
 
-<script type="module" src="js/settings.js?v=20260808b"></script>
+<script type="module" src="js/settings.js?v=20260811a"></script>
 </body>
 </html>

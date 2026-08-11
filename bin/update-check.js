@@ -32,6 +32,13 @@
 // Test-/Entwicklungsmodus (kein GitHub nötig):
 //   node bin/update-check.js --source <verzeichnis-mit-manifest.json+.sig+tarball>
 //   [--dry-run]   bricht nach dem Entpacken ab, wendet nichts an, startet nichts neu
+//   [--no-notify] schickt KEINE Meldung an Nexus, schreibt sie nur ins lokale Log.
+//                 Pflicht für jeden Testlauf auf 'business': dort läuft unter demselben
+//                 Port der produktive forge-nexus, und ein Testlauf ohne Trust-Anchor
+//                 erzeugt sonst einen echten error-Alarm samt Telegram-Versand (real
+//                 passiert am 2026-08-10, Meldung update-trust). FORGE_PUB_NEXUS_URL
+//                 hilft nur, wenn ein Ersatz-Nexus bereitsteht — dieser Schalter
+//                 braucht keinen.
 //   [--confirm]   übergeht die Auto-Apply-Politik (autoApplyPatch/isPatchLevel) — für
 //                 den manuellen "Update"-Menüpunkt in bin/setup.sh, NICHT für Cron.
 //                 Signatur-/Hash-/Downgrade-Prüfung bleiben immer aktiv.
@@ -55,7 +62,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyAgainstTrustAnchor } from '../lib/update-verify.js';
-import { FORGE_TZ } from '../core/config.js';
+import { t } from '../lib/i18n.js';
+import { renderNotification } from '../lib/notify-render.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.join(__dirname, '..');
@@ -70,6 +78,10 @@ const SERVICES = ['forge-nexus', 'forge-premium', 'forge-settings', 'forge-setti
 // unter demselben Port laufenden PRODUKTIVEN forge-nexus mit Test-Meldungen treffen
 // (Fund 2026-08-03: erste Testläufe haben genau das getan, siehe Ticket-Kontext).
 const NEXUS_URL = process.env.FORGE_PUB_NEXUS_URL || 'http://127.0.0.1:3100';
+// --no-notify wird bewusst hier auf Modulebene gelesen und nicht erst in main():
+// notify() wird auch aus Pfaden aufgerufen, die kein Argument durchgereicht bekommen —
+// ein Schalter, der nur an manchen Stellen greift, wäre schlimmer als keiner.
+const NOTIFY_DISABLED = process.argv.slice(2).includes('--no-notify');
 // Obergrenze der Beobachtung nach einem Update (siehe waitForStableServices).
 const HEALTH_WAIT_MS = 120_000;
 // Takt der Messung und Dauer, die am Stück unauffällig sein muss.
@@ -119,52 +131,53 @@ const CAT = {
 // JEDE Meldung endet mit einem Satz, der sagt was der Nutzer tun soll — auch wenn
 // die Antwort "nichts" ist. Der Adressat ist kein IT-Fachmann; eine Meldung, die
 // nur einen Befund nennt, lässt ihn ratlos zurück und wird auf Dauer ignoriert.
+// Seit i18n Schritt 7 sind das KATALOG-KEYS (lib/i18n/<lang>.json), keine Texte:
+// gerendert wird beim Anzeigen (lib/notify-render.js, Konvention 3 „_action").
 const ACTION = {
     /** Update wurde abgelehnt, laufende Installation ist unverändert und sicher. */
-    discarded: 'Es ist nichts zu tun – das Update wurde verworfen, die laufende Version bleibt unverändert. '
-        + 'Kommt diese Meldung wiederholt, spiele keine Updates von Hand ein und wende dich an den Herausgeber.',
+    discarded: 'notify.upd.act_discarded',
     /** Recovery-Key im Spiel: der Nutzer hat einen echten, zweiten Prüfweg. */
-    verifyPublisher: 'Prüfe über die Nostr-Identität des Herausgebers, ob dieser Schlüsselwechsel echt ist. '
-        + 'Solange das nicht bestätigt ist, spiele keine weiteren Updates ein.',
+    verifyPublisher: 'notify.upd.act_verify_publisher',
     /** Update liegt bereit und wartet auf eine Entscheidung. */
-    confirm: 'Bitte das Update im Backend bestätigen, damit es eingespielt wird.',
-    /** Abgeschlossenes Ereignis, rein informativ. */
-    fyi: 'Es ist nichts zu tun, diese Meldung dient nur zur Information.',
+    confirm: 'notify.upd.act_confirm',
+    /** Abgeschlossenes Ereignis, rein informativ (gemeinsamer Key aus Schritt 5). */
+    fyi: 'notify.act.fyi',
     /** Dienste laufen wieder auf der Vorversion. */
-    afterRollback: 'Es ist nichts zu tun – die vorherige Version läuft wieder. '
-        + 'Bitte im Backend kontrollieren, ob alle Bots wieder aktiv sind.',
+    afterRollback: 'notify.upd.act_after_rollback',
     /** Sofortiges Eingreifen nötig, Bots laufen nicht. */
-    urgent: 'Die Bots laufen derzeit NICHT und dein Kapital wird nicht überwacht. '
-        + 'Bitte umgehend im Backend prüfen und die Dienste von Hand wiederherstellen.',
+    urgent: 'notify.upd.act_urgent',
     /** Installation ist unvollständig. */
-    checkInstall: 'Ohne Vertrauensanker kann kein Update geprüft werden. '
-        + 'Bitte die Installation mit "sudo bin/setup.sh status" prüfen.',
+    checkInstall: 'notify.upd.act_check_install',
     /** Kanal liefert Älteres — einmalig harmlos, wiederholt verdächtig. */
-    watchChannel: 'Es ist nichts zu tun – die ältere Version wurde nicht installiert. '
-        + 'Kommt diese Meldung wiederholt, prüfe über die Nostr-Identität des Herausgebers, '
-        + 'ob dort wirklich eine Version zurückgezogen wurde.',
+    watchChannel: 'notify.upd.act_watch_channel',
 };
 
-function fmtTimestamp() {
-    return new Intl.DateTimeFormat('de-DE', {
-        timeZone: FORGE_TZ, day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
-    }).format(new Date());
-}
-
 /**
- * Sendet eine Meldung im FORGE-Meldungsschema: Kopfzeile mit Datum + Bot,
- * dann Art der Meldung, dann Details, dann IMMER eine Handlungsaufforderung.
+ * Sendet eine Meldung im FORGE-Meldungsschema. Seit i18n Schritt 7 gehen
+ * msgKey + params mit (E4): der Nexus speichert beides, gerendert wird beim
+ * Anzeigen — der mitgeschickte Text ist Telegram-Sofortversand und Fallback
+ * für Altbestand (identisches Muster wie die notify.js beider Bots seit Schritt 5).
+ * Die Handlungsaufforderung steckt als params._action im Katalog (Konvention 3).
  */
-async function notify(level, category, title, body, action) {
-    const message = `📅 ${fmtTimestamp()} · ${BOT_DISPLAY_NAME}\n*${title}*\n${body}\n${action}`;
+async function notify(level, category, msgKey, params, actionKey) {
+    const fullParams = { ...params, _action: actionKey };
+    const message = renderNotification(
+        { msgKey, params: fullParams, displayName: BOT_DISPLAY_NAME, timestamp: Date.now() },
+    );
+    if (NOTIFY_DISABLED) {
+        // Vollständig loggen statt nur "unterdrückt": Wer einen Testlauf auswertet,
+        // will denselben Text sehen, den ein echter Lauf verschickt hätte.
+        log(t('cli.upd.no_notify', { category, level, message }));
+        return;
+    }
     try {
         const res = await fetch(`${NEXUS_URL}/notify`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ botId: 'update-check', displayName: BOT_DISPLAY_NAME, level, category, message }),
+            body: JSON.stringify({ botId: 'update-check', displayName: BOT_DISPLAY_NAME, level, category, message, msgKey, params: fullParams }),
         });
         if (!res.ok) {
-            log(`Notify: Nexus antwortete HTTP ${res.status}`);
+            log(t('cli.upd.notify_http', { status: res.status }));
             return;
         }
         // Nexus meldet Unterdrückung mit ok:true — wer nur res.ok prüft, hält einen
@@ -173,10 +186,10 @@ async function notify(level, category, title, body, action) {
         // (real passiert am 2026-08-04, siehe core/nexus/dedup.js). Mindestens ins
         // lokale Log, damit es bei einer Nachforschung auffindbar bleibt.
         const ack = await res.json().catch(() => ({}));
-        if (ack.deduplicated) log(`⚠️  Alarm wurde von Nexus als Dublette unterdrückt (${category}/${level}) — nicht in der Meldungsliste!`);
-        if (ack.rateLimited)  log(`⚠️  Alarm wurde von Nexus rate-limitiert (${category}/${level}) — nicht in der Meldungsliste!`);
+        if (ack.deduplicated) log(`⚠️  ${t('cli.upd.notify_dedup', { category, level })}`);
+        if (ack.rateLimited)  log(`⚠️  ${t('cli.upd.notify_ratelimited', { category, level })}`);
     } catch (err) {
-        log(`Notify fehlgeschlagen (Nexus nicht erreichbar?): ${err.message}`);
+        log(t('cli.upd.notify_failed', { error: err.message }));
     }
 }
 
@@ -214,7 +227,7 @@ function writeUpdateStatus(data) {
         mkdirSync(path.dirname(UPDATE_STATUS_PATH), { recursive: true });
         writeFileSync(UPDATE_STATUS_PATH, JSON.stringify(data, null, 2) + '\n');
     } catch (err) {
-        log(`update-status.json konnte nicht geschrieben werden: ${err.message}`);
+        log(t('cli.upd.status_write_failed', { file: 'update-status.json', error: err.message }));
     }
 }
 
@@ -237,7 +250,7 @@ function writeLastUpdateResult(data) {
         mkdirSync(path.dirname(LAST_RESULT_PATH), { recursive: true });
         writeFileSync(LAST_RESULT_PATH, JSON.stringify({ timestamp: Date.now(), ...data }, null, 2) + '\n');
     } catch (err) {
-        log(`last-update-result.json konnte nicht geschrieben werden: ${err.message}`);
+        log(t('cli.upd.status_write_failed', { file: 'last-update-result.json', error: err.message }));
     }
 }
 
@@ -280,7 +293,7 @@ async function waitForStableServices(preActive, preRestarts) {
         lastRegressed = SERVICES.filter((s, i) =>
             (preActive[i] && !isActive(s)) || restartCount(s) > preRestarts[i]);
         if (lastRegressed.length > 0) {
-            if (stableSince !== null) log(`   … noch nicht stabil (${lastRegressed.join(', ')}), beobachte weiter`);
+            if (stableSince !== null) log(`   ${t('cli.upd.not_yet_stable', { services: lastRegressed.join(', ') })}`);
             stableSince = null;
             continue;
         }
@@ -357,7 +370,7 @@ async function main() {
     const forceApply = argv.includes('--confirm');
 
     const { repo, channel } = readUpdateConfig();
-    log(`Prüfe auf neues Release (channel=${channel}${sourceDir ? `, Quelle=${sourceDir} [TEST-MODUS]` : `, repo=${repo}`})`);
+    log(t('cli.upd.checking', { info: `channel=${channel}${sourceDir ? `, ${t('cli.upd.source_test', { dir: sourceDir })}` : `, repo=${repo}`}` }));
 
     let release;
     try {
@@ -365,51 +378,39 @@ async function main() {
     } catch (err) {
         // T4 (Freeze/Eclipse): kein Abbruch mit Fehlercode, nur kein Fortschritt.
         // Eine echte Freeze-Erkennung (Alarm nach zu langer Stille) ist noch offen.
-        log(`Kein Update abgerufen: ${err.message}`);
+        log(t('cli.upd.no_release', { error: err.message }));
         return;
     }
 
     if (!existsSync(TRUST_ANCHOR_PATH)) {
-        log(`🔴 Kein Trust-Anchor unter ${TRUST_ANCHOR_PATH}.`);
+        log(`🔴 ${t('cli.upd.no_trust_anchor', { path: TRUST_ANCHOR_PATH })}`);
         process.exitCode = EXIT.rejected;
-        await notify('error', CAT.trust, 'Update-Prüfung nicht möglich – Vertrauensanker fehlt',
-            'Die Datei mit den Prüfschlüsseln des Herausgebers fehlt in dieser Installation. '
-            + 'Es kann deshalb nicht festgestellt werden, ob ein angebotenes Update echt ist. '
-            + 'Es wurde nichts eingespielt.',
-            ACTION.checkInstall);
+        await notify('error', CAT.trust, 'notify.upd.trust_missing', {}, ACTION.checkInstall);
         return;
     }
     const trustAnchor = JSON.parse(readFileSync(TRUST_ANCHOR_PATH, 'utf8'));
     const sigResult = verifyAgainstTrustAnchor(release.manifestBuf, release.sigBuf, trustAnchor);
     if (!sigResult.valid) {
-        log('🔴 Signatur ungültig — Update wird VERWORFEN.');
+        log(`🔴 ${t('cli.upd.sig_invalid')}`);
         process.exitCode = EXIT.rejected;
-        await notify('error', CAT.signature, 'Update abgelehnt – Signatur ungültig',
-            'Ein angebotenes Update trug keine gültige Unterschrift des Herausgebers. '
-            + 'Das bedeutet: es stammt nicht von ihm oder wurde auf dem Weg verändert. '
-            + 'Es wurde nichts installiert.',
-            ACTION.discarded);
+        await notify('error', CAT.signature, 'notify.upd.sig_invalid', {}, ACTION.discarded);
         return;
     }
-    log(`✓ Signatur gültig (${sigResult.matchedKey}-Key).`);
+    log(`✓ ${t('cli.upd.sig_valid', { key: sigResult.matchedKey })}`);
     if (sigResult.matchedKey === 'recovery') {
         // Der Recovery-Key kommt laut Bedrohungsmodell (update.md, T6) nur zum Einsatz,
         // wenn der Primärschlüssel des Herausgebers kompromittiert wurde. Für den Nutzer
         // ist das die einzige Vorwarnung, die er in diesem Fall je bekommt — deshalb warn
         // und nicht info, und deshalb mit einem konkreten, unabhängigen Gegenprüfweg
         // (Nostr-Identität, siehe update.md "Bootstrapping (TOFU)").
-        await notify('warn', CAT.signature, 'Herausgeber hat den Signaturschlüssel gewechselt',
-            'Dieses Update wurde nicht mit dem üblichen Schlüssel des Herausgebers unterschrieben, '
-            + 'sondern mit seinem Ersatzschlüssel. Das ist vorgesehen, wenn sein Hauptschlüssel '
-            + 'gestohlen wurde — kann aber auch bedeuten, dass jemand anderes den Ersatzschlüssel hat.',
-            ACTION.verifyPublisher);
+        await notify('warn', CAT.signature, 'notify.upd.recovery_key', {}, ACTION.verifyPublisher);
     }
 
     const manifest = JSON.parse(release.manifestBuf.toString('utf8'));
     const installed = installedVersion();
 
     if (installed.code !== null && manifest.versionCode <= installed.code) {
-        log(`Kein neues Update (installiert: v${installed.code}, Release: v${manifest.versionCode}).`);
+        log(t('cli.upd.no_new_update', { installed: installed.code, release: manifest.versionCode }));
         // Wir sind auf dem neuesten (oder einem neueren) Stand — ein evtl. zuvor
         // gemeldetes, noch nicht eingespieltes Update gilt nicht mehr als offen.
         clearUpdateStatus();
@@ -422,29 +423,23 @@ async function main() {
         // vollkommen unsichtbar — abgewehrt und niemandem gesagt.
         if (manifest.versionCode < installed.code) {
             process.exitCode = EXIT.rejected;
-            await notify('warn', CAT.downgrade, 'Update-Quelle bietet eine ältere Version an',
-                `Die Update-Quelle bietet Version ${manifest.version} an, installiert ist aber bereits `
-                + `${installed.version ?? `v${installed.code}`}. Ältere Versionen werden grundsätzlich nicht `
-                + 'installiert – sie könnten bereits behobene Sicherheitslücken zurückbringen.',
+            await notify('warn', CAT.downgrade, 'notify.upd.downgrade',
+                { offered: manifest.version, installed: installed.version ?? `v${installed.code}` },
                 ACTION.watchChannel);
         }
         return;
     }
-    log(`Neues Release: v${manifest.versionCode} (${manifest.version}), minDataSchema=${manifest.minDataSchema}, hasMigrations=${manifest.hasMigrations}.`);
+    log(t('cli.upd.new_release', { code: manifest.versionCode, version: manifest.version, schema: manifest.minDataSchema, migrations: manifest.hasMigrations }));
 
     const tarballBuf = await release.fetchTarball(manifest.artifact.name);
     const actualSha256 = sha256(tarballBuf);
     if (actualSha256 !== manifest.artifact.sha256) {
-        log(`🔴 Tarball-Hash stimmt nicht (erwartet ${manifest.artifact.sha256}, erhalten ${actualSha256}) — VERWORFEN.`);
+        log(`🔴 ${t('cli.upd.hash_mismatch', { expected: manifest.artifact.sha256, actual: actualSha256 })}`);
         process.exitCode = EXIT.rejected;
-        await notify('error', CAT.integrity, `Update abgelehnt – Inhalt verändert (v${manifest.version})`,
-            'Die Unterschrift des Herausgebers war zwar gültig, das heruntergeladene Programmpaket '
-            + 'passt aber nicht zu dem, was er unterschrieben hat. Es wurde also nach der Unterschrift '
-            + 'verändert. Es wurde nichts installiert.',
-            ACTION.discarded);
+        await notify('error', CAT.integrity, 'notify.upd.integrity', { version: manifest.version }, ACTION.discarded);
         return;
     }
-    log('✓ Tarball-Hash stimmt.');
+    log(`✓ ${t('cli.upd.hash_ok')}`);
 
     mkdirSync(STAGING_DIR, { recursive: true });
     const stageTarget = path.join(STAGING_DIR, manifest.version);
@@ -462,24 +457,21 @@ async function main() {
     // selbst — das hier ist eine zweite, unabhängige Prüfung, kein Ersatz dafür).
     const symlinks = execFileSync('find', [stageTarget, '-type', 'l'], { encoding: 'utf8' }).trim();
     if (symlinks) {
-        log(`🔴 Unerwartete Symlinks im entpackten Artefakt — VERWORFEN:\n${symlinks}`);
+        log(`🔴 ${t('cli.upd.symlinks_found', { symlinks })}`);
         process.exitCode = EXIT.rejected;
-        await notify('error', CAT.integrity, `Update abgelehnt – verdächtige Verweise im Paket (v${manifest.version})`,
-            'Das Programmpaket enthält Dateiverweise, die aus dem vorgesehenen Verzeichnis herausführen können. '
-            + 'So etwas gehört nicht in ein reguläres Update. Es wurde nichts installiert.',
-            ACTION.discarded);
+        await notify('error', CAT.integrity, 'notify.upd.symlinks', { version: manifest.version }, ACTION.discarded);
         rmSync(stageTarget, { recursive: true, force: true });
         return;
     }
-    log(`✓ Entpackt nach ${stageTarget}`);
+    log(`✓ ${t('cli.upd.unpacked', { dir: stageTarget })}`);
 
-    if (dryRun) { log('--dry-run: Ende vor Anwendung.'); return; }
+    if (dryRun) { log(t('cli.upd.dry_run_end')); return; }
 
     const policy = readPolicy();
     const isPatchLevel = installed.version
         && installed.version.split('.').slice(0, 2).join('.') === manifest.version.split('.').slice(0, 2).join('.');
     if (!forceApply && (!policy.autoApplyPatch || !isPatchLevel)) {
-        log(`Update verfügbar (v${manifest.version}), Auto-Apply nicht aktiv oder kein Patch-Level — nur Meldung.`);
+        log(t('cli.upd.available_no_autoapply', { version: manifest.version }));
         // Grundlage für das sanfte Pulsieren der Versionsnummer im Nav-Panel —
         // siehe writeUpdateStatus()/UPDATE_STATUS_PATH oben.
         writeUpdateStatus({
@@ -488,15 +480,18 @@ async function main() {
             releaseUrl: release.releaseUrl,
             notifiedAt: Date.now(),
         });
-        await notify('info', CAT.available, `Update verfügbar – Version ${manifest.version}`,
-            `Ein geprüftes, echtes Update des Herausgebers liegt bereit (installiert: ${installed.version ?? 'unbekannt'}). `
-            + 'Es wurde noch nichts verändert – das Einspielen wartet auf deine Freigabe.'
-            + (release.releaseUrl ? `\nChangelog: ${release.releaseUrl}` : ''),
+        await notify('info', CAT.available, 'notify.upd.available',
+            {
+                version:   manifest.version,
+                installed: installed.version ?? t('cli.upd.unknown_word'),
+                // Ohne Release-URL fällt die Changelog-Zeile weg (Konvention 1).
+                ...(release.releaseUrl ? { changelog: release.releaseUrl } : {}),
+            },
             ACTION.confirm);
         return;
     }
 
-    log('Auto-Apply aktiv, Patch-Level-Update — wende an …');
+    log(t('cli.upd.applying'));
     // Zustand VOR dem Update festhalten. Das Health-Gate vergleicht danach gegen
     // GENAU DIESEN Zustand statt zu verlangen, dass alle sechs Dienste laufen
     // (Fix 2026-08-04): Läuft ein Dienst aus legitimem Grund nicht — etwa ein Bot,
@@ -510,12 +505,9 @@ async function main() {
         cwd: stageTarget, stdio: 'inherit',
     });
     if (applyResult.status !== 0) {
-        log('🔴 setup.sh update fehlgeschlagen.');
+        log(`🔴 ${t('cli.upd.setup_failed')}`);
         process.exitCode = EXIT.applyFailed;
-        await notify('error', CAT.apply, `Update fehlgeschlagen – Version ${manifest.version}`,
-            `Das Einspielen wurde mit einem Fehler abgebrochen (Code ${applyResult.status}). `
-            + 'Die Installation kann sich in einem unvollständigen Zustand befinden.',
-            ACTION.urgent);
+        await notify('error', CAT.apply, 'notify.upd.apply_failed', { version: manifest.version, code: applyResult.status }, ACTION.urgent);
         return;
     }
 
@@ -525,51 +517,39 @@ async function main() {
     // an (live gefunden: forge-pub1 nach dem ersten echten Apply-Test, 2026-08-03).
     try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker fürs Health-Gate */ }
 
-    log('Prüfe, ob alle Dienste stabil laufen …');
+    log(t('cli.upd.health_checking'));
     const regressed = await waitForStableServices(preActive, preRestarts);
     if (regressed.length === 0) {
-        log('✓ Alle Dienste laufen stabil.');
+        log(`✓ ${t('cli.upd.all_stable')}`);
         clearUpdateStatus();
         writeLastUpdateResult({ status: 'ok', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: manifest.hasMigrations, problems: [] });
-        await notify('info', CAT.apply, `Update eingespielt – Version ${manifest.version}`,
-            'Das Update wurde installiert und alle Dienste laufen wieder normal.',
-            ACTION.fyi);
+        await notify('info', CAT.apply, 'notify.upd.apply_ok', { version: manifest.version }, ACTION.fyi);
         return;
     }
 
-    log(`🔴 Dienste laufen nach dem Update nicht stabil: ${regressed.join(', ')}`);
+    log(`🔴 ${t('cli.upd.services_unstable', { services: regressed.join(', ') })}`);
     process.exitCode = EXIT.applyFailed;
-    const betroffen = `Betroffene Dienste: ${regressed.join(', ')}.`;
     if (manifest.hasMigrations) {
-        log('   Dieses Update hat die Datenbank umgestellt – ein automatisches Zurückrollen wäre gefährlicher als der jetzige Zustand. Dienste werden gestoppt.');
+        log(`   ${t('cli.upd.migration_no_rollback')}`);
         for (const s of SERVICES) spawnSync('systemctl', ['stop', s]);
         writeLastUpdateResult({ status: 'stopped-migration', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: true, problems: regressed });
-        await notify('error', CAT.rollback, `Update fehlgeschlagen – automatische Rückkehr nicht möglich (v${manifest.version})`,
-            `Nach dem Update laufen die Dienste nicht korrekt. ${betroffen} Dieses Update hat die Datenbank `
-            + 'umgestellt, deshalb wäre ein automatisches Zurückrollen gefährlicher als der jetzige Zustand – '
-            + 'die alte Version passt nicht mehr zu den umgestellten Daten. Die Dienste wurden gestoppt.',
-            ACTION.urgent);
+        await notify('error', CAT.rollback, 'notify.upd.stopped_migration', { version: manifest.version, services: regressed.join(', ') }, ACTION.urgent);
         return;
     }
-    log(`   Stelle die vorherige Version wieder her (v${installed.code}) …`);
+    log(`   ${t('cli.upd.restoring_previous', { code: installed.code })}`);
     const rollback = spawnSync('bash', [SETUP_SH, 'rollback-code', '--to-version', String(installed.code), '--non-interactive', '--yes'], { stdio: 'inherit' });
     if (rollback.status === 0) {
         writeLastUpdateResult({ status: 'auto-rolled-back', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: false, problems: regressed });
-        await notify('warn', CAT.rollback, `Update zurückgenommen – Version ${manifest.version}`,
-            `Nach dem Update liefen die Dienste nicht korrekt. ${betroffen} Die vorherige Version `
-            + `(${installed.version ?? `v${installed.code}`}) wurde automatisch wiederhergestellt. `
-            + 'Deine Daten, Einstellungen und Wallet-Schlüssel waren davon nicht betroffen.',
+        await notify('warn', CAT.rollback, 'notify.upd.rolled_back',
+            { version: manifest.version, services: regressed.join(', '), previous: installed.version ?? `v${installed.code}` },
             ACTION.afterRollback);
     } else {
         writeLastUpdateResult({ status: 'rollback-failed', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: false, problems: regressed });
-        await notify('error', CAT.rollback, `Update fehlgeschlagen und Rücknahme misslungen (v${manifest.version})`,
-            'Nach dem Update liefen die Dienste nicht korrekt, und die Wiederherstellung der Vorversion '
-            + 'ist ebenfalls fehlgeschlagen.',
-            ACTION.urgent);
+        await notify('error', CAT.rollback, 'notify.upd.rollback_failed', { version: manifest.version, services: regressed.join(', ') }, ACTION.urgent);
     }
 }
 
 main().catch((err) => {
-    console.error(`[update-check] Unerwarteter Fehler: ${err.stack}`);
+    console.error(`[update-check] 🔴 ${t('cli.upd.unexpected', { error: err.stack })}`);
     process.exitCode = EXIT.unexpected;
 });

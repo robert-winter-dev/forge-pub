@@ -42,6 +42,7 @@ do_install() {
     touch "$INSTALL_MARKER"
 
     do_packages
+    do_timezone
     do_user
     # Lock schützt einen bereits laufenden Cron (Re-Install über eine bestehende
     # Installation hinweg, s.o. "exists"-Zweig) vor dem rm-rf/npm-install-Fenster.

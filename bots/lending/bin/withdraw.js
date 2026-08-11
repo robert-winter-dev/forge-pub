@@ -19,12 +19,13 @@
 
 import { createInterface }      from 'readline';
 import { config } from '../lib/config.js';
+import { t, numLocale } from '../../../lib/i18n.js';
 import { KaminoProtocol, JupiterLendProtocol, DriftProtocol, LoopscaleProtocol } from '../lib/lending-protocols.js';
 import { loadKeypair, signAndSend, getSolBalance, fetchFeeSol } from '../lib/wallet.js';
 import { getDb, closePosition, updatePosition, getActivePositions,
          createPendingWithdrawal, recordTransaction, recordProtocolStat,
          upsertWalletSnapshot, getWalletSnapshot, addNotification } from '../lib/db.js';
-import { sendTelegram } from '../lib/notify.js';
+import * as notify from '../lib/notify.js';
 
 // ─── Argument-Parsing ─────────────────────────────────────────────────────────
 
@@ -59,19 +60,19 @@ const VALID_PROTOCOLS = [
     ...Object.keys(config.loopscale.vaults),         // loopscale-onre, loopscale-genesis, ...
 ];
 if (!protocol || !VALID_PROTOCOLS.includes(protocol)) {
-    if (jsonMode) jout({ ok: false, error: `Unbekanntes Protokoll: ${protocol}` });
-    else console.error(`Fehler: --protocol ${VALID_PROTOCOLS.join('|')} ist Pflicht.`);
+    if (jsonMode) jout({ ok: false, error: t('cli.lend.unknown_protocol', { protocol }) });
+    else console.error(t('cli.lend.protocol_required', { list: VALID_PROTOCOLS.join('|') }));
     process.exit(1);
 }
 
 if (amount == null) {
-    if (jsonMode) jout({ ok: false, error: '--amount <Betrag|all> ist Pflicht' });
-    else console.error('Fehler: --amount <Betrag|all> ist Pflicht.');
+    if (jsonMode) jout({ ok: false, error: t('cli.lend.amount_required') });
+    else console.error(t('cli.lend.amount_required_hint'));
     process.exit(1);
 }
 if (amount !== 'all' && (isNaN(amount) || amount <= 0)) {
-    if (jsonMode) jout({ ok: false, error: '--amount muss eine positive Zahl oder "all" sein' });
-    else console.error('Fehler: --amount muss eine positive Zahl oder "all" sein.');
+    if (jsonMode) jout({ ok: false, error: t('cli.lend.amount_positive_or_all') });
+    else console.error(t('cli.lend.amount_positive_or_all_hint'));
     process.exit(1);
 }
 
@@ -79,7 +80,7 @@ if (amount !== 'all' && (isNaN(amount) || amount <= 0)) {
 
 function fmt(n, decimals = 2) {
     if (n == null || isNaN(n)) return '—';
-    return Number(n).toLocaleString('de-DE', {
+    return Number(n).toLocaleString(numLocale(), {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
     });
@@ -88,9 +89,10 @@ function fmt(n, decimals = 2) {
 function fmtSeconds(s) {
     const days  = Math.floor(s / 86400);
     const hours = Math.floor((s % 86400) / 3600);
-    if (days > 0) return `${days} Tag${days !== 1 ? 'e' : ''} ${hours} Std.`;
+    if (days === 1) return t('cli.lend.dur_day', { h: hours });
+    if (days > 1)   return t('cli.lend.dur_days', { d: days, h: hours });
     const mins  = Math.floor((s % 3600) / 60);
-    return `${hours} Std. ${mins} Min.`;
+    return t('cli.lend.dur_hours', { h: hours, m: mins });
 }
 
 function hr() { console.log('─'.repeat(52)); }
@@ -133,47 +135,47 @@ async function main() {
                      label:        loopscaleVault.label,
                      vaultAddress: loopscaleVault.address,
                  })
-               : (() => { throw new Error(`Unbekanntes Protokoll: ${protocol}`); })();
+               : (() => { throw new Error(t('cli.lend.unknown_protocol', { protocol })); })();
 
     const protoLabel = proto.label;
     const poolType   = proto.poolType ?? proto.name;
 
     if (!jsonMode) {
-        console.log(`  Protokoll : ${protoLabel}`);
+        console.log(t('cli.lend.head_protocol', { v: protoLabel }));
         console.log(`  Wallet    : ${walletAddress}`);
-        if (!isComplete) console.log(`  Betrag    : ${amount === 'all' ? 'Alles' : fmt(amount) + ' USDC'}`);
-        else console.log(`  Modus     : Complete Withdraw (Pending ID: ${pendingId})`);
-        if (dryRun) console.log('  Modus     : 🔍 DRY-RUN (keine TX wird gesendet)');
+        if (!isComplete) console.log(t('cli.lend.head_amount', { v: amount === 'all' ? t('cli.lend.all') : fmt(amount) + ' USDC' }));
+        else console.log(t('cli.lend.head_mode_complete', { id: pendingId }));
+        if (dryRun) console.log(t('cli.lend.head_mode_dry'));
         hr();
     }
 
     // ── SOL-Balance prüfen ────────────────────────────────────────────────────
-    jlog('  SOL-Balance prüfen …');
+    jlog(`  ${t('cli.lend.step_sol')}`);
     const solBalance = await getSolBalance(walletAddress);
 
     if (solBalance < config.solReserve) {
-        if (jsonMode) jout({ ok: false, error: `Zu wenig SOL für Fees (${fmt(solBalance, 4)} SOL, Minimum: ${config.solReserve})` });
-        else { console.error(`\n  ❌ Fehler: Zu wenig SOL für Fees.`); console.error(`     Vorhanden: ${fmt(solBalance, 4)} SOL`); }
+        if (jsonMode) jout({ ok: false, error: t('cli.lend.low_sol', { sol: fmt(solBalance, 4), min: config.solReserve }) });
+        else { console.error(`\n  ❌ ${t('cli.lend.low_sol_hdr')}`); console.error(`     ${t('cli.lend.low_sol_have', { sol: fmt(solBalance, 4) })}`); }
         process.exit(1);
     }
     if (!jsonMode) console.log(`     → ${fmt(solBalance, 4)} SOL`);
 
     // ── Aktuelle Position abrufen ─────────────────────────────────────────────
-    jlog('  Aktuelle Position …');
+    jlog(`  ${t('cli.lend.step_current_position')}`);
     let position;
     try {
         position = await proto.getPosition(walletAddress);
         if (!position) {
-            if (jsonMode) jout({ ok: false, error: 'Keine aktive Position – Withdraw nicht möglich' });
-            else { console.log('keine Position gefunden'); console.error('\n  ❌ Keine aktive Position – Withdraw nicht möglich.'); }
+            if (jsonMode) jout({ ok: false, error: t('cli.lend.no_position') });
+            else { console.log(t('cli.lend.no_position_found')); console.error(`\n  ❌ ${t('cli.lend.no_position')}.`); }
             process.exit(1);
         }
         if (!jsonMode) {
             console.log(`     → ${fmt(position.amount)} USDC`);
-            if (position.maxWithdrawable < position.amount) console.log(`  Max. abhebbar: ${fmt(position.maxWithdrawable)} USDC`);
+            if (position.maxWithdrawable < position.amount) console.log(`  ${t('cli.lend.max_withdrawable', { usdc: fmt(position.maxWithdrawable) })}`);
         }
     } catch (err) {
-        if (!jsonMode) console.log(`     → ⚠ Nicht abfragbar (${err.message})`);
+        if (!jsonMode) console.log(`     → ⚠ ${t('cli.lend.not_queryable', { error: err.message })}`);
         position = null;
     }
 
@@ -183,8 +185,8 @@ async function main() {
         : amount;
 
     if (effectiveAmount == null) {
-        if (jsonMode) jout({ ok: false, error: 'Betrag konnte nicht bestimmt werden' });
-        else console.error('\n  ❌ Betrag konnte nicht bestimmt werden.');
+        if (jsonMode) jout({ ok: false, error: t('cli.lend.amount_undetermined') });
+        else console.error(`\n  ❌ ${t('cli.lend.amount_undetermined')}.`);
         process.exit(1);
     }
 
@@ -203,9 +205,9 @@ async function main() {
             });
         } else {
             hr();
-            console.log('  📋 Vorschau:');
+            console.log(`  📋 ${t('cli.lend.preview')}`);
             console.log(`     ${fmt(effectiveAmount)} USDC ← ${protoLabel}`);
-            console.log('\n  ℹ Dry-Run: keine Transaktion gesendet.');
+            console.log(`\n  ℹ ${t('cli.lend.dryrun_no_tx')}`);
         }
         process.exit(0);
     }
@@ -213,27 +215,27 @@ async function main() {
     // ── Bestätigung einholen (nur im interaktiven Modus) ─────────────────────
     if (!jsonMode) {
         hr();
-        console.log(`  ${fmt(effectiveAmount)} USDC werden aus ${protoLabel} abgehoben.`);
+        console.log(`  ${t('cli.lend.confirm_withdraw', { usdc: fmt(effectiveAmount), label: protoLabel })}`);
         console.log('');
-        const ok = await confirm('  Fortfahren? [j/N] ');
-        if (!ok) { console.log('\n  Abgebrochen.'); process.exit(0); }
+        const ok = await confirm(`  ${t('cli.lend.proceed')} `);
+        if (!ok) { console.log(`\n  ${t('cli.lend.aborted')}`); process.exit(0); }
         console.log('');
     }
 
     // ── TX bauen ──────────────────────────────────────────────────────────────
-    jlog('  TX wird erstellt …');
+    jlog(`  ${t('cli.lend.step_build_tx')}`);
     let withdrawResult;
     try {
         withdrawResult = await proto.buildWithdrawTx(walletAddress, effectiveAmount);
         if (!jsonMode) console.log(`     → ✓ (${withdrawResult.type})`);
     } catch (err) {
-        if (jsonMode) jout({ ok: false, error: `TX-Erstellung fehlgeschlagen: ${err.message}` });
-        else console.error(`\n  ❌ TX-Erstellung fehlgeschlagen: ${err.message}`);
+        if (jsonMode) jout({ ok: false, error: t('cli.lend.build_tx_failed', { error: err.message }) });
+        else console.error(`\n  ❌ ${t('cli.lend.build_tx_failed', { error: err.message })}`);
         process.exit(1);
     }
 
     // ── TX signieren + senden ─────────────────────────────────────────────────
-    jlog('  TX signieren + senden …');
+    jlog(`  ${t('cli.lend.step_sign_send')}`);
     const keypair = loadKeypair();
     let txSig;
     try {
@@ -247,7 +249,7 @@ async function main() {
         // Meldung als err.message gesetzt (siehe lib/wallet.js) – kein "TX fehlgeschlagen:"
         // davorsetzen, das würde den beruhigenden Ton wieder technisch wirken lassen.
         if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
-        const userMsg = err.technicalDetail ? err.message : `TX fehlgeschlagen: ${err.message}`;
+        const userMsg = err.technicalDetail ? err.message : t('cli.lend.tx_failed', { error: err.message });
         if (jsonMode) jout({ ok: false, error: userMsg });
         else console.error(`\n  ❌ ${userMsg}`);
         process.exit(1);
@@ -297,7 +299,7 @@ async function main() {
         }
 
     } catch (err) {
-        jlog(`  ⚠ DB-Update fehlgeschlagen (TX war erfolgreich): ${err.message}`);
+        jlog(`  ⚠ ${t('cli.lend.db_update_failed', { error: err.message })}`);
     }
 
     // ── Ungestakte LP-Reste erkennen (nur Loopscale) ──────────────────────────
@@ -307,13 +309,12 @@ async function main() {
     if (proto instanceof LoopscaleProtocol) {
         leftoverLp = await proto.checkLeftoverLp(walletAddress);
         if (leftoverLp) {
-            const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
-            const msg = `⚠️ ${protoLabel}: ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} `
-                      + `nach Withdraw im Wallet zurückgeblieben – bei Loopscale nicht mehr sichtbar, `
-                      + `aber on-chain vorhanden. Support kontaktieren (Restake nötig).`;
-            jlog(`  ${msg}`);
-            addNotification({ level: 'warn', message: msg });
-            await sendTelegram(`🟡 *${protoLabel}: LP-Reste nach Withdraw*\n${msg}`);
+            const usdcStr  = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
+            const lpParams = { pool: protoLabel, lp: leftoverLp.lpAmount.toFixed(6), usdc: usdcStr };
+            jlog(`  ${t('notify.len.lp_remainder_short', lpParams)}`);
+            addNotification({ level: 'warn', msgKey: 'notify.len.lp_remainder_short', params: lpParams });
+            // Katalog-Verweis statt fertigem Text: gerendert wird beim Anzeigen (Konvention 2, i18n.md §3e)
+            await notify.lpRemainder(protoLabel, { k: 'notify.len.lp_remainder_short', p: lpParams });
         }
     }
 
@@ -335,28 +336,29 @@ async function main() {
     } else {
         hr();
         if (withdrawResult.type === 'immediate') {
-            console.log('  ✅ Withdraw erfolgreich!');
+            console.log(`  ✅ ${t('cli.lend.withdraw_ok')}`);
             console.log('');
-            console.log(`  Betrag    : ${fmt(effectiveAmount)} USDC`);
-            console.log(`  Protokoll : ${protoLabel}`);
+            console.log(t('cli.lend.head_amount', { v: `${fmt(effectiveAmount)} USDC` }));
+            console.log(t('cli.lend.head_protocol', { v: protoLabel }));
             console.log(`  TX        : ${txSig}`);
             console.log(`  Solscan   : https://solscan.io/tx/${txSig}`);
         } else if (withdrawResult.type === 'cooldown') {
-            console.log('  ⏳ Cooldown gestartet!');
+            console.log(`  ⏳ ${t('cli.lend.cooldown_started')}`);
             console.log('');
-            console.log(`  Betrag      : ${fmt(effectiveAmount)} USDC`);
-            console.log(`  Protokoll   : ${protoLabel}`);
+            console.log(t('cli.lend.res12_amount', { v: `${fmt(effectiveAmount)} USDC` }));
+            console.log(t('cli.lend.res12_protocol', { v: protoLabel }));
             console.log(`  TX          : ${txSig}`);
-            console.log(`  Cooldown    : ${fmtSeconds(cooldown)}`);
-            console.log(`  Bereit ab   : ${new Date(readyAtMs).toLocaleString('de-DE')}`);
+            console.log(t('cli.lend.res12_cooldown', { v: fmtSeconds(cooldown) }));
+            console.log(t('cli.lend.res12_ready', { v: new Date(readyAtMs).toLocaleString(numLocale()) }));
             console.log('');
-            console.log('  ℹ Nach dem Cooldown: node bin/withdraw.js --protocol <p> --complete --id <ID>');
+            console.log(`  ℹ ${t('cli.lend.after_cooldown_hint')}`);
         }
         if (leftoverLp) {
             console.log('');
-            console.log(`  ⚠️  ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token zurückgeblieben`
-                + (leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '')
-                + ' – siehe Notification.');
+            console.log(`  ⚠️  ${t('cli.lend.leftover_line', {
+                lp:   leftoverLp.lpAmount.toFixed(6),
+                usdc: leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '',
+            })}`);
         }
         hr();
         console.log('');
@@ -365,6 +367,6 @@ async function main() {
 
 main().catch(err => {
     if (jsonMode) jout({ ok: false, error: err.message });
-    else console.error(`\n  ❌ Unerwarteter Fehler: ${err.message}`);
+    else console.error(`\n  ❌ ${t('cli.lend.unexpected', { error: err.message })}`);
     process.exit(1);
 });

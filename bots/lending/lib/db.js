@@ -19,6 +19,11 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync } from 'fs';
 import { config } from './config.js';
+import { renderNotification } from '../../../lib/notify-render.js';
+import { getLang }            from '../../../lib/i18n.js';
+import { getBotConfig }       from '../../../lib/bot-registry.js';
+
+const { displayName: BOT_DISPLAY_NAME } = getBotConfig('lending');
 import { PATHS }  from '../../../config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -177,6 +182,18 @@ function initSchema(db) {
     // ── Migration: sol_price-Spalte für Analyse (portfolio_history) ──
     try {
         db.exec(`ALTER TABLE portfolio_history ADD COLUMN sol_price REAL`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+
+    // ── Migration: msg_key/msg_params (Mehrsprachigkeit Schritt 5) ──────────
+    // Die lokalen Notifications gehen über bin/export.js direkt ins Dashboard.
+    // Sie tragen seit 2026-08-11 Schlüssel + Daten statt fertigem deutschem Text;
+    // `message` bleibt als Fallback für Altzeilen stehen (keine Migration nötig).
+    // Siehe Core/forge-pub/i18n.md E4 und lib/notify-render.js.
+    try {
+        db.exec(`ALTER TABLE notifications ADD COLUMN msg_key TEXT`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+    try {
+        db.exec(`ALTER TABLE notifications ADD COLUMN msg_params TEXT`);
     } catch { /* Spalte existiert bereits – kein Fehler */ }
 
     // ── Migration: Einstiegs-Anker (entry_value) ────────────────────────────
@@ -570,10 +587,24 @@ export function getTransactionsByProtocol(protocol, sinceMs = 0) {
 
 // ─── Notifications ────────────────────────────────────────────────────────────
 
-export function addNotification({ level = 'info', message }) {
+/**
+ * @param {object}  n
+ * @param {string}  [n.level]    'info' | 'warn' | 'error'
+ * @param {string}  [n.message]  Fertiger Text — nur noch für Altaufrufer.
+ * @param {string}  [n.msgKey]   Katalogschlüssel (bevorzugt, siehe lib/notify-render.js)
+ * @param {object}  [n.params]   Daten für die Platzhalter
+ *
+ * Wird ein Key übergeben, wird der Text beim Anzeigen erzeugt (bin/export.js) —
+ * `message` speichert zusätzlich den in der aktuellen Sprache gerenderten Stand
+ * als Fallback.
+ */
+export function addNotification({ level = 'info', message = null, msgKey = null, params = null }) {
+    const text = message ?? (msgKey
+        ? renderNotification({ msgKey, params, displayName: BOT_DISPLAY_NAME, timestamp: Date.now() }, getLang())
+        : '');
     return getDb()
-        .prepare('INSERT INTO notifications (bot_id, level, message, ts) VALUES (?, ?, ?, ?)')
-        .run(config.botId, level, message, Date.now());
+        .prepare('INSERT INTO notifications (bot_id, level, message, ts, msg_key, msg_params) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(config.botId, level, text, Date.now(), msgKey, params != null ? JSON.stringify(params) : null);
 }
 
 export function getNotifications(limit = 20) {

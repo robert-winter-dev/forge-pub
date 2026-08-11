@@ -2,6 +2,7 @@
   "relays": [
     "wss://nostr.mom",
     "wss://nos.lol",
-    "wss://nostr.bitcoiner.social"
+    "wss://relay.primal.net",
+    "wss://nostr.oxtr.dev"
   ]
 }

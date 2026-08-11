@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE - public: Liquidity Bot</title>
+    <title data-i18n="liq.page_title">FORGE - public: Liquidity Bot</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260329a">
     <link rel="stylesheet" href="css/layout.css?v=20260720a">
@@ -11,6 +11,9 @@
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
     <link rel="stylesheet" href="css/components.css?v=20260805a">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
+    <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
+         damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
+    <script src="../i18n/active.js"></script>
 </head>
 <body>
     <!-- Header -->
@@ -19,7 +22,7 @@
 
             <!-- Spalte 1: Logo -->
             <div class="header-col header-logo">
-                <a href="../" title="Zur Hauptseite">
+                <a href="../" title="Zur Hauptseite" data-i18n-attr="title:liq.to_main">
                     <img src="img/forge-logo.png?v=20260329a" alt="FORGE Logo" class="logo-icon">
                 </a>
                 <h1 id="headerTitle">Liquidity<span class="liquiditybot-title-ext"> Bot</span></h1>
@@ -34,9 +37,9 @@
                 <div class="status-indicator" id="statusIndicator">
                     <span class="status-text">
                         <span class="bot-state-icon" id="botStateIcon"></span>
-                        <span class="last-update offline" id="lastUpdate">Kein Signal</span>
+                        <span class="last-update offline" id="lastUpdate" data-i18n="status.no_signal">Kein Signal</span>
                     </span>
-                    <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                    <button class="notif-bell" id="notifBell" title="Benachrichtigungen" data-i18n-attr="title:notif.title">
                         <span class="notif-envelope" id="notifEnvelope">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M22 6l-10 7L2 6"></path></svg>
                         </span><span class="notif-badge hidden" id="notifBadge">0</span>
@@ -50,14 +53,14 @@
     <!-- Notification Panel -->
     <div class="notif-panel hidden" id="notifPanel">
         <div class="notif-panel-header">
-            <span class="notif-panel-title">Benachrichtigungen</span>
-            <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound + Popups deaktivieren">💰</button>
-            <button class="notif-panel-close" id="notifToastToggle" title="Popups an/aus">🔔</button>
-            <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden">🗑</button>
+            <span class="notif-panel-title" data-i18n="notif.title">Benachrichtigungen</span>
+            <button class="notif-panel-close" id="notifSoundToggle" title="Kasching-Sound + Popups deaktivieren" data-i18n-attr="title:liq.sound_popup_off">💰</button>
+            <button class="notif-panel-close" id="notifToastToggle" title="Popups an/aus" data-i18n-attr="title:liq.popup_toggle">🔔</button>
+            <button class="notif-panel-close" id="notifDeleteUnreadBtn" title="Alle ausblenden" data-i18n-attr="title:notif.hide_all">🗑</button>
             <button class="notif-panel-close" id="notifPanelClose">✕</button>
         </div>
         <div class="notif-panel-body" id="notifPanelBody">
-            <div class="notif-empty">Keine Benachrichtigungen</div>
+            <div class="notif-empty" data-i18n="notif.empty">Keine Benachrichtigungen</div>
         </div>
     </div>
 
@@ -72,9 +75,9 @@
                 <div class="metric">
                     <span class="label has-tooltip"
                           data-tooltip-title="Wallet"
-                          data-tooltip-content="Kompletter Wallet-Bestand inklusive der SOL-Reserve für Transaktionsgebühren – siehe Gesamt für den tatsächlich für Trading verfügbaren Wert.">Wallet</span>
+                          data-tooltip-content="Kompletter Wallet-Bestand inklusive der SOL-Reserve für Transaktionsgebühren – siehe Gesamt für den tatsächlich für Trading verfügbaren Wert." data-i18n-attr="data-tooltip-title:liq.tip.wallet.title,data-tooltip-content:liq.tip.wallet" data-i18n="liq.wallet">Wallet</span>
                     <div class="value-group">
-                        <span class="value clickable-value" id="walletValue" title="Details anzeigen">—</span>
+                        <span class="value clickable-value" id="walletValue" title="Details anzeigen" data-i18n-attr="title:liq.details_show">—</span>
                         <span class="unit">USDC</span>
                     </div>
                 </div>
@@ -85,9 +88,9 @@
                 <div class="metric">
                     <span class="label has-tooltip"
                           data-tooltip-title="Gesamt"
-                          data-tooltip-content="Wallet-Guthaben abzüglich der SOL-Reserve für Transaktionsgebühren (Standard 0,10 SOL), plus LP-Wert und offene Fees. Die Reserve steht nicht als Handelskapital zur Verfügung, bleibt aber weiterhin in deinem Wallet – deshalb ist Gesamt niedriger als Wallet.">Gesamt</span>
+                          data-tooltip-content="Wallet-Guthaben abzüglich der SOL-Reserve für Transaktionsgebühren (Standard 0,10 SOL), plus LP-Wert und offene Fees. Die Reserve steht nicht als Handelskapital zur Verfügung, bleibt aber weiterhin in deinem Wallet – deshalb ist Gesamt niedriger als Wallet." data-i18n-attr="data-tooltip-title:liq.tip.total.title,data-tooltip-content:liq.tip.total" data-i18n="overview.total">Gesamt</span>
                     <div class="value-group">
-                        <span class="value clickable-value" id="gesamtValue" title="Details anzeigen">—</span>
+                        <span class="value clickable-value" id="gesamtValue" title="Details anzeigen" data-i18n-attr="title:liq.details_show">—</span>
                         <span class="unit">USDC</span>
                     </div>
                 </div>
@@ -96,7 +99,7 @@
             <!-- Card 3: PnL (24h) -->
             <section class="card top-card" id="cardPnl24h">
                 <div class="metric">
-                    <span class="label">PnL (24h)</span>
+                    <span class="label" data-i18n="liq.pnl_24h">PnL (24h)</span>
                     <div class="value-group">
                         <span class="value" id="pnl24hValue" data-type="neutral">—</span>
                         <span class="unit" id="pnl24hUnit" data-type="neutral">USDC</span>
@@ -109,7 +112,7 @@
                 <div class="metric">
                     <span class="label has-tooltip"
                           data-tooltip-title="Fee-APR (24h, netto)"
-                          data-tooltip-content="Annualisierte Netto-Rendite auf Basis der letzten 24h: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Durchschnitt aller aktiven Pools.">Fee-APR (24h)</span>
+                          data-tooltip-content="Annualisierte Netto-Rendite auf Basis der letzten 24h: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Durchschnitt aller aktiven Pools." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr_24h.title,data-tooltip-content:liq.tip.fee_apr_24h" data-i18n="liq.fee_apr_24h">Fee-APR (24h)</span>
                     <div class="value-group" id="renditeGroup" data-type="neutral">
                         <span class="value" id="renditeValue">—</span>
                         <span class="unit">%</span>
@@ -130,7 +133,7 @@
                 </h2>
                 <div class="chart-wrapper" style="position:relative">
                     <svg id="volChartSvg" class="portfolio-chart" height="160" style="cursor:pointer"></svg>
-                    <p class="chart-empty-msg" id="volChartEmptyMsg">Volumen-Verlauf wird aufgebaut…</p>
+                    <p class="chart-empty-msg" id="volChartEmptyMsg" data-i18n="liq.volume_building">Volumen-Verlauf wird aufgebaut…</p>
                 </div>
             </section>
 
@@ -141,7 +144,7 @@
                 </h2>
                 <div class="chart-wrapper" style="position:relative">
                     <svg id="feeChartSvg" class="portfolio-chart" height="160" style="cursor:pointer"></svg>
-                    <p class="chart-empty-msg" id="feeChartEmptyMsg">Noch keine Fee-Daten</p>
+                    <p class="chart-empty-msg" id="feeChartEmptyMsg" data-i18n="liq.no_fee_data">Noch keine Fee-Daten</p>
                 </div>
             </section>
 
@@ -152,23 +155,23 @@
 
             <section class="card" id="poolsCard">
                 <h2>
-                    Pool Metriken
+                    <span data-i18n="liq.pool_metrics">Pool Metriken</span>
                     <input type="search" id="poolsSearchInput" placeholder="Pool suchen…" autocomplete="off"
-                           style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle">
+                           style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle" data-i18n-attr="placeholder:liq.search_pool">
                 </h2>
                 <div id="poolsContainer">
-                    <p class="empty-state" id="poolsEmpty">— Keine Pool-Daten verfügbar</p>
+                    <p class="empty-state" id="poolsEmpty" data-i18n="liq.no_pool_data">— Keine Pool-Daten verfügbar</p>
                 </div>
             </section>
 
             <section class="card" id="activePoolsCard">
                 <h2>
-                    Operative Metriken
+                    <span data-i18n="liq.operative_metrics">Operative Metriken</span>
                     <input type="search" id="activePoolsSearchInput" placeholder="Pool suchen…" autocomplete="off"
-                           style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle">
+                           style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle" data-i18n-attr="placeholder:liq.search_pool">
                 </h2>
                 <div id="activePoolsContainer">
-                    <p class="empty-state" id="activePoolsEmpty">— Keine aktiven Positionen</p>
+                    <p class="empty-state" id="activePoolsEmpty" data-i18n="liq.no_active_positions">— Keine aktiven Positionen</p>
                 </div>
             </section>
 
@@ -177,49 +180,49 @@
         <!-- Row 3b: Opportunity-Score (LMB#0116, Phase 1) -->
         <section class="card card-full" id="opportunityScoreCard">
             <h2>
-                Opportunity
+                <span data-i18n="liq.opportunity">Opportunity</span>
                 <input type="search" id="oppSearchInput" placeholder="Pool suchen…" autocomplete="off"
-                       style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle">
+                       style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle" data-i18n-attr="placeholder:liq.search_pool">
                 <select id="oppTypeFilterSelect" class="opp-type-filter-select"></select>
                 <div class="chart-range-btns" id="opportunityScoreTimeframeBtns"></div>
             </h2>
             <div id="opportunityScoreContainer">
-                <p class="empty-state" id="opportunityScoreEmpty">— Keine Score-Daten verfügbar</p>
+                <p class="empty-state" id="opportunityScoreEmpty" data-i18n="liq.no_score_data">— Keine Score-Daten verfügbar</p>
             </div>
         </section>
 
         <!-- Row 4: Statistiken -->
         <section class="card card-full" id="statisticsCard">
-            <h2>Statistiken</h2>
+            <h2 data-i18n="liq.statistics">Statistiken</h2>
             <div class="stats-cards">
 
                 <!-- Heute -->
                 <div class="stat-card">
                     <div class="stat-card-header">
-                        Heute <span class="stat-card-date" id="statDateToday"></span>
+                        <span data-i18n="liq.today">Heute</span> <span class="stat-card-date" id="statDateToday"></span>
                     </div>
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
                               data-tooltip-title="Payed Fees"
-                              data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für heute. Klick zeigt Einzeltransaktionen.">Payed Fees</span>
+                              data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für heute. Klick zeigt Einzeltransaktionen." data-i18n-attr="data-tooltip-title:liq.tip.payed_fees.title,data-tooltip-content:liq.tip.payed_fees" data-i18n="liq.payed_fees">Payed Fees</span>
                         <span class="stat-card-value" id="statPayedFeesToday">—</span>
                     </div>
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
                               data-tooltip-title="Claimed Fees"
-                              data-tooltip-content="Geclaimte LP-Fees heute in USDC (unabhängig von Reinvest/Transfer).">Claimed Fees</span>
+                              data-tooltip-content="Geclaimte LP-Fees heute in USDC (unabhängig von Reinvest/Transfer)." data-i18n-attr="data-tooltip-title:liq.tip.claimed_fees.title,data-tooltip-content:liq.tip.claimed_fees" data-i18n="liq.claimed_fees">Claimed Fees</span>
                         <span class="stat-card-value" id="statClaimedFeesToday">—</span>
                     </div>
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
                               data-tooltip-title="Fee-APR"
-                              data-tooltip-content="Annualisierte Netto-Rendite auf Basis der geclaimten Fees: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Identisch mit dem APR-Wert rechts oben.">Fee-APR</span>
+                              data-tooltip-content="Annualisierte Netto-Rendite auf Basis der geclaimten Fees: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Identisch mit dem APR-Wert rechts oben." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr.title,data-tooltip-content:liq.tip.fee_apr" data-i18n="liq.fee_apr">Fee-APR</span>
                         <span class="stat-card-value" id="statRenditeToday" data-type="neutral">—</span>
                     </div>
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
                               data-tooltip-title="PnL"
-                              data-tooltip-content="Profit &amp; Loss: Veränderung des Gesamtportfoliowerts seit Tagesbeginn (00:00 Uhr). Enthält LP-Wertänderungen, Preisbewegungen und Impermanent Loss – alle Pools zusammen.">PnL</span>
+                              data-tooltip-content="Profit &amp; Loss: Veränderung des Gesamtportfoliowerts seit Tagesbeginn (00:00 Uhr). Enthält LP-Wertänderungen, Preisbewegungen und Impermanent Loss – alle Pools zusammen." data-i18n-attr="data-tooltip-title:liq.tip.pnl.title,data-tooltip-content:liq.tip.pnl" data-i18n="overview.pnl">PnL</span>
                         <span class="stat-card-value" id="statPnlToday" data-type="neutral">—</span>
                     </div>
                 </div>
@@ -227,22 +230,22 @@
                 <!-- Gestern -->
                 <div class="stat-card">
                     <div class="stat-card-header">
-                        Gestern <span class="stat-card-date" id="statDateYesterday"></span>
+                        <span data-i18n="liq.yesterday">Gestern</span> <span class="stat-card-date" id="statDateYesterday"></span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Payed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.payed_fees">Payed Fees</span>
                         <span class="stat-card-value" id="statPayedFeesYesterday">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Claimed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.claimed_fees">Claimed Fees</span>
                         <span class="stat-card-value" id="statClaimedFeesYesterday">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Fee-APR</span>
+                        <span class="stat-card-label" data-i18n="liq.fee_apr">Fee-APR</span>
                         <span class="stat-card-value" id="statRenditeYesterday" data-type="neutral">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">PnL</span>
+                        <span class="stat-card-label" data-i18n="overview.pnl">PnL</span>
                         <span class="stat-card-value" id="statPnlYesterday" data-type="neutral">—</span>
                     </div>
                 </div>
@@ -250,22 +253,22 @@
                 <!-- Monat -->
                 <div class="stat-card">
                     <div class="stat-card-header">
-                        Monat <span class="stat-card-date" id="statDateMonth"></span>
+                        <span data-i18n="liq.month">Monat</span> <span class="stat-card-date" id="statDateMonth"></span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Payed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.payed_fees">Payed Fees</span>
                         <span class="stat-card-value" id="statPayedFeesMonth">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Claimed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.claimed_fees">Claimed Fees</span>
                         <span class="stat-card-value" id="statClaimedFeesMonth">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">Fee-APR</span>
+                        <span class="stat-card-label" data-i18n="liq.fee_apr">Fee-APR</span>
                         <span class="stat-card-value" id="statRenditeMonth" data-type="neutral">—</span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label">PnL</span>
+                        <span class="stat-card-label" data-i18n="overview.pnl">PnL</span>
                         <span class="stat-card-value" id="statPnlMonth" data-type="neutral">—</span>
                     </div>
                 </div>
@@ -275,17 +278,17 @@
 
         <!-- Row 5: Transaktionen -->
         <section class="card card-full" id="txCard">
-            <h2>Letzte 25 Transaktionen</h2>
+            <h2 data-i18n="liq.last_25_tx">Letzte 25 Transaktionen</h2>
             <div class="tx-list" id="txContainer">
                 <div class="tx-header">
-                    <span>Zeit</span>
-                    <span>Typ</span>
-                    <span>Details</span>
-                    <span class="col-r">Betrag</span>
-                    <span class="col-r tx-hash">TX</span>
+                    <span data-i18n="liq.col.time">Zeit</span>
+                    <span data-i18n="liq.col.type">Typ</span>
+                    <span data-i18n="liq.col.details">Details</span>
+                    <span class="col-r" data-i18n="liq.col.amount">Betrag</span>
+                    <span class="col-r tx-hash" data-i18n="liq.col.tx">TX</span>
                 </div>
                 <div id="txList">
-                    <p class="empty-state">— Keine Transaktionen</p>
+                    <p class="empty-state" data-i18n="liq.no_tx">— Keine Transaktionen</p>
                 </div>
             </div>
         </section>
@@ -301,11 +304,11 @@
     <div id="myAprModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="myAprModalTitle">
         <div class="modal-box">
             <div class="modal-header">
-                <h3 id="myAprModalTitle">APR</h3>
-                <button class="modal-close" id="myAprModalClose" aria-label="Schließen">✕</button>
+                <h3 id="myAprModalTitle" data-i18n="liq.apr">APR</h3>
+                <button class="modal-close" id="myAprModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="modal-tabs" id="myAprModalTabs">
-                <button class="modal-tab-btn active" id="myAprTabApr" data-tab="apr">APR</button>
+                <button class="modal-tab-btn active" id="myAprTabApr" data-tab="apr" data-i18n="liq.apr">APR</button>
             </div>
             <!-- Tab 1: APR -->
             <div class="modal-tab-panel active" id="myAprPanelApr">
@@ -321,13 +324,13 @@
     <div id="compositionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="compositionModalTitle">
         <div class="modal-box">
             <div class="modal-header">
-                <h3 id="compositionModalTitle">Coin-Verteilung</h3>
-                <button class="modal-close" id="compositionModalClose" aria-label="Schließen">✕</button>
+                <h3 id="compositionModalTitle" data-i18n="liq.coin_distribution">Coin-Verteilung</h3>
+                <button class="modal-close" id="compositionModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="compositionRangeBtns"></div>
             <div style="position:relative;margin-top:0.5rem">
                 <svg id="compositionChartSvg" width="100%" style="display:none"></svg>
-                <p class="chart-empty" id="compositionChartEmptyMsg" style="display:none">— Keine Daten für diesen Zeitraum</p>
+                <p class="chart-empty" id="compositionChartEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
             </div>
         </div>
     </div>
@@ -336,14 +339,14 @@
     <div id="posValueModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="posValueModalTitle">
         <div class="modal-box">
             <div class="modal-header">
-                <h3 id="posValueModalTitle">Mein Anteil</h3>
-                <button class="modal-close" id="posValueModalClose" aria-label="Schließen">✕</button>
+                <h3 id="posValueModalTitle" data-i18n="liq.my_share">Mein Anteil</h3>
+                <button class="modal-close" id="posValueModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="modal-tab-panel active" id="posValuePanelLp">
                 <div class="chart-range-btns" id="posValueRangeBtns"></div>
                 <div style="position:relative;margin-top:0.5rem">
                     <svg id="posValueChartSvg" width="100%" style="display:none"></svg>
-                    <p class="chart-empty" id="posValueChartEmptyMsg" style="display:none">— Keine Daten für diesen Zeitraum</p>
+                    <p class="chart-empty" id="posValueChartEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
                 </div>
             </div>
         </div>
@@ -353,8 +356,8 @@
     <div id="tvlModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="tvlModalTitle">
         <div class="modal-box">
             <div class="modal-header">
-                <h3 id="tvlModalTitle">TVL</h3>
-                <button class="modal-close" id="tvlModalClose" aria-label="Schließen">✕</button>
+                <h3 id="tvlModalTitle" data-i18n="liq.tvl">TVL</h3>
+                <button class="modal-close" id="tvlModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="tvlRangeBtns"></div>
             <svg id="tvlChartSvg" class="chart-svg"></svg>
@@ -365,8 +368,8 @@
     <div id="volModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="volModalTitle">
         <div class="modal-box">
             <div class="modal-header">
-                <h3 id="volModalTitle">VOL 24h</h3>
-                <button class="modal-close" id="volModalClose" aria-label="Schließen">✕</button>
+                <h3 id="volModalTitle" data-i18n="liq.vol24h">VOL 24h</h3>
+                <button class="modal-close" id="volModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="volModalRangeBtns"></div>
             <svg id="volModalChartSvg" class="chart-svg" style="display:none"></svg>
@@ -377,20 +380,20 @@
     <div id="rangeModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rangeModalTitle">
         <div class="modal-box modal-box-wide">
             <div class="modal-header">
-                <h3 id="rangeModalTitle">Pool</h3>
-                <button class="modal-close" id="rangeModalClose" aria-label="Schließen">✕</button>
+                <h3 id="rangeModalTitle" data-i18n="liq.pool">Pool</h3>
+                <button class="modal-close" id="rangeModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <!-- Tab-Navigation -->
             <div class="modal-tabs" id="rangeModalTabs">
-                <button class="modal-tab-btn active" data-tab="range">Range</button>
-                <button class="modal-tab-btn" data-tab="composition">Coin-Verteilung</button>
+                <button class="modal-tab-btn active" data-tab="range" data-i18n="liq.range">Range</button>
+                <button class="modal-tab-btn" data-tab="composition" data-i18n="liq.coin_distribution">Coin-Verteilung</button>
             </div>
             <!-- Tab: Range -->
             <div class="modal-tab-panel active" id="rangeTabRange">
                 <div class="chart-range-btns" id="rangeChartRangeBtns"></div>
                 <div style="position:relative;margin-top:0.5rem">
                     <svg id="rangeChartSvg" width="100%"></svg>
-                    <p id="rangeChartEmptyMsg" class="chart-empty" style="display:none">— Keine Preis-Daten verfügbar</p>
+                    <p id="rangeChartEmptyMsg" class="chart-empty" style="display:none" data-i18n="liq.no_price_data">— Keine Preis-Daten verfügbar</p>
                 </div>
             </div>
             <!-- Tab: Coin-Verteilung -->
@@ -398,7 +401,7 @@
                 <div class="chart-range-btns" id="rangeCompRangeBtns"></div>
                 <div style="position:relative;margin-top:0.5rem">
                     <svg id="rangeCompChartSvg" width="100%" style="display:none"></svg>
-                    <p class="chart-empty" id="rangeCompEmptyMsg" style="display:none">— Keine Daten für diesen Zeitraum</p>
+                    <p class="chart-empty" id="rangeCompEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
                 </div>
             </div>
 
@@ -409,8 +412,8 @@
     <div id="poolTxModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="poolTxModalTitle">
         <div class="modal-box modal-box-narrow">
             <div class="modal-header">
-                <h3 id="poolTxModalTitle">Transaktionen</h3>
-                <button class="modal-close" id="poolTxModalClose" aria-label="Schließen">✕</button>
+                <h3 id="poolTxModalTitle" data-i18n="liq.tab.transactions">Transaktionen</h3>
+                <button class="modal-close" id="poolTxModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="tx-modal-list" id="poolTxList"></div>
         </div>
@@ -420,12 +423,12 @@
     <div id="investScoreModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="investScoreModalTitle">
         <div class="modal-box pool-chart-modal-box">
             <div class="modal-header">
-                <h3 id="investScoreModalTitle">Opportunity Score</h3>
-                <button class="modal-close" id="investScoreModalClose" aria-label="Schließen">✕</button>
+                <h3 id="investScoreModalTitle" data-i18n="liq.tab.opportunity_score">Opportunity Score</h3>
+                <button class="modal-close" id="investScoreModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="modal-tabs" id="oppScoreModalTabs">
-                <button class="modal-tab-btn active" data-tab="chart">Chart</button>
-                <button class="modal-tab-btn" data-tab="bewertung">Bewertung</button>
+                <button class="modal-tab-btn active" data-tab="chart" data-i18n="liq.tab.chart">Chart</button>
+                <button class="modal-tab-btn" data-tab="bewertung" data-i18n="liq.tab.rating">Bewertung</button>
                 <div id="oppScoreRangeBtns" style="margin-left:auto;display:flex;align-items:flex-end;gap:4px;padding-bottom:4px"></div>
             </div>
             <div class="modal-tab-panel active" id="oppScoreChartPanel" style="min-height:240px"></div>
@@ -437,8 +440,8 @@
     <div id="metricChartModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="metricChartModalTitle">
         <div class="modal-box pool-chart-modal-box">
             <div class="modal-header">
-                <h3 id="metricChartModalTitle">Chart</h3>
-                <button class="modal-close" id="metricChartModalClose" aria-label="Schließen">✕</button>
+                <h3 id="metricChartModalTitle" data-i18n="liq.tab.chart">Chart</h3>
+                <button class="modal-close" id="metricChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div id="metricChartRangeBtns" class="chart-range-btns"></div>
             <div id="metricChartBody" style="min-height:220px"></div>
@@ -458,8 +461,8 @@
          role="dialog" aria-modal="true" aria-labelledby="payedFeesModalTitle">
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="payedFeesModalTitle">TX-Fees</span>
-                <button class="chart-modal-close" id="payedFeesModalClose" aria-label="Schließen">&times;</button>
+                <span class="chart-modal-pair" id="payedFeesModalTitle" data-i18n="liq.tab.tx_fees">TX-Fees</span>
+                <button class="chart-modal-close" id="payedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="wallet-modal-body" id="payedFeesModalBody"></div>
         </div>
@@ -470,8 +473,8 @@
          role="dialog" aria-modal="true" aria-labelledby="claimedFeesModalTitle">
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="claimedFeesModalTitle">Claimed Fees</span>
-                <button class="chart-modal-close" id="claimedFeesModalClose" aria-label="Schließen">&times;</button>
+                <span class="chart-modal-pair" id="claimedFeesModalTitle" data-i18n="liq.claimed_fees">Claimed Fees</span>
+                <button class="chart-modal-close" id="claimedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="wallet-modal-body" id="claimedFeesModalBody"></div>
         </div>
@@ -482,8 +485,8 @@
          role="dialog" aria-modal="true" aria-labelledby="walletDetailModalTitle">
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="walletDetailModalTitle">Wallet (Wert &gt; 0,00 USDC)</span>
-                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen">&times;</button>
+                <span class="chart-modal-pair" id="walletDetailModalTitle" data-i18n="liq.wallet_modal_title">Wallet (Wert &gt; 0,00 USDC)</span>
+                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="wallet-modal-body" id="walletDetailModalBody"></div>
         </div>
@@ -495,8 +498,8 @@
          role="dialog" aria-modal="true" aria-labelledby="portfolioChartModalTitle">
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="portfolioChartModalTitle">Gesamtguthaben</span>
-                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen">&times;</button>
+                <span class="chart-modal-pair" id="portfolioChartModalTitle" data-i18n="overview.total_balance">Gesamtguthaben</span>
+                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="chart-range-btns" id="portfolioChartModalRangeBtns"></div>
             <div class="chart-modal-body">
@@ -510,10 +513,10 @@
          role="dialog" aria-modal="true" aria-labelledby="volChartModalTitle">
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="volChartModalTitle">Volumen</span>
+                <span class="chart-modal-pair" id="volChartModalTitle" data-i18n="liq.volume">Volumen</span>
                 <select class="vol-pool-select" id="volChartModalPoolSelect"></select>
                 <div class="chart-range-btns" id="volChartModalRangeBtns"></div>
-                <button class="chart-modal-close" id="volChartModalClose" aria-label="Schließen">&times;</button>
+                <button class="chart-modal-close" id="volChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="chart-modal-body" style="position:relative">
                 <svg id="volChartModalSvg" class="chart-modal-svg"></svg>
@@ -526,9 +529,9 @@
          role="dialog" aria-modal="true" aria-labelledby="feeChartModalTitle">
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="feeChartModalTitle">Fees (claimed)</span>
+                <span class="chart-modal-pair" id="feeChartModalTitle" data-i18n="liq.fees_claimed">Fees (claimed)</span>
                 <div class="chart-range-btns" id="feeChartModalRangeBtns"></div>
-                <button class="chart-modal-close" id="feeChartModalClose" aria-label="Schließen">&times;</button>
+                <button class="chart-modal-close" id="feeChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
             </div>
             <div class="chart-modal-body" style="position:relative">
                 <svg id="feeChartModalSvg" class="chart-modal-svg"></svg>
@@ -537,6 +540,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260809a"></script>
+    <script type="module" src="js/app.js?v=20260811c"></script>
 </body>
 </html>

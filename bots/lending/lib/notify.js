@@ -2,19 +2,31 @@
  * FORGE Lending – Notifications
  *
  * Sendet alle Notifications an FORGE Nexus (POST /notify).
- * Level wird aus dem Emoji-Präfix erkannt:
- *   🚨  → error  (DB + Telegram)
- *   ⚠️  → warn   (nur DB)
- *   sonst → info  (nur DB)
- * Category wird aus dem Nachrichtentext erkannt.
+ *
+ * ── Mehrsprachigkeit (Schritt 5, Core/forge-pub/i18n.md E4) ─────
+ *
+ * 🔒 Hier steht KEIN Meldungstext mehr, und die Aufrufer formulieren auch keinen:
+ * jede Meldung ist eine benannte Funktion, die einen Katalogschlüssel
+ * (`notify.len.*` in lib/i18n/<lang>.json) plus Daten schickt. Der Satz entsteht
+ * erst beim Anzeigen (lib/notify-render.js).
+ *
+ * Das ist zugleich der zweite Grund für den Umbau: vorher schickten ~20 Stellen in
+ * bin/bot.js ihren Text selbst, und Level, Kategorie sowie Handlungsaufforderung
+ * wurden aus diesem Text ZURÜCKGERATEN (Emoji-Präfix, Regex-Tabelle). Das war
+ * schon ohne Übersetzung fragil — eine Umformulierung konnte still die Einstufung
+ * ändern. Jetzt legt jede Funktion Level und Kategorie ausdrücklich fest.
+ *
+ * Regeln für neue Meldungen: siehe Kopfkommentar von bots/liquidity/lib/notify.js
+ * (gleiches Modell, gleiche Konventionen).
  */
 
 import { existsSync }   from 'fs';
 import path             from 'path';
 import { config }       from './config.js';
 import { getBotConfig } from '../../../lib/bot-registry.js';
-import { FORGE_TZ }     from '../../../core/config.js';
 import { PATHS }        from '../../../config/paths.js';
+import { renderNotification } from '../../../lib/notify-render.js';
+import { getLang }      from '../../../lib/i18n.js';
 
 const NEXUS_URL       = 'http://127.0.0.1:3100';
 const { displayName: BOT_DISPLAY_NAME } = getBotConfig('lending');
@@ -37,98 +49,166 @@ function log(msg) {
     console.log(`[${ts}] ${msg}`);
 }
 
-function detectLevel(text) {
-    if (text.startsWith('🚨')) return 'error';
-    if (text.startsWith('⚠️')) return 'warn';
-    if (text.startsWith('🟢') || text.startsWith('🔴')) return 'lifecycle';
-    return 'info';
-}
-
-function detectCategory(text) {
-    if (/Auto-Exit/i.test(text))       return 'system';
-    if (/Auto-Deploy/i.test(text))     return 'trade';
-    if (/TVL/i.test(text))             return 'system';
-    if (/gestartet|gestoppt/i.test(text)) return 'system';
-    return 'system';
-}
-
-// ─── Handlungsaufforderung ────────────────────────────────────────────────────
+// ─── Handlungsaufforderungen ──────────────────────────────────────────────────
 //
 // 🔒 Regel (Betreiber-Vorgabe 2026-07-30): jede Meldung endet mit einem Satz, der
 // sagt was zu tun ist — auch wenn die Antwort "nichts" ist. Adressat ist kein
 // IT-Fachmann; ein reiner Befund lässt ihn ratlos zurück.
 //
-// Anders als im Liquidity Bot (dort steht jeder Text in lib/notify.js) formulieren
-// hier ~16 Aufrufstellen in bin/bot.js ihren Text selbst. Die Zuordnung sitzt
-// deshalb ZENTRAL hier — nach demselben Muster wie detectLevel/detectCategory,
-// die den Text ebenfalls schon auswerten. Vorteil: neue Aufrufstellen bekommen
-// automatisch mindestens den Level-Default, statt die Aufforderung zu vergessen.
-//
-// Reihenfolge zählt: die erste passende Regel gewinnt, spezifisch vor allgemein.
-const ACTION_RULES = [
-    [/SOL-Reserve kritisch/i,
-        'Bitte Wallet mit mindestens 0,15 SOL aufladen – ohne SOL kann der Bot keine Transaktionen mehr senden.'],
-    [/SOL-Topup fehlgeschlagen/i,
-        'Der Bot versucht es im nächsten Zyklus erneut. Bleibt die Meldung, bitte Wallet manuell mit mindestens 0,15 SOL aufladen.'],
-    [/SOL-Topup ausgeführt/i,
-        'Es ist nichts zu tun, der Bot hat sich selbst versorgt.'],
-    [/Auto-Exit ausgeführt/i,
-        'Es ist nichts zu tun. Das Kapital liegt in deiner Wallet und wird beim nächsten Auto-Deploy neu angelegt.'],
-    [/Auto-Exit .*fehlgeschlagen/i,
-        'Das Kapital liegt noch im Pool. Der Bot versucht es erneut – bleibt die Meldung, bitte im Dashboard prüfen.'],
-    [/Auto-Deploy übersprungen/i,
-        'Es ist nichts zu tun. Das Geld bleibt in der Wallet, bis wieder ein passender Pool verfügbar ist.'],
-    [/Auto-Deploy teilweise fehlgeschlagen/i,
-        'Der nicht investierte Teil bleibt in deiner Wallet. Der Bot versucht es im nächsten Zyklus erneut.'],
-    [/Auto-Deploy abgeschlossen/i,
-        'Es ist nichts zu tun, diese Meldung dient nur zur Information.'],
-    [/TVL (über|unter)/i,
-        'Es ist nichts zu tun. Beobachte den Pool im Dashboard – der Bot steigt selbst aus, wenn die Exit-Schwelle erreicht wird.'],
-    [/gestartet/i,
-        'Es ist nichts zu tun, diese Meldung dient nur zur Information.'],
-    [/gestoppt/i,
-        'Es ist nichts zu tun – der Dienst startet automatisch neu. Bleibt eine Startmeldung aus, bitte den Bot-Status im Dashboard prüfen.'],
-    [/UnhandledRejection/i,
-        'Der Bot läuft weiter. Kommt diese Meldung wiederholt, bitte den Bot neu starten.'],
-];
-
-const ACTION_BY_LEVEL = {
-    error:     'Bitte im Dashboard prüfen. Kommt die Meldung wiederholt, den Bot neu starten.',
-    warn:      'Der Bot versucht es im nächsten Zyklus erneut. Es ist zunächst nichts zu tun.',
-    info:      'Es ist nichts zu tun, diese Meldung dient nur zur Information.',
-    lifecycle: 'Es ist nichts zu tun, diese Meldung dient nur zur Information.',
+// Bis Schritt 5 wurde die passende Aufforderung aus dem Meldungstext ERRATEN
+// (ACTION_RULES-Regex-Tabelle). Jetzt wählt jede Funktion sie ausdrücklich —
+// eine neue Meldung kann die Aufforderung nicht mehr stillschweigend verlieren.
+const ACTION = {
+    fyi:        'notify.act.fyi',
+    retrying:   'notify.act.retrying',
+    inWallet:   'notify.len.act.in_wallet',
+    topUp:      'notify.len.act.top_up',
+    topUpRetry: 'notify.len.act.top_up_retry',
+    selfHealed: 'notify.len.act.self_healed',
+    observePool:'notify.len.act.observe_pool',
+    checkPool:  'notify.len.act.check_pool',
+    waitPool:   'notify.len.act.wait_pool',
+    enablePool: 'notify.len.act.enable_pool',
+    restartHint:'notify.len.act.restart_hint',
+    autoRestart:'notify.len.act.auto_restart',
+    support:    'notify.len.act.support',
+    check:      'notify.len.act.check_dashboard',
 };
 
-function detectAction(text, level) {
-    for (const [pattern, action] of ACTION_RULES) {
-        if (pattern.test(text)) return action;
-    }
-    return ACTION_BY_LEVEL[level] ?? ACTION_BY_LEVEL.info;
-}
+// ─── Interner Sender ──────────────────────────────────────────────────────────
 
-// Kopfzeile (Datum/Uhrzeit + Bot) auf JEDE Nachricht – Pool steht i.d.R. schon im
-// Text selbst (siehe Aufrufer von sendTelegram), Level/Kategorie werden bewusst
-// noch aus dem UNVERÄNDERTEN Text erkannt (detectLevel/-Category prüfen auf
-// Emoji-Präfixe wie 🚨/⚠️, die durch die Kopfzeile sonst verdeckt würden).
-export async function sendTelegram(text) {
-    const level    = detectLevel(text);
-    const category = detectCategory(text);
-    const timestamp = new Intl.DateTimeFormat('de-DE', {
-        timeZone: FORGE_TZ, day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
-    }).format(new Date());
-    const fullText = `📅 ${timestamp} · ${BOT_DISPLAY_NAME}\n${text}\n${detectAction(text, level)}`;
-
+async function send(level, category, msgKey, params = {}) {
+    const message = renderNotification(
+        { msgKey, params, displayName: BOT_DISPLAY_NAME, timestamp: Date.now() },
+        getLang(),
+    );
     try {
         const res = await fetch(`${NEXUS_URL}/notify`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ botId: NEXUS_BOT_ID, displayName: BOT_DISPLAY_NAME, level, category, message: fullText }),
+            body:    JSON.stringify({
+                botId: NEXUS_BOT_ID, displayName: BOT_DISPLAY_NAME,
+                level, category, message, msgKey, params,
+            }),
         });
         if (!res.ok) {
             const err = await res.text();
             log(`[notify] Nexus-Fehler: HTTP ${res.status} – ${err}`);
         }
     } catch (err) {
-        log(`[notify] Nexus nicht erreichbar: ${err.message} | ${level} | ${category}`);
+        log(`[notify] Nexus nicht erreichbar: ${err.message} | ${level} | ${category} | ${msgKey}`);
     }
 }
+
+// ─── Lebenszyklus ─────────────────────────────────────────────────────────────
+
+/** @param {string} pools Kommagetrennte Pool-Labels (kanonische Bezeichner, E11) */
+export async function startup(pools) {
+    if (isUpdateInProgress()) return;
+    await send('lifecycle', 'system', 'notify.len.startup', { bot: config.botDisplayName, pools, _action: ACTION.fyi });
+}
+
+export async function shutdown(signal) {
+    if (isUpdateInProgress()) return;
+    await send('lifecycle', 'system', 'notify.len.shutdown', { bot: config.botDisplayName, signal, _action: ACTION.autoRestart });
+}
+
+export async function unhandledRejection(message) {
+    await send('error', 'system', 'notify.len.unhandled_rejection', { message, _action: ACTION.restartHint });
+}
+
+/**
+ * Wiederholt fehlgeschlagene Hintergrundaufgabe (APY-Abruf, Balance, Position).
+ * @param {{k: string, p?: object}|string} label  Bezeichnung der Aufgabe
+ */
+export async function taskFailed(label, fails, message) {
+    await send('warn', 'system', 'notify.len.task_failed', {
+        label, fails, message, _action: ACTION.retrying,
+    });
+}
+
+// ─── TVL-Schutz ───────────────────────────────────────────────────────────────
+
+export async function tvlAbove(pool, threshold, tvl) {
+    await send('warn', 'system', 'notify.len.tvl_above', { pool, threshold, tvl, _action: ACTION.observePool });
+}
+
+export async function tvlBelow(pool, threshold, tvl) {
+    await send('warn', 'system', 'notify.len.tvl_below', { pool, threshold, tvl, _action: ACTION.observePool });
+}
+
+/** Auto-Exit ausgeführt – Kapital wurde aus dem Protokoll gezogen. */
+export async function autoExitExecuted(pool, { tvl, threshold, amount, tx, sentTo, sentAmount, sentTx, leftoverLp, leftoverUsdc }) {
+    await send('error', 'system', 'notify.len.auto_exit_done', {
+        pool, tvl, threshold, amount, tx,
+        sendLine: sentTo
+            ? { k: 'notify.len.auto_exit_sent', p: { amount: sentAmount, addr: sentTo.slice(0, 8), tx: sentTx } }
+            : undefined,
+        leftoverLine: leftoverLp
+            ? { k: 'notify.len.leftover_lp', p: { lp: leftoverLp, usdc: leftoverUsdc ?? '' } }
+            : undefined,
+        _action: sentTo ? ACTION.fyi : ACTION.inWallet,
+    });
+}
+
+export async function autoExitSendFailed(pool, message) {
+    await send('warn', 'system', 'notify.len.auto_exit_send_failed', { pool, message, _action: ACTION.inWallet });
+}
+
+export async function autoExitFailed(pool, tvl, message) {
+    await send('warn', 'system', 'notify.len.auto_exit_failed', { pool, tvl, message, _action: ACTION.checkPool });
+}
+
+// ─── Auto-Deploy ──────────────────────────────────────────────────────────────
+
+export async function autoDeploySkippedUnavailable(pool) {
+    await send('warn', 'trade', 'notify.len.deploy_skipped_unavailable', { pool, _action: ACTION.waitPool });
+}
+
+export async function autoDeploySkippedDisabled(pool) {
+    await send('warn', 'trade', 'notify.len.deploy_skipped_disabled', { pool, _action: ACTION.enablePool });
+}
+
+export async function autoDeploySkippedNoPools(funds) {
+    await send('warn', 'trade', 'notify.len.deploy_skipped_no_pools', { funds, _action: ACTION.waitPool });
+}
+
+/**
+ * @param {boolean} allOk       false = einzelne Schritte sind fehlgeschlagen
+ * @param {string}  results     Fertige Ergebniszeilen (Pool-IDs + Beträge, keine Prosa)
+ * @param {string|undefined} capped  optionaler Deckelungshinweis
+ */
+export async function autoDeployDone(allOk, { detected, invested, capped, results }) {
+    await send(allOk ? 'info' : 'warn', 'trade',
+        allOk ? 'notify.len.deploy_done' : 'notify.len.deploy_partial', {
+            detected, invested, results,
+            // Leerstring statt undefined: der Hinweis steht MITTEN in der Zeile —
+            // ein fehlender Parameter würde die ganze Zeile verschlucken
+            // (Konvention 1 in notify-render.js gilt zeilenweise).
+            cappedNote: capped ? { k: 'notify.len.deploy_capped', p: { rest: capped } } : '',
+            _action:    allOk ? ACTION.fyi : ACTION.retrying,
+        });
+}
+
+// ─── SOL-Reserve ──────────────────────────────────────────────────────────────
+
+export async function solReserveCritical(sol, usdc) {
+    await send('warn', 'system', 'notify.len.sol_critical', { sol, usdc, _action: ACTION.topUp });
+}
+
+export async function solTopupDone(usdc, sol, before) {
+    await send('info', 'system', 'notify.len.sol_topup_done', { usdc, sol, before, _action: ACTION.selfHealed });
+}
+
+export async function solTopupFailed(message, sol) {
+    await send('error', 'system', 'notify.len.sol_topup_failed', { message, sol, _action: ACTION.topUpRetry });
+}
+
+// ─── Withdraw / Move ──────────────────────────────────────────────────────────
+
+/** LP-Reste nach einem Withdraw – Restake nötig, Support kontaktieren. */
+export async function lpRemainder(pool, message) {
+    await send('warn', 'system', 'notify.len.lp_remainder', { pool, message, _action: ACTION.support });
+}
+
+export { ACTION };

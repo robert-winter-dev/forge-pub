@@ -12,6 +12,10 @@
  */
 
 import Database from 'better-sqlite3';
+import { notificationText } from '../../../lib/notify-render.js';
+import { getBotConfig }     from '../../../lib/bot-registry.js';
+
+const { displayName: BOT_DISPLAY_NAME } = getBotConfig('lending');
 import { dirname, resolve } from 'path';
 import { writeFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -39,6 +43,7 @@ import { displayVersion } from '../../../lib/version.js';
 // (Floor, Median-Glättung, Sanity-Cap, pnl = yield − fees). Siehe FORGE/lib/pnl.js.
 import { adjustForCashflows } from '../../../lib/pnl.js';
 import { PATHS } from '../../../config/paths.js';
+import { writeFrontendBundle } from '../../../lib/i18n.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -725,7 +730,9 @@ export async function runExport() {
         .map(n => ({
             id:      n.id,
             level:   n.level,
-            message: n.message,
+            // Text erst hier erzeugen (Mehrsprachigkeit Schritt 5) – Altzeilen
+            // ohne msg_key fallen auf den gespeicherten Text zurück.
+            message: notificationText({ ...n, timestamp: n.ts, display_name: BOT_DISPLAY_NAME }),
             ts:      n.ts,
         }));
 
@@ -823,6 +830,17 @@ export async function runExport() {
 // ─── CLI-Aufruf ───────────────────────────────────────────────────────────────
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    // Frontend-Sprachbundle (html/i18n/active.js) auffrischen.
+    //
+    // Hier und nicht nur beim Setzen der Sprache: html/ wird bei jedem Update
+    // komplett ersetzt, das generierte Bundle ist danach weg. Ohne diese
+    // Selbstheilung liefe eine englische Installation nach jedem Update wieder
+    // auf Deutsch. Schreibt nur bei echter Änderung — bin/sync.sh rsync't html/
+    // jede Minute. Bewusst VOR dem Export und im CLI-Zweig: ein fehlgeschlagener
+    // Export darf die Sprache nicht mit zurückdrehen, und beim Import dieses
+    // Moduls (runExport wird auch anderswo genutzt) hat es nichts zu suchen.
+    try { writeFrontendBundle(); } catch (err) { console.warn(`export.js: i18n-Bundle nicht aktualisierbar – ${err.message}`); }
+
     try {
         const result = await runExport();
         const posCount = result.positions.length;

@@ -69,6 +69,7 @@ import { fileURLToPath }   from 'url';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { refreshPythPrices } from '../lib/pyth-prices.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
+import { reasonPayload } from '../../../lib/pool-reason.js';
 
 const __bot_dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -339,7 +340,7 @@ async function reconcilePositions(keypair, activePools) {
         // noch etwas zu verhindern (das Kapital steckt schon drin). Befund forge-pub1 2026-07-27.
         if (!isPoolEnabled(pool)) {
             try {
-                setPoolEnabled(pool.id, true, 'Reconciliation: reale On-Chain-Position gefunden trotz Sperre – automatisch freigegeben');
+                setPoolEnabled(pool.id, true, reasonPayload('reason.reconciliation'));
                 console.log(`[bot] Reconciliation: Pool ${pool.id} war gesperrt (enabled=false) – automatisch freigegeben (echte Position vorhanden).`);
             } catch (err) {
                 console.error(`[bot] Reconciliation: setPoolEnabled fehlgeschlagen für ${pool.id}: ${err.message}`);
@@ -388,6 +389,44 @@ async function retryStartupCall(fn, label, attempts = 20, delayMs = 30_000) {
     throw lastErr;
 }
 
+// Marktdaten (TVL/Volumen/APR) für inaktive Pools – unabhängig vom Wallet-Guthaben,
+// deshalb aus der mainLoop-Iteration herausgezogen und auch aus der Einzahlungs-
+// Warteschleife in startup() aufrufbar (Fund forge-pub2 2026-08-11: ohne offene
+// Position lief dieser Code nie, Pool Metriken zeigten dauerhaft "No data").
+async function fetchInactivePoolStats(pools) {
+    for (const pool of pools) {
+        if (!running) break;
+        const now = Date.now();
+        if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
+            try {
+                const adapter = getAdapter(pool);
+                const stats   = await adapter.getPoolStats(pool);
+                const geckoNull = stats.tvlUsd == null || stats.volume24hUsd == null || stats.apr24h == null;
+                const lastKnown = geckoNull
+                    ? db.prepare(`SELECT tvl_usd, volume_24h_usd, apr_24h FROM pool_stats
+                                   WHERE pool_id = ? AND tvl_usd > 0
+                                   ORDER BY recorded_at DESC LIMIT 1`).get(pool.id) ?? null
+                    : null;
+                if (geckoNull) console.warn(`[gecko:${pool.id}] Fallback auf letzten bekannten Wert (gecko nicht verfügbar)`);
+                insertPoolStats(db, {
+                    poolId:           pool.id,
+                    price:            stats.price,
+                    tvlUsd:           stats.tvlUsd           ?? lastKnown?.tvl_usd        ?? 0,
+                    volume24hUsd:     stats.volume24hUsd     ?? lastKnown?.volume_24h_usd ?? 0,
+                    apr24h:           stats.apr24h           ?? lastKnown?.apr_24h        ?? 0,
+                    liquidityInRange: stats.liquidityInRange ?? null,
+                    fees24hUsd:       stats.fees24hUsd       ?? null,
+                });
+                insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
+                lastStatsFetch.set(pool.id, now);
+                console.log(`[bot:${pool.id}] Stats (inaktiv): Preis ${stats.price?.toFixed(2)}, APR ${stats.apr24h?.toFixed(2)}%`);
+            } catch (err) {
+                console.warn(`[bot:${pool.id}] Stats-Abfrage (inaktiv) fehlgeschlagen: ${err.message}`);
+            }
+        }
+    }
+}
+
 async function startup() {
     console.log('[bot] Liquidity startet...');
 
@@ -424,6 +463,23 @@ async function startup() {
             `Der Bot wartet und startet automatisch, sobald Guthaben eingeht.`
         ).catch(() => {});
 
+        // Dashboard-Export + Marktdaten hängen nicht vom Wallet-Guthaben ab. Ohne
+        // dies hier blieb der Export beim Warten auf die erste Einzahlung auf dem
+        // letzten Shutdown-Stand stehen ('offline') und die Pool-Metriken-Tabelle
+        // zeigte dauerhaft "No data", obwohl der Bot normal lief (forge-pub2,
+        // 2026-08-11). Export zuerst (schnell, macht "Bot deaktiviert" sofort
+        // richtig), Stats-Fetch danach (ratenlimitiert, kann bei vielen Pools
+        // mehrere Minuten dauern) – dann bei jedem Poll erneut, analog zum
+        // Zwischen-Export der regulären Zykluspause weiter unten ("In kurzen
+        // Schritten warten").
+        try {
+            await syncDashboard(msg => console.log(`[bot] ${msg}`));
+            lastExport.ts = Date.now();
+        } catch (err) {
+            console.error(`[bot] Export während Wartezeit fehlgeschlagen: ${err.message}`);
+        }
+        await fetchInactivePoolStats(config.pools.all.filter(p => !p.active));
+
         const WAIT_POLL_MS = 5 * 60 * 1000; // 5 Min – Einzahlung muss nicht sekundengenau erkannt werden
         while (solBalance < SOL_MIN_FLOOR) {
             await new Promise(resolve => setTimeout(resolve, WAIT_POLL_MS));
@@ -432,6 +488,13 @@ async function startup() {
             } catch (err) {
                 console.warn(`[bot] SOL-Balance-Check fehlgeschlagen (warte weiter): ${err.message}`);
             }
+            try {
+                await syncDashboard();
+                lastExport.ts = Date.now();
+            } catch (err) {
+                console.warn(`[bot] Export während Wartezeit fehlgeschlagen: ${err.message}`);
+            }
+            await fetchInactivePoolStats(config.pools.all.filter(p => !p.active));
         }
         usdcBalance = await getUsdcBalance(keypair.publicKey).catch(() => usdcBalance);
         console.log(`[bot] Einzahlung erkannt: ${solBalance.toFixed(4)} SOL | ${usdcBalance.toFixed(2)} USDC – Bot startet durch.`);
@@ -3555,38 +3618,7 @@ async function mainLoop() {
         }
 
         // Stats für inaktive Pools (nur Marktdaten, kein Positionsmanagement)
-        const inactivePools = freshPools.all.filter(p => !p.active);
-        for (const pool of inactivePools) {
-            if (!running) break;
-            const now = Date.now();
-            if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
-                try {
-                    const adapter = getAdapter(pool);
-                    const stats   = await adapter.getPoolStats(pool);
-                    const geckoNull = stats.tvlUsd == null || stats.volume24hUsd == null || stats.apr24h == null;
-                    const lastKnown = geckoNull
-                        ? db.prepare(`SELECT tvl_usd, volume_24h_usd, apr_24h FROM pool_stats
-                                       WHERE pool_id = ? AND tvl_usd > 0
-                                       ORDER BY recorded_at DESC LIMIT 1`).get(pool.id) ?? null
-                        : null;
-                    if (geckoNull) console.warn(`[gecko:${pool.id}] Fallback auf letzten bekannten Wert (gecko nicht verfügbar)`);
-                    insertPoolStats(db, {
-                        poolId:           pool.id,
-                        price:            stats.price,
-                        tvlUsd:           stats.tvlUsd           ?? lastKnown?.tvl_usd        ?? 0,
-                        volume24hUsd:     stats.volume24hUsd     ?? lastKnown?.volume_24h_usd ?? 0,
-                        apr24h:           stats.apr24h           ?? lastKnown?.apr_24h        ?? 0,
-                        liquidityInRange: stats.liquidityInRange ?? null,
-                        fees24hUsd:       stats.fees24hUsd       ?? null,
-                    });
-                    insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
-                    lastStatsFetch.set(pool.id, now);
-                    console.log(`[bot:${pool.id}] Stats (inaktiv): Preis ${stats.price?.toFixed(2)}, APR ${stats.apr24h?.toFixed(2)}%`);
-                } catch (err) {
-                    console.warn(`[bot:${pool.id}] Stats-Abfrage (inaktiv) fehlgeschlagen: ${err.message}`);
-                }
-            }
-        }
+        await fetchInactivePoolStats(freshPools.all.filter(p => !p.active));
 
         // SOL-Low-Alert (Cooldown 1×/h lebt jetzt zentral in notify.solLow() selbst,
         // 2026-07-29 — greift dadurch auch für alle anderen solLow()-Aufrufer, siehe dort)

@@ -26,6 +26,7 @@ import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { validatePoolOffers, validatePoolOffer } from '../../liquidity/lib/pool-offers-validator.js';
 import { loadPoolOffers, isRetired } from '../../liquidity/lib/premium-offers-store.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -163,16 +164,16 @@ router.post('/liquidity/pool-offers/:offerId/adopt', async (req, res) => {
         const offers = loadOffersRaw();
         const offer = offers.find(o => o.id === req.params.offerId);
         if (!offer) {
-            return res.status(404).json({ error: 'Offer nicht (mehr) vorhanden – evtl. wurde inzwischen ein neuer Blob geladen' });
+            return res.status(404).json({ error: t('api.offers.not_available') });
         }
 
         const localPools = loadLocalPools();
         if (localPools.some(p => p.id === offer.id)) {
-            return res.status(409).json({ error: 'Pool ist bereits bekannt – Übernahme ist nur für neue Pools vorgesehen' });
+            return res.status(409).json({ error: t('api.offers.pool_known') });
         }
         if (isRetired(offer)) {
             return res.status(422).json({
-                error: 'Dieser Pool wurde vom Datendienst zurückgestuft und kann nicht übernommen werden',
+                error: t('api.offers.retired'),
                 reason: offer.lifecycle?.reason ?? null,
             });
         }
@@ -180,7 +181,7 @@ router.post('/liquidity/pool-offers/:offerId/adopt', async (req, res) => {
         const result = await validatePoolOffer(offer, { localPoolIds: localPools.map(p => p.id) });
         if (result.status !== 'verified') {
             return res.status(422).json({
-                error: `Offer nicht übernehmbar (Status: ${result.status}) – Prüfung gegen die Chain ist fehlgeschlagen oder unvollständig`,
+                error: t('api.offers.not_verified', { status: result.status }),
                 result,
             });
         }

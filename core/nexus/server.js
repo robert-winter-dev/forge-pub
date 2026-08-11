@@ -445,12 +445,20 @@ app.get('/tx/status/:ticketId', (req, res) => {
 //
 // POST /notify  – Zentrale Notification-Weiterleitung
 //
-// Body: { botId, displayName?, level, category, message, context? }
+// Body: { botId, displayName?, level, category, message, context?, msgKey?, params? }
 //   botId:       interner Bezeichner (DB, Dedup, Routing)
 //   displayName: optionaler Anzeigename in Telegram-Nachrichten (z.B. "Liquidity Mining")
 //   level:    'info' | 'warn' | 'error' | 'lifecycle'
 //   category: z.B. 'balance_discrepancy', 'system', 'trade', 'grid'
 //   context:  optionales Objekt mit Forensik-Daten (wird als JSON in DB gespeichert)
+//   msgKey/params: Katalogschlüssel + Daten der Meldung (Mehrsprachigkeit Schritt 5,
+//                  Core/forge-pub/i18n.md E4). Werden ZUSÄTZLICH zum
+//                  gerenderten `message` gespeichert; angezeigt wird daraus erst
+//                  beim Lesen neu gerendert (lib/notify-render.js). Absender ohne
+//                  diese Felder (Skripte, Fremdmelder) funktionieren unverändert.
+//                  Telegram nutzt bewusst den mitgelieferten Text: der Versand
+//                  passiert im selben Moment wie das Erzeugen, die Sprache kann
+//                  zwischen beidem nicht wechseln.
 //
 // Verhalten:
 //   info         → nur in nexus.db speichern, kein Telegram
@@ -470,7 +478,8 @@ const TELEGRAM_WARN_CATEGORIES = new Set([
 ]);
 
 app.post('/notify', async (req, res) => {
-    const { botId, displayName, level, category, message, context, telegramOnly } = req.body ?? {};
+    const { botId, displayName, level, category, message, context, telegramOnly, msgKey, params } = req.body ?? {};
+    const i18n = msgKey ? { msgKey, params: params ?? null } : null;
 
     // Pflichtfelder prüfen
     if (!botId || !level || !category || !message) {
@@ -493,7 +502,7 @@ app.post('/notify', async (req, res) => {
         } else {
             console.log(`[nexus:notify] LIFECYCLE | ${botId} | ${category} | telegram=SUPPRESSED (Wartungsmodus: ${maintenance.reason})`);
         }
-        insertNotification(botId, level, category, message, context ?? null, sentTg, displayName ?? null);
+        insertNotification(botId, level, category, message, context ?? null, sentTg, displayName ?? null, i18n);
         return res.json({ ok: true, sentTelegram: sentTg });
     }
 
@@ -534,7 +543,7 @@ app.post('/notify', async (req, res) => {
     // telegramOnly: Nachricht bewusst nicht in nexus.db (→ keine Dashboard-Glocke),
     // z.B. für den scan-new-pools-Hinweis (nur Telegram-Erinnerung, kein DB-Datensatz).
     if (!telegramOnly) {
-        const rowId = insertNotification(botId, level, category, message, context ?? null, sentTelegram, displayName ?? null);
+        const rowId = insertNotification(botId, level, category, message, context ?? null, sentTelegram, displayName ?? null, i18n);
         if (dedupResult) {
             setDedupRowId(botId, level, category, rowId);
         }

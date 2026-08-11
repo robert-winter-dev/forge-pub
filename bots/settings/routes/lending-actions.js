@@ -39,6 +39,7 @@ import { fileURLToPath } from 'url';
 import { spawn }         from 'node:child_process';
 import Database          from 'better-sqlite3';
 import { PATHS, envFile } from '../../../config/paths.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname      = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT     = PATHS.root;
@@ -95,7 +96,7 @@ function saveTvlGuard(db, protocolId, partial) {
     const merged = { ...DEFAULT_TVL_GUARD, ...(current.tvlGuard ?? {}), ...partial };
     const threshold = Number(merged.thresholdUsd);
     if (merged.enabled && !(threshold > 0)) {
-        throw new Error('TVL-Schwelle muss größer als 0 sein.');
+        throw new Error(t('api.lending.tvl_threshold_positive'));
     }
     current.tvlGuard = {
         enabled:      !!merged.enabled,
@@ -206,7 +207,7 @@ function runCli(scriptRelPath, cliArgs, { timeoutMs = 120_000 } = {}) {
         let stdout = '';
         const timer = setTimeout(() => {
             try { proc.kill('SIGTERM'); } catch {}
-            resolve({ ok: false, error: `Timeout nach ${timeoutMs / 1000}s` });
+            resolve({ ok: false, error: t('api.common.timeout_s', { seconds: timeoutMs / 1000 }) });
         }, timeoutMs);
         // Ohne Handler crasht ein ENOENT (z.B. LB_ROOT fehlt im Fork) den ganzen
         // forge-settings-Prozess über ein unhandled 'error'-Event statt hier
@@ -218,11 +219,11 @@ function runCli(scriptRelPath, cliArgs, { timeoutMs = 120_000 } = {}) {
             const lines    = stdout.split('\n').map(l => l.trim()).filter(Boolean);
             const jsonLine = [...lines].reverse().find(l => l.startsWith('{') && l.endsWith('}'));
             if (!jsonLine) {
-                resolve({ ok: false, error: 'Kein JSON-Output vom Script' });
+                resolve({ ok: false, error: t('api.common.no_json_output') });
                 return;
             }
             try { resolve(JSON.parse(jsonLine)); }
-            catch (err) { resolve({ ok: false, error: `JSON-Parse fehlgeschlagen: ${err.message}` }); }
+            catch (err) { resolve({ ok: false, error: t('api.common.json_parse_failed', { error: err.message }) }); }
         });
     });
 }
@@ -297,10 +298,10 @@ router.get('/config', (req, res) => {
         let disabledReason = null;
         if (!qualified && !active) {
             const reasons = [];
-            if (!enabled)                  reasons.push('Pool deaktiviert');
-            if (apy == null)               reasons.push('keine APY-Daten');
-            else if (apy < apyThreshold)   reasons.push(`APY ${apy.toFixed(2)} % unter ${apyThreshold} %`);
-            disabledReason = reasons.length ? reasons.join(' · ') : 'erfüllt die internen Kriterien nicht';
+            if (!enabled)                  reasons.push(t('api.lending.reason_pool_disabled'));
+            if (apy == null)               reasons.push(t('api.lending.reason_no_apy'));
+            else if (apy < apyThreshold)   reasons.push(t('api.lending.reason_apy_below', { apy: apy.toFixed(2), threshold: apyThreshold }));
+            disabledReason = reasons.length ? reasons.join(' · ') : t('api.lending.reason_criteria');
         }
 
         return {
@@ -319,11 +320,11 @@ router.get('/config', (req, res) => {
 router.put('/tvl-guard/:protocolId', (req, res) => {
     const { protocolId } = req.params;
     if (!PROTOCOL_LABELS[protocolId]) {
-        return res.status(404).json({ ok: false, error: 'Protokoll unbekannt' });
+        return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
     }
     const body = req.body ?? {};
     if (typeof body !== 'object' || Array.isArray(body)) {
-        return res.status(400).json({ ok: false, error: 'Body muss ein Objekt sein' });
+        return res.status(400).json({ ok: false, error: t('api.common.body_object') });
     }
     try {
         const db    = openSettingsDb();
@@ -346,16 +347,16 @@ router.put('/tvl-guard/:protocolId', (req, res) => {
 router.put('/pool-enabled/:protocolId', (req, res) => {
     const { protocolId } = req.params;
     if (!PROTOCOL_LABELS[protocolId]) {
-        return res.status(404).json({ ok: false, error: 'Protokoll unbekannt' });
+        return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
     }
     const { enabled } = req.body ?? {};
     if (typeof enabled !== 'boolean') {
-        return res.status(400).json({ ok: false, error: 'enabled (bool) fehlt' });
+        return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'enabled (bool)' }) });
     }
     if (enabled === false && hasProtocolCapital(protocolId)) {
         return res.status(409).json({
             ok: false,
-            error: 'Protokoll hat eine offene Position (Kapital) – erst auszahlen, dann deaktivieren.',
+            error: t('api.lending.protocol_has_capital'),
         });
     }
 
@@ -396,8 +397,8 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
 /** Manuelles Deposit in ein Protokoll. */
 router.post('/deposit', async (req, res) => {
     const { protocol, amount } = req.body ?? {};
-    if (!protocol) return res.status(400).json({ ok: false, error: 'protocol fehlt' });
-    if (amount == null) return res.status(400).json({ ok: false, error: 'amount fehlt' });
+    if (!protocol) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'protocol' }) });
+    if (amount == null) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'amount' }) });
 
     // Deaktivierte Pools sind für JEDEN Deposit-Weg gesperrt, nicht nur Auto-Deploy.
     {
@@ -405,7 +406,7 @@ router.post('/deposit', async (req, res) => {
         const enabled = loadPoolEnabled(sdb, protocol);
         sdb.close();
         if (!enabled) {
-            return res.status(409).json({ ok: false, error: `Pool "${protocol}" ist deaktiviert – im Settings-UI wieder aktivieren.` });
+            return res.status(409).json({ ok: false, error: t('api.lending.pool_disabled', { protocol }) });
         }
     }
 
@@ -429,8 +430,8 @@ router.post('/deposit', async (req, res) => {
 /** Manueller Withdraw aus einem Protokoll. */
 router.post('/withdraw', async (req, res) => {
     const { protocol, amount } = req.body ?? {};
-    if (!protocol) return res.status(400).json({ ok: false, error: 'protocol fehlt' });
-    if (amount == null) return res.status(400).json({ ok: false, error: 'amount fehlt' });
+    if (!protocol) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'protocol' }) });
+    if (amount == null) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'amount' }) });
 
     // move.lock setzen → Bot deployed während der TX nicht automatisch
     const lockInfo = JSON.stringify({ pid: process.pid, startedAt: Date.now(), reason: 'manual-withdraw' });
@@ -468,7 +469,7 @@ router.get('/auto-deploy', (req, res) => {
 /** Setzt oder löscht den Auto-Deploy-Pause-Flag. */
 router.post('/auto-deploy', (req, res) => {
     const { paused } = req.body ?? {};
-    if (typeof paused !== 'boolean') return res.status(400).json({ ok: false, error: 'paused (bool) fehlt' });
+    if (typeof paused !== 'boolean') return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'paused (bool)' }) });
 
     try {
         if (paused) {

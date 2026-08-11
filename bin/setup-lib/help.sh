@@ -116,6 +116,7 @@ show_help() {
     echo
     echo "  --jupiter-key <key>   $(t HELP_OPT_JUPITER_KEY)"
     echo "  --helius-key <key>    $(t HELP_OPT_HELIUS_KEY)"
+    echo "  --timezone <zone>     $(t HELP_OPT_TIMEZONE)"
     echo "  --lan-ip <ip>         $(t HELP_OPT_LAN_IP)"
     echo "  --nostr-alias <name>  $(t HELP_OPT_NOSTR_ALIAS)"
     echo "  --wallets <liste>     $(t HELP_OPT_WALLETS)"

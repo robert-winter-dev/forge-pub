@@ -31,6 +31,7 @@ import {
     walletPath as premiumWalletPath, walletExists as premiumWalletExists,
     loadPremiumKeypair, getPremiumPublicKey,
 } from '../../../lib/premium-wallet.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -106,8 +107,8 @@ function openSettingsDb() {
 function readEnvField(envPath, field) {
     if (!fs.existsSync(envPath)) return null;
     for (const line of fs.readFileSync(envPath, 'utf8').split('\n')) {
-        const t = line.trim();
-        if (t.startsWith(field + '=')) return t.slice(field.length + 1).trim();
+        const ln = line.trim();
+        if (ln.startsWith(field + '=')) return ln.slice(field.length + 1).trim();
     }
     return null;
 }
@@ -169,12 +170,12 @@ router.get('/liquidity/info', (req, res) => {
 router.put('/liquidity/keypair', (req, res) => {
     const { content } = req.body;
     if (!content || typeof content !== 'string') {
-        return res.status(400).json({ error: 'content fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'content' }) });
     }
 
     const keypairPath = readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
     if (!keypairPath) {
-        return res.status(500).json({ error: 'KEYPAIR_PATH nicht in Liquidity .env konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.env_field_missing', { field: 'KEYPAIR_PATH', bot: 'Liquidity' }) });
     }
 
     const raw = content.trim();
@@ -183,17 +184,17 @@ router.put('/liquidity/keypair', (req, res) => {
         if (raw.startsWith('[')) {
             const arr = JSON.parse(raw);
             if (!Array.isArray(arr) || arr.length !== 64) {
-                return res.status(400).json({ error: 'JSON-Array muss genau 64 Bytes enthalten' });
+                return res.status(400).json({ error: t('api.wallet.json_array_64') });
             }
             bytes = new Uint8Array(arr);
         } else {
             bytes = bs58.decode(raw);
             if (bytes.length !== 64) {
-                return res.status(400).json({ error: `Base58-String ergibt ${bytes.length} Bytes (64 erwartet)` });
+                return res.status(400).json({ error: t('api.wallet.base58_length', { bytes: bytes.length }) });
             }
         }
     } catch (err) {
-        return res.status(400).json({ error: `Ungültiges Format: ${err.message}` });
+        return res.status(400).json({ error: t('api.wallet.invalid_format', { error: err.message }) });
     }
 
     const pubkey = bs58.encode(bytes.slice(32));
@@ -211,7 +212,7 @@ router.put('/liquidity/keypair', (req, res) => {
 router.get('/liquidity/keypair/export', (req, res) => {
     const keypairPath = readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
     const kp          = keypairPath ? loadKeypair(keypairPath) : null;
-    if (!kp) return res.status(404).json({ error: 'Kein Key konfiguriert' });
+    if (!kp) return res.status(404).json({ error: t('api.wallet.no_key') });
 
     const raw = fs.readFileSync(keypairPath, 'utf8').trim();
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -225,7 +226,7 @@ router.get('/liquidity/qr', async (req, res) => {
     const kp          = keypairPath ? loadKeypair(keypairPath) : null;
 
     if (!kp) {
-        return res.status(404).json({ error: 'Kein Keypair konfiguriert' });
+        return res.status(404).json({ error: t('api.wallet.no_keypair') });
     }
 
     try {
@@ -251,7 +252,7 @@ const TOKEN_2022_PROGRAM = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEp
 async function fetchLiquidityBalanceFresh(res) {
     const keypairPath = readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
     const kp          = keypairPath ? loadKeypair(keypairPath) : null;
-    if (!kp) return res.status(500).json({ error: 'Liquidity-Keypair nicht konfiguriert' });
+    if (!kp) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Liquidity' }) });
 
     try {
         const conn   = new Connection(NEXUS_RPC_FRESH, 'confirmed');
@@ -282,7 +283,7 @@ async function fetchLiquidityBalanceFresh(res) {
         res.set('Cache-Control', 'no-store');
         res.json({ sol, usdc, total_usd: null, tokens });
     } catch (err) {
-        res.status(500).json({ error: `Fresh-Balance fehlgeschlagen: ${err.message}` });
+        res.status(500).json({ error: t('api.wallet.fresh_balance_failed', { error: err.message }) });
     }
 }
 
@@ -339,13 +340,13 @@ router.get('/liquidity/addresses', (req, res) => {
 router.post('/liquidity/addresses', (req, res) => {
     const { name, address } = req.body;
     if (!name  || typeof name !== 'string'  || !name.trim()) {
-        return res.status(400).json({ error: 'name fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'name' }) });
     }
     if (!address || typeof address !== 'string') {
-        return res.status(400).json({ error: 'address fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'address' }) });
     }
     if (!isValidSolanaAddress(address.trim())) {
-        return res.status(400).json({ error: 'Ungültige Solana-Adresse' });
+        return res.status(400).json({ error: t('api.common.invalid_address') });
     }
 
     const db     = openSettingsDb();
@@ -360,23 +361,23 @@ router.post('/liquidity/addresses', (req, res) => {
 // ── PUT /liquidity/addresses/:id ───────────────────────────────────────────────────
 router.put('/liquidity/addresses/:id', (req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ungültige ID' });
+    if (!Number.isInteger(id)) return res.status(400).json({ error: t('api.common.invalid_id') });
 
     const { name, address } = req.body;
 
     const db  = openSettingsDb();
     const row = db.prepare(`SELECT id FROM address_book WHERE id = ? AND bot_id = 'liquidity'`).get(id);
-    if (!row) { db.close(); return res.status(404).json({ error: 'Adresse nicht gefunden' }); }
+    if (!row) { db.close(); return res.status(404).json({ error: t('api.common.address_not_found') }); }
 
     if (name !== undefined) {
         if (typeof name !== 'string' || !name.trim()) {
-            db.close(); return res.status(400).json({ error: 'Ungültiger Name' });
+            db.close(); return res.status(400).json({ error: t('api.common.invalid_name') });
         }
         db.prepare(`UPDATE address_book SET name = ? WHERE id = ?`).run(name.trim(), id);
     }
     if (address !== undefined) {
         if (!isValidSolanaAddress(address.trim())) {
-            db.close(); return res.status(400).json({ error: 'Ungültige Solana-Adresse' });
+            db.close(); return res.status(400).json({ error: t('api.common.invalid_address') });
         }
         db.prepare(`UPDATE address_book SET address = ? WHERE id = ?`).run(address.trim(), id);
     }
@@ -418,10 +419,10 @@ function loadTokenRegistry() {
     const mints    = { USDC: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' };
     try {
         const cfg = JSON.parse(fs.readFileSync(WALLET_MONITOR_CONFIG, 'utf8'));
-        for (const t of cfg.tokens ?? []) {
-            if (!t.symbol || !t.mint) continue;
-            mints[t.symbol]    = t.mint;
-            decimals[t.symbol] = t.decimals;
+        for (const tok of cfg.tokens ?? []) {
+            if (!tok.symbol || !tok.mint) continue;
+            mints[tok.symbol]    = tok.mint;
+            decimals[tok.symbol] = tok.decimals;
         }
     } catch (err) {
         console.warn(`[wallet] Token-Registry aus wallet-monitor/config.json nicht ladbar: ${err.message}`);
@@ -455,25 +456,25 @@ router.post('/liquidity/send', async (req, res) => {
 
     // ── Eingabe-Validierung ───────────────────────────────────────────────────
     if (!symbol || typeof symbol !== 'string') {
-        return res.status(400).json({ error: 'symbol fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'symbol' }) });
     }
     if (typeof amount !== 'number' || amount <= 0 || !Number.isFinite(amount)) {
-        return res.status(400).json({ error: 'Ungültiger Betrag' });
+        return res.status(400).json({ error: t('api.common.invalid_amount') });
     }
     if (!isValidSolanaAddress(toAddress)) {
-        return res.status(400).json({ error: 'Ungültige Zieladresse' });
+        return res.status(400).json({ error: t('api.wallet.invalid_target') });
     }
 
     const sym = symbol.trim();
     const { decimals: TOKEN_DECIMALS, mints: TOKEN_MINTS } = loadTokenRegistry();
     if (sym !== 'SOL' && !TOKEN_MINTS[sym]) {
-        return res.status(400).json({ error: `Unbekannter Token: ${sym}` });
+        return res.status(400).json({ error: t('api.wallet.unknown_token', { symbol: sym }) });
     }
 
     // ── Keypair laden ─────────────────────────────────────────────────────────
     const kpData = loadKeypairFull(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
     if (!kpData) {
-        return res.status(500).json({ error: 'Liquidity-Keypair nicht konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Liquidity' }) });
     }
     const wallet     = Keypair.fromSecretKey(kpData.bytes);
     const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
@@ -485,13 +486,13 @@ router.post('/liquidity/send', async (req, res) => {
             const maxSendable     = currentLamports - SOL_RESERVE_LAMPORTS;
 
             if (maxSendable <= 0) {
-                return res.status(400).json({ error: 'Guthaben unter der Reserve (0,1 SOL) – kein Transfer möglich' });
+                return res.status(400).json({ error: t('api.wallet.below_reserve') });
             }
 
             const requestedLamports = Math.round(amount * LAMPORTS_PER_SOL);
             if (requestedLamports > maxSendable) {
                 return res.status(400).json({
-                    error: `Betrag überschreitet das verfügbare Guthaben nach Abzug der Reserve (max. ${(maxSendable / LAMPORTS_PER_SOL).toFixed(4)} SOL)`,
+                    error: t('api.wallet.exceeds_available', { max: (maxSendable / LAMPORTS_PER_SOL).toFixed(4) }),
                 });
             }
 
@@ -542,14 +543,14 @@ router.post('/liquidity/send', async (req, res) => {
                 const ataInfo = await connection.getTokenAccountBalance(sourceATA);
                 onChainRaw = BigInt(ataInfo.value.amount);
             } catch {
-                return res.status(400).json({ error: `Kein ${sym}-Token-Konto auf diesem Wallet gefunden` });
+                return res.status(400).json({ error: t('api.wallet.no_token_account', { symbol: sym }) });
             }
 
             const requestedRaw = BigInt(Math.round(amount * 10 ** decimals));
             const rawAmount    = requestedRaw > onChainRaw ? onChainRaw : requestedRaw;
 
             if (rawAmount === BigInt(0)) {
-                return res.status(400).json({ error: `${sym}-Guthaben auf dem Wallet ist 0` });
+                return res.status(400).json({ error: t('api.wallet.token_balance_zero', { symbol: sym }) });
             }
 
             const data = Buffer.alloc(9);
@@ -601,12 +602,12 @@ router.get('/lending/info', (req, res) => {
 router.put('/lending/keypair', (req, res) => {
     const { content } = req.body;
     if (!content || typeof content !== 'string') {
-        return res.status(400).json({ error: 'content fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'content' }) });
     }
 
     const keypairPath = readEnvField(LENDING_ENV, 'SOLANA_KEYPAIR_PATH');
     if (!keypairPath) {
-        return res.status(500).json({ error: 'SOLANA_KEYPAIR_PATH nicht in LendingBot .env konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.env_field_missing', { field: 'SOLANA_KEYPAIR_PATH', bot: 'LendingBot' }) });
     }
 
     const raw = content.trim();
@@ -615,17 +616,17 @@ router.put('/lending/keypair', (req, res) => {
         if (raw.startsWith('[')) {
             const arr = JSON.parse(raw);
             if (!Array.isArray(arr) || arr.length !== 64) {
-                return res.status(400).json({ error: 'JSON-Array muss genau 64 Bytes enthalten' });
+                return res.status(400).json({ error: t('api.wallet.json_array_64') });
             }
             bytes = new Uint8Array(arr);
         } else {
             bytes = bs58.decode(raw);
             if (bytes.length !== 64) {
-                return res.status(400).json({ error: `Base58-String ergibt ${bytes.length} Bytes (64 erwartet)` });
+                return res.status(400).json({ error: t('api.wallet.base58_length', { bytes: bytes.length }) });
             }
         }
     } catch (err) {
-        return res.status(400).json({ error: `Ungültiges Format: ${err.message}` });
+        return res.status(400).json({ error: t('api.wallet.invalid_format', { error: err.message }) });
     }
 
     const pubkey = bs58.encode(bytes.slice(32));
@@ -642,7 +643,7 @@ router.get('/lending/qr', async (req, res) => {
     const kp          = keypairPath ? loadKeypair(keypairPath) : null;
 
     if (!kp) {
-        return res.status(404).json({ error: 'Kein Keypair konfiguriert' });
+        return res.status(404).json({ error: t('api.wallet.no_keypair') });
     }
 
     try {
@@ -664,7 +665,7 @@ router.get('/lending/qr', async (req, res) => {
 async function fetchLendingBalanceFresh(res) {
     const keypairPath = readEnvField(LENDING_ENV, 'SOLANA_KEYPAIR_PATH');
     const kp          = keypairPath ? loadKeypair(keypairPath) : null;
-    if (!kp) return res.status(500).json({ error: 'Lending-Keypair nicht konfiguriert' });
+    if (!kp) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Lending' }) });
 
     try {
         const conn   = new Connection(NEXUS_RPC_FRESH, 'confirmed');
@@ -694,7 +695,7 @@ async function fetchLendingBalanceFresh(res) {
         res.set('Cache-Control', 'no-store');
         res.json({ sol, usdc, total_usd: null, tokens });
     } catch (err) {
-        res.status(500).json({ error: `Fresh-Balance fehlgeschlagen: ${err.message}` });
+        res.status(500).json({ error: t('api.wallet.fresh_balance_failed', { error: err.message }) });
     }
 }
 
@@ -742,24 +743,24 @@ router.post('/lending/send', async (req, res) => {
     const { symbol, amount, toAddress } = req.body;
 
     if (!symbol || typeof symbol !== 'string') {
-        return res.status(400).json({ error: 'symbol fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'symbol' }) });
     }
     if (typeof amount !== 'number' || amount <= 0 || !Number.isFinite(amount)) {
-        return res.status(400).json({ error: 'Ungültiger Betrag' });
+        return res.status(400).json({ error: t('api.common.invalid_amount') });
     }
     if (!isValidSolanaAddress(toAddress)) {
-        return res.status(400).json({ error: 'Ungültige Zieladresse' });
+        return res.status(400).json({ error: t('api.wallet.invalid_target') });
     }
 
     const sym = symbol.trim();
     const { decimals: TOKEN_DECIMALS, mints: TOKEN_MINTS } = loadTokenRegistry();
     if (sym !== 'SOL' && !TOKEN_MINTS[sym]) {
-        return res.status(400).json({ error: `Unbekannter Token: ${sym}` });
+        return res.status(400).json({ error: t('api.wallet.unknown_token', { symbol: sym }) });
     }
 
     const kpData = loadKeypairFull(LENDING_ENV, 'SOLANA_KEYPAIR_PATH');
     if (!kpData) {
-        return res.status(500).json({ error: 'Lending-Keypair nicht konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Lending' }) });
     }
     const wallet     = Keypair.fromSecretKey(kpData.bytes);
     const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
@@ -770,13 +771,13 @@ router.post('/lending/send', async (req, res) => {
             const maxSendable     = currentLamports - SOL_RESERVE_LAMPORTS;
 
             if (maxSendable <= 0) {
-                return res.status(400).json({ error: 'Guthaben unter der Reserve (0,1 SOL) – kein Transfer möglich' });
+                return res.status(400).json({ error: t('api.wallet.below_reserve') });
             }
 
             const requestedLamports = Math.round(amount * LAMPORTS_PER_SOL);
             if (requestedLamports > maxSendable) {
                 return res.status(400).json({
-                    error: `Betrag überschreitet das verfügbare Guthaben nach Abzug der Reserve (max. ${(maxSendable / LAMPORTS_PER_SOL).toFixed(4)} SOL)`,
+                    error: t('api.wallet.exceeds_available', { max: (maxSendable / LAMPORTS_PER_SOL).toFixed(4) }),
                 });
             }
 
@@ -824,14 +825,14 @@ router.post('/lending/send', async (req, res) => {
                 const ataInfo = await connection.getTokenAccountBalance(sourceATA);
                 onChainRaw = BigInt(ataInfo.value.amount);
             } catch {
-                return res.status(400).json({ error: `Kein ${sym}-Token-Konto auf diesem Wallet gefunden` });
+                return res.status(400).json({ error: t('api.wallet.no_token_account', { symbol: sym }) });
             }
 
             const requestedRaw = BigInt(Math.round(amount * 10 ** decimals));
             const rawAmount    = requestedRaw > onChainRaw ? onChainRaw : requestedRaw;
 
             if (rawAmount === BigInt(0)) {
-                return res.status(400).json({ error: `${sym}-Guthaben auf dem Wallet ist 0` });
+                return res.status(400).json({ error: t('api.wallet.token_balance_zero', { symbol: sym }) });
             }
 
             const data = Buffer.alloc(9);
@@ -872,10 +873,10 @@ let _walletMonitorRunning = false;
 
 router.post('/refresh-monitor', async (req, res) => {
     if (_walletMonitorRunning) {
-        return res.status(409).json({ error: 'Wallet-Monitor läuft bereits' });
+        return res.status(409).json({ error: t('api.wallet.monitor_running') });
     }
     if (!fs.existsSync(WALLET_MONITOR_SCRIPT)) {
-        return res.status(500).json({ error: `monitor.js nicht gefunden: ${WALLET_MONITOR_SCRIPT}` });
+        return res.status(500).json({ error: t('api.wallet.monitor_not_found', { path: WALLET_MONITOR_SCRIPT }) });
     }
 
     _walletMonitorRunning = true;
@@ -891,12 +892,12 @@ router.post('/refresh-monitor', async (req, res) => {
             child.stderr.on('data', d => { stderr += d.toString(); });
             const killTimer = setTimeout(() => {
                 child.kill('SIGTERM');
-                reject(new Error(`Timeout nach ${WALLET_MONITOR_TIMEOUT_MS}ms`));
+                reject(new Error(t('api.common.timeout_ms', { ms: WALLET_MONITOR_TIMEOUT_MS })));
             }, WALLET_MONITOR_TIMEOUT_MS);
             child.on('exit', code => {
                 clearTimeout(killTimer);
                 if (code === 0) resolve();
-                else reject(new Error(`monitor.js exit ${code}: ${stderr.slice(-300)}`));
+                else reject(new Error(t('api.wallet.monitor_exit', { code, stderr: stderr.slice(-300) })));
             });
             child.on('error', err => {
                 clearTimeout(killTimer);
@@ -938,12 +939,12 @@ router.get('/premium/info', (req, res) => {
 router.put('/premium/keypair', (req, res) => {
     const { content } = req.body;
     if (!content || typeof content !== 'string') {
-        return res.status(400).json({ error: 'content fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'content' }) });
     }
 
     const keypairPath = premiumWalletPath();
     if (!keypairPath) {
-        return res.status(500).json({ error: 'PREMIUM_WALLET_PATH nicht konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.premium_path_missing') });
     }
 
     const raw = content.trim();
@@ -952,17 +953,17 @@ router.put('/premium/keypair', (req, res) => {
         if (raw.startsWith('[')) {
             const arr = JSON.parse(raw);
             if (!Array.isArray(arr) || arr.length !== 64) {
-                return res.status(400).json({ error: 'JSON-Array muss genau 64 Bytes enthalten' });
+                return res.status(400).json({ error: t('api.wallet.json_array_64') });
             }
             bytes = new Uint8Array(arr);
         } else {
             bytes = bs58.decode(raw);
             if (bytes.length !== 64) {
-                return res.status(400).json({ error: `Base58-String ergibt ${bytes.length} Bytes (64 erwartet)` });
+                return res.status(400).json({ error: t('api.wallet.base58_length', { bytes: bytes.length }) });
             }
         }
     } catch (err) {
-        return res.status(400).json({ error: `Ungültiges Format: ${err.message}` });
+        return res.status(400).json({ error: t('api.wallet.invalid_format', { error: err.message }) });
     }
 
     const pubkey = bs58.encode(bytes.slice(32));
@@ -974,7 +975,7 @@ router.put('/premium/keypair', (req, res) => {
 router.get('/premium/keypair/export', (req, res) => {
     const keypairPath = premiumWalletPath();
     if (!keypairPath || !premiumWalletExists()) {
-        return res.status(404).json({ error: 'Kein Key konfiguriert' });
+        return res.status(404).json({ error: t('api.wallet.no_key') });
     }
     const pubkey = getPremiumPublicKey();
     const raw    = fs.readFileSync(keypairPath, 'utf8').trim();
@@ -986,7 +987,7 @@ router.get('/premium/keypair/export', (req, res) => {
 // ── GET /premium/qr ─────────────────────────────────────────────────────────────────
 router.get('/premium/qr', async (req, res) => {
     const pubkey = premiumWalletExists() ? getPremiumPublicKey() : null;
-    if (!pubkey) return res.status(404).json({ error: 'Kein Keypair konfiguriert' });
+    if (!pubkey) return res.status(404).json({ error: t('api.wallet.no_keypair') });
 
     try {
         const svg = await QRCode.toString(pubkey, {
@@ -1049,23 +1050,23 @@ router.post('/premium/send', async (req, res) => {
     const { symbol, amount, toAddress } = req.body;
 
     if (!symbol || typeof symbol !== 'string') {
-        return res.status(400).json({ error: 'symbol fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'symbol' }) });
     }
     if (typeof amount !== 'number' || amount <= 0 || !Number.isFinite(amount)) {
-        return res.status(400).json({ error: 'Ungültiger Betrag' });
+        return res.status(400).json({ error: t('api.common.invalid_amount') });
     }
     if (!isValidSolanaAddress(toAddress)) {
-        return res.status(400).json({ error: 'Ungültige Zieladresse' });
+        return res.status(400).json({ error: t('api.wallet.invalid_target') });
     }
 
     const sym = symbol.trim();
     if (sym !== 'SOL' && sym !== 'USDC') {
-        return res.status(400).json({ error: `Unbekannter Token: ${sym}` });
+        return res.status(400).json({ error: t('api.wallet.unknown_token', { symbol: sym }) });
     }
 
     const wallet = loadPremiumKeypair();
     if (!wallet) {
-        return res.status(500).json({ error: 'Premium-Keypair nicht konfiguriert' });
+        return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Premium' }) });
     }
     const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
 
@@ -1075,13 +1076,13 @@ router.post('/premium/send', async (req, res) => {
             const maxSendable     = currentLamports - SOL_RESERVE_LAMPORTS;
 
             if (maxSendable <= 0) {
-                return res.status(400).json({ error: 'Guthaben unter der Reserve (0,1 SOL) – kein Transfer möglich' });
+                return res.status(400).json({ error: t('api.wallet.below_reserve') });
             }
 
             const requestedLamports = Math.round(amount * LAMPORTS_PER_SOL);
             if (requestedLamports > maxSendable) {
                 return res.status(400).json({
-                    error: `Betrag überschreitet das verfügbare Guthaben nach Abzug der Reserve (max. ${(maxSendable / LAMPORTS_PER_SOL).toFixed(4)} SOL)`,
+                    error: t('api.wallet.exceeds_available', { max: (maxSendable / LAMPORTS_PER_SOL).toFixed(4) }),
                 });
             }
 
@@ -1129,14 +1130,14 @@ router.post('/premium/send', async (req, res) => {
                 const ataInfo = await connection.getTokenAccountBalance(sourceATA);
                 onChainRaw = BigInt(ataInfo.value.amount);
             } catch {
-                return res.status(400).json({ error: `Kein ${sym}-Token-Konto auf diesem Wallet gefunden` });
+                return res.status(400).json({ error: t('api.wallet.no_token_account', { symbol: sym }) });
             }
 
             const requestedRaw = BigInt(Math.round(amount * 10 ** decimals));
             const rawAmount    = requestedRaw > onChainRaw ? onChainRaw : requestedRaw;
 
             if (rawAmount === BigInt(0)) {
-                return res.status(400).json({ error: `${sym}-Guthaben auf dem Wallet ist 0` });
+                return res.status(400).json({ error: t('api.wallet.token_balance_zero', { symbol: sym }) });
             }
 
             const data = Buffer.alloc(9);

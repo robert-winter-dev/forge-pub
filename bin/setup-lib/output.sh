@@ -8,7 +8,11 @@ _log() { [[ -n "$LOG_FILE" ]] && printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 say()    { [[ "$QUIET" -eq 0 ]] && echo -e "$1" || true; _log "$1"; }
 c_ok()   { say "  $1"; }
 c_warn() { say "  $1"; }
-c_err()  { echo -e "  $1" >&2; _log "ERROR: $1"; }
+# ✗-Präfix seit i18n Schritt 7: sprachunabhängiger Fehlermarker. Der Update-Tab
+# (bots/settings/html/js/updates.js parseSetupPhases) erkennt Fehlzeilen daran —
+# vorher hing die Erkennung an deutschen Wörtern und wäre auf einer englischen
+# Installation still ausgefallen. Zusätzlich Farbenblind-tauglich (Symbol statt Farbe).
+c_err()  { echo -e "  ✗ $1" >&2; _log "ERROR: $1"; }
 # Bewusst KEINE nachlaufenden Striche mehr (Fund 2026-08-07, echter Testlauf auf
 # forge-pub2): eine feste Gesamtbreite mit Auffüll-Strichen sah bei einer ersten
 # Umsetzung noch uneinheitlich aus. Statt die Breite weiter zu justieren, bleibt

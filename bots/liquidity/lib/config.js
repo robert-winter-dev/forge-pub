@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import Database      from 'better-sqlite3';
 import { applyPoolDynamics } from './db.js';
 import { PATHS, envFile } from '../../../config/paths.js';
+import { reasonPayload, renderReason } from '../../../lib/pool-reason.js';
 
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB   = PATHS.settingsDb;
@@ -272,8 +273,12 @@ export function isPoolEnabled(pool) {
  *   durchsuchen muss (Fund 2026-08-06: forge-pub1 PUMP/SOL wirkte ohne diesen Kontext wie
  *   ein stiller Bug). Jeder Aufrufer sollte seinen Grund benennen; ohne Angabe wird ein
  *   generischer Platzhalter geschrieben statt den Aufruf abzulehnen.
+ *   🔴 Kein Klartext: der Grund wird als Katalog-Key + Parameter über
+ *   `reasonPayload()` übergeben und erst beim Lesen in die aktive Sprache gerendert
+ *   (lib/pool-reason.js) — der Text entsteht beim Schreiben, die Sprache kann bis zum
+ *   Anzeigen wechseln. Altbestand in Klartext bleibt unverändert lesbar.
  */
-export function setPoolEnabled(poolId, enabled, reason = 'Grund nicht protokolliert') {
+export function setPoolEnabled(poolId, enabled, reason = reasonPayload('reason.not_logged')) {
     let changed;
     const bdb = openBotDbRW();
     try {
@@ -289,7 +294,7 @@ export function setPoolEnabled(poolId, enabled, reason = 'Grund nicht protokolli
         bdb.close();
     }
     if (!changed) return false;
-    console.log(`[config] Pool ${poolId} ${enabled ? 'freigegeben' : 'gesperrt'} (enabled=${enabled}, Grund: ${reason})`);
+    console.log(`[config] Pool ${poolId} ${enabled ? 'freigegeben' : 'gesperrt'} (enabled=${enabled}, Grund: ${renderReason(reason)})`);
     return true;
 }
 

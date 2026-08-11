@@ -168,8 +168,8 @@ export async function checkRankingExitWarning(pool, db) {
     const lpUsd = snap?.lp_value_usd ?? 0;
 
     _rkWarnSentAt.set(pool.id, Date.now());
-    const label = `Ranking-Exit (${streakHours}h / ${badDurationHours}h)`;
-    console.log(`[ranking-exit:${pool.id}] Vorwarnung: ${label}, LP ${lpUsd.toFixed(2)} USDC`);
+    const label = { k: 'notify.liq.rm_label_ranking', p: { streak: streakHours, bad: badDurationHours } };
+    console.log(`[ranking-exit:${pool.id}] Vorwarnung: Ranking-Exit (${streakHours}h / ${badDurationHours}h), LP ${lpUsd.toFixed(2)} USDC`);
     await notify.rmWarning(pool, label, lpUsd).catch(() => {});
 }
 
@@ -293,7 +293,7 @@ export async function executeRankingExit(pool, db) {
         updateRkExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         console.log(`[ranking-exit:${pool.id}] Ranking-Exit vollständig abgeschlossen.`);
         const snap = db.prepare(`SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(pool.id);
-        await notify.rmExecuted(pool, `Ranking-Exit (${streakHours.toFixed(1)}h / ${badDurationHours}h)`, snap?.lp_value_usd ?? 0).catch(() => {});
+        await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_ranking', p: { streak: streakHours.toFixed(1), bad: badDurationHours } }, snap?.lp_value_usd ?? 0).catch(() => {});
 
     } catch (err) {
         console.error(`[ranking-exit:${pool.id}] FEHLER: ${err.message}`);

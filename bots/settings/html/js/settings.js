@@ -5,11 +5,13 @@
  * Navigation erfolgt über das Hamburger-Menü (nav.js).
  */
 
-import { initNav, initFooter } from '/forge/js/nav.js?v=20260808h';
+import { initNav, initFooter } from '/forge/js/nav.js?v=20260811b';
 import { showToast }           from '/forge/js/toast.js?v=20260722b';
 import { initMessageBell }     from '/forge/js/message-bell.js?v=20260809a';
-import * as liquidity          from './bot-liquidity.js?v=20260808b';
-import * as lending            from './bot-lending.js?v=20260807a';
+import { t as tr }             from '/forge/js/i18n.js?v=20260811a';
+import * as liquidity          from './bot-liquidity.js?v=20260811c';
+import * as lending            from './bot-lending.js?v=20260811a';
+import { initForgeTooltip }    from './tooltip.js?v=20260811a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────
 const HASH_TO_SVC = {
@@ -58,6 +60,34 @@ initFooter({ botName: `Settings: ${FULL_NAME[activeSvc] ?? activeSvc}` });
 
 // Brief-Icon → Message Center. Settings ist immer LAN-only (Port 3200) → requireLan:false.
 initMessageBell({ requireLan: false });
+
+// ── Sprachwahl ────────────────────────────────────────────────────────────────
+// Setzt die Sprache der GANZEN Installation (Backend + Oberfläche), nicht nur die
+// des Browsers – siehe Core/forge-pub/i18n.md (E3). Danach ein
+// Reload, weil der Katalog synchron im <head> geladen wird (html/i18n/active.js):
+// ein Umschalten ohne Neuladen würde nur die Hälfte der Oberfläche erwischen.
+const _langSelect = document.getElementById('langSelect');
+if (_langSelect) {
+    fetch('/api/i18n')
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.lang) _langSelect.value = d.lang; })
+        .catch(() => {});
+
+    _langSelect.addEventListener('change', async () => {
+        const lang = _langSelect.value;
+        try {
+            const r = await fetch('/api/i18n', {
+                method:  'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ lang }),
+            });
+            if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
+            location.reload();
+        } catch (err) {
+            showToast(tr('set.language_failed', 'Sprache konnte nicht gesetzt werden: {error}', { error: err.message }), 'error');
+        }
+    });
+}
 
 let botStatuses  = {};
 let botCapital   = {};
@@ -111,15 +141,15 @@ function renderSimplePanel(panel, svcId) {
     panel.innerHTML = `
         <div class="settings-card">
             <div class="settings-row">
-                <span class="settings-label">Status</span>
+                <span class="settings-label">${tr('set.status', 'Status')}</span>
                 <span class="status-badge ${_badgeClass(status)}" id="simple-badge-${svcId}">${status}</span>
             </div>
             <div class="settings-row">
-                <span class="settings-label">Service</span>
+                <span class="settings-label">${tr('set.service', 'Service')}</span>
                 <div class="bot-actions">
-                    <button class="btn btn-start"   data-action="start">▶ Start</button>
-                    <button class="btn btn-stop"    data-action="stop">■ Stop</button>
-                    <button class="btn btn-restart" data-action="restart">↺ Restart</button>
+                    <button class="btn btn-start"   data-action="start">${tr('set.start', '▶ Start')}</button>
+                    <button class="btn btn-stop"    data-action="stop">${tr('set.stop', '■ Stop')}</button>
+                    <button class="btn btn-restart" data-action="restart">${tr('set.restart', '↺ Restart')}</button>
                 </div>
             </div>
             <div class="task-status" id="simple-task-${svcId}"></div>
@@ -173,7 +203,7 @@ async function pollTask(taskId, svc, action, taskEl) {
                 return;
             }
             if (task.status === 'failed') {
-                const msg = task.error ?? 'Unbekannter Fehler';
+                const msg = task.error ?? tr('set.unknown_error', 'Unbekannter Fehler');
                 if (taskEl) { taskEl.textContent = `❌ ${msg}`; taskEl.className = 'task-status failed'; }
                 showToast(`${svc}: ${msg}`, 'error');
                 return;
@@ -181,7 +211,7 @@ async function pollTask(taskId, svc, action, taskEl) {
             if (taskEl) { taskEl.textContent = `${task.status}…`; }
         } catch { /* ignorieren */ }
     }
-    if (taskEl) { taskEl.textContent = 'Timeout – kein Ergebnis'; taskEl.className = 'task-status failed'; }
+    if (taskEl) { taskEl.textContent = tr('set.timeout_no_result', 'Timeout – kein Ergebnis'); taskEl.className = 'task-status failed'; }
 }
 
 // ── Bot-Status laden (alle 30s) ───────────────────────────────────────────────
@@ -212,42 +242,6 @@ async function loadBots() {
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// ── Forge Tooltip (identisch zu SGB) ─────────────────────────────────────────
-function initForgeTooltip() {
-    const tip = document.getElementById('forgeTooltip');
-    if (!tip) return;
-    const title = document.getElementById('forgeTooltipTitle');
-    const body  = document.getElementById('forgeTooltipBody');
-
-    function position(e) {
-        const m = 14;
-        let x = e.clientX + m;
-        let y = e.clientY - tip.offsetHeight - m;
-        if (y < 0)                                         y = e.clientY + m;
-        if (y + tip.offsetHeight > window.innerHeight)     y = window.innerHeight - tip.offsetHeight - m;
-        if (x + tip.offsetWidth  > window.innerWidth)      x = e.clientX - tip.offsetWidth - m;
-        tip.style.left = `${x}px`;
-        tip.style.top  = `${y}px`;
-    }
-
-    document.addEventListener('mouseover', e => {
-        const el = e.target.closest('[data-tooltip-title]');
-        if (!el) return;
-        title.textContent = el.dataset.tooltipTitle ?? '';
-        body.innerHTML    = (el.dataset.tooltipContent ?? '').replace(/\||\\n|\n/g, '<br>');
-        tip.style.display = 'block';
-        position(e);
-    });
-    document.addEventListener('mousemove', e => {
-        if (tip.style.display === 'none') return;
-        if (!e.target.closest('[data-tooltip-title]')) { tip.style.display = 'none'; return; }
-        position(e);
-    });
-    document.addEventListener('mouseout', e => {
-        if (!e.relatedTarget?.closest('[data-tooltip-title]')) tip.style.display = 'none';
-    });
-}
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 mountBot(activeSvc);

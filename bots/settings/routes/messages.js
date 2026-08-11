@@ -33,6 +33,8 @@
  */
 
 import { Router } from 'express';
+import { t } from '../../../lib/i18n.js';
+import { notificationText } from '../../../lib/notify-render.js';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { listBots } from '../../../lib/bot-registry.js';
@@ -90,7 +92,7 @@ async function proxyJson(req, res, path, init = {}) {
         res.set('Content-Type', upstream.headers.get('content-type') ?? 'application/json');
         res.send(body);
     } catch (err) {
-        res.status(503).json({ error: `Premium-Dienst nicht erreichbar: ${err.message}` });
+        res.status(503).json({ error: t('msg.support.premium_unreachable', { error: err.message }) });
     }
 }
 
@@ -106,7 +108,7 @@ async function proxyNexusJson(req, res, path, init = {}) {
         res.set('Content-Type', upstream.headers.get('content-type') ?? 'application/json');
         res.send(body);
     } catch (err) {
-        res.status(503).json({ error: `Nexus nicht erreichbar: ${err.message}` });
+        res.status(503).json({ error: t('msg.support.nexus_unreachable', { error: err.message }) });
     }
 }
 
@@ -157,10 +159,10 @@ router.get('/support/stream', async (req, res) => {
             signal: AbortSignal.timeout ? undefined : undefined, // kein Timeout, Stream ist absichtlich langlebig
         });
     } catch (err) {
-        return res.status(503).json({ error: `Premium-Dienst nicht erreichbar: ${err.message}` });
+        return res.status(503).json({ error: t('msg.support.premium_unreachable', { error: err.message }) });
     }
     if (!upstream.ok || !upstream.body) {
-        return res.status(502).json({ error: 'Premium-Dienst lieferte keinen Stream' });
+        return res.status(502).json({ error: t('msg.support.premium_no_stream') });
     }
 
     res.set({
@@ -252,15 +254,24 @@ router.get('/system', (req, res) => {
             .all().some(c => c.name === 'read');
         const readCol = hasRead ? 'read' : '0';
 
+        // msg_key/msg_params kamen mit der Mehrsprachigkeit dazu (Schritt 5,
+        // Migration beim Nexus-Start) – gleiche Vorsichtsmaßnahme wie oben.
+        const hasI18n  = db.prepare('PRAGMA table_info(notifications)')
+            .all().some(c => c.name === 'msg_key');
+        const i18nCols = hasI18n ? 'msg_key, msg_params' : 'NULL AS msg_key, NULL AS msg_params';
+
         const rows = db.prepare(`
-            SELECT id, timestamp, bot_id AS botId, level, category, message, context, ${nameCol} AS displayName, ${readCol} AS read
+            SELECT id, timestamp, bot_id AS botId, level, category, message, context, ${nameCol} AS displayName, ${readCol} AS read, ${i18nCols}
             FROM notifications
             ${whereSql}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
         `).all(...params, PER_PAGE, (page - 1) * PER_PAGE)
-          .map(({ context, ...r }) => ({
+          // notificationText() entscheidet als EINZIGE Stelle, ob aus msg_key neu
+          // gerendert oder der gespeicherte Text genommen wird (Altbestand).
+          .map(({ context, msg_key, msg_params, ...r }) => ({
               ...r,
+              message: notificationText({ ...r, msg_key, msg_params }),
               read:    !!r.read,
               botName: resolveBotName(r.displayName, r.botId),
               pool:    extractPool(context, r.message),

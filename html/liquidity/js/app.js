@@ -5,7 +5,11 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260809b';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260811b';
+// Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
+// durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
+// Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
+import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
 import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260609a';
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
@@ -55,18 +59,18 @@ function displayPairOf(data, pair) {
 
 function fmtUsdc(v, dec = 2) {
     if (v == null) return '—';
-    return Number(v).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    return Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec });
 }
 
 function fmtPct(v, dec = 2) {
     if (v == null) return '—';
     const sign = v >= 0 ? '+' : '';
-    return sign + Number(v).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u202f%';
+    return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u202f%';
 }
 
 function fmtPrice(v, dec = 4) {
     if (v == null) return '—';
-    return Number(v).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    return Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec });
 }
 
 function fmtTs(ts) {
@@ -113,9 +117,9 @@ function setVal(id, val) {
 // im Tooltip.
 function buildTxAmountTooltip(tx, solPrice = 0) {
     if (tx.amountA == null && tx.amountB == null) return null;
-    const tokens = tx.pool?.split('/') ?? ['Token A', 'Token B'];
-    const tokenA = tokens[0] ?? 'Token A';
-    const tokenB = tokens[1] ?? 'Token B';
+    const tokens = tx.pool?.split('/') ?? [tr('liq.token_a', 'Token A'), tr('liq.token_b', 'Token B')];
+    const tokenA = tokens[0] ?? tr('liq.token_a', 'Token A');
+    const tokenB = tokens[1] ?? tr('liq.token_b', 'Token B');
     const time   = fmtTs(tx.createdAt);
     const rows   = [];
 
@@ -147,8 +151,8 @@ function buildTxAmountTooltip(tx, solPrice = 0) {
     return `<table>` +
         `<tr style="border-bottom:1px solid rgba(255,255,255,0.15)">` +
         `<td style="font-weight:600">Zeit</td>` +
-        `<td style="font-weight:600">Coin</td>` +
-        `<td style="font-weight:600;text-align:right;padding-left:12px">Menge</td>` +
+        `<td style="font-weight:600">${tr('liq.coin', 'Coin')}</td>` +
+        `<td style="font-weight:600;text-align:right;padding-left:12px">${tr('liq.quantity', 'Menge')}</td>` +
         `</tr>` +
         rows.join('') +
         totalRow +
@@ -183,7 +187,7 @@ function renderRendite(p) {
     const apr = p.avgApr ?? null;
     if (apr != null) {
         const sign = apr >= 0 ? '+' : '−';
-        renditeEl.textContent = sign + Math.abs(apr).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        renditeEl.textContent = sign + Math.abs(apr).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         if (renditeGroup) renditeGroup.setAttribute('data-type', apr > 0 ? 'positive' : 'neutral');
     } else {
         renditeEl.textContent = '0,00';
@@ -300,9 +304,9 @@ let _oppTypeFilter = localStorage.getItem(LS_OPP_TYPE_FILTER) ?? 'all';
 // für die ausführlichen Erklärtexte je Typ.
 const POOL_TYPE_LABELS = {
     rebalance_free: 'Rebalance-frei',
-    volatil_1:      'Gering volatil',
-    volatil_2:      'Mittel volatil',
-    volatil_3:      'Stark volatil',
+    volatil_1:      tr('liq.vol_low', 'Gering volatil'),
+    volatil_2:      tr('liq.vol_mid', 'Mittel volatil'),
+    volatil_3:      tr('liq.vol_high', 'Stark volatil'),
     rwa:            'RWA',
 };
 
@@ -414,7 +418,7 @@ function hasPremiumAccess(data) {
 /** "(noch aktiviert bis 19:00 Uhr)" – Text neben der Krone im Header. */
 function formatPremiumCountdown(coveredUntilMs) {
     const tz = window.FORGE_TZ || 'Europe/Berlin';
-    const timeStr = new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(coveredUntilMs));
+    const timeStr = new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(coveredUntilMs));
     return `(noch aktiviert bis ${timeStr} Uhr)`;
 }
 
@@ -537,11 +541,11 @@ function renderOpportunityScores(data) {
         // "nicht erreichbar" (wäre reine Wiederholung), bleibt aber für "wartet
         // auf erste Daten" bestehen.
         const headline = unreachable
-            ? 'Premium Service derzeit nicht erreichbar'
+            ? tr('liq.premium_service_unreachable', 'Premium Service derzeit nicht erreichbar')
             : waitingForFirstDelivery
-                ? 'Premium Service wird aktiviert'
-                : 'Premium Service inaktiv';
-        const note = waitingForFirstDelivery ? 'Warte auf den ersten Premium-Datensatz.' : '';
+                ? tr('liq.premium_service_activating', 'Premium Service wird aktiviert')
+                : tr('liq.premium_service_inactive', 'Premium Service inaktiv');
+        const note = waitingForFirstDelivery ? tr('liq.premium_waiting', 'Warte auf den ersten Premium-Datensatz.') : '';
 
         let panel = container.querySelector('.premium-locked-panel');
         if (!panel) {
@@ -592,7 +596,7 @@ function renderOpportunityScores(data) {
     const typeFilterInput = document.getElementById('oppTypeFilterSelect');
     if (typeFilterInput && !typeFilterInput.dataset.bound) {
         typeFilterInput.dataset.bound = '1';
-        typeFilterInput.innerHTML = `<option value="all">Alle Typen</option>`
+        typeFilterInput.innerHTML = `<option value="all">${tr('liq.all_types', 'Alle Typen')}</option>`
             + Object.entries(POOL_TYPE_LABELS).map(([val, label]) =>
                 `<option value="${val}">${escHtml(label)}</option>`).join('');
         typeFilterInput.addEventListener('change', () => {
@@ -672,16 +676,16 @@ function renderOpportunityScores(data) {
         const entry = scores[poolId]?.[tf];
         if (!entry || entry.reason !== 'insufficient_data') return null;
         const missing = Math.max(0, OPP_MIN_SAMPLES - (entry.sampleCount ?? 0));
-        if (missing <= 0) return 'Daten sollten mit dem nächsten Bot-Zyklus verfügbar sein.';
+        if (missing <= 0) return tr('liq.premium_next_cycle', 'Daten sollten mit dem nächsten Bot-Zyklus verfügbar sein.');
         const etaDate = new Date(Date.now() + missing * OPP_STATS_INTERVAL_MS);
-        const etaDateStr = etaDate.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        const etaTimeStr = etaDate.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+        const etaDateStr = etaDate.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' });
+        const etaTimeStr = etaDate.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
         return `Messpunkte sind verfügbar:\n${etaDateStr} ab ca. ${etaTimeStr} Uhr`;
     };
     const _noDataSpan = (poolId, tf) => {
         const tip = _dataEtaTooltip(poolId, tf);
         return tip
-            ? `<span class="has-tooltip text-muted" data-tooltip-title="Noch keine Daten" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">no data</span>`
+            ? `<span class="has-tooltip text-muted" data-tooltip-title="${tr('liq.no_data_yet', 'Noch keine Daten')}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">no data</span>`
             : '<span class="text-muted" style="font-size:0.78em">no data</span>';
     };
     // Ab hier ist scoreSource garantiert nicht 'none' (früher Return oben) — ein
@@ -694,7 +698,7 @@ function renderOpportunityScores(data) {
     const fmtSlope   = (v, unit, poolId, tf, label) => {
         if (v == null) return _noDataSpan(poolId, tf);
         const sign = v >= 0 ? '+' : '−';
-        return `${sign}${Number(Math.abs(v)).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${unit} ${slopeArrow(v)}`;
+        return `${sign}${Number(Math.abs(v)).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${unit} ${slopeArrow(v)}`;
     };
     const fmtPnl = v => {
         if (v == null) return '<span class="text-muted" style="font-size:0.78em">no data</span>';
@@ -714,20 +718,20 @@ function renderOpportunityScores(data) {
 
     // Pool-Filter Select (inline im Header, idempotent)
     const poolFilterSel = `<select id="oppPoolFilterSelect" style="background:#0f172a;border:none;color:#f1f5f9;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.05em;text-transform:uppercase">
-        <option value="all"${_oppPoolFilter==='all'?' selected':''}>Alle Pools</option>
-        <option value="active"${_oppPoolFilter==='active'?' selected':''}>Aktive Pools</option>
-        <option value="inactive"${_oppPoolFilter==='inactive'?' selected':''}>Inaktive Pools</option>
+        <option value="all"${_oppPoolFilter==='all'?' selected':''}>${tr('liq.all_pools', 'Alle Pools')}</option>
+        <option value="active"${_oppPoolFilter==='active'?' selected':''}>${tr('liq.active_pools', 'Aktive Pools')}</option>
+        <option value="inactive"${_oppPoolFilter==='inactive'?' selected':''}>${tr('liq.inactive_pools', 'Inaktive Pools')}</option>
     </select>`;
 
     // PnL-Modus Select (hist = historischer PnL aktiver Pools, sim = Modell-Prognose aller Pools)
     // Tooltip liegt auf dem Wrapper-Span (Select-Hover ist browserübergreifend unzuverlässig).
-    const _pnlSelTitle   = _oppPnlMode === 'sim' ? 'Simulation – Zukunft' : 'Historischer PnL – norm. 1.000 USDC';
+    const _pnlSelTitle   = _oppPnlMode === 'sim' ? tr('liq.simulation_future', 'Simulation – Zukunft') : tr('liq.hist_pnl_norm', 'Historischer PnL – norm. 1.000 USDC');
     const _pnlSelContent = _oppPnlMode === 'sim'
-        ? 'Modell-Prognose des Netto-Ertrags für alle Pools im gewählten Zeitfenster. Berechnet aus aktuellem Fee-APR, Volatilität und geschätztem Impermanent Loss nach Range-Advisor-Modell. Basis: 1.000 USDC. Bezieht sich auf die Zukunft — kein realer Messwert, kursiv dargestellt.'
+        ? tr('liq.np_forecast', 'Modell-Prognose des Netto-Ertrags für alle Pools im gewählten Zeitfenster. Berechnet aus aktuellem Fee-APR, Volatilität und geschätztem Impermanent Loss nach Range-Advisor-Modell. Basis: 1.000 USDC. Bezieht sich auf die Zukunft — kein realer Messwert, kursiv dargestellt.')
         : 'Tatsächlich realisierter PnL im gewählten Zeitfenster (Kurswert + Fees − Kapitalflüsse, cashflow-bereinigt), normiert auf 1.000 USDC Poolkapital. Alle Pools sind so direkt vergleichbar.\n\nAktive Pools: realer PnL, auf 1.000 USDC normiert.\nInaktive Pools: Schätzwert aus Modell (kursiv) — für eine Zukunftsprognose den Modus "PnL sim" wählen.';
     const pnlModeSel = `<span class="has-tooltip" data-tooltip-title="${_pnlSelTitle}" data-tooltip-content="${escHtml(_pnlSelContent)}" data-tooltip-type="text" style="display:inline-flex"><select id="oppPnlModeSelect" style="background:#0f172a;border:none;color:#94a3b8;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.05em;text-transform:uppercase">
-        <option value="hist"${_oppPnlMode==='hist'?' selected':''}>PnL hist.</option>
-        <option value="sim"${_oppPnlMode==='sim'?' selected':''}>PnL sim</option>
+        <option value="hist"${_oppPnlMode==='hist'?' selected':''}>${tr('liq.pnl_hist', 'PnL hist.')}</option>
+        <option value="sim"${_oppPnlMode==='sim'?' selected':''}>${tr('liq.pnl_sim', 'PnL sim')}</option>
     </select></span>`;
 
     const _chartIconSvg = `<svg width="14" height="12" viewBox="0 0 14 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -759,7 +763,7 @@ function renderOpportunityScores(data) {
             const specific = cats.filter(c => c !== 'Layer-1-Coin');
             if (specific.length > 0) cats = specific;
         }
-        return (cats.length ? `${cats.join(' / ')}\n` : '') + 'Klick für mehr Infos.';
+        return (cats.length ? `${cats.join(' / ')}\n` : '') + tr('liq.more_info', 'Klick für mehr Infos.');
     };
 
     // Sortier-Button-Helper
@@ -774,12 +778,12 @@ function renderOpportunityScores(data) {
     table.innerHTML = `
         <div class="opp-score-header">
             <span style="display:flex;align-items:center;gap:3px">${poolFilterSel}</span>
-            <span class="has-tooltip" data-tooltip-title="Chart" data-tooltip-content="Öffnet den Kurs- und Fee-Chart des Pools." data-tooltip-type="text" style="cursor:default">Chart</span>
-            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('score','Nach Score sortieren')}<span class="has-tooltip" data-tooltip-title="Opportunity Score" data-tooltip-content="Bewertet die aktuelle Investitionsqualität eines Pools (0–100). Hauptfaktor ist der PnL (verdient die Position gerade Geld), dazu Fee-APR, Preis-Trend und APR-Entwicklung. Die Gewichtung hängt vom Pool-Typ ab (z. B. zählt bei stabilen/RWA-Pools der PnL stärker, bei sehr volatilen die Fee-APR). Details je Pool im Score-Klick → Reiter „Bewertung“.\n\n≥ 60 – Gute Bedingungen, Position lohnt sich.\n35–59 – Neutrale Lage, abwarten.\n&lt; 35 – Ungünstige Bedingungen, kein Invest." data-tooltip-type="text" style="cursor:default">Score</span></span>
-            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('pnl','Nach PnL sortieren')}${pnlModeSel}</span>
-            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('priceSlope','Nach Preis-Slope sortieren')}Preis-Slope</span>
-            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('aprSlope','Nach APR-Slope sortieren')}APR-Slope</span>
-            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('tvlSlope','Nach TVL-Slope sortieren')}TVL-Slope</span>
+            <span class="has-tooltip" data-tooltip-title="Chart" data-tooltip-content="${tr('liq.tip.chart_open', 'Öffnet den Kurs- und Fee-Chart des Pools.')}" data-tooltip-type="text" style="cursor:default">Chart</span>
+            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('score',tr('liq.sort_score', 'Nach Score sortieren'))}<span class="has-tooltip" data-tooltip-title="Opportunity Score" data-tooltip-content="${tr('liq.tip.opp_score', 'Bewertet die aktuelle Investitionsqualität eines Pools (0–100). Hauptfaktor ist der PnL (verdient die Position gerade Geld), dazu Fee-APR, Preis-Trend und APR-Entwicklung. Die Gewichtung hängt vom Pool-Typ ab (z. B. zählt bei stabilen/RWA-Pools der PnL stärker, bei sehr volatilen die Fee-APR). Details je Pool im Score-Klick → Reiter „Bewertung“.\\n\\n≥ 60 – Gute Bedingungen, Position lohnt sich.\\n35–59 – Neutrale Lage, abwarten.\\n&lt; 35 – Ungünstige Bedingungen, kein Invest.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.score', 'Score')}</span></span>
+            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('pnl',tr('liq.sort_pnl', 'Nach PnL sortieren'))}${pnlModeSel}</span>
+            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('priceSlope',tr('liq.sort_price_slope', 'Nach Preis-Slope sortieren'))}Preis-Slope</span>
+            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('aprSlope',tr('liq.sort_apr_slope', 'Nach APR-Slope sortieren'))}APR-Slope</span>
+            <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('tvlSlope',tr('liq.sort_tvl_slope', 'Nach TVL-Slope sortieren'))}TVL-Slope</span>
         </div>
         <div class="opp-score-body">
         ${rows.map(({pool, s}) => {
@@ -788,10 +792,10 @@ function renderOpportunityScores(data) {
             const isGated   = pool.investScore?.hopiumVeto === true;
             const isNewPool = (pool.investScore?.dataDays ?? 1) === 0;
             const badge   = isGated
-                ? ` <span class="has-tooltip" data-tooltip-title="Höheres Risiko!" data-tooltip-content="6h-Signal: Kurs fällt stärker als −0,5 %/h und der Fee-APR sinkt gleichzeitig. Score auf max. 40 gedeckelt." data-tooltip-type="text" style="cursor:default">🚫</span>`
+                ? ` <span class="has-tooltip" data-tooltip-title="${tr('liq.higher_risk', 'Höheres Risiko!')}" data-tooltip-content="${tr('liq.tip.signal_6h', '6h-Signal: Kurs fällt stärker als −0,5 %/h und der Fee-APR sinkt gleichzeitig. Score auf max. 40 gedeckelt.')}" data-tooltip-type="text" style="cursor:default">🚫</span>`
                 : '';
             const newPoolBadge = isNewPool
-                ? ` <span class="has-tooltip" data-tooltip-title="Wenig Daten" data-tooltip-content="Pool erst seit weniger als 24h beobachtet – Zeitfenster-Werte sind noch identisch." data-tooltip-type="text" style="color:#f59e0b;font-size:0.75em;cursor:default">&#60;24h</span>`
+                ? ` <span class="has-tooltip" data-tooltip-title="${tr('liq.few_data', 'Wenig Daten')}" data-tooltip-content="${tr('liq.pool_young', 'Pool erst seit weniger als 24h beobachtet – Zeitfenster-Werte sind noch identisch.')}" data-tooltip-type="text" style="color:#f59e0b;font-size:0.75em;cursor:default">&#60;24h</span>`
                 : '';
             const pnlVal   = pool.pnlWindows?.[_oppDisplayTf] ?? null;
             const capital  = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
@@ -802,16 +806,16 @@ function renderOpportunityScores(data) {
             // NP auf kurzen Fenstern für volatile Pools unzuverlässig (Richtungstreffer < 50%).
             const _npUnreliable = Array.isArray(pool.npUnreliableWindows)
                 && pool.npUnreliableWindows.includes(_oppDisplayTf);
-            const _unreliableNote = ' ⚠ Für volatile Pools auf kurzen Zeitfenstern (6h/12h) unzuverlässig'
+            const _unreliableNote = tr('liq.unreliable_note', ' ⚠ Für volatile Pools auf kurzen Zeitfenstern (6h/12h) unzuverlässig')
                 + ' — Richtungstreffer unter 50 %. Nur als grobe Tendenz lesen.';
             if (_oppPnlMode === 'sim') {
                 const npRaw    = pool.npWindows?.[_oppDisplayTf] ?? null;
                 const npScaled = npRaw != null ? (capital != null ? npRaw * capital / 1000 : npRaw) : null;
                 const simBasis = capital != null
-                    ? `Basis: ${capital.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC (aktuelles Poolkapital).`
+                    ? `Basis: ${capital.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC (aktuelles Poolkapital).`
                     : `Basis: 1.000 USDC (kein aktives Kapital).`;
                 const simTip = `Simulierter Netto-Ertrag aus Fee-APR und geschätztem Impermanent Loss nach Range-Advisor-Modell. ${simBasis} Kein realer Messwert.${_npUnreliable ? _unreliableNote : ''}`;
-                const simTitle = `Simulierter Ertrag ${tfLabel}${_npUnreliable ? ' (unzuverlässig)' : ''}`;
+                const simTitle = `Simulierter Ertrag ${tfLabel}${_npUnreliable ? tr('liq.unreliable_short', ' (unzuverlässig)') : ''}`;
                 const _simIcon = `<span style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;${_npUnreliable ? '' : 'visibility:hidden'}">⚠</span>`;
                 pnlCell = npScaled != null
                     ? `<span>${_simIcon}<span class="has-tooltip" data-tooltip-title="${simTitle}" data-tooltip-content="${escHtml(simTip)}" data-tooltip-type="text" style="cursor:default">${fmtNp(npScaled)}</span></span>`
@@ -820,9 +824,9 @@ function renderOpportunityScores(data) {
                 // hist-Modus: echter PnL für aktive Pools, npWindows-Schätzung für inaktive.
                 if (pnlVal != null) {
                     const pnlNorm = capital != null ? pnlVal / capital * 1000 : pnlVal;
-                    const _capStr = capital != null ? capital.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDC' : 'unbekannt';
+                    const _capStr = capital != null ? capital.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDC' : 'unbekannt';
                     const _pnlTip = `Realer PnL ${tfLabel}, normiert auf 1.000 USDC Poolkapital (aktuelles Kapital: ${_capStr}). Klicken für PnL-Verlauf.`;
-                    pnlCell = `<span><span style="display:inline-block;min-width:1.2em;text-align:center;visibility:hidden">⚠</span><span class="${mc} has-tooltip" data-tooltip-title="Realer PnL (norm. 1.000 USDC)" data-tooltip-content="${escHtml(_pnlTip)}" data-tooltip-type="text" data-pool-id="${pid}" data-metric="pnl" data-metric-tf="${escHtml(_oppDisplayTf)}" style="cursor:pointer">${fmtPnl(pnlNorm)}</span></span>`;
+                    pnlCell = `<span><span style="display:inline-block;min-width:1.2em;text-align:center;visibility:hidden">⚠</span><span class="${mc} has-tooltip" data-tooltip-title="${tr('liq.real_pnl_norm', 'Realer PnL (norm. 1.000 USDC)')}" data-tooltip-content="${escHtml(_pnlTip)}" data-tooltip-type="text" data-pool-id="${pid}" data-metric="pnl" data-metric-tf="${escHtml(_oppDisplayTf)}" style="cursor:pointer">${fmtPnl(pnlNorm)}</span></span>`;
                 } else {
                     // Kein realer PnL (Pool inaktiv oder zu jung) → NP-Schätzung als Fallback.
                     const npRaw    = pool.npWindows?.[_oppDisplayTf] ?? null;
@@ -832,12 +836,12 @@ function renderOpportunityScores(data) {
                         const availMs  = pool.positionOpenedAt
                             ? pool.positionOpenedAt + (_tfMs[_oppDisplayTf] ?? 24) * 3_600_000 : null;
                         const availStr = availMs
-                            ? new Date(availMs).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) : null;
+                            ? new Date(availMs).toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' }) : null;
                         npTip = `Schätzwert auf Basis historischer Pool-Daten — realer PnL noch nicht verfügbar (Pool zu jung für dieses Zeitfenster${availStr ? `, voraussichtlich ab ${availStr} Uhr` : ''}). Kursiv dargestellt.`;
                     } else {
                         npTip = `Auf historischen Pool-Daten (Fee-APR, Volatilität, Preisverlauf) basierender Schätzwert. Basis: 1.000 USDC. Kein realer PnL-Messwert — kursiv dargestellt.`;
                     }
-                    const npTitle = `Schätzung (hist. Daten)${_npUnreliable ? ' – unzuverlässig' : ''}`;
+                    const npTitle = `Schätzung (hist. Daten)${_npUnreliable ? tr('liq.unreliable_dash', ' – unzuverlässig') : ''}`;
                     const _npIcon = `<span style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;${_npUnreliable ? '' : 'visibility:hidden'}">⚠</span>`;
                     pnlCell = npScaled != null
                         ? `<span>${_npIcon}<span class="has-tooltip" data-tooltip-title="${npTitle}" data-tooltip-content="${escHtml(npTip + (_npUnreliable ? _unreliableNote : ''))}" data-tooltip-type="text" style="cursor:default">${fmtNp(npScaled)}</span></span>`
@@ -846,13 +850,13 @@ function renderOpportunityScores(data) {
             }
             return `
         <div class="opp-score-row${rowCls}">
-            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="Token-Infos anzeigen">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${badge}${newPoolBadge}</span></span>
+            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${badge}${newPoolBadge}</span></span>
             <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg}</button>
-            <span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="Opportunity Score – Details anzeigen"'}>${fmtInvestScore(pool)}</span>
+            <span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span>
             ${pnlCell}
-            <span class="opp-col-detail ${mc} ${slopeCls(s?.priceSlopePct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${s?.priceSlopePct == null ? '' : ' title="Preis-Slope-Verlauf anzeigen"'}>${fmtSlope(s?.priceSlopePct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
-            <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="APR-Slope-Verlauf anzeigen"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
-            <span class="opp-col-detail ${mc} ${slopeCls(s?.tvlSlopePct)}"  data-pool-id="${pid}" data-metric="tvlSlope"   style="cursor:pointer"${s?.tvlSlopePct == null ? '' : ' title="TVL-Slope-Verlauf anzeigen"'}>${fmtSlope(s?.tvlSlopePct, '%/h', pool.id, _oppDisplayTf, 'TVL-Slope')}</span>
+            <span class="opp-col-detail ${mc} ${slopeCls(s?.priceSlopePct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${s?.priceSlopePct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.priceSlopePct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
+            <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="' + tr('liq.slope_apr_show', 'APR-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
+            <span class="opp-col-detail ${mc} ${slopeCls(s?.tvlSlopePct)}"  data-pool-id="${pid}" data-metric="tvlSlope"   style="cursor:pointer"${s?.tvlSlopePct == null ? '' : ' title="' + tr('liq.slope_tvl_show', 'TVL-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.tvlSlopePct, '%/h', pool.id, _oppDisplayTf, 'TVL-Slope')}</span>
         </div>`;
         }).join('')}
         </div>`;
@@ -904,14 +908,11 @@ function renderPools(data) {
     const emptyMsg  = $('poolsEmpty');
     if (!container) return;
 
+    // Anders als bei den positionsbezogenen Boxen (Operative Metriken, Fees, Volumen)
+    // ist "keine offene Position" hier KEIN Grund, die Tabelle auszublenden — Pool
+    // Metriken listet die verfügbaren Pools, nicht Positionen. Ohne offene Position
+    // greift stattdessen einfach der Default-Filter "Alle Pools" (_poolsVisFilter).
     const poolsSearchInputEl = document.getElementById('poolsSearchInput');
-    if (data?.botActive === false) {
-        if (emptyMsg) emptyMsg.style.display = 'none';
-        if (poolsSearchInputEl) poolsSearchInputEl.style.display = 'none';
-        container.querySelector('.pools-overview-table')?.remove();
-        renderBotInactivePanel(container, 'Keine offenen Positionen');
-        return;
-    }
     if (poolsSearchInputEl) poolsSearchInputEl.style.display = '';
     removeBotInactivePanel(container);
 
@@ -984,9 +985,9 @@ function renderPools(data) {
     if (pools.length === 0) {
         if (emptyMsg) emptyMsg.style.display = 'none';
         const poolFilterSelectEmpty = `<select id="poolsVisFilterSelect" class="pools-header-select" data-stop-tooltip="1">
-            <option value="all"${_poolsVisFilter==='all'?' selected':''}>Alle Pools</option>
-            <option value="active"${_poolsVisFilter==='active'?' selected':''}>Aktive Pools</option>
-            <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>Inaktive Pools</option>
+            <option value="all"${_poolsVisFilter==='all'?' selected':''}>${tr('liq.all_pools', 'Alle Pools')}</option>
+            <option value="active"${_poolsVisFilter==='active'?' selected':''}>${tr('liq.active_pools', 'Aktive Pools')}</option>
+            <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>${tr('liq.inactive_pools', 'Inaktive Pools')}</option>
         </select>`;
         table.style.maxHeight = '';
         table.style.overflowY = '';
@@ -997,7 +998,7 @@ function renderPools(data) {
                 <span class="col-r"></span>
                 <span class="col-r"></span>
             </div>
-            <div class="pools-overview-empty-row">Keine Pool-Daten verfügbar</div>`;
+            <div class="pools-overview-empty-row">${tr('liq.no_pool_data_plain', 'Keine Pool-Daten verfügbar')}</div>`;
         const visSelEmpty = table.querySelector('#poolsVisFilterSelect');
         if (visSelEmpty) {
             visSelEmpty.addEventListener('mousedown', e => e.stopPropagation());
@@ -1016,15 +1017,15 @@ function renderPools(data) {
 
     // Pool-Filter-Select (Alle / Aktive) im Pool-Spaltenkopf
     const poolFilterSelect = `<select id="poolsVisFilterSelect" class="pools-header-select" data-stop-tooltip="1">
-        <option value="all"${_poolsVisFilter==='all'?' selected':''}>Alle Pools</option>
-        <option value="active"${_poolsVisFilter==='active'?' selected':''}>Aktive Pools</option>
-        <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>Inaktive Pools</option>
+        <option value="all"${_poolsVisFilter==='all'?' selected':''}>${tr('liq.all_pools', 'Alle Pools')}</option>
+        <option value="active"${_poolsVisFilter==='active'?' selected':''}>${tr('liq.active_pools', 'Aktive Pools')}</option>
+        <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>${tr('liq.inactive_pools', 'Inaktive Pools')}</option>
     </select>`;
 
     // APR-Spalten-Select (24h vs. 1h) im Header
     const aprSelect = `<select id="poolsAprTfSelect" class="pools-header-select" data-stop-tooltip="1">
-        <option value="24h"${_poolsAprTf==='24h'?' selected':''}>APR 24h</option>
-        <option value="1h"${_poolsAprTf==='1h'?' selected':''}>APR 1H</option>
+        <option value="24h"${_poolsAprTf==='24h'?' selected':''}>${tr('liq.apr_24h', 'APR 24h')}</option>
+        <option value="1h"${_poolsAprTf==='1h'?' selected':''}>${tr('liq.apr_1h', 'APR 1H')}</option>
     </select>`;
 
     const useApr1h = _poolsAprTf === '1h';
@@ -1041,9 +1042,9 @@ function renderPools(data) {
     table.innerHTML = `
         <div class="pools-overview-header">
             <span>${poolFilterSelect}</span>
-            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('apr','Nach APR sortieren')}${aprSelect}</span>
-            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('vol','Nach Volumen sortieren')}VOL 24h</span>
-            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('tvl','Nach TVL sortieren')}TVL</span>
+            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('apr',tr('liq.sort_apr', 'Nach APR sortieren'))}${aprSelect}</span>
+            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('vol',tr('liq.sort_volume', 'Nach Volumen sortieren'))}VOL 24h</span>
+            <span class="col-r" style="display:flex;align-items:center;justify-content:flex-end;gap:3px">${_poolsSortBtn('tvl',tr('liq.sort_tvl', 'Nach TVL sortieren'))}TVL</span>
         </div>
         ${pools.map(pool => {
             const rowCls = pool.active ? '' : ' inactive';
@@ -1058,7 +1059,7 @@ function renderPools(data) {
             const aprNum = (aprRaw != null && aprRaw >= 0) ? aprRaw : null;
             const _nd = '<span style="color:#64748b;font-size:0.78em">no data</span>';
             const aprVal = aprNum != null
-                ? aprNum.toLocaleString('de-DE', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' %'
+                ? aprNum.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' %'
                 : _nd;
             return `
         <div class="pools-overview-row${rowCls}">
@@ -1133,7 +1134,7 @@ function renderActivePositions(data) {
         if (emptyMsg) emptyMsg.style.display = 'none';
         if (activeSearchInputEl) activeSearchInputEl.style.display = 'none';
         container.querySelector('.active-pools-table')?.remove();
-        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        renderBotInactivePanel(container, tr('liq.no_open_positions', 'Keine offenen Positionen'));
         return;
     }
     if (activeSearchInputEl) activeSearchInputEl.style.display = '';
@@ -1175,13 +1176,13 @@ function renderActivePositions(data) {
         table.style.overflowY = '';
         table.innerHTML = `
             <div class="active-pools-header">
-                <span>Aktive Pools</span>
+                <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
                 <span>Range</span>
-                <span class="col-r">Reb.</span>
-                <span class="col-r">Fees</span>
-                <span class="col-r">Anteil</span>
+                <span class="col-r">${tr('liq.reb', 'Reb.')}</span>
+                <span class="col-r">${tr('liq.fees', 'Fees')}</span>
+                <span class="col-r">${tr('liq.share', 'Anteil')}</span>
             </div>
-            <div class="pools-overview-empty-row">${positions.length === 0 ? 'Keine aktiven Positionen' : 'Keine Treffer'}</div>`;
+            <div class="pools-overview-empty-row">${positions.length === 0 ? tr('liq.no_active_positions_plain', 'Keine aktiven Positionen') : tr('liq.no_matches', 'Keine Treffer')}</div>`;
         _bindActiveSearch();
         return;
     }
@@ -1208,11 +1209,11 @@ function renderActivePositions(data) {
 
     table.innerHTML = `
         <div class="active-pools-header">
-            <span>Aktive Pools</span>
-            <span class="has-tooltip" data-tooltip-title="Range" data-tooltip-content="Öffnet die aktuelle Kursrange und Coin-Verteilung der Position." data-tooltip-type="text" style="cursor:default">Range</span>
-            <span class="col-r has-tooltip" data-tooltip-title="Rebalances" data-tooltip-content="Anzahl der Rebalancings heute. Ein Rebalancing schließt die aktuelle Position und öffnet sie mit angepasster Kursrange neu." data-tooltip-type="text" style="cursor:default">Reb.</span>
-            <span class="col-r">Fees</span>
-            <span class="col-r">Anteil</span>
+            <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
+            <span class="has-tooltip" data-tooltip-title="Range" data-tooltip-content="${tr('liq.tip.range_open', 'Öffnet die aktuelle Kursrange und Coin-Verteilung der Position.')}" data-tooltip-type="text" style="cursor:default">Range</span>
+            <span class="col-r has-tooltip" data-tooltip-title="Rebalances" data-tooltip-content="${tr('liq.tip.rebalances', 'Anzahl der Rebalancings heute. Ein Rebalancing schließt die aktuelle Position und öffnet sie mit angepasster Kursrange neu.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.reb', 'Reb.')}</span>
+            <span class="col-r">${tr('liq.fees', 'Fees')}</span>
+            <span class="col-r">${tr('liq.share', 'Anteil')}</span>
         </div>
         ${filteredPositions.map(pos => {
             const pair    = escHtml(pos.displayPair ?? pos.pair ?? '—');
@@ -1225,12 +1226,12 @@ function renderActivePositions(data) {
             const rbHtml  = `<span class="rebalance-clickable${rbCls}" data-pool-id="${escHtml(pos.poolId ?? '')}" data-pool-pair="${escHtml(pos.pair ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${rbCnt}</span>`;
             const _claimCnt = pos.todayClaimCount ?? 0;
             const _claimUsd = pos.todayClaimUsd   ?? 0;
-            const _feeTodayDate = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
+            const _feeTodayDate = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
             const _feeTtTitle   = `${pair}: Fees ${_feeTodayDate}`;
             const _feeTtContent = `${_claimCnt} Claims (${fmtUsdc(_claimUsd)} USDC)`;
             const _pnlToday     = pos.todayPnlUsd;
             const _pnlSign      = _pnlToday != null && _pnlToday >= 0 ? '+' : '';
-            const _pnlTodayDate = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
+            const _pnlTodayDate = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
             const _pnlPct       = _pnlToday != null && pos.myValue != null && pos.myValue !== 0 ? (_pnlToday / pos.myValue) * 100 : null;
             const _pnlTodayBlock = `${_pnlTodayDate} (heute, ab 00:00 Uhr):\n${_pnlToday != null
                 ? `${_pnlSign}${fmtUsdc(_pnlToday)} USDC${_pnlPct != null ? ` (${fmtPct(_pnlPct)})` : ''}`
@@ -1240,10 +1241,10 @@ function renderActivePositions(data) {
             const _pnlDepPct    = _pnlDep != null && pos.myValue != null && pos.myValue !== 0 ? (_pnlDep / pos.myValue) * 100 : null;
             if (_pnlDepPct != null) partValCls = _pnlDepPct > 1 ? 'value-good' : _pnlDepPct < -1 ? 'value-danger' : '';
             const _pnlDepDate   = pos.sinceDepositAt != null
-                ? new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
+                ? new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
                 : null;
             const _pnlDepTime   = pos.sinceDepositAt != null
-                ? new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
+                ? new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
                 : null;
             const _pnlDepBlock  = _pnlDepDate != null
                 ? `${_pnlDepDate}, ${_pnlDepTime} Uhr (letzte Einzahlung):\n${_pnlDep != null
@@ -1266,7 +1267,7 @@ function renderActivePositions(data) {
             return `
         <div class="active-pools-row" style="opacity:0.5">
             <span>${pair}</span>
-            <span style="color:var(--text-secondary);font-size:0.75em;grid-column:2/6">Position wird eröffnet …</span>
+            <span style="color:var(--text-secondary);font-size:0.75em;grid-column:2/6">${tr('liq.position_opening', 'Position wird eröffnet …')}</span>
         </div>`;
         }).join('')}`;
 
@@ -1308,18 +1309,18 @@ const TX_LABELS = {
     close_position: 'Auszahlung',
     deposit:        'Einzahlung',
     withdraw:       'Auszahlung',
-    withdraw_full:  'Pool geleert',
-    claim:          'Fee Claim',
+    withdraw_full:  tr('liq.pool_emptied', 'Pool geleert'),
+    claim:          tr('liq.fee_claim', 'Fee Claim'),
     reinvest:       'Reinvest',
     rebalance:      'Rebalance',
     compounding:    'Compounding',
-    'fee-transfer': 'Fee Transfer',
+    'fee-transfer': tr('liq.fee_transfer', 'Fee Transfer'),
 };
 
 function txLabel(tx) {
     if (tx.type === 'deposit' && (tx.note?.startsWith('cleanup') || tx.note?.startsWith('Auto-Top-Up'))) return 'Cleanup';
-    if (tx.type === 'swap' && tx.note?.startsWith('stuck-dust swap')) return 'Dust Swap 24h';
-    if (tx.type === 'swap' && tx.note?.startsWith('dust swap')) return 'Dust Swap';
+    if (tx.type === 'swap' && tx.note?.startsWith('stuck-dust swap')) return tr('liq.dust_swap_24h', 'Dust Swap 24h');
+    if (tx.type === 'swap' && tx.note?.startsWith('dust swap')) return tr('liq.dust_swap', 'Dust Swap');
     return TX_LABELS[tx.type] ?? tx.type;
 }
 
@@ -1383,7 +1384,7 @@ function renderStatistics(data) {
     const now = data?.timestamp ? new Date(data.timestamp) : new Date();
 
     // Datum-Labels (mit Jahr)
-    const fmtDate = d => d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const fmtDate = d => d.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' });
     const today = new Date(now); today.setHours(0,0,0,0);
     const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
     const monthStart = new Date(today); monthStart.setDate(1);
@@ -1408,7 +1409,7 @@ function renderStatistics(data) {
     const fmtPct  = (v, sign = true) => {
         const abs = Math.abs(+v || 0);
         const prefix = sign ? ((+v || 0) >= 0 ? '+' : '−') : '';
-        return `<span class="stat-value-number">${prefix}${Number(abs).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span><span class="stat-value-unit">%</span>`;
+        return `<span class="stat-value-number">${prefix}${Number(abs).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span><span class="stat-value-unit">%</span>`;
     };
 
     // APR + Netto: vorberechnet in export.js (single source, LMB#0167).
@@ -1457,7 +1458,7 @@ function renderStatistics(data) {
     if (topEl) {
         if (apr24h != null) {
             const sign = apr24h >= 0 ? '+' : '−';
-            topEl.textContent = sign + Math.abs(apr24h).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            topEl.textContent = sign + Math.abs(apr24h).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             topGroup?.setAttribute('data-type', apr24h > 0 ? 'positive' : apr24h < 0 ? 'negative' : 'neutral');
         } else {
             topEl.textContent = '0,00';
@@ -1502,10 +1503,10 @@ function openPayedFeesModal(period, data) {
                  :                          monthStart.getTime();
     const toMs   = period === 'yesterday' ? todayStart.getTime() : null;
 
-    const fmtDE = ms => new Intl.DateTimeFormat('de-DE',
+    const fmtDE = ms => new Intl.DateTimeFormat(NUM_LOCALE,
         { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: _tz }
     ).format(new Date(ms));
-    const fmtDT = ms => new Intl.DateTimeFormat('de-DE',
+    const fmtDT = ms => new Intl.DateTimeFormat(NUM_LOCALE,
         { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: _tz }
     ).format(new Date(ms));
 
@@ -1527,7 +1528,7 @@ function openPayedFeesModal(period, data) {
 
 
     if (txs.length === 0) {
-        body.innerHTML = `<p class="empty-state" style="padding:1rem">— Keine Transaktionen im Zeitraum</p>`;
+        body.innerHTML = `<p class="empty-state" style="padding:1rem">${tr('liq.no_tx_period', '— Keine Transaktionen im Zeitraum')}</p>`;
     } else {
         const rows = txs.map(t => `<tr>
             <td style="white-space:nowrap">${fmtDT(t.createdAt)}</td>
@@ -1538,7 +1539,7 @@ function openPayedFeesModal(period, data) {
         body.innerHTML = `
             <div class="fees-table-scroll">
                 <table class="wallet-detail-table">
-                    <thead><tr><th>Zeit</th><th>Typ</th><th>Pool</th><th>TX-Fee</th></tr></thead>
+                    <thead><tr><th>Zeit</th><th>Typ</th><th>Pool</th><th>${tr('liq.tx_fee', 'TX-Fee')}</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>
             </div>
@@ -1584,10 +1585,10 @@ function openClaimedFeesModal(period, data) {
     const toMs   = period === 'yesterday' ? todayStart.getTime() : null;
     const isMonth = period === 'month';
 
-    const fmtDE = ms => new Intl.DateTimeFormat('de-DE',
+    const fmtDE = ms => new Intl.DateTimeFormat(NUM_LOCALE,
         { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: _tz }
     ).format(new Date(ms));
-    const fmtDT = ms => new Intl.DateTimeFormat('de-DE',
+    const fmtDT = ms => new Intl.DateTimeFormat(NUM_LOCALE,
         { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: _tz }
     ).format(new Date(ms));
     const isoDay = ms => new Intl.DateTimeFormat('en-CA', { timeZone: _tz }).format(new Date(ms));
@@ -1618,7 +1619,7 @@ function openClaimedFeesModal(period, data) {
 
     const buildTable = (cols, rows) => {
         if (rows.length === 0) {
-            return `<p class="empty-state" style="padding:1rem">— Keine Einträge im Zeitraum</p>`;
+            return `<p class="empty-state" style="padding:1rem">${tr('liq.no_entries_period', '— Keine Einträge im Zeitraum')}</p>`;
         }
         const ths = cols.map(c => `<th${c.right ? ' style="text-align:right"' : ''}>${c.label}</th>`).join('');
         const trs = rows.map(cells => `<tr>${cells.map((c, i) => {
@@ -1664,7 +1665,7 @@ function openClaimedFeesModal(period, data) {
                 ];
             });
         html = buildTable(
-            [{ label: 'Datum' }, { label: 'Pool' }, { label: 'Claims' }, { label: 'Gegenwert', right: true }],
+            [{ label: tr('liq.date', 'Datum') }, { label: 'Pool' }, { label: 'Claims' }, { label: 'Gegenwert', right: true }],
             rows
         );
     } else {
@@ -1686,7 +1687,7 @@ function openClaimedFeesModal(period, data) {
             ];
         });
         html = buildTable(
-            [{ label: 'Zeit' }, { label: 'Pool' }, { label: 'Menge' }, { label: 'Gegenwert', right: true }],
+            [{ label: 'Zeit' }, { label: 'Pool' }, { label: tr('liq.quantity', 'Menge') }, { label: 'Gegenwert', right: true }],
             rows
         );
     }
@@ -1734,7 +1735,7 @@ function renderHeader(data) {
     // das ist dann aber kein Alarm, sondern erwartetes Verhalten. Statt des roten
     // Blink-Dreiecks zeigen wir explizit "Bot deaktiviert", nichts blinkt mehr.
     if (data?.botState === 'offline') {
-        el.textContent = 'Bot deaktiviert';
+        el.textContent = tr('liq.bot_disabled', 'Bot deaktiviert');
         el.className   = 'last-update';
         if (iconEl) { iconEl.textContent = '⏸'; iconEl.className = 'bot-state-icon state-paused'; }
         if (titleEl) titleEl.className = '';
@@ -1813,12 +1814,12 @@ function renderNotifs(data) {
         premiumIcon.classList.toggle('active', active);
         if (showCountdown) {
             premiumIcon.dataset.tooltipTitle   = 'Premium';
-            premiumIcon.dataset.tooltipContent = 'Der Premium Service ist deaktiviert.';
+            premiumIcon.dataset.tooltipContent = tr('liq.premium_disabled', 'Der Premium Service ist deaktiviert.');
         } else {
-            premiumIcon.dataset.tooltipTitle = active ? 'Premium aktiv' : 'Premium inaktiv';
+            premiumIcon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
             premiumIcon.dataset.tooltipContent = active
                 ? 'Premium-Datendienst aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit laufen mit gelieferten Daten.'
-                : 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.';
+                : tr('liq.score_inactive', 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
         }
 
         if (premiumCountdownText) {
@@ -1826,7 +1827,7 @@ function renderNotifs(data) {
             if (showCountdown) {
                 premiumCountdownText.textContent = formatPremiumCountdown(coveredUntil);
                 premiumCountdownText.dataset.tooltipTitle   = 'Premium';
-                premiumCountdownText.dataset.tooltipContent = 'Der Premium Service ist deaktiviert.';
+                premiumCountdownText.dataset.tooltipContent = tr('liq.premium_disabled', 'Der Premium Service ist deaktiviert.');
             }
         }
     }
@@ -2047,7 +2048,7 @@ function renderDetailPortfolioChart() {
     const H       = svg.getBoundingClientRect().height || 380;
     const history = filterByRange(_lastData?.portfolioHistory ?? [], _portfolioRange, r => r.t);
     if (history.length < 2) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
 
@@ -2193,7 +2194,7 @@ function renderFeeChart(data) {
     const fees = _getFeeData(data, _feeRange);
     if (fees.length === 0) {
         svg.style.display      = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Noch keine Fee-Daten';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('liq.no_fee_data_plain', 'Noch keine Fee-Daten');
         emptyMsg.style.display = 'block';
         return;
     }
@@ -2212,7 +2213,7 @@ function _feeBarTooltipText(bar) {
     const dateStr = bar.dataset.date;
     const lbl     = dateStr.includes(':')
         ? `${dateStr} Uhr`
-        : new Date(dateStr + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+        : new Date(dateStr + 'T12:00:00').toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
     return `${lbl}: ${fmtUsdc(fees, 4)} USDC`;
 }
 
@@ -2230,7 +2231,7 @@ function renderDetailFeeChart() {
     const H    = svg.getBoundingClientRect().height || 380;
     const fees = _getFeeData(_lastData, _feeRange);
     if (fees.length === 0) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
     _drawFeeBars(svg, fees, H);
@@ -2362,7 +2363,7 @@ function _volBarTooltipText(bar) {
     const d   = new Date(t);
     const lbl = _volRange === '1D'
         ? `${String(d.getHours()).padStart(2, '0')}:00 Uhr`
-        : d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+        : d.toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
     return `${lbl}: ${fmtVol(vol)}`;
 }
 
@@ -2430,7 +2431,7 @@ function renderVolumeChart(data) {
     const poolId = _volSelectedPool ?? pools[0]?.id;
     if (!poolId) {
         svg.style.display = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Kein aktiver Pool';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('liq.no_active_pool', 'Kein aktiver Pool');
         emptyMsg.style.display = 'block';
         return;
     }
@@ -2438,7 +2439,7 @@ function renderVolumeChart(data) {
     const filtered = _getVolFiltered(data, poolId, _volRange);
     const ok       = _buildVolSvg(svg, 160, filtered, _volRange, 'volMainClip');
     svg.style.display      = ok ? 'block' : 'none';
-    if (emptyMsg) emptyMsg.textContent = 'Volumen-Verlauf wird aufgebaut…';
+    if (emptyMsg) emptyMsg.textContent = tr('liq.volume_building', 'Volumen-Verlauf wird aufgebaut…');
     emptyMsg.style.display = ok ? 'none'  : 'block';
 
     if (ok) {
@@ -2617,7 +2618,7 @@ function openCompositionModal(poolPair, data) {
     const modal = $('compositionModal');
     if (!modal) return;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('compositionModalTitle').textContent = 'Coin-Verteilung: ' + displayPairOf(data, poolPair);
+    $('compositionModalTitle').textContent = tr('liq.coin_distribution_prefix', 'Coin-Verteilung: ') + displayPairOf(data, poolPair);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
     updateChartRangeBtns('compositionRangeBtns', data?.compositionHistory ?? [], r => r.t,
@@ -3170,7 +3171,7 @@ function openPosValueModal(poolPair, data) {
     const modal = $('posValueModal');
     if (!modal) return;
 
-    $('posValueModalTitle').textContent = 'Mein Anteil: ' + displayPairOf(data, poolPair);
+    $('posValueModalTitle').textContent = tr('liq.my_share_prefix', 'Mein Anteil: ') + displayPairOf(data, poolPair);
 
     _switchPosValueTab('mine');
 
@@ -3218,12 +3219,12 @@ function renderDetailVolChart() {
     const H        = svg.getBoundingClientRect().height || 380;
     const poolId   = _volSelectedPool;
     if (!poolId) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Kein Pool ausgewählt</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_pool_selected', 'Kein Pool ausgewählt')}</text>`;
         return;
     }
     const filtered = _getVolFiltered(_lastData, poolId, _volRange);
     if (!_buildVolSvg(svg, H, filtered, _volRange, 'volModalMainClip')) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
     } else {
         const body = svg.closest('.chart-modal-body');
         if (body) attachBarTooltip(svg, body, '.vol-bar', _volBarTooltipText);
@@ -3318,7 +3319,7 @@ function renderMyAprChart(data, poolPair) {
 
     if (filtered.length < 2) {
         svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
     const pad = { top: 20, right: 65, bottom: 30, left: 60 };
@@ -3403,7 +3404,7 @@ function _switchMyAprTab(tab) {
 
     const titleEl = $('myAprModalTitle');
     if (titleEl && _myAprPool) {
-        titleEl.textContent = (_myAprUseMyApr ? 'APR' : 'Pool APR') + ': ' + displayPairOf(_lastData, _myAprPool);
+        titleEl.textContent = (_myAprUseMyApr ? 'APR' : tr('liq.pool_apr', 'Pool APR')) + ': ' + displayPairOf(_lastData, _myAprPool);
     }
 
     if (!_lastData || !_myAprPool) return;
@@ -3735,7 +3736,7 @@ function renderVolModalChart(data, poolPair) {
     const volModalWrap = svg.closest('.modal-box') ?? svg.parentElement;
     if (volModalWrap) attachBarTooltip(svg, volModalWrap, '.vol-modal-bar', bar => {
         const d = new Date(parseInt(bar.dataset.t, 10));
-        const lbl = d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+        const lbl = d.toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
         return `${lbl}: ${fmtVol(parseInt(bar.dataset.vol, 10))}`;
     });
 
@@ -3775,7 +3776,7 @@ function openVolModal(poolPair, data) {
     const modal = $('volModal');
     if (!modal) return;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('volModalTitle').textContent = 'VOL 24h: ' + displayPairOf(data, poolPair);
+    $('volModalTitle').textContent = tr('liq.vol24h_prefix', 'VOL 24h: ') + displayPairOf(data, poolPair);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
     _updateVolModalRangeBtns(data);
@@ -4022,7 +4023,7 @@ function closePoolTxModal() {
 }
 
 function renderPoolTxList(poolPair, data, opts = {}) {
-    const { typeFilter = null, titlePrefix = 'Letzte 25 Transaktionen' } = opts;
+    const { typeFilter = null, titlePrefix = tr('liq.last_25_tx', 'Letzte 25 Transaktionen') } = opts;
     const titleEl = $('poolTxModalTitle');
     const listEl  = $('poolTxList');
     if (!listEl) return;
@@ -4043,7 +4044,7 @@ function renderPoolTxList(poolPair, data, opts = {}) {
     const allTx = txFiltered.slice(0, 25);
 
     if (allTx.length === 0) {
-        listEl.innerHTML = '<div class="tx-modal-empty">— Keine Transaktionen für diesen Pool</div>';
+        listEl.innerHTML = '<div class="tx-modal-empty">— ' + tr('liq.no_tx_pool', 'Keine Transaktionen für diesen Pool') + '</div>';
         return;
     }
 
@@ -4095,7 +4096,7 @@ function renderPoolTxList(poolPair, data, opts = {}) {
         <table class="tip-orders">
             <thead>
                 <tr>
-                    <th>Datum</th>
+                    <th>${tr('liq.date', 'Datum')}</th>
                     <th>Typ</th>
                     <th class="tx-amount">Betrag</th>
                     <th class="tx-hash-col"></th>
@@ -4156,14 +4157,14 @@ function _renderClaimHistTab(tab) {
 
     const _tz     = window.FORGE_TZ || 'Europe/Berlin';
     const isoDay  = ms => new Intl.DateTimeFormat('en-CA', { timeZone: _tz }).format(new Date(ms));
-    const fmtTime = ms => new Intl.DateTimeFormat('de-DE', {
+    const fmtTime = ms => new Intl.DateTimeFormat(NUM_LOCALE, {
         hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: _tz,
     }).format(new Date(ms));
 
     const tabDefs = [
         { key: 'today',     label: 'Heute',       entries: todayEntries },
         { key: 'yesterday', label: 'Gestern',      entries: yesterdayEntries },
-        { key: 'month',     label: 'Dieser Monat', entries: monthEntries },
+        { key: 'month',     label: tr('liq.this_month', 'Dieser Monat'), entries: monthEntries },
     ];
     const tabsHtml = tabDefs.map(t =>
         `<button class="modal-tab-btn${t.key === tab ? ' active' : ''}" data-claim-tab="${t.key}">${t.label}</button>`
@@ -4196,7 +4197,7 @@ function _renderClaimHistTab(tab) {
                     <td class="tx-amount">+${g.usd.toFixed(4)}&nbsp;USDC</td>
                 </tr>`;
             });
-        cols = [{ label: 'Datum' }, { label: 'Claims' }, { label: 'Gegenwert', right: true }];
+        cols = [{ label: tr('liq.date', 'Datum') }, { label: 'Claims' }, { label: 'Gegenwert', right: true }];
     } else {
         rows = entries.map(e => {
             const aA = +e.amountA || 0;
@@ -4214,7 +4215,7 @@ function _renderClaimHistTab(tab) {
                 <td class="tx-amount">+${(e.usdValue ?? 0).toFixed(4)}&nbsp;USDC</td>
             </tr>`;
         });
-        cols = [{ label: 'Zeit' }, { label: 'Menge' }, { label: 'Gegenwert', right: true }];
+        cols = [{ label: 'Zeit' }, { label: tr('liq.quantity', 'Menge') }, { label: 'Gegenwert', right: true }];
     }
 
     const total      = entries.reduce((s, e) => s + (e.usdValue ?? 0), 0);
@@ -4231,7 +4232,7 @@ function _renderClaimHistTab(tab) {
 
 function _buildClaimTable(cols, rows, total, claimCount) {
     if (rows.length === 0) {
-        return `<p class="tx-modal-empty">— Keine Einträge im Zeitraum</p>`;
+        return `<p class="tx-modal-empty">${tr('liq.no_entries_period', '— Keine Einträge im Zeitraum')}</p>`;
     }
     const ths = cols.map(c => `<th${c.right ? ' class="tx-amount"' : ''}>${c.label}</th>`).join('');
     const scrollAttr = rows.length > 5 ? ' style="max-height:165px;overflow-y:auto"' : '';
@@ -4256,7 +4257,7 @@ function _buildClaimTable(cols, rows, total, claimCount) {
 // Analog zu openPoolClaimHistoryModal, aber Datenquelle: data.rebalances.
 
 const REBAL_REASON_LABELS = {
-    out_of_range: 'Out of Range',
+    out_of_range: tr('liq.out_of_range', 'Out of Range'),
     proactive:    'Proaktiv',
     manual:       'Manuell',
     drift:        'Drift',
@@ -4308,14 +4309,14 @@ function _renderRebalHistTab(tab) {
 
     const _tz     = window.FORGE_TZ || 'Europe/Berlin';
     const isoDay  = ms => new Intl.DateTimeFormat('en-CA', { timeZone: _tz }).format(new Date(ms));
-    const fmtTime = ms => new Intl.DateTimeFormat('de-DE', {
+    const fmtTime = ms => new Intl.DateTimeFormat(NUM_LOCALE, {
         hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: _tz,
     }).format(new Date(ms));
 
     const tabDefs = [
         { key: 'today',     label: 'Heute',        entries: todayEntries },
         { key: 'yesterday', label: 'Gestern',      entries: yesterdayEntries },
-        { key: 'month',     label: 'Dieser Monat', entries: monthEntries },
+        { key: 'month',     label: tr('liq.this_month', 'Dieser Monat'), entries: monthEntries },
     ];
     const tabsHtml = tabDefs.map(t =>
         `<button class="modal-tab-btn${t.key === tab ? ' active' : ''}" data-rebal-tab="${t.key}">${t.label}</button>`
@@ -4357,7 +4358,7 @@ function _renderRebalHistTab(tab) {
                 </tr>`;
             });
         cols = [
-            { label: 'Datum' },
+            { label: tr('liq.date', 'Datum') },
             { label: 'Rebalances' },
             { label: 'Mein Anteil', right: true },
             { label: 'Kosten',      right: true },
@@ -4408,7 +4409,7 @@ function _buildRebalTable(cols, rows, totalCost, count, poolOpenedAt) {
         let msg = '— Keine Rebalances im Zeitraum';
         if (poolOpenedAt) {
             const _tz = window.FORGE_TZ || 'Europe/Berlin';
-            const since = new Intl.DateTimeFormat('de-DE', {
+            const since = new Intl.DateTimeFormat(NUM_LOCALE, {
                 day: '2-digit', month: '2-digit', year: 'numeric', timeZone: _tz,
             }).format(new Date(poolOpenedAt));
             msg = `— Keine Rebalances im Zeitraum<br><span class="text-muted" style="font-size:0.78rem">Pool eröffnet am ${since} – seitdem keine Rebalances nötig</span>`;
@@ -4652,7 +4653,7 @@ function openInvestScoreModal(poolId, data) {
         // Differenz zwischen dem gewichteten Blend und dem Gesamt-Score.
         const volMalus = is?.volumeMalus ?? 0;
         const volMalusRow = volMalus > 0 ? `<tr>
-                <td style="padding:6px 8px;color:#f59e0b;width:${colWidths[0]}">Volumen-Malus<br><span style="font-size:0.72rem;color:#94a3b8">${volMalus} h ohne Handel (letzte 24 h)</span></td>
+                <td style="padding:6px 8px;color:#f59e0b;width:${colWidths[0]}">${tr('liq.volume_malus', 'Volumen-Malus')}<br><span style="font-size:0.72rem;color:#94a3b8">${volMalus} h ohne Handel (letzte 24 h)</span></td>
                 <td style="width:${colWidths[1]}"></td>
                 <td style="padding:6px 8px;text-align:right;font-weight:600;color:#f59e0b;width:${colWidths[2]}">−${volMalus}</td>
                 <td style="width:${colWidths[3]}"></td>
@@ -4672,7 +4673,7 @@ function openInvestScoreModal(poolId, data) {
             ? (() => {
                 const sign = npVal24h >= 0 ? '+' : '−';
                 const cls  = npVal24h >= 0 ? 'value-good' : 'value-danger';
-                const abs  = Math.abs(npVal24h).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const abs  = Math.abs(npVal24h).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                 return ` Simulierter Netto-Ertrag auf 1.000 USDC (NP 24h): <span class="${cls}">${sign}${abs} USDC</span>.`;
             })()
             : '';
@@ -4680,14 +4681,14 @@ function openInvestScoreModal(poolId, data) {
             ? `<p style="color:#64748b;font-size:0.78rem;margin:4px 0 0">Kein PnL verfügbar (inaktiver Pool) – Score basiert ausschließlich auf Marktdaten. Wertebereich: 10–90.${npNote}</p>` : '';
 
         const _typeInfo = {
-            rebalance_free: 'Rebalance-frei – PnL zählt stark, niedrige Fee-APR ist hier normal',
-            volatil_1:      'Gering volatil – PnL-betont',
-            volatil_2:      'Mittel volatil – ausgewogen zwischen PnL und Fee-APR',
-            volatil_3:      'Stark volatil – Fee-APR-betont, PnL bewusst gedämpft',
-            rwa:            'RWA (Real-World-Asset) – PnL-betont, kein Krypto-Preistrend',
+            rebalance_free: tr('liq.vol_norebal_desc', 'Rebalance-frei – PnL zählt stark, niedrige Fee-APR ist hier normal'),
+            volatil_1:      tr('liq.vol_low_desc', 'Gering volatil – PnL-betont'),
+            volatil_2:      tr('liq.vol_mid_desc', 'Mittel volatil – ausgewogen zwischen PnL und Fee-APR'),
+            volatil_3:      tr('liq.vol_high_desc', 'Stark volatil – Fee-APR-betont, PnL bewusst gedämpft'),
+            rwa:            tr('liq.vol_rwa_desc', 'RWA (Real-World-Asset) – PnL-betont, kein Krypto-Preistrend'),
         };
         const _typeNote = is?.poolType
-            ? `<p style="color:#94a3b8;font-size:0.75rem;margin:0 0 4px">Pool-Typ: <span style="color:#e2e8f0">${escHtml(is.poolType)}</span> – ${escHtml(_typeInfo[is.poolType] ?? 'typ-abhängige Gewichtung')}</p>`
+            ? `<p style="color:#94a3b8;font-size:0.75rem;margin:0 0 4px">${tr('liq.pool_type', 'Pool-Typ:')} <span style="color:#e2e8f0">${escHtml(is.poolType)}</span> – ${escHtml(_typeInfo[is.poolType] ?? tr('liq.type_weighting', 'typ-abhängige Gewichtung'))}</p>`
             : '';
 
         bewertungEl.innerHTML = `
@@ -4697,10 +4698,10 @@ function openInvestScoreModal(poolId, data) {
             <table style="width:100%;border-collapse:collapse;font-size:0.82rem;table-layout:fixed">
                 <thead style="display:table;width:100%;table-layout:fixed">
                     <tr style="color:#94a3b8;text-transform:uppercase;font-size:0.72rem;letter-spacing:0.05em;border-bottom:1px solid #334155">
-                        <th style="${thStyle(0,';text-align:left')}">Bezeichnung</th>
-                        <th style="${thStyle(1,';text-align:right')}">Wert</th>
-                        <th style="${thStyle(2,';text-align:right')}">Score</th>
-                        <th style="${thStyle(3,';text-align:right')}">Gewichtung</th>
+                        <th style="${thStyle(0,';text-align:left')}">${tr('liq.designation', 'Bezeichnung')}</th>
+                        <th style="${thStyle(1,';text-align:right')}">${tr('liq.value', 'Wert')}</th>
+                        <th style="${thStyle(2,';text-align:right')}">${tr('liq.score', 'Score')}</th>
+                        <th style="${thStyle(3,';text-align:right')}">${tr('liq.weighting', 'Gewichtung')}</th>
                     </tr>
                 </thead>
                 <tbody style="${tbodyStyle}">
@@ -4731,7 +4732,7 @@ function openInvestScoreModal(poolId, data) {
         if (!pts.length) {
             svgEl.setAttribute('viewBox', '0 0 300 180');
             svgEl.setAttribute('height', '180');
-            svgEl.innerHTML = `<text x="150" y="90" dominant-baseline="middle" text-anchor="middle" fill="#64748b" font-size="12">Noch keine Daten</text>`;
+            svgEl.innerHTML = `<text x="150" y="90" dominant-baseline="middle" text-anchor="middle" fill="#64748b" font-size="12">${tr('liq.no_data_yet', 'Noch keine Daten')}</text>`;
             return;
         }
         _drawScoreChart(svgEl, pts, _oppScoreRange);
@@ -4817,7 +4818,7 @@ function _drawMetricChart(svgEl, points, meta) {
     if (!vals.length) {
         svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
         svgEl.setAttribute('height', H);
-        svgEl.innerHTML = `<text x="${W/2}" y="${H/2}" dominant-baseline="middle" text-anchor="middle" fill="#64748b" font-size="12">Noch keine Daten</text>`;
+        svgEl.innerHTML = `<text x="${W/2}" y="${H/2}" dominant-baseline="middle" text-anchor="middle" fill="#64748b" font-size="12">${tr('liq.no_data_yet', 'Noch keine Daten')}</text>`;
         return;
     }
 

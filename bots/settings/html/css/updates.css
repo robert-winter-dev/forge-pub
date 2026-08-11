@@ -71,6 +71,31 @@
 /* ── Plugins-Hinweis ──────────────────────────────────────────────────────── */
 .up-plugins-hint { color: var(--text-muted); font-style: italic; }
 
+/* ── Spalte 2 (Wert/Feld) exakt spaltenweise ausgerichtet ─────────────────────
+   Feedback 2026-08-11 (Screenshot mit roter Linie): die zweite Spalte
+   soll in JEDEM Boxen-Paar (Versionen↔Update-Modus, Sprache↔Aktionen) an
+   derselben x-Position beginnen wie der Erklärungstext in Update-Modus/
+   Aktionen. Dort bestimmt .up-option-btn (min-width 9.5rem) + .up-option-row-
+   Gap (0.75rem) diese Position – .settings-label bekommt hier dieselbe Breite
+   und .settings-row denselben Gap, dadurch fluchten alle vier Boxen exakt,
+   ohne dass Versionen/Sprache eigene Sonderwerte pflegen müssten. */
+.up-grid .settings-label { width: 9.5rem; }
+.up-grid .settings-row   { gap: 0.75rem; }
+
+/* Info-Icon lebt in der Label-Zelle (nicht zwischen Label und Feld) – nur so
+   bleibt die Zeitzone-Zeile trotz Icon auf derselben Spaltenbreite wie
+   "Sprache" ohne Icon. */
+.up-lang-label .info-tip-label { margin-left: 0.3rem; }
+
+/* Select und Input bekommen dieselbe .lang-select-Optik (Kopf-Sprachwahl,
+   settings.css) UND dieselbe Breite – sonst rendert der Browser Select/Input
+   unterschiedlich hoch/breit, obwohl dieselbe Klasse dran hängt. */
+.up-field-control {
+    width: 200px;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
 /* ── Core-Versionszeile: Aktuell/Update-verfügbar-Symbol ─────────────────────── */
 .up-version-status.current  { color: var(--success); font-weight: 600; }
 .up-version-status.outdated { color: var(--danger); font-weight: 600; }
@@ -89,8 +114,6 @@
     overflow-y: auto;
     overflow-x: hidden; /* ohne das erzwingt der Browser auto auch für die X-Achse, sobald overflow-y != visible – kurzer waagerechter Scrollbalken während der Einblend-Animation */
 }
-
-.up-checklist-empty { color: var(--text-muted); font-size: 0.85rem; }
 
 /* Bewusst KEIN display:flex auf .up-checklist-list ODER .up-step – ein <li>
    mit display:flex verliert seinen Aufzählungspunkt in den meisten Browsern.

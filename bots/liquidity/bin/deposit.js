@@ -59,6 +59,7 @@ import { getSplTokensUsd } from '../lib/wallet-monitor-client.js';
 import { refreshAfterAction } from '../lib/refresh-state.js';
 import { logActionError } from '../lib/error-log.js';
 import { matchErrorCode, describeError } from '../../../lib/error-messages.js';
+import { t } from '../../../lib/i18n.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import { PublicKey }           from '@solana/web3.js';
 import {
@@ -107,39 +108,7 @@ const { values: args } = parseArgs({
 
 // Muss vor jedem Seiteneffekt (openDatabase() weiter unten) geprüft werden.
 if (args.help) {
-    console.log(`
-FORGE Liquidity – Manuelles Einzahlen in einen Pool (bin/deposit.js)
-
-Fügt einer bestehenden Position via increaseLiquidity Kapital hinzu,
-oder eröffnet (mit --new) eine neue Position. KEIN Dry-Run per Default –
-jeder Aufruf ohne --dry-run führt echte On-Chain-Transaktionen aus.
-
-Verwendung:
-  node bin/deposit.js --pool "SOL/USDC"    --usdc 500
-  node bin/deposit.js --pool "cbBTC/USDC"  --usdc 200 --new
-  node bin/deposit.js --pool "EURC/USDC"   --tokenb 85
-  node bin/deposit.js --pool "EURC/USDC"   --usdc 100 --dry-run
-  node bin/deposit.js --pool "SOL/USDC"    --token SOL --amount 0.5     (Modus B)
-  node bin/deposit.js --pool "cbBTC/WBTC"  --token cbBTC --amount 0.001 (Modus B)
-
-Optionen:
-  --pool <pair>     Pool-Paar, z.B. "SOL/USDC" oder "EURC/USDC"  (Pflicht)
-  --usdc <betrag>   Modus A: USDC-Budget (Pre-Swap zu Pool-Tokens)
-  --tokenb <betrag> Direkt tokenB-Betrag einzahlen (Legacy)
-  --token <symbol>  Modus B: Anker-Token, gegen-Menge folgt via Pool-Ratio
-  --amount <betrag> Menge des Anker-Tokens (zusammen mit --token)
-  Genau eines von --usdc / --tokenb / (--token + --amount) ist Pflicht.
-  --new             Neue Position erlauben wenn keine existiert
-  --dry-run         Simulation: alle Checks + Berechnungen, keine On-Chain-TX
-  --json            Maschinenlesbarer Output (für UI-Integration)
-  --help, -h        Dieser Text, kein Deposit-Lauf
-
-Mindestbeträge (Modus A):
-  - bestehende Position, Standard:     5 USDC
-  - bestehende Position, volatilePair: 10 USDC (2 Swaps nötig)
-  - neue Position (--new):            20 USDC (zzgl. Account-Rent)
-  - Modus B: keine Mindestbeträge (kein Swap)
-`);
+    console.log(t('cli.ld.help'));
     process.exit(0);
 }
 
@@ -162,8 +131,20 @@ if (jsonMode) {
     console.error = (...a) => jsonLog.push({ level: 'error', msg: a.join(' ') });
 }
 
-function emitJson(ok, errorMsg = null) {
-    const payload = { ok, error: errorMsg, log: jsonLog, result: jsonResult };
+/**
+ * @param {string|null} errorCode  Stabiler Fehlerschlüssel für Aufrufer, die auf einen
+ *   bestimmten Fehlertyp reagieren müssen (Settings-UI: 30s-Retry statt Abbruch).
+ *
+ * 🔒 Warum ein Code und nicht der Text: die Settings-UI hat bis 2026-08-11 den
+ * MELDUNGSTEXT verglichen ("beginnt mit 'Wallet-Balance konnte nicht gelesen
+ * werden'"). Mit der Mehrsprachigkeit übersetzt das Frontend seine Vergleichs-
+ * texte — der Abgleich gegen die (deutsche) Skriptmeldung ging damit auf einer
+ * englischen Installation still ins Leere und der Retry-Ablauf entfiel.
+ * Ein Vergleich auf Prosa ist auch ohne Übersetzung fragil: eine umformulierte
+ * Meldung hätte dasselbe bewirkt.
+ */
+function emitJson(ok, errorMsg = null, errorCode = null) {
+    const payload = { ok, error: errorMsg, errorCode, log: jsonLog, result: jsonResult };
     _origLog(JSON.stringify(payload));
 }
 
@@ -195,14 +176,14 @@ const maxBArg       = useMaxPair ? parseFloat(args['max-b']) : NaN;
 let   depositAmount = hasUsdc ? parseFloat(args.usdc) : (hasTokenB ? parseFloat(args.tokenb) : (useModeB ? modeBAmount : Math.max(maxAArg, maxBArg)));
 
 if (useMaxPair && (isNaN(maxAArg) || maxAArg <= 0 || isNaN(maxBArg) || maxBArg <= 0)) {
-    const msg = `Ungültige Pair-Mengen: --max-a "${args['max-a']}" --max-b "${args['max-b']}" (beide müssen > 0 sein)`;
+    const msg = t('cli.ld.invalid_pair_amounts', { maxA: args['max-a'], maxB: args['max-b'] });
     if (jsonMode) { emitJson(false, msg); process.exit(1); }
     console.error(`[deposit] ${msg}`);
     process.exit(1);
 }
 if (!useMaxPair && (isNaN(depositAmount) || depositAmount <= 0)) {
     const raw = args.usdc ?? args.tokenb ?? args.amount;
-    const msg = `Ungültiger Betrag: "${raw}"`;
+    const msg = t('cli.ld.invalid_amount', { value: raw });
     if (jsonMode) { emitJson(false, msg); process.exit(1); }
     console.error(`[deposit] ${msg}`);
     process.exit(1);
@@ -255,19 +236,19 @@ async function _describeInsufficientFunds(pool, amountA, amountB, tokenALabel, t
         getTokenBalanceFresh(kp.publicKey, new PublicKey(pool.tokenB), pool.decimalsB).catch(() => null),
         getSolBalanceFresh(kp.publicKey).catch(() => null),
     ]);
-    const lines = [`Nicht genug Guthaben für die Einzahlung.`];
+    const lines = [t('cli.ld.insufficient_hdr')];
     if (freshA != null) {
-        lines.push(`         ${tokenALabel}: angefordert ~${amountA.toFixed(6)}, aktuell im Wallet ${freshA.toFixed(6)}`);
+        lines.push(`         ${t('cli.ld.insufficient_token', { token: tokenALabel, requested: amountA.toFixed(6), wallet: freshA.toFixed(6) })}`);
     }
     if (freshB != null) {
-        lines.push(`         ${tokenBLabel}: angefordert ~${amountB.toFixed(6)}, aktuell im Wallet ${freshB.toFixed(6)}`);
+        lines.push(`         ${t('cli.ld.insufficient_token', { token: tokenBLabel, requested: amountB.toFixed(6), wallet: freshB.toFixed(6) })}`);
     }
     if (freshSol != null) {
         lines.push(freshSol < 0.05
-            ? `         SOL: nur noch ${freshSol.toFixed(4)} SOL im Wallet – zu wenig für TX-Fees/Rent, das könnte die eigentliche Ursache sein.`
-            : `         SOL: ${freshSol.toFixed(4)} (ausreichend, vermutlich nicht die Ursache)`);
+            ? `         ${t('cli.ld.insufficient_sol_low', { sol: freshSol.toFixed(4) })}`
+            : `         ${t('cli.ld.insufficient_sol_ok', { sol: freshSol.toFixed(4) })}`);
     }
-    lines.push(`         Wallet-Stand hat sich vermutlich seit Beginn der Einzahlung geändert (z.B. durch einen zwischenzeitlichen Cleanup-Lauf). Bitte erneut versuchen.`);
+    lines.push(`         ${t('cli.ld.insufficient_footer')}`);
     return lines.join('\n');
 }
 
@@ -286,7 +267,7 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     ).get();
     const solPrice = solPriceRow?.price ?? 0;
     if (solPrice <= 0) {
-        console.warn(`[deposit] SOL-Top-Up: SOL-Preis nicht verfügbar – Top-Up übersprungen`);
+        console.warn(`[deposit] ${t('cli.liq.topup_no_price')}`);
         return currentBalance;
     }
     const target      = minNeeded + 0.01; // kleiner Extra-Puffer
@@ -294,10 +275,10 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     const neededUsdc   = neededSol * solPrice * 1.02; // +2% Slippage-Puffer
     const usdcBal      = await getTokenBalanceFresh(getKeypair().publicKey, USDC_MINT, 6);
     if (usdcBal < neededUsdc) {
-        console.warn(`[deposit] SOL-Top-Up: nicht genug USDC (${usdcBal.toFixed(2)} < ${neededUsdc.toFixed(2)} USDC) – kein Auto-Swap möglich`);
+        console.warn(`[deposit] ${t('cli.liq.topup_no_usdc', { have: usdcBal.toFixed(2), need: neededUsdc.toFixed(2) })}`);
         return currentBalance;
     }
-    console.log(`[deposit] SOL-Top-Up: ${currentBalance.toFixed(4)} SOL < ${minNeeded.toFixed(4)} – tausche ~${neededUsdc.toFixed(2)} USDC → SOL`);
+    console.log(`[deposit] ${t('cli.liq.topup_swapping', { sol: currentBalance.toFixed(4), min: minNeeded.toFixed(4), usdc: neededUsdc.toFixed(2) })}`);
     try {
         await swapTokens({
             inputMint:      USDC_MINT,
@@ -309,25 +290,31 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
             connection:     getConnection(),
         });
         const newBalance = await getUsableSolBalanceFresh(getKeypair().publicKey);
-        console.log(`[deposit] SOL-Top-Up OK: jetzt ${newBalance.toFixed(4)} SOL`);
+        console.log(`[deposit] ${t('cli.liq.topup_ok', { sol: newBalance.toFixed(4) })}`);
         return newBalance;
     } catch (err) {
-        console.warn(`[deposit] SOL-Top-Up fehlgeschlagen: ${err.message}`);
+        console.warn(`[deposit] ${t('cli.liq.topup_failed', { error: err.message })}`);
         return currentBalance;
     }
 }
 
-const SWAP_ROUTING_ERROR  = 'Der Swap konnte nicht ausgeführt werden – der Marktpreis hat sich während der Berechnung bewegt. Bitte warte etwas und versuche es dann noch einmal.';
-const MARKET_DATA_ERROR   = 'Konnte aktuelle Marktdaten nicht abrufen. Bitte warte etwas und versuche es dann noch einmal.';
+const SWAP_ROUTING_ERROR  = t('cli.ld.swap_routing_error');
+const MARKET_DATA_ERROR   = t('cli.ld.market_data_error');
+const WALLET_BALANCE_ERROR = t('cli.ld.wallet_balance_error');
 
-function abort(msg) {
+// Stabile Schlüssel für genau die Fehler, bei denen die Settings-UI einen Retry
+// anbietet statt abzubrechen (siehe emitJson()). Wer hier etwas ergänzt, muss
+// _isRetryableError() in bots/settings/html/js/bot-liquidity.js mitziehen.
+const RETRYABLE = { swap: 'SWAP_ROUTING', market: 'MARKET_DATA', wallet: 'WALLET_BALANCE' };
+
+function abort(msg, errorCode = null) {
     if (jsonMode) {
         // Im JSON-Modus FEHLER in error-Feld, nicht in log
         try { releaseManualLock(); } catch { /* */ }
-        emitJson(false, msg);
+        emitJson(false, msg, errorCode);
         process.exit(1);
     }
-    console.error(`[deposit] FEHLER: ${msg}`);
+    console.error(`[deposit] ${t('cli.liq.error_word')}: ${msg}`);
     try { releaseManualLock(); } catch { /* */ }
     process.exit(1);
 }
@@ -347,7 +334,7 @@ function _fatalHandler(err) {
     try { releaseManualLock(); } catch {}
     const msg = err?.message ?? String(err);
     _origErr('[deposit] Fatal:', msg);
-    if (jsonMode) { emitJson(false, `Unerwarteter Fehler: ${msg}`); }
+    if (jsonMode) { emitJson(false, t('cli.common.unexpected', { error: msg })); }
     process.exit(1);
 }
 process.on('uncaughtException',  _fatalHandler);
@@ -355,15 +342,15 @@ process.on('unhandledRejection', _fatalHandler);
 
 if (!dryRun) {
     if (isCleanupRunning()) {
-        abort('Cleanup läuft gerade – bitte ~30 s warten und erneut versuchen.');
+        abort(t('cli.liq.lock_cleanup'));
     }
     if (isSlLocked()) {
-        abort('Stop-Loss/Take-Profit-Flow läuft – bitte warten und erneut versuchen.');
+        abort(t('cli.liq.lock_sl'));
     }
     // Bot hat Vorrang: warten bis Claim/Reinvest/Rebalancing fertig sind, statt
     // gleichzeitig dieselbe Position zu mutieren (sonst stale Snapshot/Race).
     if (!(await waitForBotToFinish())) {
-        abort('Bot ist gerade aktiv (Claim/Reinvest/Rebalance) – bitte in ~1 Min erneut versuchen.');
+        abort(t('cli.liq.lock_bot_active'));
     }
     acquireManualLock({ action: 'deposit', pool: args.pool });
     for (const sig of ['SIGTERM', 'SIGINT']) {
@@ -372,7 +359,7 @@ if (!dryRun) {
     // TOCTOU: falls der Bot zwischen Wait und Lock noch eine Operation gestartet hat,
     // erneut warten (Bot-Vorrang) — danach mutiert garantiert nur diese Aktion.
     if (!(await waitForBotToFinish())) {
-        abort('Bot-Aktion dauert an – bitte erneut versuchen.');
+        abort(t('cli.liq.lock_bot_busy'));
     }
 }
 
@@ -387,7 +374,7 @@ syncPools(db, config.pools.all);
 const pool = config.pools.all.find(p => p.pair === args.pool);
 if (!pool) {
     const available = config.pools.all.map(p => p.pair).join(', ');
-    abort(`Pool "${args.pool}" nicht gefunden. Verfügbare Pools: ${available}`);
+    abort(t('cli.liq.pool_not_found_list', { pool: args.pool, list: available }));
 }
 
 // Benutzer-Sperre: in gesperrte Pools (enabled=false) kann nicht eingezahlt werden.
@@ -396,20 +383,19 @@ if (!pool) {
 // dem ein noch gesperrter (z.B. gerade übernommener Pool-Offer) Pool vorab geprüft
 // wird, bevor die Freigabe überhaupt möglich ist (siehe pool-offers-dryrun.js).
 if (!dryRun && !isPoolEnabled(pool)) {
-    abort(`Pool "${pool.pair}" ist deaktiviert (gesperrt) – keine Einzahlung möglich. ` +
-        `Erst in den Einstellungen wieder aktivieren.`);
+    abort(t('cli.ld.pool_disabled', { pool: pool.pair }));
 }
 
 console.log(`[deposit] Pool:    ${pool.pair} (${pool.id})`);
 const _tbLabel = pool.usdcIsTokenA ? pool.pair.split('/')[0] : pool.pair.split('/')[1];
 if (useMaxPair) {
-    console.log(`[deposit] Modus:   max-pair (max-a=${maxAArg}, max-b=${maxBArg}) – Engpass-Logik`);
+    console.log(`[deposit] ${t('cli.ld.head_mode_maxpair', { maxA: maxAArg, maxB: maxBArg })}`);
 } else {
     const _labelForArg = useModeB ? modeBToken : (useTokenB ? _tbLabel : 'USDC');
-    console.log(`[deposit] Betrag:  ${depositAmount.toFixed(6)} ${_labelForArg}`);
+    console.log(`[deposit] ${t('cli.liq.head_amount', { v: `${depositAmount.toFixed(6)} ${_labelForArg}` })}`);
 }
-console.log(`[deposit] --new:   ${args.new ? 'ja' : 'nein'}`);
-if (dryRun) console.log(`[deposit] ── DRY-RUN: keine On-Chain-Transaktionen ────────────`);
+console.log(`[deposit] --new:   ${args.new ? t('cli.liq.yes') : t('cli.liq.no')}`);
+if (dryRun) console.log(`[deposit] ── ${t('cli.ld.dry_run_hdr')} ────────────`);
 
 // ─── Mindestbetrag-Check (Modus A) ───────────────────────────────────────────
 // Modus B (User-spezifizierte Token-Menge) hat kein Mindestbetrag, weil dort
@@ -417,17 +403,13 @@ if (dryRun) console.log(`[deposit] ── DRY-RUN: keine On-Chain-Transaktionen 
 if (!useModeBOrC) {
     let minUsdc;
     let label;
-    if (args.new)                    { minUsdc = MIN_USDC_DEPOSIT_NEW;      label = 'neue Position'; }
-    else if (pool.volatilePair)      { minUsdc = MIN_USDC_DEPOSIT_BTCPAIR;  label = 'volatilePair-Pool'; }
-    else                             { minUsdc = MIN_USDC_DEPOSIT_STANDARD; label = 'Standard-Pool'; }
+    if (args.new)                    { minUsdc = MIN_USDC_DEPOSIT_NEW;      label = t('cli.ld.min_new'); }
+    else if (pool.volatilePair)      { minUsdc = MIN_USDC_DEPOSIT_BTCPAIR;  label = t('cli.ld.min_volatile'); }
+    else                             { minUsdc = MIN_USDC_DEPOSIT_STANDARD; label = t('cli.ld.min_standard'); }
 
     // Bei --tokenb: kein USDC-Mindest (User gibt tokenB direkt), nur Plausibilität > 0
     if (hasUsdc && depositAmount < minUsdc) {
-        abort(
-            `Betrag unter Mindestbetrag.\n` +
-            `         ${label}: min. ${minUsdc} USDC\n` +
-            `         Angegeben: ${depositAmount.toFixed(2)} USDC`
-        );
+        abort(t('cli.ld.below_minimum', { label, min: minUsdc, given: depositAmount.toFixed(2) }));
     }
 }
 
@@ -436,16 +418,13 @@ if (!useModeBOrC) {
 const position = getOpenPosition(db, pool.id);
 
 if (!position && !args.new) {
-    abort(
-        `Keine offene Position für "${pool.pair}".\n` +
-        `         Verwende --new um eine neue Position zu eröffnen.`
-    );
+    abort(t('cli.ld.no_position_hint', { pool: pool.pair }));
 }
 
 if (position) {
     console.log(`[deposit] Position: ${position.nft_mint}`);
 } else {
-    console.log(`[deposit] Keine bestehende Position – neue wird eröffnet (--new).`);
+    console.log(`[deposit] ${t('cli.ld.new_position_note')}`);
 }
 
 // ─── Aktuellen Preis abrufen ──────────────────────────────────────────────────
@@ -456,7 +435,7 @@ let stats;
 try {
     stats = await adapter.getPoolStats(pool);
 } catch (err) {
-    abort(MARKET_DATA_ERROR);
+    abort(MARKET_DATA_ERROR, RETRYABLE.market);
 }
 
 if (stats.tvlUsd != null) {
@@ -472,7 +451,7 @@ if (stats.tvlUsd != null) {
 const currentPrice = stats.price;
 const tokenALabel  = pool.usdcIsTokenA ? pool.pair.split('/')[1] : pool.pair.split('/')[0];
 const tokenBLabel  = pool.usdcIsTokenA ? pool.pair.split('/')[0] : pool.pair.split('/')[1];
-console.log(`[deposit] Preis:   ${currentPrice.toFixed(4)} ${tokenBLabel}/${tokenALabel}`);
+console.log(`[deposit] ${t('cli.liq.head_price', { v: `${currentPrice.toFixed(4)} ${tokenBLabel}/${tokenALabel}` })}`);
 console.log(`[deposit] Modus:   ${useTokenB ? `--tokenb (${tokenBLabel})` : '--usdc (USDC)'}`);
 
 // Quote-Preis und USD-Anker für volatilePair (z.B. HYPE/SOL → SOL/USDC liefert solUsd)
@@ -481,7 +460,7 @@ let usdPerTokenA  = 0;
 let usdPerTokenB  = 0;
 if (pool.volatilePair) {
     quotePrice = getTokenUsdPrice(pool.quoteTokenMint, db);
-    if (quotePrice <= 0) abort(`Quote-Preis nicht verfügbar für ${pool.quoteTokenMint}. Bitte zuerst den Bot starten (pool_stats werden benötigt).`);
+    if (quotePrice <= 0) abort(t('cli.liq.quote_price_missing', { mint: pool.quoteTokenMint }));
     const quoteIsTokenA = pool.quoteTokenMint === pool.tokenA;
     usdPerTokenA = quoteIsTokenA ? quotePrice : quotePrice * currentPrice;
     usdPerTokenB = quoteIsTokenA ? quotePrice / currentPrice : quotePrice;
@@ -500,22 +479,13 @@ if (!pool.volatilePair && !pool.usdcIsTokenA && pool.tokenA) {
         if (marketPrice && marketPrice > 0 && currentPrice > 0) {
             const ilPct = Math.abs(1 - currentPrice / marketPrice) * 100;
             if (ilPct >= 15) {
-                abort(
-                    `Pool-Preis weicht stark vom Marktpreis ab.\n` +
-                    `\n` +
-                    `   Pool-Preis (On-Chain):  ${currentPrice.toFixed(4)} USDC/${tokenALabel}\n` +
-                    `   Marktpreis (Jupiter):   ${marketPrice.toFixed(4)} USDC/${tokenALabel}\n` +
-                    `\n` +
-                    `   Eine Einzahlung in diesen Pool verursacht aktuell einen\n` +
-                    `   Impermanent Loss (= IL) von ~${ilPct.toFixed(0)}%.\n` +
-                    `   Die Einzahlung ist deshalb erst wieder ab einem IL < 15% möglich.`
-                );
+                abort(t('cli.ld.il_too_high', { poolPrice: currentPrice.toFixed(4), marketPrice: marketPrice.toFixed(4), token: tokenALabel, il: ilPct.toFixed(0) }));
             }
-            console.log(`[deposit] IL-Check: Pool ${currentPrice.toFixed(4)} vs. Markt ${marketPrice.toFixed(4)} USDC → IL ~${ilPct.toFixed(1)}% (OK)`);
+            console.log(`[deposit] ${t('cli.ld.il_check_ok', { pool: currentPrice.toFixed(4), market: marketPrice.toFixed(4), il: ilPct.toFixed(1) })}`);
         }
     } catch {
         // Jupiter nicht erreichbar – IL-Check überspringen, Einzahlung weiter erlauben
-        console.warn(`[deposit] IL-Check übersprungen (Jupiter nicht erreichbar)`);
+        console.warn(`[deposit] ${t('cli.ld.il_check_skipped')}`);
     }
 }
 
@@ -540,7 +510,7 @@ if (useModeBOrC) {
         const symBUp   = tokenBLabel.toUpperCase();
         if (symbolUp === symAUp)      modeBAnchorIsA = true;
         else if (symbolUp === symBUp) modeBAnchorIsA = false;
-        else abort(`Modus B: --token "${modeBToken}" ist keiner der Pool-Tokens (${tokenALabel} / ${tokenBLabel}).`);
+        else abort(t('cli.liq.mode_b_wrong_token', { token: modeBToken, tokenA: tokenALabel, tokenB: tokenBLabel }));
 
         if (modeBAnchorIsA) {
             const aPerB = clmmTokenAForDeposit(1, currentPrice, prLower, prUpper);
@@ -551,8 +521,8 @@ if (useModeBOrC) {
             manualAmountB = modeBAmount;
             manualAmountA = clmmTokenAForDeposit(modeBAmount, currentPrice, prLower, prUpper);
         }
-        console.log(`[deposit] Modus B Anker: ${modeBAmount.toFixed(6)} ${modeBAnchorIsA ? tokenALabel : tokenBLabel}`);
-        console.log(`[deposit] Gegen-Bedarf:  ~${(modeBAnchorIsA ? manualAmountB : manualAmountA).toFixed(6)} ${modeBAnchorIsA ? tokenBLabel : tokenALabel}`);
+        console.log(`[deposit] ${t('cli.ld.mode_b_anchor', { amount: modeBAmount.toFixed(6), token: modeBAnchorIsA ? tokenALabel : tokenBLabel })}`);
+        console.log(`[deposit] ${t('cli.ld.mode_b_counter', { amount: (modeBAnchorIsA ? manualAmountB : manualAmountA).toFixed(6), token: modeBAnchorIsA ? tokenBLabel : tokenALabel })}`);
     } else {
         // Modus C: Engpass-Logik
         {
@@ -569,7 +539,7 @@ if (useModeBOrC) {
                 manualAmountA = aForMaxB;
                 manualAmountB = maxBArg;
             }
-            console.log(`[deposit] Modus C Engpass: ${manualAmountA.toFixed(6)} ${tokenALabel} + ${manualAmountB.toFixed(6)} ${tokenBLabel} (Schranken: ${maxAArg} / ${maxBArg}, Ratio aPerB=${aPerB.toFixed(6)})`);
+            console.log(`[deposit] ${t('cli.ld.mode_c', { a: manualAmountA.toFixed(6), tokenA: tokenALabel, b: manualAmountB.toFixed(6), tokenB: tokenBLabel, maxA: maxAArg, maxB: maxBArg, ratio: aPerB.toFixed(6) })}`);
         }
     }
 }
@@ -589,7 +559,7 @@ try {
         ? await getTokenBBalance(keypair, pool)
         : null;
 } catch {
-    abort('Wallet-Balance konnte nicht gelesen werden. Bitte warte etwas und versuche es dann noch einmal.');
+    abort(WALLET_BALANCE_ERROR, RETRYABLE.wallet);
 }
 
 // ─── Upfront SOL-Check + Auto-Top-Up vor allen Transaktionen ─────────────────
@@ -615,16 +585,10 @@ if (!dryRun) {
             // die tatsächliche Wallet-Balance zeigen, sonst wirkt es so als fehle die Reserve
             // zusätzlich zum bereits angezeigten Betrag.
             const _solTotal = await getSolBalanceFresh(keypair.publicKey);
-            abort(
-                `Zu wenig SOL für die Deposit-TXs.\n` +
-                `         Wallet-Guthaben: ${_solTotal.toFixed(4)} SOL (davon ${config.solReserve} SOL Reserve reserviert)\n` +
-                `         Nutzbar:         ${_solBalance.toFixed(4)} SOL\n` +
-                `         Benötigt:        ~${(_txCount * _solFeePerTx).toFixed(4)} SOL für ${_txCount} TX × ${_solFeePerTx} SOL\n` +
-                `         Bitte SOL-Guthaben aufstocken und erneut versuchen.`
-            );
+            abort(t('cli.ld.low_sol_txs', { total: _solTotal.toFixed(4), reserve: config.solReserve, usable: _solBalance.toFixed(4), needed: (_txCount * _solFeePerTx).toFixed(4), txs: _txCount, perTx: _solFeePerTx }));
         }
     } else {
-        console.log(`[deposit] SOL-Check: ${_solBalance.toFixed(4)} SOL verfügbar (min. ~${_solMinNeeded.toFixed(4)} SOL) – OK`);
+        console.log(`[deposit] ${t('cli.ld.sol_check_ok', { sol: _solBalance.toFixed(4), min: _solMinNeeded.toFixed(4) })}`);
     }
 }
 
@@ -637,16 +601,12 @@ if (position && pool.volatilePair && hasUsdc && !useModeBOrC) {
     try {
         preState = await adapter.getPositionState(pool, position.nft_mint);
     } catch (err) {
-        abort(MARKET_DATA_ERROR);
+        abort(MARKET_DATA_ERROR, RETRYABLE.market);
     }
     if (!preState.inRange) {
-        abort(
-            `Position ist außerhalb der Range – Einzahlung nicht möglich (früher Check vor Swap).\n` +
-            `         Range: ${preState.priceLower.toFixed(4)} – ${preState.priceUpper.toFixed(4)}\n` +
-            `         Aktueller Preis: ${preState.currentPrice.toFixed(4)}`
-        );
+        abort(t('cli.ld.oor_early', { lower: preState.priceLower.toFixed(4), upper: preState.priceUpper.toFixed(4), price: preState.currentPrice.toFixed(4) }));
     }
-    console.log(`[deposit] OOR-Vorprüfung OK: Preis ${preState.currentPrice.toFixed(4)} liegt in Range.`);
+    console.log(`[deposit] ${t('cli.ld.oor_precheck_ok', { price: preState.currentPrice.toFixed(4) })}`);
 }
 
 // ─── volatilePair Auto-Swap (USDC → tokenA + USDC → tokenB) ─────────────────
@@ -661,7 +621,7 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
 
     // Frische USDC-Balance lesen (alte Reads können stale sein)
     walletUsdc = await getTokenBalanceFresh(keypair.publicKey, USDC_MINT, 6);
-    console.log(`[deposit] volatilePair: ${walletTokenA.toFixed(8)} ${tokenALabel} + ${walletTokenB.toFixed(8)} ${tokenBLabel} + ${walletUsdc.toFixed(2)} USDC im Wallet`);
+    console.log(`[deposit] ${t('cli.ld.volatile_wallet', { a: walletTokenA.toFixed(8), tokenA: tokenALabel, b: walletTokenB.toFixed(8), tokenB: tokenBLabel, usdc: walletUsdc.toFixed(2) })}`);
 
     // Defizit pro Seite ermitteln, jeweils mit +1.5% Puffer für Slippage
     const usdValueA = usdPerTokenA;
@@ -690,11 +650,7 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
         usdcForA        = deficitA > 0 ? (deficitA * usdValueA) * 1.015 : 0;
         usdcForB        = deficitB > 0 ? (deficitB * usdValueB) * 1.015 : 0;
         totalUsdcNeeded = usdcForA + usdcForB;
-        console.log(
-            `[deposit] volatilePair: USDC nach evtl. SOL-Top-Up knapp – Betrag ` +
-            `${prev.toFixed(2)} → ${depositAmount.toFixed(2)} USDC begrenzt ` +
-            `(verfügbar ${walletUsdc.toFixed(2)}, Faktor ${scale.toFixed(4)})`
-        );
+        console.log(`[deposit] ${t('cli.ld.volatile_capped', { old: prev.toFixed(2), new: depositAmount.toFixed(2), available: walletUsdc.toFixed(2), factor: scale.toFixed(4) })}`);
     }
 
     if (usdcForA >= 1.0) {
@@ -722,7 +678,8 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
                     : await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenA), pool.decimalsA);
                 walletUsdc   = await getTokenBalanceFresh(keypair.publicKey, USDC_MINT, 6);
             } catch (err) {
-                abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : `Auto-Swap USDC → ${tokenALabel} fehlgeschlagen: ${err.message}`);
+                abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : `Auto-Swap USDC → ${tokenALabel} fehlgeschlagen: ${err.message}`,
+                      isRoutingError(err) ? RETRYABLE.swap : null);
             }
         }
     }
@@ -752,7 +709,8 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
                     : await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
                 walletUsdc   = await getTokenBalanceFresh(keypair.publicKey, USDC_MINT, 6);
             } catch (err) {
-                abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : `Auto-Swap USDC → ${tokenBLabel} fehlgeschlagen: ${err.message}`);
+                abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : `Auto-Swap USDC → ${tokenBLabel} fehlgeschlagen: ${err.message}`,
+                      isRoutingError(err) ? RETRYABLE.swap : null);
             }
         }
     }
@@ -766,10 +724,10 @@ if (useModeBOrC) {
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(6)} ${tokenALabel} + ${walletTokenB.toFixed(6)} ${tokenBLabel}`);
     console.log(`[deposit] Bedarf:  ${manualAmountA.toFixed(6)} ${tokenALabel} + ${manualAmountB.toFixed(6)} ${tokenBLabel}`);
     if (walletTokenA < manualAmountA * 0.01 && manualAmountA > 0) {
-        abort(`Nicht genug ${tokenALabel} im Wallet (Vorhanden: ${walletTokenA.toFixed(6)}, Bedarf: ${manualAmountA.toFixed(6)}).`);
+        abort(t('cli.ld.not_enough_wallet', { token: tokenALabel, have: walletTokenA.toFixed(6), need: manualAmountA.toFixed(6) }));
     }
     if (walletTokenB < manualAmountB * 0.01 && manualAmountB > 0) {
-        abort(`Nicht genug ${tokenBLabel} im Wallet (Vorhanden: ${walletTokenB.toFixed(6)}, Bedarf: ${manualAmountB.toFixed(6)}).`);
+        abort(t('cli.ld.not_enough_wallet', { token: tokenBLabel, have: walletTokenB.toFixed(6), need: manualAmountB.toFixed(6) }));
     }
     // Auf tatsächlich Vorhandenes kappen — Orca-Ratio-Engpass-Logik nochmals anwenden
     if (manualAmountA > walletTokenA || manualAmountB > walletTokenB) {
@@ -780,7 +738,7 @@ if (useModeBOrC) {
         const prevB  = manualAmountB;
         manualAmountA = manualAmountA * scale;
         manualAmountB = manualAmountB * scale;
-        console.log(`[deposit] Wallet-Kappung (Faktor ${scale.toFixed(4)}): ${prevA.toFixed(6)} → ${manualAmountA.toFixed(6)} ${tokenALabel}, ${prevB.toFixed(6)} → ${manualAmountB.toFixed(6)} ${tokenBLabel}`);
+        console.log(`[deposit] ${t('cli.ld.wallet_capped', { factor: scale.toFixed(4), oldA: prevA.toFixed(6), newA: manualAmountA.toFixed(6), tokenA: tokenALabel, oldB: prevB.toFixed(6), newB: manualAmountB.toFixed(6), tokenB: tokenBLabel })}`);
     }
 } else if (pool.volatilePair) {
     // volatilePair: USD-Bedarf je Seite (halbiertes Kapital), nach Auto-Swap sollten beide Seiten passen
@@ -790,42 +748,27 @@ if (useModeBOrC) {
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(6)} ${tokenALabel} + ${walletTokenB.toFixed(6)} ${tokenBLabel}`);
     console.log(`[deposit] Bedarf:  ~${aNeed.toFixed(6)} ${tokenALabel} + ~${bNeed.toFixed(6)} ${tokenBLabel} (≈ ${depositAmount.toFixed(2)} USDC)`);
     if (walletTokenA < aNeed * 0.5)
-        abort(`Nicht genug ${tokenALabel}.\n         Geschätzt benötigt: ~${aNeed.toFixed(6)}\n         Vorhanden: ${walletTokenA.toFixed(6)}`);
+        abort(t('cli.ld.not_enough_est', { token: tokenALabel, need: aNeed.toFixed(6), have: walletTokenA.toFixed(6) }));
     if (walletTokenB < bNeed * 0.5)
-        abort(`Nicht genug ${tokenBLabel}.\n         Geschätzt benötigt: ~${bNeed.toFixed(6)}\n         Vorhanden: ${walletTokenB.toFixed(6)}`);
+        abort(t('cli.ld.not_enough_est', { token: tokenBLabel, need: bNeed.toFixed(6), have: walletTokenB.toFixed(6) }));
 } else if (useTokenB) {
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(6)} ${tokenALabel} + ${walletTokenB.toFixed(6)} ${tokenBLabel}`);
     if (walletTokenB < depositAmount) {
         const fehlend = (depositAmount - walletTokenB).toFixed(6);
-        abort(
-            `Nicht genug ${tokenBLabel}.\n` +
-            `         Benötigt: ${depositAmount.toFixed(6)} ${tokenBLabel}\n` +
-            `         Vorhanden: ${walletTokenB.toFixed(6)} ${tokenBLabel}\n` +
-            `         Fehlbetrag: ${fehlend} ${tokenBLabel}`
-        );
+        abort(t('cli.ld.not_enough_full', { token: tokenBLabel, need: depositAmount.toFixed(6), have: walletTokenB.toFixed(6), missing: fehlend }));
     }
 } else if (pool.usdcIsTokenA) {
     // tokenA = USDC, tokenB = z.B. EURC. --usdc X = X USDC Wallet-Budget.
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(2)} USDC + ${walletTokenB.toFixed(6)} ${tokenBLabel}`);
     if (walletTokenA < depositAmount) {
         const fehlend = (depositAmount - walletTokenA).toFixed(2);
-        abort(
-            `Nicht genug USDC für Budget.\n` +
-            `         Budget:    ${depositAmount.toFixed(2)} USDC\n` +
-            `         Vorhanden: ${walletTokenA.toFixed(2)} USDC\n` +
-            `         Fehlbetrag: ${fehlend} USDC`
-        );
+        abort(t('cli.ld.not_enough_usdc_budget', { need: depositAmount.toFixed(2), have: walletTokenA.toFixed(2), missing: fehlend }));
     }
 } else {
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(6)} ${tokenALabel} (nutzbar) + ${walletUsdc.toFixed(2)} USDC`);
     if (walletUsdc < depositAmount) {
         const fehlend = (depositAmount - walletUsdc).toFixed(2);
-        abort(
-            `Nicht genug USDC.\n` +
-            `         Benötigt: ${depositAmount.toFixed(2)} USDC\n` +
-            `         Vorhanden: ${walletUsdc.toFixed(2)} USDC\n` +
-            `         Fehlbetrag: ${fehlend} USDC`
-        );
+        abort(t('cli.ld.not_enough_full', { token: 'USDC', need: depositAmount.toFixed(2), have: walletUsdc.toFixed(2), missing: fehlend }));
     }
 }
 
@@ -891,11 +834,11 @@ if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
                         : await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenA), pool.decimalsA);
                     walletUsdc   = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
                 } catch (err) {
-                    console.error(`[deposit] Pre-Swap fehlgeschlagen: ${err.message} — fahre trotzdem fort (Fix 2 als Fallback)`);
+                    console.error(`[deposit] ${t('cli.ld.preswap_failed', { error: err.message })}`);
                 }
             }
         } else {
-            console.log(`[deposit] Pre-Swap: Betrag zu klein (${deficitUsdc.toFixed(2)} USDC) – überspringe`);
+            console.log(`[deposit] ${t('cli.ld.preswap_too_small', { usdc: deficitUsdc.toFixed(2) })}`);
         }
     }
 }
@@ -951,11 +894,12 @@ if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
                     walletTokenA = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenA), pool.decimalsA);
                     walletTokenB = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
                 } catch (err) {
-                    abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : MARKET_DATA_ERROR);
+                    abort(isRoutingError(err) ? SWAP_ROUTING_ERROR : MARKET_DATA_ERROR,
+                          isRoutingError(err) ? RETRYABLE.swap : RETRYABLE.market);
                 }
             }
         } else {
-            console.log(`[deposit] Pre-Swap: Defizit zu klein (${swapAmountFinal.toFixed(4)} USDC) – überspringe`);
+            console.log(`[deposit] ${t('cli.ld.preswap_deficit_small', { usdc: swapAmountFinal.toFixed(4) })}`);
         }
     }
 
@@ -972,7 +916,7 @@ if (position) {
     try {
         state = await adapter.getPositionState(pool, position.nft_mint);
     } catch (err) {
-        abort(MARKET_DATA_ERROR);
+        abort(MARKET_DATA_ERROR, RETRYABLE.market);
     }
 
     if (!state.inRange) {
@@ -982,7 +926,7 @@ if (position) {
         // Pool-Tokens starten kann — ohne manuellen USDC→SOL-Zwischenschritt.
         if (swappedVolatileB && !dryRun && walletUsdc >= 1.0) {
             const rescueUsdc = walletUsdc * 0.99;
-            console.warn(`[deposit] Position OOR nach Auto-Swap – Rescue-Swap: ${rescueUsdc.toFixed(2)} USDC → ${tokenALabel}`);
+            console.warn(`[deposit] ${t('cli.ld.rescue_swap', { usdc: rescueUsdc.toFixed(2), token: tokenALabel })}`);
             try {
                 const { amountOut, txSignature } = await swapTokens({
                     inputMint:      USDC_MINT,
@@ -995,21 +939,18 @@ if (position) {
                 });
                 console.log(`[deposit] Rescue-Swap OK: ${rescueUsdc.toFixed(2)} USDC → ${amountOut.toFixed(6)} ${tokenALabel} TX=${txSignature}`);
             } catch (err) {
-                console.warn(`[deposit] Rescue-Swap fehlgeschlagen (${err.message}) – USDC verbleiben im Wallet`);
+                console.warn(`[deposit] ${t('cli.ld.rescue_failed', { error: err.message })}`);
             }
         }
-        abort(
-            `Position ist außerhalb der Range – Einzahlung nicht möglich.\n` +
-            `         Range: ${state.priceLower.toFixed(4)} – ${state.priceUpper.toFixed(4)}\n` +
-            `         Aktueller Preis: ${state.currentPrice.toFixed(4)}\n` +
-            (swappedVolatileB
-                ? `         Verbleibende USDC wurden vorsorglich in ${tokenALabel} getauscht.\n` +
-                  `         Bitte erneut einzahlen wenn die Position wieder in Range ist.`
-                : `         Bitte erneut einzahlen wenn die Position wieder in Range ist.`)
-        );
+        abort(t('cli.ld.oor_abort', {
+            lower: state.priceLower.toFixed(4), upper: state.priceUpper.toFixed(4),
+            price: state.currentPrice.toFixed(4),
+            // Mitten-im-Text-Optional: Leerstring statt undefined (i18n.md §3e Merksatz)
+            swapNote: swappedVolatileB ? t('cli.ld.oor_swap_note', { token: tokenALabel }) + '\n' : '',
+        }));
     }
 
-    console.log(`[deposit] Range:   ${state.priceLower.toFixed(4)} – ${state.priceUpper.toFixed(4)} USDC  ✓ in Range`);
+    console.log(`[deposit] ${t('cli.liq.head_range_ok', { lower: state.priceLower.toFixed(4), upper: state.priceUpper.toFixed(4) })}`);
 
     // TokenA-Bedarf schätzen (CLMM-korrekt):
     //   volatilePair: depositAmount / 2 / usdPerTokenA (je Hälfte des USD-Betrags in tokenA)
@@ -1023,12 +964,7 @@ if (position) {
     // Modus B/C: bereits oben im Wallet-Check geprüft; sonst Abort nur bei deutlichem Mangel
     if (!useModeBOrC && walletTokenA < estTokenANeeded * 0.98) {
         const fehlend = (estTokenANeeded - walletTokenA).toFixed(6);
-        abort(
-            `Nicht genug ${tokenALabel} für die Einzahlung.\n` +
-            `         Geschätzt benötigt: ~${estTokenANeeded.toFixed(6)} ${tokenALabel}\n` +
-            `         Vorhanden: ${walletTokenA.toFixed(6)} ${tokenALabel}\n` +
-            `         Fehlbetrag: ~${fehlend} ${tokenALabel}`
-        );
+        abort(t('cli.ld.not_enough_deposit', { token: tokenALabel, need: estTokenANeeded.toFixed(6), have: walletTokenA.toFixed(6), missing: fehlend }));
     }
 
     // amountA/B: Orca berechnet tokenMaxA/B = amount * (1 + slippage) → auf walletBalance / SLIPPAGE_FACTOR
@@ -1055,15 +991,15 @@ if (position) {
         ? Math.min(manualAmountB, walletTokenBBal / SLIPPAGE_FACTOR * WALLET_SAFETY)
         : Math.min(depositAmountB, walletTokenBBal / SLIPPAGE_FACTOR * WALLET_SAFETY);
 
-    console.log(`[deposit] Übergabe: ~${amountA.toFixed(6)} ${tokenALabel} + ${amountB.toFixed(6)} ${tokenBLabel} (Orca nutzt nur den benötigten Anteil)`);
+    console.log(`[deposit] ${t('cli.ld.handover', { a: amountA.toFixed(6), tokenA: tokenALabel, b: amountB.toFixed(6), tokenB: tokenBLabel })}`);
     console.log(`[deposit] Slippage: ${SLIPPAGE_PCT_STR}`);
 
     if (dryRun) {
         const estDepA = clmmTokenAForDeposit(amountB, currentPrice, state.priceLower, state.priceUpper);
         const estDepUsdc = calcDepositedUsdc(estDepA, amountB, currentPrice, pool, 0, quotePrice);
-        console.log(`[deposit] Erwartete Einzahlung: ~${estDepA.toFixed(6)} ${tokenALabel} + ${amountB.toFixed(6)} ${tokenBLabel}`);
-        console.log(`[deposit] Erwarteter LP-Wert:   ~${estDepUsdc.toFixed(2)} USDC`);
-        console.log(`[deposit] ── DRY-RUN ENDE ── keine Transaktion ausgeführt ────────`);
+        console.log(`[deposit] ${t('cli.ld.expected_deposit', { a: estDepA.toFixed(6), tokenA: tokenALabel, b: amountB.toFixed(6), tokenB: tokenBLabel })}`);
+        console.log(`[deposit] ${t('cli.ld.expected_lp', { usdc: estDepUsdc.toFixed(2) })}`);
+        console.log(`[deposit] ── ${t('cli.ld.dry_run_end')} ────────`);
         Object.assign(jsonResult, {
             mode: 'increaseLiquidity', dryRun: true,
             estimatedTokenA: estDepA, estimatedTokenB: amountB,
@@ -1082,10 +1018,10 @@ if (position) {
             // Selbstheilung: SOL ist zwischen Upfront-Check und dieser TX unter die Reserve
             // gefallen (z.B. durch einen Pre-Swap) — erst automatisch USDC→SOL nachtanken,
             // dann EINMAL retryen, bevor abgebrochen wird.
-            console.warn(`[deposit] increaseLiquidity: zu wenig SOL (${err.solBalance.toFixed(4)}) – versuche Selbstheilung...`);
+            console.warn(`[deposit] ${t('cli.liq.low_sol_selfheal', { step: 'increaseLiquidity', sol: err.solBalance.toFixed(4) })}`);
             const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
             if (healedSol >= config.solReserve) {
-                console.log(`[deposit] SOL-Selbstheilung OK (${healedSol.toFixed(4)} SOL) – Retry increaseLiquidity...`);
+                console.log(`[deposit] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'increaseLiquidity' })}`);
                 try {
                     result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
                 } catch (err2) {
@@ -1110,15 +1046,13 @@ if (position) {
                 rawMsg === '[object Object]';
             let msg;
             if (isSlippageError(err)) {
-                msg =
-                    `SLIPPAGE-FEHLER (>${SLIPPAGE_PCT_STR}): Preis hat sich während der Transaktion ` +
-                    `zu stark bewegt. Erneut versuchen oder --usdc-Betrag anpassen.`;
+                msg = t('cli.liq.slippage_error', { slip: SLIPPAGE_PCT_STR });
             } else if (isInsufficientFundsError(err)) {
                 msg = await _describeInsufficientFunds(pool, amountA, amountB, tokenALabel, tokenBLabel);
             } else {
                 logActionError(`deposit increaseLiquidity ${pool.pair}`, err);
-                const { reason, detail } = describeError(err);
-                msg = `increaseLiquidity fehlgeschlagen – ${reason}\n${detail}`;
+                const { reasonKey, reasonParams, detail } = describeError(err);
+                msg = t('cli.liq.step_failed', { step: 'increaseLiquidity', reason: t(reasonKey, reasonParams), detail });
             }
             if (isTransient) {
                 await notify.info(`deposit ${pool.pair}`, msg);
@@ -1191,14 +1125,14 @@ if (position) {
     // HWM zurücksetzen: Kapital hat sich verändert, neuer Referenzwert wird im nächsten Snapshot etabliert
     db.prepare('UPDATE positions SET hwm_usd = NULL, hwm_at = NULL, hwm_base_adjustment = NULL WHERE pool_id = ? AND closed_at IS NULL').run(pool.id);
 
-    console.log(`[deposit] ✓ Einzahlung erfolgreich`);
+    console.log(`[deposit] ✓ ${t('cli.ld.success')}`);
     console.log(`[deposit] TX:       ${result.txHash}`);
-    console.log(`[deposit] Kapital:  ${oldCapital.toFixed(2)} → ${newCapital.toFixed(2)} USDC`);
-    console.log(`[deposit] HWM zurückgesetzt – wird beim nächsten Snapshot neu etabliert`);
+    console.log(`[deposit] ${t('cli.liq.head_capital_change', { old: oldCapital.toFixed(2), new: newCapital.toFixed(2) })}`);
+    console.log(`[deposit] ${t('cli.liq.hwm_reset')}`);
 
     // Auto-Activate: Pool als aktiv markieren (DB ist Single Source of Truth)
     if (setPoolActive(pool.id, true)) {
-        console.log(`[deposit] Pool ${pool.pair} auf active=true gesetzt (DB)`);
+        console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
     }
     ensureScoreLimitEnabled(pool.id);
     {
@@ -1250,24 +1184,19 @@ const amountANew = useModeBOrC
 
 if (!useModeBOrC && walletTokenA < estTokenANeededB * 0.9) {
     const fehlend = (estTokenANeededB - walletTokenA).toFixed(6);
-    abort(
-        `Nicht genug ${tokenALabel} für neue Position.\n` +
-        `         Geschätzt benötigt: ~${estTokenANeededB.toFixed(6)} ${tokenALabel}\n` +
-        `         Vorhanden: ${walletTokenA.toFixed(6)} ${tokenALabel}\n` +
-        `         Fehlbetrag: ~${fehlend} ${tokenALabel}`
-    );
+    abort(t('cli.ld.not_enough_new', { token: tokenALabel, need: estTokenANeededB.toFixed(6), have: walletTokenA.toFixed(6), missing: fehlend }));
 }
 
-console.log(`[deposit] Kapital: ~${amountANew.toFixed(6)} ${tokenALabel} + ${amountBNew.toFixed(6)} ${tokenBLabel}`);
+console.log(`[deposit] ${t('cli.ld.head_capital_pair', { a: amountANew.toFixed(6), tokenA: tokenALabel, b: amountBNew.toFixed(6), tokenB: tokenBLabel })}`);
 console.log(`[deposit] Slippage: ${SLIPPAGE_PCT_STR}`);
 
 if (dryRun) {
     // Orca nutzt die passende Token-Seite – mit echter CLMM-Ratio rückrechnen
     const estDepA   = clmmTokenAForDeposit(amountBNew, currentPrice, range.priceLower, range.priceUpper);
     const estCapital = calcDepositedUsdc(estDepA, amountBNew, currentPrice, pool, 0, quotePrice);
-    console.log(`[deposit] Erwartete Einzahlung: ~${estDepA.toFixed(6)} ${tokenALabel} + ${amountBNew.toFixed(6)} ${tokenBLabel}`);
-    console.log(`[deposit] Erwarteter LP-Wert:   ~${estCapital.toFixed(2)} USDC`);
-    console.log(`[deposit] ── DRY-RUN ENDE ── keine Transaktion ausgeführt ────────`);
+    console.log(`[deposit] ${t('cli.ld.expected_deposit', { a: estDepA.toFixed(6), tokenA: tokenALabel, b: amountBNew.toFixed(6), tokenB: tokenBLabel })}`);
+    console.log(`[deposit] ${t('cli.ld.expected_lp', { usdc: estCapital.toFixed(2) })}`);
+    console.log(`[deposit] ── ${t('cli.ld.dry_run_end')} ────────`);
     Object.assign(jsonResult, {
         mode: 'openPosition', dryRun: true,
         estimatedTokenA: estDepA, estimatedTokenB: amountBNew,
@@ -1287,10 +1216,10 @@ try {
 } catch (err) {
     if (err.solBalance !== undefined) {
         // Selbstheilung wie bei increaseLiquidity: erst USDC→SOL nachtanken, dann 1× retryen.
-        console.warn(`[deposit] openPosition: zu wenig SOL (${err.solBalance.toFixed(4)}) – versuche Selbstheilung...`);
+        console.warn(`[deposit] ${t('cli.liq.low_sol_selfheal', { step: 'openPosition', sol: err.solBalance.toFixed(4) })}`);
         const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
         if (healedSol >= config.solReserve) {
-            console.log(`[deposit] SOL-Selbstheilung OK (${healedSol.toFixed(4)} SOL) – Retry openPosition...`);
+            console.log(`[deposit] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'openPosition' })}`);
             try {
                 resultNew = await adapter.openPosition(
                     pool, range.tickLower, range.tickUpper, amountANew, amountBNew, DEPOSIT_SLIPPAGE
@@ -1314,15 +1243,13 @@ try {
             rawMsgNew === '[object Object]';
         let msg;
         if (isSlippageError(err)) {
-            msg =
-                `SLIPPAGE-FEHLER (>${SLIPPAGE_PCT_STR}): Preis hat sich während der Transaktion ` +
-                `zu stark bewegt. Erneut versuchen.`;
+            msg = t('cli.liq.slippage_error_short', { slip: SLIPPAGE_PCT_STR });
         } else if (isInsufficientFundsError(err)) {
             msg = await _describeInsufficientFunds(pool, amountANew, amountBNew, tokenALabel, tokenBLabel);
         } else {
             logActionError(`deposit openPosition ${pool.pair}`, err);
-            const { reason, detail } = describeError(err);
-            msg = `openPosition fehlgeschlagen – ${reason}\n${detail}`;
+            const { reasonKey, reasonParams, detail } = describeError(err);
+            msg = t('cli.liq.step_failed', { step: 'openPosition', reason: t(reasonKey, reasonParams), detail });
         }
         if (isTransientNew) {
             await notify.info(`deposit --new ${pool.pair}`, msg);
@@ -1406,15 +1333,15 @@ insertCapitalFlow(db, {
     note:            'Manueller Deposit --new',
 });
 
-console.log(`[deposit] ✓ Neue Position eröffnet`);
+console.log(`[deposit] ✓ ${t('cli.ld.new_position_success')}`);
 console.log(`[deposit] NFT:     ${resultNew.nftMint}`);
 console.log(`[deposit] TX:      ${resultNew.txHash}`);
 const _fmtB = pool.decimalsB >= 8 ? realTokenB.toFixed(6) : realTokenB.toFixed(2);
-console.log(`[deposit] Kapital: ${realTokenA.toFixed(6)} ${tokenALabel} + ${_fmtB} ${tokenBLabel} = ~${realCapital.toFixed(2)} USDC`);
+console.log(`[deposit] ${t('cli.ld.head_capital_real', { a: realTokenA.toFixed(6), tokenA: tokenALabel, b: _fmtB, tokenB: tokenBLabel, usdc: realCapital.toFixed(2) })}`);
 
 // Auto-Activate: Pool als aktiv markieren (DB ist Single Source of Truth)
 if (setPoolActive(pool.id, true)) {
-    console.log(`[deposit] Pool ${pool.pair} auf active=true gesetzt (DB)`);
+    console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
 }
 ensureScoreLimitEnabled(pool.id);
 {

@@ -61,6 +61,19 @@ export function getDb() {
         _db.exec('ALTER TABLE notifications ADD COLUMN read INTEGER NOT NULL DEFAULT 0');
     }
 
+    // msg_key / msg_params (2026-08-11, Mehrsprachigkeit Schritt 5): die Bots
+    // schicken seither Schlüssel + Daten statt fertigem Text (
+    // Core/forge-pub/i18n.md, E4). Der gerenderte Text bleibt zusätzlich in
+    // `message` stehen — das ist der Fallback für Altbestand und für einen später
+    // verschwundenen Key. ZUSÄTZLICHE Spalten statt Ersatz: keine Migration,
+    // keine unlesbaren Alt-Meldungen.
+    if (!cols.includes('msg_key')) {
+        _db.exec('ALTER TABLE notifications ADD COLUMN msg_key TEXT');
+    }
+    if (!cols.includes('msg_params')) {
+        _db.exec('ALTER TABLE notifications ADD COLUMN msg_params TEXT');
+    }
+
     // settings (2026-08-03): generische Key/Value-Ablage, erster Nutzer sind die
     // Benachrichtigungs-Toggles (System/Support/Premium) aus dem Message Center.
     // Gleicher Grund wie bei read oben: lag vorher in localStorage
@@ -89,6 +102,10 @@ export function getDb() {
  * @param {string|null} displayName – Anzeigename des BETROFFENEN Bots ("Liquidity Bot").
  *                                    Nicht zwingend der Absender: `wallet-monitor`
  *                                    meldet für mehrere Bots.
+ * @param {{msgKey?: string|null, params?: object|null}} [i18n]
+ *        Schlüssel + Daten der Meldung (Mehrsprachigkeit Schritt 5). Fehlen sie,
+ *        bleibt es beim gespeicherten Text — Absender ohne i18n-Unterstützung
+ *        (z.B. Skripte) funktionieren unverändert weiter.
  * @returns {number} Inserted ID
  */
 // Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
@@ -97,11 +114,11 @@ export function getDb() {
 // Auslese-Obergrenze zu sein.
 const MAX_NOTIFICATIONS = 100;
 
-export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null) {
+export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null, i18n = null) {
     const db   = getDb();
     const stmt = db.prepare(`
-        INSERT INTO notifications (timestamp, bot_id, level, category, message, context, sent_telegram, display_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO notifications (timestamp, bot_id, level, category, message, context, sent_telegram, display_name, msg_key, msg_params)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
         Date.now(),
@@ -112,6 +129,8 @@ export function insertNotification(botId, level, category, message, context, sen
         context != null ? JSON.stringify(context) : null,
         sentTelegram ? 1 : 0,
         displayName ?? null,
+        i18n?.msgKey ?? null,
+        i18n?.params != null ? JSON.stringify(i18n.params) : null,
     );
 
     db.prepare(`

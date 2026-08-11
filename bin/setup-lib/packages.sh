@@ -120,6 +120,54 @@ do_ssl() {
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Zeitzone
+# ═════════════════════════════════════════════════════════════════════════════
+# Setzt sowohl die OS-Zeitzone (steuert cron-Weckzeiten und Log-/Journal-
+# Zeitstempel) als auch FORGE_TZ (steuert Tagesgrenzen/Anzeige der App, siehe
+# core/config.js) auf denselben Wert — beide sollen nie auseinanderlaufen.
+# Default ist die bereits am Server konfigurierte Zeitzone (nicht hart Europe/
+# Berlin): ein Nutzer in z.B. Florida bekommt so America/New_York als
+# Vorschlag statt eines für ihn falschen deutschen Defaults, kann aber jede
+# gültige IANA-Zone eintippen. Fund 2026-08-11 (forge-pub1/pub2 liefen beide
+# unbemerkt auf Etc/UTC): dieser Schritt verhindert das ab jetzt bei jeder
+# Neuinstallation.
+do_timezone() {
+    step "$(t TIMEZONE_STEP)"
+    local detected=""
+    detected="$(timedatectl show --property=Timezone --value 2>/dev/null || true)"
+    [[ -z "$detected" ]] && detected="$(cat /etc/timezone 2>/dev/null || true)"
+    [[ -z "$detected" ]] && detected="UTC"
+
+    if [[ -z "$OPT_TIMEZONE" ]]; then
+        if [[ "$INTERACTIVE" -eq 1 ]]; then
+            ask OPT_TIMEZONE "$(t TIMEZONE_PROMPT "$detected")" "$detected"
+        else
+            OPT_TIMEZONE="$detected"
+        fi
+    fi
+
+    if [[ ! -e "/usr/share/zoneinfo/$OPT_TIMEZONE" ]]; then
+        c_warn "$(t TIMEZONE_INVALID "$OPT_TIMEZONE" "$detected")"
+        OPT_TIMEZONE="$detected"
+    fi
+
+    if [[ "$OPT_TIMEZONE" != "$detected" ]]; then
+        if timedatectl set-timezone "$OPT_TIMEZONE" 2>/dev/null; then
+            # timedatectl aktualisiert nur den /etc/localtime-Symlink, NICHT
+            # /etc/timezone (Fund 2026-08-11) — ohne dpkg-reconfigure würden beide
+            # Quellen auseinanderlaufen. cron neu starten, damit laufende Ticks die
+            # neue Zone sofort verwenden statt erst beim nächsten Boot.
+            DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive tzdata >/dev/null 2>&1 || true
+            systemctl restart cron 2>/dev/null || true
+        else
+            c_warn "$(t TIMEZONE_SET_FAILED "$OPT_TIMEZONE")"
+            OPT_TIMEZONE="$detected"
+        fi
+    fi
+    c_ok "$(t TIMEZONE_DONE "$OPT_TIMEZONE")"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
 # API-Key-Validierung
 # ═════════════════════════════════════════════════════════════════════════════
 # Leichter Testaufruf direkt gegen Jupiter/Helius (Nexus läuft an dieser Stelle
@@ -232,6 +280,14 @@ do_config() {
     set_env_var "$prem" PREMIUM_WALLET_PATH "$SECRETS_DIR/premium-wallet.json"
     set_env_var "$prem" NOSTR_SECRETS_DIR   "$SECRETS_DIR"
     set_env_var "$prem" NOSTR_IDENTITY      "$NOSTR_IDENTITY_NAME"
+
+    # FORGE_TZ steuert Tagesgrenzen/Anzeige der App (core/config.js) — auf
+    # denselben Wert gesetzt wie die OS-Zeitzone aus do_timezone(), damit beide
+    # nie auseinanderlaufen (kein hartes Europe/Berlin für Nutzer in anderen Zonen).
+    local settings_env="$ENV_DIR/settings.env"
+    for f in "$nexus_env" "$settings_env" "$liq" "$lend" "$prem"; do
+        set_env_var "$f" FORGE_TZ "$OPT_TIMEZONE"
+    done
 
     chown "$INSTALL_USER:$INSTALL_USER" "$ENV_DIR"/*.env 2>/dev/null || true
     chmod 600 "$ENV_DIR"/*.env 2>/dev/null || true

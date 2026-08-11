@@ -41,9 +41,10 @@ import QRCode from 'qrcode';
 import { EventEmitter } from 'events';
 import { nip19 } from 'nostr-tools';
 import { PATHS, envFile } from '../../config/paths.js';
+import { t, getLang } from '../../lib/i18n.js';
 import { issueActivationToken, getLastIssuedAt } from './activation.js';
 import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
-import { loadMinVersionConfig, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
+import { loadMinVersionConfig, signMinVersion, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
 import { startConnectionMonitor, getConnectionStats } from '../../lib/nostr-stats.js';
 import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed, markActivationEventProcessed, pruneMessagesToLimit } from './messages-db.js';
 
@@ -182,15 +183,22 @@ function classifyPremiumCommand(text) {
 function formatHourRange(hourId) {
     const startMs = hourId * 3_600_000;
     const endMs = startMs + 3_600_000;
-    const fmt = ms => new Date(ms).toLocaleTimeString('de-DE', {
+    const locale = numLocale();
+    const fmt = ms => new Date(ms).toLocaleTimeString(locale, {
         hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin',
     });
-    return `${fmt(startMs)}–${fmt(endMs)} Uhr`;
+    // "Uhr" hängt an der Sprache, nicht am Zeitformat (englisch: kein Suffix).
+    return t('msg.premium.hour_range', { from: fmt(startMs), to: fmt(endMs) });
 }
 
-/** Deutsche Zahlennotation (Komma statt Punkt) für USDC-Beträge, wie im Rest von FORGE. */
+/** Locale für Zahlen/Uhrzeiten — folgt der Sprache, wie im Frontend (E10). */
+function numLocale() {
+    return getLang() === 'en' ? 'en-US' : 'de-DE';
+}
+
+/** Zahlnotation für USDC-Beträge in der aktiven Sprache (deutsch: Komma). */
 function formatUsdcDe(amount) {
-    return Number(amount).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return Number(amount).toLocaleString(numLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 /**
@@ -201,109 +209,76 @@ function formatUsdcDe(amount) {
  * in = "erhalten").
  */
 function humanizePremiumMessage(direction, cmd) {
+    // Kurzform: `sd(key)` liefert { summary, detail } aus zwei Katalog-Keys, die sich
+    // nur im Suffix unterscheiden. Gerendert wird bei JEDEM Abruf — anders als bei den
+    // Bot-Meldungen (Schritt 5) muss hier nichts gespeichert werden, weil die rohe
+    // Kommando-Nutzlast in der DB liegt und die Übersetzung erst beim Lesen entsteht.
+    const sd = (key, params = null) => ({
+        summary: t(`msg.premium.${key}.summary`, params),
+        detail:  t(`msg.premium.${key}.detail`,  params),
+    });
+
     switch (cmd.cmd) {
         case 'premium-activate':
-            return direction === 'in'
-                ? { summary: 'Aktivierungsanfrage erhalten', detail: 'Ein Client hat eine Premium-Aktivierung angefordert.' }
-                : { summary: 'Aktivierungsanfrage gesendet', detail: 'Aktivierungsanfrage an den FORGE Master gesendet.' };
+            return sd(direction === 'in' ? 'activate_in' : 'activate_out');
         case 'premium-token':
-            return direction === 'in'
-                ? { summary: 'Premium-Zugang freigeschaltet', detail: 'Ein Aktivierungs-Token wurde empfangen – Premium ist aktiv.' }
-                : { summary: 'Aktivierungs-Token verschickt', detail: 'Ein Aktivierungs-Token wurde an eine anfragende Gegenstelle verschickt.' };
+            return sd(direction === 'in' ? 'token_in' : 'token_out');
         case 'premium-blob': {
-            const hourSuffix = cmd.hourId ? ` (${formatHourRange(cmd.hourId)})` : '';
-            return {
-                summary: `Update: Premium-Daten aktualisiert${hourSuffix}`,
-                detail:  `Neue Premium-Daten wurden geliefert und automatisch verarbeitet${hourSuffix}.`,
-            };
+            // Klammerzusatz nur wenn die Stunde bekannt ist — sonst bliebe "()" stehen.
+            const range = cmd.hourId ? ` (${formatHourRange(cmd.hourId)})` : '';
+            return sd('blob', { range });
         }
         case 'premium-blob-sealed':
             // hourId steckt im verschlüsselten Anteil (an die zahlende Wallet gebunden,
             // siehe lib/premium-payer-binding.js) — für die Anzeige hier nicht entschlüsselt,
             // das würde den Zahler-Key außerhalb des eigentlichen Ingest-Pfads laden.
-            return direction === 'in'
-                ? { summary: 'Update: Premium-Daten aktualisiert', detail: 'Neue Premium-Daten wurden geliefert und automatisch verarbeitet.' }
-                : { summary: 'Premium-Daten verschickt', detail: 'Verschlüsselte Premium-Daten wurden an einen zahlenden Kunden verschickt.' };
+            return direction === 'in' ? sd('blob', { range: '' }) : sd('blob_sealed_out');
         case 'premium-payment': {
             // Reines lokales Ereignis (siehe premium-pay.js/recordPremiumMessage) — kein
             // "erhalten"/"gesendet"-Unterschied nötig, es gibt keine Gegenstelle.
-            const range = formatHourRange(cmd.hourId);
-            const amountDe = formatUsdcDe(cmd.amountUsdc);
+            const range  = formatHourRange(cmd.hourId);
+            const amount = formatUsdcDe(cmd.amountUsdc);
             return {
-                summary: `💰 ${amountDe} USDC bezahlt (${range})`,
-                detail:  `Premium-Zahlung ausgeführt: ${amountDe} USDC für ${range}.`,
+                ...sd('payment', { amount, range }),
                 // Strukturierte Felder zusätzlich zu summary/detail, damit das Frontend
                 // Empfänger/TX selbst formatieren kann (TX als Explorer-Link gekürzt, die
                 // Empfangsadresse bewusst ungekürzt) statt die volle 88-stellige Signatur im
                 // Fließtext auszuschreiben.
-                payment: { amountUsdc: amountDe, hourRange: range, toWallet: cmd.toWallet, signature: cmd.signature },
+                payment: { amountUsdc: amount, hourRange: range, toWallet: cmd.toWallet, signature: cmd.signature },
             };
         }
         case 'premium-autopay-enabled':
-            return {
-                summary: 'Premium-Service aktiviert',
-                detail: 'Ab jetzt wird stündlich automatisch bezahlt und die Marktdaten werden alle 10 Minuten im '
-                    + 'Hintergrund aktualisiert – dafür gibt es keine eigene Nachricht mehr. Eine Meldung gibt es nur '
-                    + 'noch bei Guthabenproblemen oder wenn der Premium-Service vorübergehend nicht erreichbar ist.',
-            };
+            return sd('autopay_on');
         case 'premium-autopay-disabled':
-            if (cmd.reason === 'liquiditybot-stopped') {
-                return {
-                    summary: 'Premium-Service deaktiviert – Liquidity Bot gestoppt',
-                    detail: 'Der Liquidity Bot wurde manuell gestoppt, dafür liefert Premium Marktdaten – die '
-                        + 'automatische Zahlung wurde deshalb mit deaktiviert. Wieder aktivieren über '
-                        + 'Liquidity → Premium → Verwalten, sobald der Bot wieder läuft.',
-                };
-            }
-            return {
-                summary: 'Premium-Service manuell deaktiviert',
-                detail: 'Es werden keine weiteren automatischen Zahlungen mehr ausgeführt.',
-            };
-        case 'premium-pay-failed': {
-            if (cmd.reason === 'insufficient-balance') {
-                return {
-                    summary: '⚠️ Premium-Service deaktiviert – kein Guthaben mehr',
-                    detail: `Das Guthaben im Premium-Wallet reicht nicht mehr aus (benötigt `
-                        + `${formatUsdcDe(cmd.priceUsdc ?? 0)} USDC, vorhanden ${formatUsdcDe(cmd.usdcBalance ?? 0)} USDC). `
-                        + `Der Premium-Service wurde deshalb deaktiviert – es werden keine weiteren automatischen `
-                        + `Zahlungen mehr versucht. Bitte Guthaben in USDC nachfüllen und den Premium-Service über `
-                        + `Liquidity → Premium → Verwalten wieder aktivieren!`,
-                };
-            }
-            return {
-                summary: '⚠️ Zahlung fehlgeschlagen',
-                detail: `Transaktion konnte nicht ausgeführt werden (${cmd.detail ?? 'unbekannter Fehler'}). `
-                    + `Mögliche Ursache: zu wenig SOL für die Netzwerkgebühr. Bitte Wallet mit mindestens 0,15 SOL `
-                    + `aufladen – die automatische Zahlung wird beim nächsten erfolgreichen Versuch fortgesetzt.`,
-            };
-        }
+            return sd(cmd.reason === 'liquiditybot-stopped' ? 'autopay_off_bot' : 'autopay_off');
+        case 'premium-pay-failed':
+            return cmd.reason === 'insufficient-balance'
+                ? sd('pay_failed_balance', {
+                    needed: formatUsdcDe(cmd.priceUsdc ?? 0),
+                    have:   formatUsdcDe(cmd.usdcBalance ?? 0),
+                  })
+                : sd('pay_failed', { detail: cmd.detail ?? t('msg.premium.unknown_error') });
         case 'premium-outage':
-            return cmd.state === 'recovered'
-                ? {
-                    summary: 'Premium-Service wieder erreichbar',
-                    detail: 'Die automatischen Zahlungen laufen ab sofort wieder normal weiter.',
-                }
-                : {
-                    summary: '⚠️ Premium-Service vorübergehend nicht erreichbar',
-                    detail: 'Der Premium-Service ist vorübergehend nicht erreichbar. Die stündlichen Zahlungen wurden '
-                        + 'ausgesetzt und werden automatisch wieder aufgenommen, wenn der Service wieder erreichbar ist.',
-                };
+            return sd(cmd.state === 'recovered' ? 'outage_over' : 'outage');
         case 'premium-version-check':
             return direction === 'in'
-                ? { summary: 'Versions-Meldung erhalten', detail: `Ein Fork hat seine Softwareversion gemeldet (${cmd.version ?? '?'}).` }
-                : { summary: 'Versions-Meldung gesendet', detail: 'Eigene Softwareversion an den FORGE Master gemeldet.' };
-        case 'premium-version-too-old':
+                ? sd('version_in', { version: cmd.version ?? '?' })
+                : sd('version_out');
+        case 'premium-version-too-old': {
+            // Seit Fund 2026-08-11 signierter Umschlag statt Klartext-Feld – die
+            // Mindestversion steckt in minVersion.params.minRequiredVersion (siehe
+            // handleVersionCheck/handleVersionTooOld), alte Nachrichten aus der DB
+            // (vor dem Umbau) hatten sie noch als cmd.minRequiredVersion.
+            const minReq = cmd.minVersion?.params?.minRequiredVersion ?? cmd.minRequiredVersion ?? '?';
             return direction === 'in'
-                ? {
-                    summary: '⚠️ Premium-Service deaktiviert – Version veraltet',
-                    detail: `Die installierte Version (${cmd.yourVersion ?? '?'}) ist älter als die benötigte Mindestversion `
-                        + `${cmd.minRequiredVersion ?? '?'}. Der Premium-Service funktioniert u.U. nicht korrekt und wurde `
-                        + `deshalb deaktiviert. Bitte FORGE.pub aktualisieren und den Premium-Service danach über `
-                        + `Liquidity → Premium → Verwalten wieder aktivieren.`,
-                }
-                : { summary: 'Versionshinweis gesendet', detail: `Mindestversion ${cmd.minRequiredVersion ?? '?'} an eine veraltete Gegenstelle gemeldet.` };
+                ? sd('version_old_in', { yourVersion: cmd.yourVersion ?? '?', minVersion: minReq })
+                : sd('version_old_out', { minVersion: minReq });
+        }
         default:
-            return { summary: `Unbekanntes Kommando: ${cmd.cmd ?? '?'}`, detail: JSON.stringify(cmd) };
+            return {
+                summary: t('msg.premium.unknown_cmd', { cmd: cmd.cmd ?? '?' }),
+                detail:  JSON.stringify(cmd),
+            };
     }
 }
 
@@ -662,16 +637,23 @@ function startNostrService() {
             return;
         }
 
-        let minRequiredVersion;
+        let params;
         try {
-            ({ minRequiredVersion } = loadMinVersionConfig());
+            params = loadMinVersionConfig();
         } catch (err) {
             console.warn(`[premium] Mindestversions-Konfiguration konnte nicht gelesen werden: ${err.message}`);
             return;
         }
+        const { minRequiredVersion } = params;
         if (!isValidVersion(minRequiredVersion) || isVersionSupported(cmd.version, minRequiredVersion)) return;
 
-        const replyText = JSON.stringify({ cmd: 'premium-version-too-old', minRequiredVersion, yourVersion: cmd.version });
+        // Signiert statt Klartext (Fund 2026-08-11): der Fork verifiziert die Nachricht
+        // jetzt über verifyMinVersion() inkl. Downgrade-/Replay-Schutz (lastSeenVersion,
+        // siehe handleVersionTooOld unten) – ein vom Relay erneut ausgelieferter Backlog-
+        // Eintrag aus einem alten Test kann den Autopay-Kill-Switch damit nicht mehr
+        // beliebig oft erneut auslösen.
+        const minVersion = signMinVersion(params, identity.privkeyHex);
+        const replyText = JSON.stringify({ cmd: 'premium-version-too-old', minVersion, yourVersion: cmd.version });
         await Promise.any(sendDirectMessage(pool, relays, identity, rumor.pubkey, replyText));
 
         const timestamp = Date.now();
@@ -839,14 +821,25 @@ function startNostrService() {
     }
 
     /**
-     * FORK-SEITE: empfängt {cmd:'premium-version-too-old', minRequiredVersion, yourVersion}
-     * vom Master (Gegenstück zu handleVersionCheck oben). Schaltet den Premium-Service
-     * über denselben Kill-Switch ab, der auch bei unzureichendem Guthaben greift
+     * FORK-SEITE: empfängt {cmd:'premium-version-too-old', minVersion, yourVersion} vom
+     * Master (Gegenstück zu handleVersionCheck oben). Schaltet den Premium-Service über
+     * denselben Kill-Switch ab, der auch bei unzureichendem Guthaben greift
      * (setAutoPayEnabled(false), siehe premium-pay.js) – der bereits vorhandene
      * Autopay-Check dort verhindert danach jede weitere automatische Zahlung, bis der
      * Nutzer nach einem Update manuell reaktiviert. Kein eigener DB-Insert nötig: die
      * eingehende DM wurde bereits vom generischen Insert-Pfad oben gespeichert (category
      * 'premium') und erscheint über humanizePremiumMessage() im Message-Center.
+     *
+     * 🔴 Fund 2026-08-11: bis hierher wurde `minRequiredVersion` ungeprüft im Klartext
+     * übernommen, ohne Signatur- oder Replay-Schutz (verifyMinVersion()/der zugehörige
+     * Store existierten zwar schon, waren aber nie verdrahtet). Ein einzelner Live-Test
+     * des Feature-Rollouts (06.08.2026, testweise minRequiredVersion=9.9.9 gegen
+     * forge-pub1 gesendet) blieb dadurch als Nostr-Relay-Backlog-Eintrag liegen und hat
+     * den Kill-Switch bei jedem Watchdog-Resubscribe (alle ~15-20 Min, siehe Vorfall
+     * 2026-08-01) erneut ausgelöst – Reaktivieren half nur bis zum nächsten Resubscribe.
+     * Jetzt wie premium-pricing.js: signierter Umschlag + monotoner `version`-Zähler
+     * gegen genau diesen Fall (verifyMinVersion() lehnt unsignierte/alte alte Nachrichten
+     * ab, storeMinVersion() merkt sich die zuletzt akzeptierte Version dauerhaft).
      */
     async function handleVersionTooOld(rumor) {
         let cmd;
@@ -862,15 +855,22 @@ function startNostrService() {
             console.warn(`[premium] premium-version-too-old-DM von unbekanntem Absender verworfen (${rumor.pubkey}).`);
             return;
         }
-        if (!isValidVersion(cmd.minRequiredVersion)) {
-            console.warn(`[premium] premium-version-too-old mit ungültiger minRequiredVersion verworfen: "${cmd.minRequiredVersion}"`);
+
+        const { verifyMinVersion } = await import('../../lib/premium-min-version.js');
+        const { getLastSeenMinVersion, storeMinVersion } = await import('../../lib/premium-min-version-store.js');
+
+        const lastSeen = getLastSeenMinVersion();
+        const result = verifyMinVersion(cmd.minVersion, masterContact.pubkeyHex, lastSeen);
+        if (!result.valid) {
+            console.warn(`[premium] premium-version-too-old verworfen: ${result.reason}`);
             return;
         }
+        storeMinVersion(result.params);
 
         const { setAutoPayEnabled } = await import('../../lib/premium-auto-pay-store.js');
         setAutoPayEnabled(false);
 
-        console.warn(`[premium] Premium-Service deaktiviert – installierte Version (${cmd.yourVersion}) ist älter als die Mindestversion ${cmd.minRequiredVersion}.`);
+        console.warn(`[premium] Premium-Service deaktiviert – installierte Version (${cmd.yourVersion}) ist älter als die Mindestversion ${result.params.minRequiredVersion}.`);
     }
 
     console.log(`✅  Nostr-Service aktiv (${identity.npub}) – Relays: ${relays.join(', ')}`);
@@ -928,7 +928,7 @@ app.use(express.json());
 
 app.get('/identity', (_req, res) => {
     if (!identityExists(IDENTITY_NAME)) {
-        return res.status(404).json({ error: `Identität "${IDENTITY_NAME}" fehlt – bin/nostr-setup.js ausführen` });
+        return res.status(404).json({ error: t('msg.support.identity_missing_setup', { name: IDENTITY_NAME }) });
     }
     const id = loadIdentity(IDENTITY_NAME);
     res.json({
@@ -957,7 +957,7 @@ app.get('/nostr/stats', (_req, res) => {
 // deshalb ist das ein unkritischer Vorgang ohne Aufräumbedarf.
 app.post('/identity/alias', async (req, res) => {
     if (!identityExists(IDENTITY_NAME)) {
-        return res.status(404).json({ error: `Identität "${IDENTITY_NAME}" fehlt` });
+        return res.status(404).json({ error: t('msg.support.identity_missing', { name: IDENTITY_NAME }) });
     }
     const alias = sanitizeAlias(req.body?.alias ?? '') || DEFAULT_ALIAS;
     try {
@@ -970,7 +970,7 @@ app.post('/identity/alias', async (req, res) => {
         }
         res.json({ ok: true, alias });
     } catch (err) {
-        res.status(500).json({ error: `Alias konnte nicht gesetzt werden: ${err.message}` });
+        res.status(500).json({ error: t('msg.support.alias_failed', { error: err.message }) });
     }
 });
 
@@ -999,12 +999,12 @@ app.post('/identity/alias', async (req, res) => {
 app.post('/identity/regenerate', (req, res) => {
     if (IS_MASTER_IDENTITY) {
         return res.status(403).json({
-            error: 'Der FORGE Master darf nicht zurückgesetzt werden – die npub muss stabil bleiben, damit alle Gegenstellen (u.a. FORGE.pub-Forks) ihn weiterhin erreichen. Der Anzeigename kann über /identity/alias trotzdem geändert werden.',
+            error: t('msg.support.master_no_reset'),
         });
     }
     if (req.body?.confirm !== true) {
         return res.status(400).json({
-            error: 'Bestätigung fehlt: confirm=true nötig. Achtung – der bisherige Nostr-Account und ALLE Nachrichten werden unwiederbringlich gelöscht.',
+            error: t('msg.support.reset_confirm_missing'),
         });
     }
     const alias = sanitizeAlias(req.body?.alias ?? '') || DEFAULT_ALIAS;
@@ -1028,13 +1028,13 @@ app.post('/identity/regenerate', (req, res) => {
         });
         res.on('finish', () => setTimeout(() => process.exit(0), 200));
     } catch (err) {
-        res.status(500).json({ error: `Account konnte nicht neu angelegt werden: ${err.message}` });
+        res.status(500).json({ error: t('msg.support.account_failed', { error: err.message }) });
     }
 });
 
 app.get('/identity/qr', async (_req, res) => {
     if (!identityExists(IDENTITY_NAME)) {
-        return res.status(404).json({ error: `Identität "${IDENTITY_NAME}" fehlt` });
+        return res.status(404).json({ error: t('msg.support.identity_missing', { name: IDENTITY_NAME }) });
     }
     const id = loadIdentity(IDENTITY_NAME);
     try {
@@ -1102,7 +1102,7 @@ app.get('/support/unread-count', (_req, res) => {
 // das der "alte" Sammel-Thread ohne Markierung (thread_id IS NULL).
 app.get('/support/thread/:peer', async (req, res) => {
     const peerPubkeyHex = resolvePubkeyHex(req.params.peer);
-    if (!peerPubkeyHex) return res.status(400).json({ error: 'Ungültiger Pubkey' });
+    if (!peerPubkeyHex) return res.status(400).json({ error: t('msg.support.invalid_pubkey') });
     const threadId = typeof req.query.threadId === 'string' && req.query.threadId ? req.query.threadId : null;
 
     const db = openMessagesDb();
@@ -1144,7 +1144,7 @@ app.get('/support/thread/:peer', async (req, res) => {
 // das Symptom "gelöschte Nachricht taucht Stunden später wieder auf" (2026-07-30).
 app.delete('/support/thread/:peer', (req, res) => {
     const peerPubkeyHex = resolvePubkeyHex(req.params.peer);
-    if (!peerPubkeyHex) return res.status(400).json({ error: 'Ungültiger Pubkey' });
+    if (!peerPubkeyHex) return res.status(400).json({ error: t('msg.support.invalid_pubkey') });
     const threadId = typeof req.query.threadId === 'string' && req.query.threadId ? req.query.threadId : null;
 
     const db = openMessagesDb();
@@ -1226,7 +1226,7 @@ app.get('/premium/unread-count', (_req, res) => {
 // Premium-Menü jede Nachricht einzeln (nicht gruppiert nach Gegenstelle) zeigt.
 app.post('/premium/:id/read', (req, res) => {
     const id = parseInt(req.params.id, 10);
-    if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ungültige id' });
+    if (!Number.isInteger(id)) return res.status(400).json({ error: t('msg.support.invalid_id') });
     const db = openMessagesDb();
     try {
         const info = db.prepare(
@@ -1272,15 +1272,15 @@ app.get('/support/stream', (req, res) => {
 // nicht selbst erfinden muss).
 app.post('/support/send', async (req, res) => {
     const text = (req.body?.text ?? '').trim();
-    if (!text) return res.status(400).json({ error: 'text fehlt' });
+    if (!text) return res.status(400).json({ error: t('msg.support.text_missing') });
 
     const peerPubkeyHex = resolvePubkeyHex(req.body?.peerPubkey);
     if (!peerPubkeyHex) {
-        return res.status(400).json({ error: 'peerPubkey muss ein gültiger npub1… oder 64-stelliger hex-Pubkey sein' });
+        return res.status(400).json({ error: t('msg.support.invalid_peer') });
     }
 
     if (!nostrService) {
-        return res.status(503).json({ error: 'Nostr-Service nicht bereit (Identität fehlt oder Relays nicht erreichbar)' });
+        return res.status(503).json({ error: t('msg.support.nostr_not_ready') });
     }
 
     const threadId = req.body?.newThread === true

@@ -3,25 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE – Updates</title>
+    <title data-i18n="upd.page_title">FORGE – Updates</title>
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260810a">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/updates.css?v=20260810m">
+    <link rel="stylesheet" href="css/updates.css?v=20260811d">
+    <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
+         damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
+    <script src="/forge/i18n/active.js"></script>
 </head>
 <body>
 
 <header class="header">
     <div class="header-content">
         <div class="header-col header-logo">
-            <a href="/forge/" title="Zur Hauptseite">
+            <a href="/forge/" title="Zur Hauptseite" data-i18n-attr="title:liq.to_main">
                 <img src="/forge/img/forge-logo.png" alt="FORGE Logo" class="logo-icon">
             </a>
-            <h1>Updates</h1>
+            <h1 data-i18n="upd.updates">Updates</h1>
         </div>
         <div class="header-right">
             <span class="last-update" id="lastUpdate">–</span>
-            <button class="notif-bell" id="notifBell" title="Message Center">
+            <button class="notif-bell" id="notifBell" title="Message Center" data-i18n-attr="title:nav.message_center">
                 <span class="notif-envelope">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M22 6l-10 7L2 6"></path></svg>
                 </span><span class="notif-badge hidden" id="notifBadge">0</span>
@@ -34,74 +37,84 @@
     <div class="up-grid">
         <div class="settings-card">
             <div class="settings-card-header">
-                <span class="sch-title">Versionen</span>
+                <span class="sch-title" data-i18n="upd.versions">Versionen</span>
             </div>
             <div class="settings-row">
-                <span class="settings-label">Core</span>
+                <span class="settings-label" data-i18n="upd.core">Core</span>
                 <span id="upCoreVersion">–</span>
             </div>
             <div class="settings-row" id="upAvailableRow" style="display:none;">
-                <span class="settings-label">Verfügbar</span>
+                <span class="settings-label" data-i18n="upd.available">Verfügbar</span>
                 <span id="upAvailableVersion">–</span>
             </div>
             <div class="settings-row" style="border:none;">
-                <span class="settings-label">Plugins</span>
-                <span class="up-plugins-hint">derzeit keine Plugins installiert</span>
+                <span class="settings-label" data-i18n="upd.plugins">Plugins</span>
+                <span class="up-plugins-hint" data-i18n="upd.no_plugins">derzeit keine Plugins installiert</span>
             </div>
         </div>
 
         <div class="settings-card">
             <div class="settings-card-header">
-                <span class="sch-title">Update-Modus</span>
+                <span class="sch-title" data-i18n="upd.language">Sprache</span>
             </div>
-            <div class="up-option-row">
-                <button class="up-option-btn" id="upModeManual" data-mode="manual">Manuell</button>
-                <span class="up-option-desc">Du entscheidest selbst, wann ein Update eingespielt wird.</span>
+            <div class="settings-row">
+                <span class="settings-label up-lang-label" data-i18n="upd.language">Sprache</span>
+                <span id="upLangText" style="display:none;"></span>
+                <select class="lang-select up-field-control" id="upLangSelect" style="display:none;">
+                    <option value="de">Deutsch</option>
+                    <option value="en">English</option>
+                </select>
             </div>
-            <div class="up-option-row">
-                <button class="up-option-btn" id="upModeAuto" data-mode="auto">Automatisch</button>
-                <span class="up-option-desc">Geprüfte Patch-Updates werden ohne Rückfrage eingespielt, inkl. Selbsttest und Rollback bei Problemen.</span>
+            <div class="settings-row" style="border:none;">
+                <span class="settings-label up-lang-label">
+                    <span data-i18n="upd.timezone">Zeitzone</span>
+                    <span class="info-tip-label" data-tooltip-title="Zeitzone" data-tooltip-content="Ändert nur die FORGE-interne Zeitzone (Datumsgrenzen/Anzeige) – die Server-Systemzeit bleibt unverändert." data-i18n-attr="data-tooltip-title:upd.timezone,data-tooltip-content:upd.timezone_hint">&#9432;</span>
+                </span>
+                <span id="upTzText" style="display:none;"></span>
+                <input type="text" id="upTzInput" list="upTzList" class="lang-select up-field-control" style="display:none;" placeholder="Europe/Berlin">
+                <datalist id="upTzList"></datalist>
             </div>
         </div>
     </div>
 
     <div class="settings-card" id="upRollbackCard" style="display:none;border-color:var(--danger);margin-top:1rem;">
         <div class="settings-card-header">
-            <span class="sch-title" style="color:var(--danger);">Letztes Update fehlgeschlagen</span>
+            <span class="sch-title" style="color:var(--danger);" data-i18n="upd.last_failed">Letztes Update fehlgeschlagen</span>
         </div>
         <div class="settings-row" style="border:none;">
             <span id="upRollbackInfo" style="color:var(--text-secondary);font-size:0.85rem;"></span>
         </div>
         <div class="settings-row" style="border:none;">
-            <button class="btn btn-stop" id="upRollbackBtn">Auf Vorgängerversion zurückrollen</button>
+            <button class="btn btn-stop" id="upRollbackBtn" data-i18n="upd.rollback_to_previous">Auf Vorgängerversion zurückrollen</button>
         </div>
     </div>
 
     <div class="up-grid" style="margin-top:1rem;">
         <div class="settings-card">
             <div class="settings-card-header">
-                <span class="sch-title">Aktionen</span>
+                <span class="sch-title" data-i18n="upd.mode">Update-Modus</span>
             </div>
             <div class="up-option-row">
-                <button class="up-option-btn" id="upCheckBtn">Jetzt prüfen</button>
-                <span class="up-option-desc">Prüft bei GitHub, ob eine neue Version bereitliegt.</span>
+                <button class="up-option-btn" id="upModeManual" data-mode="manual" data-i18n="upd.manual">Manuell</button>
+                <span class="up-option-desc" data-i18n="upd.manual_hint">Du entscheidest selbst, wann ein Update eingespielt wird.</span>
             </div>
             <div class="up-option-row">
-                <button class="up-option-btn" id="upApplyBtn">Update einspielen</button>
-                <span class="up-option-desc">Spielt ein geprüftes Update ein, inkl. automatischem Selbsttest.</span>
-            </div>
-            <div class="up-option-row">
-                <button class="up-option-btn" id="upSelftestBtn">Selbsttest</button>
-                <span class="up-option-desc">Prüft, ob alle Dienste normal laufen.</span>
+                <button class="up-option-btn" id="upModeAuto" data-mode="auto" data-i18n="upd.automatic">Automatisch</button>
+                <span class="up-option-desc">Geprüfte Patch-Updates werden ohne Rückfrage eingespielt, inkl. Selbsttest und Rollback bei Problemen.</span>
             </div>
         </div>
 
-        <div class="settings-card" id="upProtocolCard">
+        <div class="settings-card">
             <div class="settings-card-header">
-                <span class="sch-title">Protokoll</span>
+                <span class="sch-title" data-i18n="upd.actions">Aktionen</span>
             </div>
-            <div class="up-checklist" id="upChecklist">
-                <span class="up-checklist-empty">Noch keine Aktion ausgeführt.</span>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upCheckBtn" data-i18n="upd.check_now">Jetzt prüfen</button>
+                <span class="up-option-desc" data-i18n="upd.check_hint">Prüft bei GitHub, ob eine neue Version bereitliegt.</span>
+            </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upApplyBtn" data-i18n="upd.install">Update einspielen</button>
+                <span class="up-option-desc" data-i18n="upd.install_hint">Spielt ein geprüftes Update ein, inkl. automatischem Selbsttest.</span>
             </div>
         </div>
     </div>
@@ -111,6 +124,13 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/updates.js?v=20260810m"></script>
+<div class="forge-tooltip" id="forgeTooltip">
+    <table>
+        <thead><tr><th id="forgeTooltipTitle"></th></tr></thead>
+        <tbody><tr><td id="forgeTooltipBody"></td></tr></tbody>
+    </table>
+</div>
+
+<script type="module" src="js/updates.js?v=20260811f"></script>
 </body>
 </html>

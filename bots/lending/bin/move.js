@@ -25,6 +25,7 @@ import { resolve, dirname, join }   from 'path';
 import { fileURLToPath }      from 'url';
 
 import { config }             from '../lib/config.js';
+import { t, numLocale } from '../../../lib/i18n.js';
 import {
     KaminoProtocol, JupiterLendProtocol,
     DriftProtocol, LoopscaleProtocol,
@@ -35,7 +36,7 @@ import {
     getActivePositions, recordTransaction,
     upsertWalletSnapshot, getWalletSnapshot, addNotification,
 } from '../lib/db.js';
-import { sendTelegram } from '../lib/notify.js';
+import * as notify from '../lib/notify.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -67,19 +68,19 @@ const VALID_PROTOCOLS = [
 ];
 
 if (!fromProto || !VALID_PROTOCOLS.includes(fromProto)) {
-    console.error(`Fehler: --from muss eines von: ${VALID_PROTOCOLS.join(', ')}`);
+    console.error(t('cli.lend.from_required', { list: VALID_PROTOCOLS.join(', ') }));
     process.exit(1);
 }
 if (!toProto || !VALID_PROTOCOLS.includes(toProto)) {
-    console.error(`Fehler: --to muss eines von: ${VALID_PROTOCOLS.join(', ')}`);
+    console.error(t('cli.lend.to_required', { list: VALID_PROTOCOLS.join(', ') }));
     process.exit(1);
 }
 if (fromProto === toProto) {
-    console.error('Fehler: --from und --to dürfen nicht identisch sein.');
+    console.error(t('cli.lend.from_to_distinct'));
     process.exit(1);
 }
 if (amount !== 'all' && (isNaN(amount) || amount <= 0)) {
-    console.error('Fehler: --amount muss eine positive Zahl oder "all" sein.');
+    console.error(t('cli.lend.amount_positive_or_all_hint'));
     process.exit(1);
 }
 
@@ -87,7 +88,7 @@ if (amount !== 'all' && (isNaN(amount) || amount <= 0)) {
 
 function fmt(n, decimals = 2) {
     if (n == null || isNaN(n)) return '—';
-    return Number(n).toLocaleString('de-DE', {
+    return Number(n).toLocaleString(numLocale(), {
         minimumFractionDigits: decimals,
         maximumFractionDigits: decimals,
     });
@@ -122,7 +123,7 @@ function buildProtocol(name) {
         label:        loopscaleVault.label,
         vaultAddress: loopscaleVault.address,
     });
-    throw new Error(`Unbekanntes Protokoll: ${name}`);
+    throw new Error(t('cli.lend.unknown_protocol', { protocol: name }));
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -135,36 +136,36 @@ async function main() {
     console.log('');
     console.log('  FORGE LendingBot – Move');
     hr();
-    console.log(`  Von      : ${protoFrom.label}`);
-    console.log(`  Nach     : ${protoTo.label}`);
-    console.log(`  Betrag   : ${amount === 'all' ? 'Alles' : fmt(amount) + ' USDC'}`);
+    console.log(t('cli.lend.mv_from', { v: protoFrom.label }));
+    console.log(t('cli.lend.mv_to', { v: protoTo.label }));
+    console.log(t('cli.lend.mv_amount', { v: amount === 'all' ? t('cli.lend.all') : fmt(amount) + ' USDC' }));
     console.log(`  Wallet   : ${walletAddress}`);
-    if (dryRun) console.log('  Modus    : 🔍 DRY-RUN (keine TXs werden gesendet)');
+    if (dryRun) console.log(t('cli.lend.mv_mode_dry'));
     hr();
 
     // ── SOL-Balance prüfen ────────────────────────────────────────────────────
-    process.stdout.write('  SOL-Balance … ');
+    process.stdout.write(`  ${t('cli.lend.mv_sol')} `);
     const solBalance = await getSolBalance(walletAddress);
     console.log(`${fmt(solBalance, 4)} SOL`);
     if (solBalance < config.solReserve) {
-        console.error(`\n  ❌ Zu wenig SOL für Fees (min. ${config.solReserve} SOL)`);
+        console.error(`\n  ❌ ${t('cli.lend.mv_low_sol', { min: config.solReserve })}`);
         process.exit(1);
     }
 
     // ── Quell-Position prüfen ─────────────────────────────────────────────────
-    process.stdout.write(`  Position ${protoFrom.label} … `);
+    process.stdout.write(`  ${t('cli.lend.mv_position', { label: protoFrom.label })} `);
     let position;
     try {
         position = await protoFrom.getPosition(walletAddress);
         if (position) {
             console.log(`${fmt(position.amount)} USDC`);
         } else {
-            console.log('keine Position gefunden');
-            console.error(`\n  ❌ Keine aktive Position in ${protoFrom.label} – Abbruch.`);
+            console.log(t('cli.lend.no_position_found'));
+            console.error(`\n  ❌ ${t('cli.lend.mv_no_position', { label: protoFrom.label })}`);
             process.exit(1);
         }
     } catch (err) {
-        console.log(`⚠ Nicht abfragbar: ${err.message}`);
+        console.log(`⚠ ${t('cli.lend.not_queryable', { error: err.message })}`);
         position = null;
     }
 
@@ -173,12 +174,12 @@ async function main() {
         : amount;
 
     if (effectiveAmount == null) {
-        console.error('\n  ❌ Betrag konnte nicht bestimmt werden.');
+        console.error(`\n  ❌ ${t('cli.lend.amount_undetermined')}.`);
         process.exit(1);
     }
 
     // ── Ziel-Pool: APY vorab prüfen ───────────────────────────────────────────
-    process.stdout.write(`  APY ${protoTo.label} … `);
+    process.stdout.write(`  ${t('cli.lend.mv_apy', { label: protoTo.label })} `);
     let targetApy = null;
     let targetTvl = null;
     try {
@@ -190,36 +191,36 @@ async function main() {
                 ? (targetTvl/1e6).toFixed(1)+'M'
                 : (targetTvl/1e3).toFixed(0)+'K'}` : ''));
     } catch (err) {
-        console.log(`⚠ Nicht abfragbar: ${err.message}`);
+        console.log(`⚠ ${t('cli.lend.not_queryable', { error: err.message })}`);
     }
 
     hr();
 
     // ── Dry-Run: Zusammenfassung ──────────────────────────────────────────────
     if (dryRun) {
-        console.log('  📋 Vorschau:');
-        console.log(`     ${fmt(effectiveAmount)} USDC aus ${protoFrom.label} abheben`);
-        console.log(`     ${fmt(effectiveAmount)} USDC in ${protoTo.label} einzahlen`);
+        console.log(`  📋 ${t('cli.lend.preview')}`);
+        console.log(`     ${t('cli.lend.mv_prev_withdraw', { usdc: fmt(effectiveAmount), label: protoFrom.label })}`);
+        console.log(`     ${t('cli.lend.mv_prev_deposit', { usdc: fmt(effectiveAmount), label: protoTo.label })}`);
         if (targetApy) {
             const yearly = effectiveAmount * (targetApy / 100);
-            console.log(`     Erwarteter Jahres-Yield: ~${fmt(yearly)} USDC (${fmt(targetApy, 2)} % APY)`);
+            console.log(`     ${t('cli.lend.preview_yearly', { usdc: fmt(yearly), apy: fmt(targetApy, 2) })}`);
         }
         console.log('');
-        console.log('  ℹ Dry-Run: keine Transaktionen gesendet.');
+        console.log(`  ℹ ${t('cli.lend.dryrun_no_tx')}`);
         process.exit(0);
     }
 
     // ── Bestätigung ───────────────────────────────────────────────────────────
-    console.log(`  ${fmt(effectiveAmount)} USDC werden umgeschichtet:`);
+    console.log(`  ${t('cli.lend.mv_confirm', { usdc: fmt(effectiveAmount) })}`);
     console.log(`    ${protoFrom.label}  →  ${protoTo.label}`);
-    if (targetApy) console.log(`  Ziel-APY: ${fmt(targetApy, 2)} %`);
+    if (targetApy) console.log(`  ${t('cli.lend.mv_target_apy', { apy: fmt(targetApy, 2) })}`);
     console.log('');
-    console.log('  ⚠  Auto-Deploy und Auto-Rebalancing werden für die Dauer pausiert.');
+    console.log(`  ⚠  ${t('cli.lend.mv_pause_warn')}`);
     console.log('');
 
-    const ok = await confirm('  Fortfahren? [j/N] ');
+    const ok = await confirm(`  ${t('cli.lend.proceed')} `);
     if (!ok) {
-        console.log('\n  Abgebrochen.');
+        console.log(`\n  ${t('cli.lend.aborted')}`);
         process.exit(0);
     }
     console.log('');
@@ -233,17 +234,17 @@ async function main() {
         startedAt: new Date().toISOString(),
     });
     writeFileSync(LOCK_FILE, lockInfo, 'utf-8');
-    console.log('  🔒 Lock gesetzt – Auto-Deploy + Auto-Rebalancing pausiert');
+    console.log(`  🔒 ${t('cli.lend.mv_lock_set')}`);
     console.log('');
 
     try {
         // ── Schritt 1: Withdraw ───────────────────────────────────────────────
-        console.log(`  [1/2] Withdraw aus ${protoFrom.label} …`);
-        process.stdout.write('        TX wird erstellt … ');
+        console.log(`  [1/2] ${t('cli.lend.mv_step1', { label: protoFrom.label })}`);
+        process.stdout.write(`        ${t('cli.lend.step_build_tx')} `);
         const withdrawResult = await protoFrom.buildWithdrawTx(walletAddress, effectiveAmount);
         console.log(`✓ (${withdrawResult.type})`);
 
-        process.stdout.write('        TX signieren + senden … ');
+        process.stdout.write(`        ${t('cli.lend.step_sign_send')} `);
         const keypair = loadKeypair();
         const txSigWithdraw = await signAndSend(
             withdrawResult.transaction, keypair,
@@ -268,35 +269,36 @@ async function main() {
                 note:     `Move → ${toProto}`,
             });
         } catch (dbErr) {
-            console.warn(`        ⚠ DB-Update (Withdraw) fehlgeschlagen: ${dbErr.message}`);
+            console.warn(`        ⚠ ${t('cli.lend.mv_db_failed', { step: 'Withdraw', error: dbErr.message })}`);
         }
 
-        console.log(`        ✅ Withdraw erfolgreich (${fmt(effectiveAmount)} USDC)`);
+        console.log(`        ✅ ${t('cli.lend.mv_withdraw_ok', { usdc: fmt(effectiveAmount) })}`);
 
         // Ungestakte LP-Reste erkennen (nur Loopscale) – siehe
         // LoopscaleProtocol.checkLeftoverLp() in lib/lending-protocols.js für Hintergrund.
         if (protoFrom instanceof LoopscaleProtocol) {
             const leftoverLp = await protoFrom.checkLeftoverLp(walletAddress);
             if (leftoverLp) {
-                const usdcStr = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
-                const msg = `⚠️ ${protoFrom.label}: ${leftoverLp.lpAmount.toFixed(6)} ungestakte LP-Token${usdcStr} `
-                          + `nach Withdraw im Wallet zurückgeblieben – bei Loopscale nicht mehr sichtbar, `
-                          + `aber on-chain vorhanden. Support kontaktieren (Restake nötig).`;
-                console.log(`        ${msg}`);
-                try { addNotification({ level: 'warn', message: msg }); } catch { /* Best-Effort */ }
-                await sendTelegram(`🟡 *${protoFrom.label}: LP-Reste nach Withdraw*\n${msg}`);
+                const usdcStr  = leftoverLp.estimatedUsdc != null ? ` (~${fmt(leftoverLp.estimatedUsdc)} USDC)` : '';
+                const lpParams = { pool: protoFrom.label, lp: leftoverLp.lpAmount.toFixed(6), usdc: usdcStr };
+                console.log(`        ${t('notify.len.lp_remainder_short', lpParams)}`);
+                try {
+                    addNotification({ level: 'warn', msgKey: 'notify.len.lp_remainder_short', params: lpParams });
+                } catch { /* Best-Effort */ }
+                // Katalog-Verweis statt fertigem Text: gerendert wird beim Anzeigen (Konvention 2, i18n.md §3e)
+                await notify.lpRemainder(protoFrom.label, { k: 'notify.len.lp_remainder_short', p: lpParams });
             }
         }
         console.log('');
 
         // ── Schritt 2: Deposit ────────────────────────────────────────────────
-        console.log(`  [2/2] Deposit in ${protoTo.label} …`);
-        process.stdout.write('        TX wird erstellt … ');
+        console.log(`  [2/2] ${t('cli.lend.mv_step2', { label: protoTo.label })}`);
+        process.stdout.write(`        ${t('cli.lend.step_build_tx')} `);
         const isLoopscale = protoTo instanceof LoopscaleProtocol;
         const depositTxData = await protoTo.buildDepositTx(walletAddress, effectiveAmount);
         console.log('✓');
 
-        process.stdout.write('        TX signieren + senden … ');
+        process.stdout.write(`        ${t('cli.lend.step_sign_send')} `);
         const txSigDeposit = await signAndSend(depositTxData, keypair, {
             preserveBlockhash: isLoopscale,
         });
@@ -340,19 +342,19 @@ async function main() {
                 });
             }
         } catch (dbErr) {
-            console.warn(`        ⚠ DB-Update (Deposit) fehlgeschlagen: ${dbErr.message}`);
+            console.warn(`        ⚠ ${t('cli.lend.mv_db_failed', { step: 'Deposit', error: dbErr.message })}`);
         }
 
-        console.log(`        ✅ Deposit erfolgreich (${fmt(effectiveAmount)} USDC)`);
+        console.log(`        ✅ ${t('cli.lend.mv_deposit_ok', { usdc: fmt(effectiveAmount) })}`);
         console.log('');
 
         // ── Ergebnis ──────────────────────────────────────────────────────────
         hr();
-        console.log('  ✅ Move abgeschlossen!');
+        console.log(`  ✅ ${t('cli.lend.mv_done')}`);
         console.log('');
-        console.log(`  Betrag     : ${fmt(effectiveAmount)} USDC`);
-        console.log(`  Von        : ${protoFrom.label}`);
-        console.log(`  Nach       : ${protoTo.label}`);
+        console.log(t('cli.lend.mv_res_amount', { v: `${fmt(effectiveAmount)} USDC` }));
+        console.log(t('cli.lend.mv_res_from', { v: protoFrom.label }));
+        console.log(t('cli.lend.mv_res_to', { v: protoTo.label }));
         console.log(`  Withdraw TX: https://solscan.io/tx/${txSigWithdraw}`);
         console.log(`  Deposit TX : https://solscan.io/tx/${txSigDeposit}`);
         hr();
@@ -360,18 +362,18 @@ async function main() {
 
     } catch (err) {
         if (err.technicalDetail) console.error(`  [debug] ${err.technicalDetail}`);
-        console.error(`\n  ❌ Fehler: ${err.message}`);
-        console.error('     Lock wird trotzdem entfernt.');
+        console.error(`\n  ❌ ${t('cli.lend.mv_error', { error: err.message })}`);
+        console.error(`     ${t('cli.lend.mv_lock_removed_anyway')}`);
         process.exitCode = 1;
     } finally {
         // Lock immer entfernen – auch bei Fehlern
         try { unlinkSync(LOCK_FILE); } catch { /* bereits gelöscht oder nie angelegt */ }
-        console.log('  🔓 Lock entfernt – Auto-Deploy + Auto-Rebalancing wieder aktiv.');
+        console.log(`  🔓 ${t('cli.lend.mv_lock_removed')}`);
     }
 }
 
 main().catch(err => {
-    console.error(`\n  ❌ Unerwarteter Fehler: ${err.message}`);
+    console.error(`\n  ❌ ${t('cli.lend.unexpected', { error: err.message })}`);
     try { unlinkSync(LOCK_FILE); } catch { /* ignore */ }
     process.exit(1);
 });

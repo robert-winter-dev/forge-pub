@@ -11,6 +11,9 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+// `t` ist in diesem Modul mehrfach ein lokaler Variablenname (Token/Timestamp) —
+// der Helfer wird deshalb als `tr` importiert (bin/i18n-check.js kennt beide).
+import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 const SVC_ID = 'forge-liquiditybot';
@@ -112,10 +115,10 @@ function _premiumBalanceWarning(status) {
     const { remainingHours, lowBalanceWarnHours, lowBalanceCriticalHours } = status;
     if (remainingHours == null) return null;
     if (remainingHours <= (lowBalanceCriticalHours ?? 0)) {
-        return { level: 'critical', icon: '🔴', text: `Kritisch: Guthaben reicht noch ~${remainingHours.toFixed(1)}h – bitte zeitnah aufladen.` };
+        return { level: 'critical', icon: '🔴', text: tr('sliq.balance_critical', 'Kritisch: Guthaben reicht noch ~{hours}h – bitte zeitnah aufladen.', { hours: remainingHours.toFixed(1) }) };
     }
     if (remainingHours <= (lowBalanceWarnHours ?? 0)) {
-        return { level: 'warn', icon: '🟡', text: `Guthaben wird knapp: reicht noch ~${remainingHours.toFixed(1)}h.` };
+        return { level: 'warn', icon: '🟡', text: tr('sliq.balance_low', 'Guthaben wird knapp: reicht noch ~{hours}h.', { hours: remainingHours.toFixed(1) }) };
     }
     return null;
 }
@@ -123,18 +126,16 @@ function _premiumBalanceWarning(status) {
 function _formatPremiumEndDate(remainingHours) {
     if (remainingHours == null) return 'no data';
     const end = new Date(Date.now() + remainingHours * 3600 * 1000);
-    const dd   = String(end.getDate()).padStart(2, '0');
-    const mm   = String(end.getMonth() + 1).padStart(2, '0');
-    const min  = String(end.getMinutes()).padStart(2, '0');
-    return `${dd}.${mm}.${end.getFullYear()} / ${end.getHours()}:${min} Uhr`;
+    const date = end.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const time = end.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
+    return tr('sliq.premium_until_fmt', '{date} / {time} Uhr', { date, time });
 }
 
 function _premiumTabPanelHtml(status) {
     if (!status.walletConfigured) {
         return `
             <p class="modal-hint" style="margin:0;">
-                Kein Premium-Wallet konfiguriert. Wird bei der Installation automatisch angelegt
-                (bin/install.sh) — bei einer bestehenden Installation ggf. neu installieren.
+                ${tr('sliq.no_premium_wallet', 'Kein Premium-Wallet konfiguriert. Wird bei der Installation automatisch angelegt (bin/install.sh) — bei einer bestehenden Installation ggf. neu installieren.')}
             </p>`;
     }
 
@@ -142,19 +143,19 @@ function _premiumTabPanelHtml(status) {
     const untilText = _formatPremiumEndDate(status.remainingHours);
     const priceText = status.priceUsdcPerHour != null ? `${status.priceUsdcPerHour} USDC/h` : 'no data';
     const disableBtns = !status.activated || !status.pricingKnown;
-    const disableReason = !status.activated ? 'Kein Aktivierungs-Token vorhanden.' : 'Preisliste noch nicht bekannt.';
+    const disableReason = !status.activated ? tr('sliq.no_token', 'Kein Aktivierungs-Token vorhanden.') : tr('sliq.no_pricing', 'Preisliste noch nicht bekannt.');
 
     return `
         <div style="display:grid;grid-template-columns:auto 1fr;gap:0.3rem 1rem;font-size:0.85rem;margin-bottom:0.8rem">
-            <span style="color:var(--text-muted)">Aktueller Status</span>
-            <span>${status.enabled ? 'Premium Service aktiviert' : 'Premium Service deaktiviert'}</span>
-            <span style="color:var(--text-muted)">SOL Guthaben</span>
+            <span style="color:var(--text-muted)">${tr('sliq.current_status', 'Aktueller Status')}</span>
+            <span>${status.enabled ? tr('sliq.premium_on', 'Premium Service aktiviert') : tr('sliq.premium_off', 'Premium Service deaktiviert')}</span>
+            <span style="color:var(--text-muted)">${tr('sliq.sol_balance', 'SOL Guthaben')}</span>
             <span>${status.solBalance != null ? status.solBalance.toFixed(4) : 'no data'} SOL</span>
-            <span style="color:var(--text-muted)">USDC Guthaben</span>
+            <span style="color:var(--text-muted)">${tr('sliq.usdc_balance', 'USDC Guthaben')}</span>
             <span>${status.usdcBalance != null ? status.usdcBalance.toFixed(2) : 'no data'} USDC</span>
-            <span style="color:var(--text-muted)">Kosten pro Stunde</span>
+            <span style="color:var(--text-muted)">${tr('sliq.cost_per_hour', 'Kosten pro Stunde')}</span>
             <span>${_esc(priceText)}</span>
-            <span style="color:var(--text-muted)">Reicht bis zum</span>
+            <span style="color:var(--text-muted)">${tr('sliq.lasts_until', 'Reicht bis zum')}</span>
             <span>${_esc(untilText)}</span>
         </div>
         ${warning ? `
@@ -165,20 +166,17 @@ function _premiumTabPanelHtml(status) {
         <div class="bot-actions">
             <button class="btn btn-secondary btn-uniform" id="premium-btn-enable"
                 ${disableBtns || status.enabled ? 'disabled' : ''}
-                ${disableBtns ? `data-tooltip-title="Noch nicht möglich" data-tooltip-content="${_esc(disableReason)}"` : ''}>
-                Aktivieren
+                ${disableBtns ? `data-tooltip-title="${tr('sliq.not_possible_yet', 'Noch nicht möglich')}" data-tooltip-content="${_esc(disableReason)}"` : ''}>
+                ${tr('sb.activate', 'Aktivieren')}
             </button>
             <button class="btn btn-secondary btn-uniform" id="premium-btn-disable"
                 ${disableBtns || !status.enabled ? 'disabled' : ''}
-                ${disableBtns ? `data-tooltip-title="Noch nicht möglich" data-tooltip-content="${_esc(disableReason)}"` : ''}>
-                Deaktivieren
+                ${disableBtns ? `data-tooltip-title="${tr('sliq.not_possible_yet', 'Noch nicht möglich')}" data-tooltip-content="${_esc(disableReason)}"` : ''}>
+                ${tr('sb.deactivate', 'Deaktivieren')}
             </button>
         </div>
         <p style="margin:0.5rem 0 0;font-size:0.78rem;color:var(--text-muted);">
-            Voraussetzung: die aktuelle Version von FORGE.pub. Bei einer veralteten Version
-            wird der Premium Service automatisch deaktiviert. Wird der Liquidity Bot manuell
-            gestoppt, wird die automatische Zahlung mit deaktiviert (Premium liefert Daten
-            speziell für diesen Bot).
+            ${tr('sliq.premium_requirements', 'Voraussetzung: die aktuelle Version von FORGE.pub. Bei einer veralteten Version wird der Premium Service automatisch deaktiviert. Wird der Liquidity Bot manuell gestoppt, wird die automatische Zahlung mit deaktiviert (Premium liefert Daten speziell für diesen Bot).')}
         </p>
         <div class="modal-feedback" id="premium-modal-feedback"></div>`;
 }
@@ -186,19 +184,13 @@ function _premiumTabPanelHtml(status) {
 function _premiumExplainerHtml() {
     return `
         <p style="margin:0 0 0.6rem;">
-            Der Premium-Service verbindet diesen Bot mit dem FORGE.pub-Datendienst: automatisch
-            geprüfte neue Pool-Angebote (Adresse, Token, Fee-Tier gegen die Chain verifiziert),
-            laufendes Marktscoring/Scanner-Daten für die Poolbewertung sowie priorisierter
-            Support-Kontakt.
+            ${tr('sliq.premium_explain_1', 'Der Premium-Service verbindet diesen Bot mit dem FORGE.pub-Datendienst: automatisch geprüfte neue Pool-Angebote (Adresse, Token, Fee-Tier gegen die Chain verifiziert), laufendes Marktscoring/Scanner-Daten für die Poolbewertung sowie priorisierter Support-Kontakt.')}
         </p>
         <p style="margin:0 0 0.6rem;color:var(--text-muted);">
-            Die Kosten werden stündlich automatisch aus dem hier hinterlegten Premium-Wallet
-            beglichen (getrennt vom Bot-Kapital) — solange Guthaben reicht und der Service unten
-            aktiviert ist.
+            ${tr('sliq.premium_explain_2', 'Die Kosten werden stündlich automatisch aus dem hier hinterlegten Premium-Wallet beglichen (getrennt vom Bot-Kapital) — solange Guthaben reicht und der Service unten aktiviert ist.')}
         </p>
         <p style="margin:0;color:var(--text-muted);">
-            Dieser Premium-Service ist speziell auf den Liquidity Bot zugeschnitten und wird
-            unabhängig von anderen Bots verwaltet und bezahlt.
+            ${tr('sliq.premium_explain_3', 'Dieser Premium-Service ist speziell auf den Liquidity Bot zugeschnitten und wird unabhängig von anderen Bots verwaltet und bezahlt.')}
         </p>`;
 }
 
@@ -208,23 +200,23 @@ async function _openPremiumModal() {
     try {
         status = await _fetchPremiumStatus();
     } catch (err) {
-        _ctx.showToast?.(`Premium-Status nicht ladbar: ${err.message}`, 'error');
+        _ctx.showToast?.(tr('sliq.premium_status_failed', 'Premium-Status nicht ladbar: {error}', { error: err.message }), 'error');
         return;
     }
     if (!status.available) return; // Master, oder Fork ohne Premium-Wallet
 
     showModal({
         id: mid,
-        title: 'Premium Service verwalten',
+        title: tr('sliq.manage_premium', 'Premium Service verwalten'),
         body: `
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-wm="settings">Einstellungen</button>
-                <button class="wm-tab" data-wm="explain">Erklärung</button>
+                <button class="wm-tab active" data-wm="settings">${tr('sliq.settings_tab', 'Einstellungen')}</button>
+                <button class="wm-tab" data-wm="explain">${tr('sliq.explain_tab', 'Erklärung')}</button>
             </div>
             <div id="premium-tab-settings" style="min-height:220px;">${_premiumTabPanelHtml(status)}</div>
             <div id="premium-tab-explain" style="min-height:220px;font-size:0.85rem;" hidden>${_premiumExplainerHtml()}</div>`,
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -244,7 +236,7 @@ async function _openPremiumModal() {
             const btn = backdrop.querySelector(`#${btnId}`);
             const fb  = backdrop.querySelector('#premium-modal-feedback');
             btn.disabled = true;
-            if (fb) { fb.textContent = 'Bitte warten…'; fb.className = 'modal-feedback'; }
+            if (fb) { fb.textContent = tr('sliq.please_wait', 'Bitte warten…'); fb.className = 'modal-feedback'; }
             try {
                 const res  = await fetch(endpoint, { method: 'POST' });
                 const data = await res.json();
@@ -256,17 +248,17 @@ async function _openPremiumModal() {
                     // deshalb 'info' statt 'error'.
                     _ctx.showToast?.(
                         data.immediatePayment.ok
-                            ? 'Premium Service aktiviert – erste Zahlung gesendet, Daten sind in Kürze aktuell'
-                            : `Premium Service aktiviert. Hinweis zur ersten Zahlung: ${data.immediatePayment.error}`,
+                            ? tr('sliq.premium_on_first_payment', 'Premium Service aktiviert – erste Zahlung gesendet, Daten sind in Kürze aktuell')
+                            : tr('sliq.premium_on_note', 'Premium Service aktiviert. Hinweis zur ersten Zahlung: {error}', { error: data.immediatePayment.error }),
                         data.immediatePayment.ok ? 'success' : 'info'
                     );
                 } else {
-                    _ctx.showToast?.(data.enabled ? 'Premium Service aktiviert' : 'Premium Service deaktiviert', 'success');
+                    _ctx.showToast?.(data.enabled ? tr('sliq.premium_on', 'Premium Service aktiviert') : tr('sliq.premium_off', 'Premium Service deaktiviert'), 'success');
                 }
                 await _refreshPremiumBadge();
                 await _openPremiumModal(); // Modal mit frischem Status neu aufbauen
             } catch (err) {
-                if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+                if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
                 btn.disabled = false;
             }
         });
@@ -281,7 +273,7 @@ async function _refreshPremiumBadge() {
     try {
         const status = await _fetchPremiumStatus();
         if (!status.available) { text.closest('tr')?.style.setProperty('display', 'none'); return; }
-        text.innerHTML   = status.enabled ? '&#10003; Aktiv' : '&#9888; Inaktiv';
+        text.innerHTML   = status.enabled ? tr('sliq.badge_active', '&#10003; Aktiv') : tr('sliq.badge_inactive', '&#9888; Inaktiv');
         text.className   = 'key-status ' + (status.enabled ? 'set' : 'unset');
     } catch { /* Text bleibt wie zuletzt bekannt */ }
 }
@@ -296,9 +288,9 @@ async function _refreshPremiumBadge() {
 // separat freigegeben).
 
 const STATUS_LABEL = {
-    verified:    { text: 'Geprüft',           icon: '✅' },
-    unsupported: { text: 'Nicht unterstützt', icon: '⚠️' },
-    rejected:    { text: 'Abgelehnt',         icon: '❌' },
+    verified:    { text: tr('sliq.offer_verified', 'Geprüft'),           icon: '✅' },
+    unsupported: { text: tr('sliq.offer_unsupported', 'Nicht unterstützt'), icon: '⚠️' },
+    rejected:    { text: tr('sliq.offer_rejected', 'Abgelehnt'),         icon: '❌' },
 };
 
 async function _renderPoolOffers(el) {
@@ -320,12 +312,11 @@ async function _renderPoolOffers(el) {
     card.className = 'settings-card';
     card.innerHTML = `
         <div class="settings-card-header">
-            <span class="sch-title">Neue Pool-Angebote &#128081;</span>
-            <span class="sch-meta">${offers.length} verfügbar</span>
+            <span class="sch-title">${tr('sliq.new_offers', 'Neue Pool-Angebote &#128081;')}</span>
+            <span class="sch-meta">${tr('sliq.n_available', '{n} verfügbar', { n: offers.length })}</span>
         </div>
         <p style="margin:0 0 0.6rem;color:var(--text-muted);font-size:0.82rem">
-            Vom Premium-Datendienst geprüfte Pools, die dieser Bot noch nicht kennt.
-            Übernehmen macht den Pool nur bekannt — es wird dabei nie Kapital investiert.
+            ${tr('sliq.offers_intro', 'Vom Premium-Datendienst geprüfte Pools, die dieser Bot noch nicht kennt. Übernehmen macht den Pool nur bekannt — es wird dabei nie Kapital investiert.')}
         </p>
         <div class="pool-offers-list"></div>`;
     el.appendChild(card);
@@ -343,7 +334,7 @@ async function _renderPoolOffers(el) {
             </span>
             <span style="display:flex;align-items:center;gap:0.6rem">
                 <span class="status-badge ${offer.status === 'verified' ? 'active' : offer.status === 'unsupported' ? 'unknown' : 'inactive'}">
-                    ${st.icon} ${st.text}${offer.acceptedException ? ' (Ausnahme akzeptiert)' : ''}
+                    ${st.icon} ${st.text}${offer.acceptedException ? tr('sliq.exception_accepted', ' (Ausnahme akzeptiert)') : ''}
                 </span>
                 <button class="btn btn-secondary btn-uniform" data-offer-details>Details</button>
             </span>`;
@@ -363,9 +354,9 @@ function _renderOfferChecks(checks) {
         </tr>`).join('');
     return `
         <div style="margin-top:0.6rem">
-            <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:2px">Prüfergebnisse (gegen die Chain verifiziert):</div>
+            <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:2px">${tr('sliq.check_results', 'Prüfergebnisse (gegen die Chain verifiziert):')}</div>
             <table style="font-size:0.8rem;border-collapse:collapse">
-                <tr style="color:var(--text-muted)"><th style="text-align:left;padding-right:8px">Feld</th><th style="text-align:left;padding-right:8px">Erwartet</th><th style="text-align:left">Tatsächlich</th></tr>
+                <tr style="color:var(--text-muted)"><th style="text-align:left;padding-right:8px">${tr('sliq.field', 'Feld')}</th><th style="text-align:left;padding-right:8px">${tr('sliq.expected', 'Erwartet')}</th><th style="text-align:left">${tr('sliq.actual', 'Tatsächlich')}</th></tr>
                 ${rows}
             </table>
         </div>`;
@@ -380,7 +371,7 @@ function _renderOfferTokenInfo(tokenInfo) {
             <span style="color:var(--text-muted)"> — ${_esc(t.category ?? '')}</span>
             <div style="color:var(--text-muted);font-size:0.8rem">${_esc(t.description ?? '')}</div>
         </div>`).join('');
-    return `<div style="margin-top:0.6rem"><div style="font-size:0.8rem;color:var(--text-muted)">Token-Infos:</div>${items}</div>`;
+    return `<div style="margin-top:0.6rem"><div style="font-size:0.8rem;color:var(--text-muted)">${tr('sliq.token_info', 'Token-Infos:')}</div>${items}</div>`;
 }
 
 function _openAdoptOfferModal(offer, containerEl) {
@@ -391,17 +382,19 @@ function _openAdoptOfferModal(offer, containerEl) {
     const rationale = offer.unprovable?.rationale;
     const rationaleHtml = rationale
         ? `<div style="margin-top:0.6rem;font-size:0.82rem;color:var(--text-muted)">
-             Warum vorgeschlagen: Fees 24h ≈ ${rationale.fees24hUsd != null ? rationale.fees24hUsd.toFixed(2) : 'no data'} USDC,
-             TVL ≈ ${rationale.tvlUsd != null ? Math.round(rationale.tvlUsd).toLocaleString('de-DE') : 'no data'} USDC,
-             beobachtet seit ${rationale.observedDays ?? 'no data'} Tagen.
-             Nicht on-chain prüfbar — reine Einschätzung des Datendienstes.
+             ${tr('sliq.offer_rationale',
+                'Warum vorgeschlagen: Fees 24h ≈ {fees} USDC, TVL ≈ {tvl} USDC, beobachtet seit {days} Tagen. Nicht on-chain prüfbar — reine Einschätzung des Datendienstes.',
+                {
+                    fees: rationale.fees24hUsd != null ? rationale.fees24hUsd.toFixed(2) : 'no data',
+                    tvl:  rationale.tvlUsd != null ? Math.round(rationale.tvlUsd).toLocaleString(NUM_LOCALE) : 'no data',
+                    days: rationale.observedDays ?? 'no data',
+                })}
            </div>`
         : '';
 
     const acceptedHtml = offer.acceptedException
         ? `<div style="margin-top:0.6rem;padding:0.5rem;background:rgba(234,179,8,0.1);border-radius:6px;font-size:0.82rem">
-             ⚠️ Dieser Pool löst ein technisches Abbruchkriterium aus (Token-2022 und/oder
-             adaptive Gebühren), wurde aber ausdrücklich als Ausnahme freigegeben:
+             ${tr('sliq.offer_exception_hint', '⚠️ Dieser Pool löst ein technisches Abbruchkriterium aus (Token-2022 und/oder adaptive Gebühren), wurde aber ausdrücklich als Ausnahme freigegeben:')}
              <div style="margin-top:4px;color:var(--text-muted)">${_esc(offer.acceptedReason ?? '')}</div>
            </div>`
         : '';
@@ -409,17 +402,16 @@ function _openAdoptOfferModal(offer, containerEl) {
     const statusHtml = !canAdopt
         ? `<div style="margin-top:0.6rem;padding:0.5rem;background:rgba(239,68,68,0.1);border-radius:6px;font-size:0.82rem">
              ${offer.status === 'rejected'
-                ? '❌ Mindestens ein gelieferter Wert stimmt nicht mit der Chain überein. Dieser Pool kann nicht übernommen werden.'
-                : '⚠️ Dieser Pool erfüllt ein technisches Abbruchkriterium ohne akzeptierte Ausnahme und wird nicht unterstützt.'}
+                ? tr('sliq.offer_rejected_hint', '❌ Mindestens ein gelieferter Wert stimmt nicht mit der Chain überein. Dieser Pool kann nicht übernommen werden.')
+                : tr('sliq.offer_unsupported_hint', '⚠️ Dieser Pool erfüllt ein technisches Abbruchkriterium ohne akzeptierte Ausnahme und wird nicht unterstützt.')}
            </div>`
         : '';
 
     const body = `
         <p style="margin:0 0 0.4rem"><strong>${name}</strong> · ${_esc(offer.display.protocol ?? '')}</p>
         <p style="margin:0;color:var(--text-muted);font-size:0.85rem">
-            Übernehmen macht diesen Pool im Bot bekannt (deaktiviert, kein Cleanup-Reinvest).
-            <strong>Es wird dabei kein Kapital investiert.</strong> Freigeben für echtes Kapital
-            geschieht danach separat über "Pool aktivieren", genau wie bei jedem anderen Pool.
+            ${tr('sliq.adopt_explain_1', 'Übernehmen macht diesen Pool im Bot bekannt (deaktiviert, kein Cleanup-Reinvest).')}
+            <strong>${tr('sliq.adopt_explain_2', 'Es wird dabei kein Kapital investiert.')}</strong> ${tr('sliq.adopt_explain_3', 'Freigeben für echtes Kapital geschieht danach separat über "Pool aktivieren", genau wie bei jedem anderen Pool.')}
         </p>
         ${statusHtml}
         ${acceptedHtml}
@@ -433,26 +425,26 @@ function _openAdoptOfferModal(offer, containerEl) {
         const fb = modalEl?.querySelector('#adopt-feedback');
         const btns = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
         btns.forEach(b => { b.disabled = true; });
-        if (fb) { fb.style.color = 'var(--text-muted)'; fb.textContent = 'Wird übernommen…'; }
+        if (fb) { fb.style.color = 'var(--text-muted)'; fb.textContent = tr('sliq.adopting', 'Wird übernommen…'); }
         try {
             const res = await fetch(`/api/pools/liquidity/pool-offers/${encodeURIComponent(offer.id)}/adopt`, { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
             closeModal(mid);
-            _ctx.showToast?.(`${name} übernommen — noch kein Kapital investiert, Freigabe separat über "Pool aktivieren".`, 'success');
+            _ctx.showToast?.(tr('sliq.adopted', '{pool} übernommen — noch kein Kapital investiert, Freigabe separat über "Pool aktivieren".', { pool: name }), 'success');
             _render();
         } catch (err) {
-            if (fb) { fb.style.color = 'var(--danger)'; fb.textContent = `Fehler: ${err.message}`; }
+            if (fb) { fb.style.color = 'var(--danger)'; fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); }
             btns.forEach(b => { b.disabled = false; });
         }
     };
 
     const actions = canAdopt
-        ? [{ label: 'Übernehmen (kein Kapital)', onClick: doAdopt }, { label: 'Abbrechen', onClick: () => closeModal(mid) }]
-        : [{ label: 'Schließen', onClick: () => closeModal(mid) }];
+        ? [{ label: tr('sliq.adopt_btn', 'Übernehmen (kein Kapital)'), onClick: doAdopt }, { label: tr('sliq.cancel', 'Abbrechen'), onClick: () => closeModal(mid) }]
+        : [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) }];
 
-    showModal({ id: mid, title: 'Pool-Angebot prüfen', body, actions });
+    showModal({ id: mid, title: tr('sliq.check_offer', 'Pool-Angebot prüfen'), body, actions });
 }
 
 // ── Service-Karte (inkl. Cleanup) ─────────────────────────────────────────────
@@ -462,26 +454,26 @@ async function _renderService(el) {
     card.className = 'settings-card';
     card.innerHTML = `
         <div class="settings-card-header">
-            <span class="sch-title">Liquidity Bot</span>
+            <span class="sch-title">${tr('nav.liquidity', 'Liquidity Bot')}</span>
         </div>
         <table class="wallet-action-table">
             <tbody>
                 <tr>
-                    <td class="wat-label">Status</td>
+                    <td class="wat-label">${tr('set.status', 'Status')}</td>
                     <td class="wat-info">
-                        <span class="key-status" id="liquiditybot-status-text">laden…</span>
+                        <span class="key-status" id="liquiditybot-status-text">${tr('sb.loading_short', 'laden…')}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="liquiditybot-btn-status-manage">Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="liquiditybot-btn-status-manage">${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
                 <tr>
-                    <td class="wat-label">Premium &#128296;</td>
+                    <td class="wat-label">${tr('sliq.premium_badge', 'Premium &#128296;')}</td>
                     <td class="wat-info">
-                        <span class="key-status" id="liquiditybot-premium-text">laden…</span>
+                        <span class="key-status" id="liquiditybot-premium-text">${tr('sb.loading_short', 'laden…')}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="liquiditybot-btn-premium">Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="liquiditybot-btn-premium">${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
             </tbody>
@@ -506,23 +498,23 @@ function _openBotControlModal() {
     const mid = 'liquiditybot-control-modal';
     showModal({
         id: mid,
-        title: 'Liquidity Bot verwalten',
+        title: tr('sliq.manage_bot', 'Liquidity Bot verwalten'),
         body: `
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-start">&#9654; Start</button>
-                <span class="bcm-hint">Startet den Bot, falls er aktuell gestoppt ist.</span>
+                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-start">${tr('sb.start_btn', '&#9654; Start')}</button>
+                <span class="bcm-hint">${tr('sb.start_hint', 'Startet den Bot, falls er aktuell gestoppt ist.')}</span>
             </div>
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-stop">&#9632; Stop</button>
-                <span class="bcm-hint">Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.</span>
+                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-stop">${tr('sb.stop_btn', '&#9632; Stop')}</button>
+                <span class="bcm-hint">${tr('sb.stop_hint', 'Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.')}</span>
             </div>
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-restart">&#8635; Restart</button>
-                <span class="bcm-hint">Stoppt und startet den Bot neu, z.&nbsp;B. nach einer Konfigurationsänderung.</span>
+                <button class="btn btn-secondary btn-uniform" id="liquiditybot-btn-restart">${tr('sb.restart_btn', '&#8635; Restart')}</button>
+                <span class="bcm-hint">${tr('sb.restart_hint', 'Stoppt und startet den Bot neu, z.&nbsp;B. nach einer Konfigurationsänderung.')}</span>
             </div>
             <div class="task-status" id="liquiditybot-task-status"></div>`,
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -569,7 +561,7 @@ async function _loadAndRenderCleanupRow(wrap) {
         fetch('/api/config/liquiditybot'),
         fetch(`/api/pools/liquidity?t=${Date.now()}`),
     ]);
-    if (!cfgRes.ok) throw new Error('Config nicht verfügbar');
+    if (!cfgRes.ok) throw new Error(tr('sliq.config_unavailable', 'Config nicht verfügbar'));
     const cfg   = await cfgRes.json();
     const pools = poolsRes.ok ? await poolsRes.json() : [];
     const parsed = _parseCleanupCfg(cfg);
@@ -586,10 +578,10 @@ async function _loadAndRenderCleanupRow(wrap) {
         <table class="wallet-action-table">
             <tbody>
                 <tr>
-                    <td class="wat-label">Cleanup</td>
+                    <td class="wat-label">${tr('sliq.cleanup', 'Cleanup')}</td>
                     <td class="wat-info">${_esc(_cleanupModeSummary(parsed, pools))}</td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="sys-cleanup-manage-btn" ${botInactive ? 'disabled' : ''}>Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="sys-cleanup-manage-btn" ${botInactive ? 'disabled' : ''}>${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
             </tbody>
@@ -615,17 +607,17 @@ function _cleanupModeSummary(parsed, pools) {
     const { mode, minScore, dustEnabled } = parsed;
     let base;
     if (mode === 'ranking') {
-        base = `Bester Pool · Score ≥ ${minScore}`;
+        base = tr('sliq.cleanup_best_summary', 'Bester Pool · Score ≥ {score}', { score: minScore });
     } else if (mode === 'disabled') {
-        base = 'Deaktiviert';
+        base = tr('sb.disabled', 'Deaktiviert');
     } else if (mode?.startsWith('pool:')) {
         const id = mode.slice('pool:'.length);
         const p  = pools.find(pp => String(pp.id) === id);
-        base = `Manuell: ${p ? (p.displayPair ?? p.pair) : 'gewählter Pool'}`;
+        base = tr('sliq.cleanup_manual_summary', 'Manuell: {pool}', { pool: p ? (p.displayPair ?? p.pair) : tr('sliq.selected_pool', 'gewählter Pool') });
     } else {
-        base = 'Unbekannt';
+        base = tr('sb.status_unknown', 'Unbekannt');
     }
-    return `${base} · Dust ${dustEnabled ? 'aktiv' : 'aus'}`;
+    return `${base} · ${tr('sliq.dust', 'Dust')} ${dustEnabled ? tr('sliq.dust_on', 'aktiv') : tr('sliq.dust_off', 'aus')}`;
 }
 
 // Kurzbeschreibung je Tab: sichtbares Kurzlabel + Icon mit ausführlichem
@@ -643,18 +635,18 @@ function _openCleanupModal(wrap, cfgParsed, pools, premiumLocked) {
 
     showModal({
         id:    mid,
-        title: 'Cleanup verwalten',
+        title: tr('sliq.manage_cleanup', 'Cleanup verwalten'),
         body:  `
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-wm="manuell">Manuell</button>
-                <button class="wm-tab" data-wm="bester">Bester Pool</button>
-                <button class="wm-tab" data-wm="dust">Dust</button>
+                <button class="wm-tab active" data-wm="manuell">${tr('sliq.manual', 'Manuell')}</button>
+                <button class="wm-tab" data-wm="bester">${tr('sb.best_pool', 'Bester Pool')}</button>
+                <button class="wm-tab" data-wm="dust">${tr('sliq.dust', 'Dust')}</button>
             </div>
             <div id="cu-tab-manuell">${_manuellTabHtml(cfgParsed, pools)}</div>
             <div id="cu-tab-bester" hidden>${_besterPoolTabHtml(cfgParsed, pools, premiumLocked)}</div>
             <div id="cu-tab-dust" hidden>${_dustTabHtml(cfgParsed)}</div>`,
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -684,29 +676,29 @@ function _manuellTabHtml(cfgParsed, pools) {
 
     return `
         ${_cuDescHtml(
-            'Investiert das Wallet-Guthaben gezielt in einen von dir gewählten Pool.',
-            'Manuell',
-            'Investiert das gesamte investierbare Wallet-Guthaben einmalig in den hier gewählten Pool – unabhängig vom Opportunity Score. Dieser Pool wird damit zum neuen Cleanup-Ziel, bis du hier oder im Reiter „Bester Pool" etwas anderes wählst.'
+            tr('sliq.manual_desc', 'Investiert das Wallet-Guthaben gezielt in einen von dir gewählten Pool.'),
+            tr('sliq.manual', 'Manuell'),
+            tr('sliq.manual_tip', 'Investiert das gesamte investierbare Wallet-Guthaben einmalig in den hier gewählten Pool – unabhängig vom Opportunity Score. Dieser Pool wird damit zum neuen Cleanup-Ziel, bis du hier oder im Reiter „Bester Pool“ etwas anderes wählst.')
         )}
         <div style="display:flex;gap:0.4rem;margin-bottom:0.4rem;">
-            <input type="text" id="cu-manuell-search" placeholder="Pool suchen…"
+            <input type="text" id="cu-manuell-search" placeholder="${tr('liq.search_pool', 'Pool suchen…')}"
                    style="flex:1;min-width:0;box-sizing:border-box;padding:0.3rem 0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:0.875rem">
             <select id="cu-manuell-active-filter"
                     style="flex-shrink:0;box-sizing:border-box;padding:0.3rem 0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:0.875rem">
-                <option value="all">Alle</option>
-                <option value="active">Aktiv</option>
-                <option value="inactive">Inaktiv</option>
+                <option value="all">${tr('sliq.filter_all', 'Alle')}</option>
+                <option value="active">${tr('sliq.filter_active', 'Aktiv')}</option>
+                <option value="inactive">${tr('sliq.filter_inactive', 'Inaktiv')}</option>
             </select>
         </div>
         <div id="cu-manuell-list" class="cu-panel-body" style="max-height:14rem;overflow-y:auto;display:flex;flex-direction:column;gap:0.2rem;padding-bottom:0.25rem;">
             ${sortedPools.map(p => `
             <label class="cleanup-radio-option" data-cu-pool="${_esc(p.displayPair ?? p.pair).toLowerCase()}" data-cu-active="${p.active ? '1' : '0'}">
                 <input type="radio" name="cleanup-mode-pool" value="pool:${p.id}" ${mode === 'pool:' + p.id ? 'checked' : ''}>
-                <span${p.active ? '' : ' style="opacity:0.55;font-style:italic;"'}>Invest in ${_esc(p.displayPair ?? p.pair)}${p.active ? '' : ' (inaktiv)'}</span>
+                <span${p.active ? '' : ' style="opacity:0.55;font-style:italic;"'}>Invest in ${_esc(p.displayPair ?? p.pair)}${p.active ? '' : tr('sb.suffix_inactive', ' (inaktiv)')}</span>
             </label>`).join('')}
         </div>
         <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="cu-manuell-start-btn">Jetzt starten</button>
+            <button class="btn btn-secondary btn-uniform" id="cu-manuell-start-btn">${tr('sliq.start_now', 'Jetzt starten')}</button>
         </div>
         <div class="modal-feedback" id="cu-manuell-feedback"></div>`;
 }
@@ -749,19 +741,19 @@ function _cleanupEligiblePools(pools) {
 }
 
 function _fmtCooldownUntil(ts) {
-    return new Date(ts).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+    return new Date(ts).toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
 }
 
 function _bestPoolHtml(bestPool, bestScore, bestName, threshold, cooldownSkipped) {
     const cooldownHint = cooldownSkipped
-        ? `<br><span style="color:var(--text-muted);font-size:0.78rem">${_esc(cooldownSkipped.name)} hätte Score ${cooldownSkipped.score}, ist aber bis ${_fmtCooldownUntil(cooldownSkipped.until)} im ${_esc(cooldownSkipped.reason)}-Cooldown und wird übersprungen.</span>`
+        ? `<br><span style="color:var(--text-muted);font-size:0.78rem">${tr('sliq.cooldown_skipped', '{pool} hätte Score {score}, ist aber bis {time} im {reason}-Cooldown und wird übersprungen.', { pool: _esc(cooldownSkipped.name), score: cooldownSkipped.score, time: _fmtCooldownUntil(cooldownSkipped.until), reason: _esc(cooldownSkipped.reason) })}</span>`
         : '';
     if (!bestPool || bestScore == null)
-        return `<span style="color:var(--text-muted)">— Keine Score-Daten verfügbar</span>${cooldownHint}`;
+        return `<span style="color:var(--text-muted)">${tr('liq.no_score_data', '— Keine Score-Daten verfügbar')}</span>${cooldownHint}`;
     const ok    = bestScore >= threshold;
     const color = ok ? 'var(--success)' : 'var(--danger)';
     const icon  = ok ? '✓' : '✗';
-    const hint  = ok ? '' : `<br><span style="color:var(--text-muted);font-size:0.78rem">Minimum ${threshold} nicht erreicht → kein Investment</span>`;
+    const hint  = ok ? '' : `<br><span style="color:var(--text-muted);font-size:0.78rem">${tr('sliq.min_not_reached', 'Minimum {min} nicht erreicht → kein Investment', { min: threshold })}</span>`;
     return `<span style="color:var(--text)">${bestName}</span> — Score <strong style="color:${color}">${bestScore}</strong> <span style="color:${color}">${icon}</span>${hint}${cooldownHint}`;
 }
 
@@ -777,7 +769,7 @@ function _computeBestPool(pools) {
         .slice()
         .sort((a, b) => (b.investScore?.value ?? -Infinity) - (a.investScore?.value ?? -Infinity))[0] ?? null;
     const cooldownSkipped = (cooldownTop && (bestScore == null || (cooldownTop.investScore?.value ?? -Infinity) > bestScore))
-        ? { name: cooldownTop.displayPair ?? cooldownTop.pair, score: cooldownTop.investScore?.value ?? '?', until: cooldownTop.cleanupCooldownUntil, reason: cooldownTop.cleanupCooldownReason ?? 'Risk-Management' }
+        ? { name: cooldownTop.displayPair ?? cooldownTop.pair, score: cooldownTop.investScore?.value ?? '?', until: cooldownTop.cleanupCooldownUntil, reason: cooldownTop.cleanupCooldownReason ?? tr('sliq.risk_management', 'Risk-Management') }
         : null;
 
     return { bestPool, bestScore, bestName, cooldownSkipped };
@@ -785,15 +777,15 @@ function _computeBestPool(pools) {
 
 function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
     const desc = _cuDescHtml(
-        'Automatischer, wiederkehrender Invest in den Pool mit dem höchsten Opportunity Score.',
-        'Bester Pool',
-        'Läuft zu jeder vollen Stunde: investiert das Wallet-Guthaben automatisch in den Pool mit dem höchsten Opportunity Score – sofern dieser die Minimum-Score-Schwelle erreicht. Steht nur mit aktiviertem Premium-Service zur Verfügung (Opportunity Score wird zentral berechnet).'
+        tr('sliq.best_pool_desc', 'Automatischer, wiederkehrender Invest in den Pool mit dem höchsten Opportunity Score.'),
+        tr('sb.best_pool', 'Bester Pool'),
+        tr('sliq.best_pool_tip', 'Läuft zu jeder vollen Stunde: investiert das Wallet-Guthaben automatisch in den Pool mit dem höchsten Opportunity Score – sofern dieser die Minimum-Score-Schwelle erreicht. Steht nur mit aktiviertem Premium-Service zur Verfügung (Opportunity Score wird zentral berechnet).')
     );
 
     if (premiumLocked) {
         return `${desc}
             <p class="modal-hint" style="margin:0;">
-                Nur mit aktiviertem Premium-Service verfügbar (Opportunity Score wird zentral berechnet).
+                ${tr('sliq.premium_only', 'Nur mit aktiviertem Premium-Service verfügbar (Opportunity Score wird zentral berechnet).')}
             </p>`;
     }
 
@@ -806,58 +798,58 @@ function _besterPoolTabHtml(cfgParsed, pools, premiumLocked) {
         <div class="cu-panel-body" style="display:flex;flex-direction:column;gap:0.6rem">
             <label class="cleanup-radio-option">
                 <input type="radio" name="cleanup-mode-ranking" value="ranking" ${mode === 'ranking' ? 'checked' : ''}>
-                <span>Bester Pool <small style="opacity:0.7;">— investiert in den Pool mit dem höchsten InvestScore</small></span>
+                <span>${tr('sb.best_pool', 'Bester Pool')} <small style="opacity:0.7;">${tr('sliq.best_pool_hint', '— investiert in den Pool mit dem höchsten InvestScore')}</small></span>
             </label>
             <label class="cleanup-radio-option">
                 <input type="radio" name="cleanup-mode-ranking" value="disabled" ${mode === 'disabled' ? 'checked' : ''}>
-                <span>Deaktiviert</span>
+                <span>${tr('sb.disabled', 'Deaktiviert')}</span>
             </label>
             <div style="border-top:1px solid var(--border);padding-top:0.6rem">
-                <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">Minimum-Score (0–100)</label>
+                <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">${tr('sliq.min_score', 'Minimum-Score (0–100)')}</label>
                 <input type="number" id="cu-bester-min-score" min="0" max="100" value="${minScore}"
                        style="width:80px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
                 <p style="margin:0.3rem 0 0;font-size:0.76rem;color:var(--text-muted)">
-                    50 = neutral &nbsp;·&nbsp; <strong>65 = empfohlen</strong> &nbsp;·&nbsp; 75 = konservativ
+                    ${tr('sliq.score_neutral', '50 = neutral &nbsp;·&nbsp;')} <strong>${tr('sliq.score_recommended', '65 = empfohlen')}</strong> ${tr('sliq.score_conservative', '&nbsp;·&nbsp; 75 = konservativ')}
                 </p>
             </div>
             <div style="border-top:1px solid var(--border);padding-top:0.6rem;display:flex;gap:1rem;">
                 <div style="flex:1">
                     <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">
-                        Min. Einzahlung/Lauf
+                        ${tr('sliq.min_deposit_run', 'Min. Einzahlung/Lauf')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Minimale Einzahlung"
-                            data-tooltip-content="Cleanup investiert nur wenn mindestens dieser Betrag an investierbarem USDC-Gegenwert im Wallet liegt.||Beispiel: Minimum 10 USDC, im Wallet liegen nur 9 USDC Gegenwert → es passiert nichts.||Leer lassen oder 0 = kein Minimum.">&#9432;</span>
+                            data-tooltip-title="${tr('sb.min_deposit', 'Minimale Einzahlung')}"
+                            data-tooltip-content="${tr('sliq.min_deposit_tip', 'Cleanup investiert nur wenn mindestens dieser Betrag an investierbarem USDC-Gegenwert im Wallet liegt.||Beispiel: Minimum 10 USDC, im Wallet liegen nur 9 USDC Gegenwert → es passiert nichts.||Leer lassen oder 0 = kein Minimum.')}">&#9432;</span>
                     </label>
                     <div style="display:flex;align-items:center;gap:0.4rem;">
                         <input type="number" id="cu-bester-min-deposit" min="1" max="10000" step="1"
-                               value="${minDeposit > 0 ? minDeposit : ''}" placeholder="kein Minimum"
+                               value="${minDeposit > 0 ? minDeposit : ''}" placeholder="${tr('sb.no_minimum', 'kein Minimum')}"
                                style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
                         <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
                     </div>
                 </div>
                 <div style="flex:1">
                     <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">
-                        Max. Einzahlung/Lauf
+                        ${tr('sliq.max_deposit_run', 'Max. Einzahlung/Lauf')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Maximale Einzahlung"
-                            data-tooltip-content="Begrenzt wie viel USDC pro Cleanup-Lauf in den besten Pool investiert werden darf.||Beispiel: 2.350 USDC im Wallet, Limit 500 USDC → pro Lauf werden max. 500 USDC eingezahlt; der Rest bleibt liquide.||Leer lassen oder 0 = kein Limit.">&#9432;</span>
+                            data-tooltip-title="${tr('sb.max_deposit', 'Maximale Einzahlung')}"
+                            data-tooltip-content="${tr('sliq.max_deposit_tip', 'Begrenzt wie viel USDC pro Cleanup-Lauf in den besten Pool investiert werden darf.||Beispiel: 2.350 USDC im Wallet, Limit 500 USDC → pro Lauf werden max. 500 USDC eingezahlt; der Rest bleibt liquide.||Leer lassen oder 0 = kein Limit.')}">&#9432;</span>
                     </label>
                     <div style="display:flex;align-items:center;gap:0.4rem;">
                         <input type="number" id="cu-bester-max-deposit" min="10" max="10000" step="10"
-                               value="${maxDeposit > 0 ? maxDeposit : ''}" placeholder="kein Limit"
+                               value="${maxDeposit > 0 ? maxDeposit : ''}" placeholder="${tr('sb.no_limit', 'kein Limit')}"
                                style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
                         <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
                     </div>
                 </div>
             </div>
-            <p style="margin:-0.3rem 0 0;font-size:0.74rem;color:var(--text-muted)">10–10.000 bzw. 1–10.000 USDC &nbsp;·&nbsp; leer = kein Limit/Minimum</p>
+            <p style="margin:-0.3rem 0 0;font-size:0.74rem;color:var(--text-muted)">${tr('sliq.deposit_range_hint', '10–10.000 bzw. 1–10.000 USDC &nbsp;·&nbsp; leer = kein Limit/Minimum')}</p>
             <div style="border-top:1px solid var(--border);padding-top:0.6rem">
-                <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:0.4rem">Aktuell bester Pool</div>
+                <div style="font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-muted);margin-bottom:0.4rem">${tr('sliq.current_best_pool', 'Aktuell bester Pool')}</div>
                 <div id="cu-bester-best-pool-row">${_bestPoolHtml(bestPool, bestScore, bestName, minScore, cooldownSkipped)}</div>
             </div>
         </div>
         <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="cu-bester-save-btn">Speichern</button>
+            <button class="btn btn-secondary btn-uniform" id="cu-bester-save-btn">${tr('msg.save', 'Speichern')}</button>
         </div>
         <div class="modal-feedback" id="cu-bester-feedback"></div>`;
 }
@@ -886,7 +878,7 @@ function _wireBesterPoolTab(modalEl, mid, wrap, pools) {
         const conflict  = Number.isFinite(minVal) && minVal > 0 && Number.isFinite(maxVal) && maxVal > 0 && minVal > maxVal;
         if (saveBtn) saveBtn.disabled = conflict;
         if (fb) {
-            if (conflict) { fb.textContent = 'Minimale Einzahlung darf nicht größer als die Maximale sein.'; fb.className = 'modal-feedback error'; }
+            if (conflict) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
             else if (fb.classList.contains('error')) { fb.textContent = ''; fb.className = 'modal-feedback'; }
         }
     };
@@ -902,23 +894,23 @@ function _dustTabHtml(cfgParsed) {
     const { mode, dustEnabled, dustMin, dustMax } = cfgParsed;
     return `
         ${_cuDescHtml(
-            'Tauscht kleine Token-Reste am Ende jedes Cleanup-Laufs automatisch zu USDC.',
-            'Dust',
-            'Nach jedem Cleanup-Lauf bleiben oft kleine Reste bekannter Pool-Token im Wallet zurück (z. B. nach einem Swap nicht exakt aufgehende Beträge). Der Dust-Sweep tauscht diese Reste automatisch zu USDC, damit sie nicht ungenutzt liegen bleiben. Unter- und Obergrenze bestimmen, welcher Gegenwert als „Dust" zählt.'
+            tr('sliq.dust_desc', 'Tauscht kleine Token-Reste am Ende jedes Cleanup-Laufs automatisch zu USDC.'),
+            tr('sliq.dust', 'Dust'),
+            tr('sliq.dust_tip', 'Nach jedem Cleanup-Lauf bleiben oft kleine Reste bekannter Pool-Token im Wallet zurück (z. B. nach einem Swap nicht exakt aufgehende Beträge). Der Dust-Sweep tauscht diese Reste automatisch zu USDC, damit sie nicht ungenutzt liegen bleiben. Unter- und Obergrenze bestimmen, welcher Gegenwert als „Dust“ zählt.')
         )}
         ${_cleanupHint(mode)}
         <div class="cu-panel-body" style="display:flex;flex-direction:column;gap:0.6rem">
             <label class="cleanup-radio-option">
                 <input type="radio" name="cleanup-dust-mode" value="on" ${dustEnabled ? 'checked' : ''}>
-                <span>Aktivieren</span>
+                <span>${tr('sb.activate', 'Aktivieren')}</span>
             </label>
             <label class="cleanup-radio-option">
                 <input type="radio" name="cleanup-dust-mode" value="off" ${!dustEnabled ? 'checked' : ''}>
-                <span>Deaktivieren</span>
+                <span>${tr('sb.deactivate', 'Deaktivieren')}</span>
             </label>
             <div style="border-top:1px solid var(--border);padding-top:0.6rem;display:flex;gap:1rem;">
                 <div style="flex:1">
-                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">Untergrenze</label>
+                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">${tr('sliq.lower_bound', 'Untergrenze')}</label>
                     <div style="display:flex;align-items:center;gap:0.4rem;">
                         <input type="number" id="cu-dust-min" min="0" step="0.01" value="${dustMin}"
                                style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
@@ -926,7 +918,7 @@ function _dustTabHtml(cfgParsed) {
                     </div>
                 </div>
                 <div style="flex:1">
-                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">Obergrenze</label>
+                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">${tr('sliq.upper_bound', 'Obergrenze')}</label>
                     <div style="display:flex;align-items:center;gap:0.4rem;">
                         <input type="number" id="cu-dust-max" min="0" step="0.5" value="${dustMax}"
                                style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
@@ -935,12 +927,11 @@ function _dustTabHtml(cfgParsed) {
                 </div>
             </div>
             <p style="margin:-0.3rem 0 0;font-size:0.76rem;color:var(--text-muted)">
-                Reste in diesem Bereich werden nach jedem Cleanup automatisch zu USDC getauscht.
-                Darunter: vernachlässigbar, bleibt liegen. Darüber: bleibt liegen, regulärer Invest folgt.
+                ${tr('sliq.dust_range_hint', 'Reste in diesem Bereich werden nach jedem Cleanup automatisch zu USDC getauscht. Darunter: vernachlässigbar, bleibt liegen. Darüber: bleibt liegen, regulärer Invest folgt.')}
             </p>
         </div>
         <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="cu-dust-save-btn">Speichern</button>
+            <button class="btn btn-secondary btn-uniform" id="cu-dust-save-btn">${tr('msg.save', 'Speichern')}</button>
         </div>
         <div class="modal-feedback" id="cu-dust-feedback"></div>`;
 }
@@ -956,7 +947,7 @@ function _wireDustTab(modalEl, mid, wrap) {
         const conflict = Number.isFinite(minVal) && Number.isFinite(maxVal) && minVal >= maxVal;
         if (saveBtn) saveBtn.disabled = conflict;
         if (fb) {
-            if (conflict) { fb.textContent = 'Untergrenze muss kleiner als die Obergrenze sein.'; fb.className = 'modal-feedback error'; }
+            if (conflict) { fb.textContent = tr('sliq.dust_min_lt_max', 'Untergrenze muss kleiner als die Obergrenze sein.'); fb.className = 'modal-feedback error'; }
             else if (fb.classList.contains('error')) { fb.textContent = ''; fb.className = 'modal-feedback'; }
         }
     };
@@ -972,11 +963,11 @@ async function _runCleanupManuell(mid, wrap) {
     const fb       = document.getElementById('cu-manuell-feedback');
     const selected = document.querySelector('input[name="cleanup-mode-pool"]:checked');
     if (!selected) {
-        if (fb) { fb.textContent = 'Bitte einen Pool wählen.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sliq.choose_pool', 'Bitte einen Pool wählen.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
-    if (fb) { fb.textContent = 'Speichere Modus…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sliq.saving_mode', 'Speichere Modus…'); fb.className = 'modal-feedback'; }
     const modalEl = getModal(mid);
     const btns = modalEl
         ? [...modalEl.querySelectorAll('.forge-modal-footer button'), modalEl.querySelector('#cu-manuell-start-btn')].filter(Boolean)
@@ -991,13 +982,13 @@ async function _runCleanupManuell(mid, wrap) {
         if (!saveRes.ok) { const d = await saveRes.json(); throw new Error(d.error ?? `HTTP ${saveRes.status}`); }
         await _loadAndRenderCleanupRow(wrap);
 
-        if (fb) { fb.textContent = 'Cleanup läuft… (kann bis zu 5 min dauern)'; fb.className = 'modal-feedback'; }
+        if (fb) { fb.textContent = tr('sliq.cleanup_running', 'Cleanup läuft… (kann bis zu 5 min dauern)'); fb.className = 'modal-feedback'; }
         const runRes = await fetch('/api/pools/liquidity/cleanup/run', { method: 'POST' });
         const data   = await runRes.json().catch(() => ({}));
 
         if (runRes.ok && data.ok) {
-            if (fb) { fb.textContent = '✓ Cleanup erfolgreich abgeschlossen.'; fb.className = 'modal-feedback success'; }
-            _ctx.showToast?.('Cleanup erfolgreich', 'success');
+            if (fb) { fb.textContent = tr('sliq.cleanup_done', '✓ Cleanup erfolgreich abgeschlossen.'); fb.className = 'modal-feedback success'; }
+            _ctx.showToast?.(tr('sliq.cleanup_ok', 'Cleanup erfolgreich'), 'success');
             const walletEl = _container?.querySelector('.liquiditybot-grid-wallet');
             const poolsEl  = _container?.querySelector('.liquiditybot-grid-pools');
             if (walletEl) _renderWallet(walletEl);
@@ -1007,7 +998,7 @@ async function _runCleanupManuell(mid, wrap) {
             throw new Error(msg);
         }
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
         _ctx.showToast?.(`Cleanup: ${err.message}`, 'error');
     } finally {
         btns.forEach(b => { b.disabled = false; });
@@ -1019,7 +1010,7 @@ async function _saveBesterPool(mid, wrap) {
     const fb       = document.getElementById('cu-bester-feedback');
     const selected = document.querySelector('input[name="cleanup-mode-ranking"]:checked');
     if (!selected) {
-        if (fb) { fb.textContent = 'Bitte eine Option wählen.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.choose_option', 'Bitte eine Option wählen.'); fb.className = 'modal-feedback error'; }
         return;
     }
     const minScoreEl    = document.getElementById('cu-bester-min-score');
@@ -1032,11 +1023,11 @@ async function _saveBesterPool(mid, wrap) {
     const minDepositVal = minDepositRaw >= 1 ? minDepositRaw : 0;
 
     if (minDepositVal > 0 && maxDepositVal > 0 && minDepositVal > maxDepositVal) {
-        if (fb) { fb.textContent = 'Minimale Einzahlung darf nicht größer als die Maximale sein.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch('/api/config/liquiditybot', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1048,11 +1039,11 @@ async function _saveBesterPool(mid, wrap) {
             }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        if (fb) { fb.textContent = '✓ Cleanup gespeichert.'; fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.('Cleanup gespeichert', 'success');
+        if (fb) { fb.textContent = tr('sliq.cleanup_saved_dot', '✓ Cleanup gespeichert.'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('sliq.cleanup_saved', 'Cleanup gespeichert'), 'success');
         await _loadAndRenderCleanupRow(wrap);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -1067,11 +1058,11 @@ async function _saveDust(mid, wrap) {
     const maxVal = parseFloat(maxEl?.value ?? '25');
 
     if (!Number.isFinite(minVal) || minVal < 0 || !Number.isFinite(maxVal) || maxVal <= 0 || minVal >= maxVal) {
-        if (fb) { fb.textContent = 'Untergrenze muss kleiner als die Obergrenze sein (beide ≥ 0).'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sliq.dust_min_lt_max_zero', 'Untergrenze muss kleiner als die Obergrenze sein (beide ≥ 0).'); fb.className = 'modal-feedback error'; }
         return;
     }
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch('/api/config/liquiditybot', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -1082,10 +1073,10 @@ async function _saveDust(mid, wrap) {
             }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        if (fb) { fb.textContent = '✓ Dust-Einstellungen gespeichert.'; fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.('Dust-Einstellungen gespeichert', 'success');
+        if (fb) { fb.textContent = tr('sliq.dust_saved_dot', '✓ Dust-Einstellungen gespeichert.'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('sliq.dust_saved', 'Dust-Einstellungen gespeichert'), 'success');
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -1137,7 +1128,7 @@ function _applyButtonStates(status) {
     const hasCapital = _ctx.getHasCapital?.(SVC_ID) ?? false;
     if (hasCapital) canStop = false;
     btnStop.title = hasCapital
-        ? 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.'
+        ? tr('sb.stop_blocked_capital', 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.')
         : '';
 
     btnStart.disabled   = !canStart;
@@ -1161,7 +1152,7 @@ async function _doAction(action) {
         const { taskId } = await res.json();
         await _pollTask(taskId, action, taskEl);
     } catch (err) {
-        if (taskEl) { taskEl.textContent = `Fehler: ${err.message}`; taskEl.className = 'task-status failed'; }
+        if (taskEl) { taskEl.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); taskEl.className = 'task-status failed'; }
         _ctx.showToast?.(`${action} fehlgeschlagen: ${err.message}`, 'error');
     } finally {
         buttons.forEach(b => b.disabled = false);
@@ -1188,7 +1179,7 @@ async function _pollTask(taskId, action, taskEl) {
                 return;
             }
             if (task.status === 'failed') {
-                const msg = task.error ?? 'Unbekannter Fehler';
+                const msg = task.error ?? tr('set.unknown_error', 'Unbekannter Fehler');
                 if (taskEl) { taskEl.textContent = `❌ ${msg}`; taskEl.className = 'task-status failed'; }
                 _ctx.showToast?.(`LMBot: ${msg}`, 'error');
                 return;
@@ -1196,7 +1187,7 @@ async function _pollTask(taskId, action, taskEl) {
             if (taskEl) { taskEl.textContent = `${task.status}…`; }
         } catch { /* ignorieren, weiter warten */ }
     }
-    if (taskEl) { taskEl.textContent = 'Timeout – kein Ergebnis'; taskEl.className = 'task-status failed'; }
+    if (taskEl) { taskEl.textContent = tr('set.timeout_no_result', 'Timeout – kein Ergebnis'); taskEl.className = 'task-status failed'; }
 }
 
 // ── Wallet-Tab ─────────────────────────────────────────────────────────────────
@@ -1204,14 +1195,12 @@ async function _pollTask(taskId, action, taskEl) {
 // Datum/Uhrzeit + Minuten seit dem letzten Wallet-Monitor-Check (beide Wallets
 // werden gemeinsam per monitor.js aktualisiert, siehe _refreshWalletMonitor).
 function _formatLastCheck(ms) {
-    if (!ms) return 'noch kein Check';
+    if (!ms) return tr('sb.no_check_yet', 'noch kein Check');
     const d      = new Date(ms);
-    const dd     = String(d.getDate()).padStart(2, '0');
-    const mo     = String(d.getMonth() + 1).padStart(2, '0');
-    const hh     = String(d.getHours()).padStart(2, '0');
-    const mi     = String(d.getMinutes()).padStart(2, '0');
+    const date   = d.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const time   = d.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
     const ageMin = Math.max(0, Math.round((Date.now() - ms) / 60000));
-    return `${dd}.${mo}.${d.getFullYear()} ${hh}:${mi} Uhr (vor ${ageMin} Min.)`;
+    return tr('sb.last_check_fmt', '{date} {time} Uhr (vor {age} Min.)', { date, time, age: ageMin });
 }
 
 async function _refreshWalletMonitor(card, el) {
@@ -1219,17 +1208,17 @@ async function _refreshWalletMonitor(card, el) {
     if (!btn || btn.disabled) return;
     const origLabel = btn.textContent;
     btn.disabled = true;
-    btn.textContent = 'Aktualisiere…';
+    btn.textContent = tr('sb.refreshing', 'Aktualisiere…');
     try {
         const r = await fetch('/api/wallet/refresh-monitor', { method: 'POST' });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
-        _ctx.showToast?.('Wallet aktualisiert', 'success');
+        _ctx.showToast?.(tr('sb.wallet_refreshed', 'Wallet aktualisiert'), 'success');
         await _renderWallet(el);
     } catch (err) {
         btn.disabled = false;
         btn.textContent = origLabel;
-        _ctx.showToast?.(`Wallet-Update fehlgeschlagen: ${err.message}`, 'error');
+        _ctx.showToast?.(tr('sb.wallet_update_failed', 'Wallet-Update fehlgeschlagen: {error}', { error: err.message }), 'error');
     }
 }
 
@@ -1243,11 +1232,11 @@ async function _refreshWalletMonitor(card, el) {
 function _walletRowHtml(label, balance, status = null) {
     const amountText = balance?.recorded_at
         ? `${(balance.total_usd ?? 0).toFixed(2)} USDC`
-        : '<span class="wat-muted">noch keine Daten – auf Aktualisieren klicken</span>';
+        : '<span class="wat-muted">' + tr('sb.no_data_click_refresh', 'noch keine Daten – auf Aktualisieren klicken') + '</span>';
 
     const infoHtml = (balance?.recorded_at && status)
         ? `<span class="key-status ${status.ok ? 'set' : 'crit'}"
-                ${!status.ok ? `data-tooltip-title="Zu wenig SOL" data-tooltip-content="${_esc(status.tooltip)}"` : ''}>
+                ${!status.ok ? `data-tooltip-title="${tr('sb.sol_low_title', 'Zu wenig SOL')}" data-tooltip-content="${_esc(status.tooltip)}"` : ''}>
                 ${status.ok ? '&#10003;' : '&#10007;'} ${amountText}
            </span>`
         : amountText;
@@ -1257,13 +1246,13 @@ function _walletRowHtml(label, balance, status = null) {
             <td class="wat-label">${_esc(label)}</td>
             <td class="wat-info">${infoHtml}</td>
             <td class="wat-action">
-                <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>Verwalten</button>
+                <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
             </td>
         </tr>`;
 }
 
 async function _renderWallet(el) {
-    el.innerHTML = '<div class="wallet-loading">Lade…</div>';
+    el.innerHTML = '<div class="wallet-loading">' + tr('msg.loading', 'Lade…') + '</div>';
     try {
         const [infoRes, balRes, addrRes, premiumInfoRes] = await Promise.all([
             fetch('/api/wallet/liquidity/info'),
@@ -1271,9 +1260,9 @@ async function _renderWallet(el) {
             fetch('/api/addresses'),
             fetch('/api/wallet/premium/info'),
         ]);
-        if (!infoRes.ok) throw new Error(`Wallet-Info konnte nicht geladen werden (HTTP ${infoRes.status})`);
-        if (!balRes.ok) throw new Error(`Wallet-Bestand konnte nicht geladen werden (HTTP ${balRes.status})`);
-        if (!addrRes.ok) throw new Error(`Adressbuch konnte nicht geladen werden (HTTP ${addrRes.status})`);
+        if (!infoRes.ok) throw new Error(tr('sb.wallet_info_failed', 'Wallet-Info konnte nicht geladen werden (HTTP {status})', { status: infoRes.status }));
+        if (!balRes.ok) throw new Error(tr('sb.wallet_balance_failed', 'Wallet-Bestand konnte nicht geladen werden (HTTP {status})', { status: balRes.status }));
+        if (!addrRes.ok) throw new Error(tr('sb.addrbook_failed', 'Adressbuch konnte nicht geladen werden (HTTP {status})', { status: addrRes.status }));
         const info        = await infoRes.json();
         const balance      = await balRes.json();
         const addrs        = await addrRes.json();
@@ -1295,12 +1284,12 @@ async function _renderWallet(el) {
         }
 
         const liquidityStatus = balance?.sol != null
-            ? { ok: balance.sol > SOL_LOW_THRESHOLD_LIQUIDITY, tooltip: 'Zu wenig SOL im Wallet für den Betrieb des Bots.' }
+            ? { ok: balance.sol > SOL_LOW_THRESHOLD_LIQUIDITY, tooltip: tr('sb.sol_low_tip', 'Zu wenig SOL im Wallet für den Betrieb des Bots.') }
             : null;
         // Kein Haken/Kreuz solange Premium deaktiviert ist — der Zustand ist dann
         // ohnehin irrelevant (siehe Wunsch: neutrale, weiße Darstellung).
         const premiumStatus = premiumEnabled && premiumBalance?.sol != null
-            ? { ok: premiumBalance.sol > SOL_LOW_THRESHOLD_PREMIUM, tooltip: 'Zu wenig SOL im Premium-Wallet für die stündliche Zahlung.' }
+            ? { ok: premiumBalance.sol > SOL_LOW_THRESHOLD_PREMIUM, tooltip: tr('sliq.sol_low_premium', 'Zu wenig SOL im Premium-Wallet für die stündliche Zahlung.') }
             : null;
 
         el.innerHTML = '';
@@ -1309,17 +1298,17 @@ async function _renderWallet(el) {
         const lastCheckMs = Math.max(balance?.recorded_at ?? 0, premiumBalance?.recorded_at ?? 0) || null;
         card.innerHTML = `
             <div class="settings-card-header">
-                <span class="sch-title">Wallet</span>
+                <span class="sch-title">${tr('liq.wallet', 'Wallet')}</span>
             </div>
             <table class="wallet-action-table">
                 <tbody>
-                    ${_walletRowHtml('Liquidity Bot', balance, liquidityStatus)}
-                    ${premiumInfo.available ? _walletRowHtml('Premium Service', premiumBalance, premiumStatus) : ''}
+                    ${_walletRowHtml(tr('nav.liquidity', 'Liquidity Bot'), balance, liquidityStatus)}
+                    ${premiumInfo.available ? _walletRowHtml(tr('sliq.premium_service', 'Premium Service'), premiumBalance, premiumStatus) : ''}
                     <tr>
-                        <td class="wat-label">Letzter Check</td>
+                        <td class="wat-label">${tr('sb.last_check', 'Letzter Check')}</td>
                         <td class="wat-info">${_esc(_formatLastCheck(lastCheckMs))}</td>
                         <td class="wat-action">
-                            <button class="btn btn-secondary btn-sm" id="wallet-btn-refresh-all">Aktualisieren</button>
+                            <button class="btn btn-secondary btn-sm" id="wallet-btn-refresh-all">${tr('sb.refresh', 'Aktualisieren')}</button>
                         </td>
                     </tr>
                 </tbody>
@@ -1389,7 +1378,7 @@ function _walletMonitorShape(balance) {
 // ── Kombiniertes Wallet-Modal: Guthaben / Senden / Empfangen / Private Key ───
 function _openWalletManageModal(flavor, el, info, balance, addrs) {
     const mid   = `${flavor}-wallet-modal`;
-    const title = flavor === 'premium' ? 'Premium-Wallet verwalten' : 'Wallet verwalten';
+    const title = flavor === 'premium' ? tr('sliq.manage_premium_wallet', 'Premium-Wallet verwalten') : tr('sb.manage_wallet', 'Wallet verwalten');
     const tokens = [
         { symbol: 'SOL',  balance: balance.sol  ?? 0 },
         { symbol: 'USDC', balance: balance.usdc ?? 0 },
@@ -1402,10 +1391,10 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
         title,
         body: `
             <div class="wb-tab-bar">
-                <button class="wb-tab active" data-wb="guthaben">Guthaben</button>
-                <button class="wb-tab" data-wb="senden">Senden</button>
-                <button class="wb-tab" data-wb="empfangen">Empfangen</button>
-                <button class="wb-tab" data-wb="key">Private Key</button>
+                <button class="wb-tab active" data-wb="guthaben">${tr('len.balance', 'Guthaben')}</button>
+                <button class="wb-tab" data-wb="senden">${tr('msg.send', 'Senden')}</button>
+                <button class="wb-tab" data-wb="empfangen">${tr('sb.receive', 'Empfangen')}</button>
+                <button class="wb-tab" data-wb="key">${tr('sb.private_key', 'Private Key')}</button>
             </div>
             <div id="wb-tab-guthaben">${buildWalletDetailHtml(_walletMonitorShape(balance))}</div>
             <div id="wb-tab-senden" hidden>
@@ -1415,9 +1404,9 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
             </div>
             <div id="wb-tab-empfangen" hidden>${_buildReceivePanelHtml(flavor, info)}</div>
             <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(flavor, info)}</div>`,
-        footerNote: '<span id="wb-footer-note">Wert &gt; 0,00 USDC</span>',
+        footerNote: '<span id="wb-footer-note">' + tr('sb.value_gt_zero', 'Wert &gt; 0,00 USDC') + '</span>',
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -1445,16 +1434,16 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
 function _buildReceivePanelHtml(flavor, info) {
     return `
         <div class="settings-row">
-            <span class="settings-label">Adresse</span>
+            <span class="settings-label">${tr('sb.address', 'Adresse')}</span>
             <div class="addr-display-row">
                 <span class="addr-text" title="${_esc(info.pubkey)}">${_esc(info.preview)}</span>
-                <button class="btn btn-secondary btn-icon" id="wb-receive-copy-btn" title="Kopieren">&#128203;</button>
+                <button class="btn btn-secondary btn-icon" id="wb-receive-copy-btn" title="${tr('sb.copy', 'Kopieren')}">&#128203;</button>
             </div>
         </div>
         <div class="settings-row" style="border:none; align-items:flex-start; margin-top:0.75rem;">
-            <span class="settings-label">QR-Code</span>
+            <span class="settings-label">${tr('sb.qr_code', 'QR-Code')}</span>
             <div class="qr-wrapper">
-                <img src="/api/wallet/${flavor}/qr" alt="QR-Code" class="qr-img">
+                <img src="/api/wallet/${flavor}/qr" alt="${tr('sb.qr_code', 'QR-Code')}" class="qr-img">
             </div>
         </div>`;
 }
@@ -1488,26 +1477,26 @@ function _buildKeyPanelHtml(flavor, info) {
             <span class="key-status ${info.keypairSet ? 'set' : 'unset'}">
                 ${info.keypairSet
                     ? `&#10003; Gesetzt &nbsp;<span class="key-preview">${_esc(info.preview)}</span>`
-                    : '&#9888; Kein Key konfiguriert'}
+                    : tr('sb.key_missing', '&#9888; Kein Key konfiguriert')}
             </span>
         </div>
         ${info.keypairSet ? `
         <div class="bot-actions" style="margin:0.6rem 0;">
-            <a class="btn btn-secondary btn-sm" href="/api/wallet/${flavor}/keypair/export" download>&#11015; Herunterladen</a>
+            <a class="btn btn-secondary btn-sm" href="/api/wallet/${flavor}/keypair/export" download>${tr('sb.download', '&#11015; Herunterladen')}</a>
         </div>
         <p class="modal-hint" style="margin:0 0 0.9rem;">
-            Bewahre die heruntergeladene Datei sicher auf — wer sie besitzt, hat vollen Zugriff auf dieses Wallet.
+            ${tr('sb.key_download_hint', 'Bewahre die heruntergeladene Datei sicher auf — wer sie besitzt, hat vollen Zugriff auf dieses Wallet.')}
         </p>` : ''}
         <p class="modal-hint" style="margin-top:0.5rem;">
-            ${info.keypairSet ? 'Neuen Key importieren, um den bestehenden zu ersetzen:' : 'Key einfügen:'}<br>
-            Akzeptierte Formate:<br>
-              &bull; Base58-String (64 Bytes, Solana CLI Format)<br>
-              &bull; JSON-Array: <code>[1, 2, &hellip;, 64]</code></p>
+            ${info.keypairSet ? tr('sb.key_import_replace', 'Neuen Key importieren, um den bestehenden zu ersetzen:') : tr('sb.key_paste', 'Key einfügen:')}<br>
+            ${tr('sb.key_formats', 'Akzeptierte Formate:')}<br>
+              ${tr('sb.key_format_base58', '&bull; Base58-String (64 Bytes, Solana CLI Format)')}<br>
+              ${tr('sb.key_format_json', '&bull; JSON-Array:')} <code>[1, 2, &hellip;, 64]</code></p>
         <textarea id="wb-key-input" class="key-textarea"
-            placeholder="${info.keypairSet ? 'Neuen Key einfügen um zu ersetzen…' : 'Key einfügen (Strg+V)…'}"
+            placeholder="${info.keypairSet ? tr('sb.key_ph_replace', 'Neuen Key einfügen um zu ersetzen…') : tr('sb.key_ph_paste', 'Key einfügen (Strg+V)…')}"
             autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
         <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="wb-key-save-btn">Speichern</button>
+            <button class="btn btn-secondary btn-uniform" id="wb-key-save-btn">${tr('msg.save', 'Speichern')}</button>
         </div>
         <div class="modal-feedback" id="wb-key-feedback"></div>`;
 }
@@ -1522,10 +1511,10 @@ async function _saveKey(flavor, mid, modalEl, el) {
     const content  = input?.value.trim();
 
     if (!content) {
-        if (feedback) { feedback.textContent = 'Bitte Key einfügen.'; feedback.className = 'modal-feedback error'; }
+        if (feedback) { feedback.textContent = tr('sb.key_required', 'Bitte Key einfügen.'); feedback.className = 'modal-feedback error'; }
         return;
     }
-    if (feedback) { feedback.textContent = 'Speichere…'; feedback.className = 'modal-feedback'; }
+    if (feedback) { feedback.textContent = tr('sb.saving', 'Speichere…'); feedback.className = 'modal-feedback'; }
 
     try {
         const res  = await fetch(`/api/wallet/${flavor}/keypair`, {
@@ -1537,10 +1526,10 @@ async function _saveKey(flavor, mid, modalEl, el) {
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
         closeModal(mid);
-        _ctx.showToast?.(`Key gespeichert. Adresse: ${data.preview}`, 'success');
+        _ctx.showToast?.(tr('sb.key_saved', 'Key gespeichert. Adresse: {address}', { address: data.preview }), 'success');
         if (el) await _renderWallet(el);
     } catch (err) {
-        if (feedback) { feedback.textContent = `Fehler: ${err.message}`; feedback.className = 'modal-feedback error'; }
+        if (feedback) { feedback.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); feedback.className = 'modal-feedback error'; }
     }
 }
 
@@ -1553,8 +1542,8 @@ function _buildSendPanel(tokens) {
             <span class="settings-label">
                 Token
                 <span id="wm-sol-hint" style="margin-left:0.3rem;${isSol ? '' : 'display:none;'}"
-                    data-tooltip-title="SOL-Reserve"
-                    data-tooltip-content="0,1 SOL werden für den Betrieb des Bots auf dem Wallet benötigt und können nicht über diese Funktion abgezogen werden.">&#9432;</span>
+                    data-tooltip-title="${tr('sb.sol_reserve', 'SOL-Reserve')}"
+                    data-tooltip-content="${tr('sb.sol_reserve_tip', '0,1 SOL werden für den Betrieb des Bots auf dem Wallet benötigt und können nicht über diese Funktion abgezogen werden.')}">&#9432;</span>
             </span>
             <div style="display:flex;gap:0.4rem;align-items:center;">
                 <select class="modal-select" id="wm-token">
@@ -1564,24 +1553,24 @@ function _buildSendPanel(tokens) {
                         </option>`
                     ).join('')}
                 </select>
-                <button class="btn btn-secondary btn-icon" id="wm-refresh" title="Guthaben aktualisieren">&#8635;</button>
+                <button class="btn btn-secondary btn-icon" id="wm-refresh" title="${tr('sb.refresh_balance', 'Guthaben aktualisieren')}">&#8635;</button>
             </div>
         </div>
         <div class="settings-row">
-            <span class="settings-label">Betrag</span>
+            <span class="settings-label">${tr('msg.amount', 'Betrag')}</span>
             <div class="send-amount-row">
                 <input class="modal-input" id="wm-amount" type="number" min="0" step="any" placeholder="0.00">
                 <button class="btn btn-secondary btn-sm" id="wm-max">Max</button>
             </div>
         </div>
         <div class="settings-row">
-            <span class="settings-label">An</span>
+            <span class="settings-label">${tr('msg.to', 'An')}</span>
             <div class="addr-select-row">
                 <div class="addr-selected-display${sel ? '' : ' empty'}" id="wm-addr-display"
                      title="${sel ? _esc(sel.address) : ''}">
-                    ${sel ? _esc(sel.name) : 'Keine Adresse gewählt'}
+                    ${sel ? _esc(sel.name) : tr('sb.no_address_selected', 'Keine Adresse gewählt')}
                 </div>
-                <button class="btn btn-secondary btn-sm wm-to-addrbook" title="Adressbuch">&#128218;</button>
+                <button class="btn btn-secondary btn-sm wm-to-addrbook" title="${tr('sb.address_book', 'Adressbuch')}">&#128218;</button>
             </div>
         </div>
         <div class="modal-feedback" id="wm-send-feedback" style="margin-top:0.5rem;"></div>`;
@@ -1589,7 +1578,7 @@ function _buildSendPanel(tokens) {
 
 function _buildAddrbookList(addrs) {
     if (addrs.length === 0) {
-        return `<p class="wallet-hint" style="margin-bottom:0.75rem;">Noch keine Adressen gespeichert.</p>`;
+        return `<p class="wallet-hint" style="margin-bottom:0.75rem;">${tr('sb.no_addresses', 'Noch keine Adressen gespeichert.')}</p>`;
     }
     return `
         <div class="ab-modal-list">
@@ -1600,9 +1589,9 @@ function _buildAddrbookList(addrs) {
                         <div class="ab-modal-addr">${_esc(a.address)}</div>
                     </div>
                     <div class="ab-modal-actions">
-                        <button class="btn btn-secondary btn-sm ab-select" data-id="${a.id}">&#8629; Wählen</button>
-                        <button class="btn btn-secondary btn-icon ab-edit" data-id="${a.id}" title="Bearbeiten">&#9998;</button>
-                        <button class="btn btn-secondary btn-icon ab-del" data-id="${a.id}" title="Löschen">&#10005;</button>
+                        <button class="btn btn-secondary btn-sm ab-select" data-id="${a.id}">${tr('sb.select_btn', '&#8629; Wählen')}</button>
+                        <button class="btn btn-secondary btn-icon ab-edit" data-id="${a.id}" title="${tr('sb.edit', 'Bearbeiten')}">&#9998;</button>
+                        <button class="btn btn-secondary btn-icon ab-del" data-id="${a.id}" title="${tr('msg.delete', 'Löschen')}">&#10005;</button>
                     </div>
                 </div>`).join('')}
         </div>`;
@@ -1610,13 +1599,13 @@ function _buildAddrbookList(addrs) {
 
 function _buildAddrbookForm(row) {
     return `
-        <span class="ab-form-title">${row ? 'Adresse bearbeiten' : 'Neue Adresse'}</span>
+        <span class="ab-form-title">${row ? tr('sb.edit_address', 'Adresse bearbeiten') : tr('sb.new_address', 'Neue Adresse')}</span>
         <label class="modal-label" style="margin-top:0.75rem;">Name</label>
         <input id="ab-form-name" class="modal-input" type="text"
-            value="${row ? _esc(row.name) : ''}" placeholder="z. B. Coinbase Wallet" autocomplete="off">
-        <label class="modal-label" style="margin-top:0.75rem;">Solana-Adresse</label>
+            value="${row ? _esc(row.name) : ''}" placeholder="${tr('sb.addr_name_ph', 'z. B. Coinbase Wallet')}" autocomplete="off">
+        <label class="modal-label" style="margin-top:0.75rem;">${tr('sb.solana_address', 'Solana-Adresse')}</label>
         <input id="ab-form-address" class="modal-input" type="text"
-            value="${row ? _esc(row.address) : ''}" placeholder="Base58-Adresse…"
+            value="${row ? _esc(row.address) : ''}" placeholder="${tr('sb.base58_ph', 'Base58-Adresse…')}"
             autocomplete="off" autocorrect="off" spellcheck="false">
         <div class="modal-feedback" id="ab-form-feedback"></div>`;
 }
@@ -1640,7 +1629,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
     function showSend() {
         backdrop.querySelector('#wm-send').hidden     = false;
         backdrop.querySelector('#wm-addrbook').hidden = true;
-        setActionBar('<button class="btn btn-secondary btn-uniform" id="wb-send-btn">&#9654; Senden</button>');
+        setActionBar('<button class="btn btn-secondary btn-uniform" id="wb-send-btn">' + tr('sb.send_btn', '&#9654; Senden') + '</button>');
         wireSendButton();
     }
 
@@ -1714,7 +1703,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
             display.title       = _selectedSendAddr.address;
             display.classList.remove('empty');
         } else {
-            display.textContent = 'Keine Adresse gewählt';
+            display.textContent = tr('sb.no_address_selected', 'Keine Adresse gewählt');
             display.title       = '';
             display.classList.add('empty');
         }
@@ -1727,7 +1716,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
         const panel = backdrop.querySelector('#wm-addrbook');
         panel.innerHTML = _buildAddrbookList(currentAddrs);
         wireList(panel);
-        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-new">+ Neue Adresse</button>');
+        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-new">' + tr('sb.new_address_btn', '+ Neue Adresse') + '</button>');
         bar?.querySelector('#ab-new')?.addEventListener('click', () => showForm(null));
     }
 
@@ -1738,14 +1727,14 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
         const panel = backdrop.querySelector('#wm-addrbook');
         panel.innerHTML = _buildAddrbookForm(row);
 
-        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-form-save">Speichern</button>');
+        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-form-save">' + tr('msg.save', 'Speichern') + '</button>');
         bar?.querySelector('#ab-form-save')?.addEventListener('click', async () => {
             const name    = panel.querySelector('#ab-form-name')?.value.trim();
             const address = panel.querySelector('#ab-form-address')?.value.trim();
             const fb      = panel.querySelector('#ab-form-feedback');
 
             if (!name || !address) {
-                if (fb) { fb.textContent = 'Name und Adresse ausfüllen.'; fb.className = 'modal-feedback error'; }
+                if (fb) { fb.textContent = tr('sb.name_addr_required', 'Name und Adresse ausfüllen.'); fb.className = 'modal-feedback error'; }
                 return;
             }
             try {
@@ -1770,7 +1759,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
                 showList();
             } catch (err) {
                 const fb2 = panel.querySelector('#ab-form-feedback');
-                if (fb2) { fb2.textContent = `Fehler: ${err.message}`; fb2.className = 'modal-feedback error'; }
+                if (fb2) { fb2.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb2.className = 'modal-feedback error'; }
             }
         });
     }
@@ -1794,7 +1783,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
 
         panel.querySelectorAll('.ab-del').forEach(btn => {
             btn.addEventListener('click', async () => {
-                if (!confirm('Adresse wirklich löschen?')) return;
+                if (!confirm(tr('sb.delete_address_q', 'Adresse wirklich löschen?'))) return;
                 const delId = Number(btn.dataset.id);
 
                 const delRes = await fetch(`/api/addresses/${delId}`, { method: 'DELETE' });
@@ -1804,9 +1793,9 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
                         const where = err.usages.map(u =>
                             `• ${u.botId} / ${u.poolId}: ${u.fields.join(', ')}`
                         ).join('\n');
-                        alert(`Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n${where}`);
+                        alert(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
                     } else {
-                        alert(err.error ?? 'Löschen fehlgeschlagen.');
+                        alert(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
                     }
                     return;
                 }
@@ -1836,28 +1825,28 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
 
             // Validierung (client-seitig, Server prüft nochmal)
             if (!symbol) {
-                fb.textContent = 'Bitte einen Token auswählen.';
+                fb.textContent = tr('sb.select_token', 'Bitte einen Token auswählen.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (!amount || amount <= 0) {
-                fb.textContent = 'Bitte einen Betrag eingeben.';
+                fb.textContent = tr('sb.enter_amount', 'Bitte einen Betrag eingeben.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (!toAddress) {
-                fb.textContent = 'Bitte eine Empfänger-Adresse im Adressbuch wählen.';
+                fb.textContent = tr('sb.select_recipient', 'Bitte eine Empfänger-Adresse im Adressbuch wählen.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (symbol === 'SOL' && amount > getMaxSendable()) {
-                fb.textContent = `Betrag überschreitet das verfügbare Guthaben (max. ${getMaxSendable().toFixed(4)} SOL nach Reserve).`;
+                fb.textContent = tr('sb.amount_exceeds_sol', 'Betrag überschreitet das verfügbare Guthaben (max. {max} SOL nach Reserve).', { max: getMaxSendable().toFixed(4) });
                 fb.className   = 'modal-feedback error';
                 return;
             }
 
             sendBtn.disabled = true;
-            fb.textContent   = 'Transaktion wird gesendet…';
+            fb.textContent   = tr('sb.tx_sending', 'Transaktion wird gesendet…');
             fb.className     = 'modal-feedback';
 
             try {
@@ -1870,11 +1859,11 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
 
                 if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
-                fb.textContent = `✓ Gesendet: ${amount} ${symbol} → ${_selectedSendAddr.name}`;
+                fb.textContent = tr('sb.sent_ok', '✓ Gesendet: {amount} {symbol} → {to}', { amount, symbol, to: _selectedSendAddr.name });
                 fb.className   = 'modal-feedback ok';
                 if (amountInp) amountInp.value = '';
             } catch (err) {
-                fb.textContent = `Fehler: ${err.message}`;
+                fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message });
                 fb.className   = 'modal-feedback error';
             } finally {
                 sendBtn.disabled = false;
@@ -1899,10 +1888,10 @@ let _poolActiveFilter = localStorage.getItem('liquiditybot.poolActiveFilter') ??
 // Kurzlabels für poolType (config/pools.json), siehe auch das gleichnamige
 // Objekt im Liquidity-Dashboard (html/liquidity/js/app.js).
 const POOL_TYPE_LABELS = {
-    rebalance_free: 'Rebalance-frei',
-    volatil_1:      'Gering volatil',
-    volatil_2:      'Mittel volatil',
-    volatil_3:      'Stark volatil',
+    rebalance_free: tr('sliq.pool_type_rebalance_free', 'Rebalance-frei'),
+    volatil_1:      tr('liq.vol_low', 'Gering volatil'),
+    volatil_2:      tr('liq.vol_mid', 'Mittel volatil'),
+    volatil_3:      tr('liq.vol_high', 'Stark volatil'),
     rwa:            'RWA',
 };
 
@@ -1919,14 +1908,14 @@ function _updatePremiumIcon(pools) {
     icon.classList.remove('hidden');
     const active = !!scoreSource && scoreSource !== 'none';
     icon.classList.toggle('active', active);
-    icon.dataset.tooltipTitle = active ? 'Premium aktiv' : 'Premium inaktiv';
+    icon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
     icon.dataset.tooltipContent = active
-        ? 'Premium-Datendienst aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit laufen mit gelieferten Daten.'
-        : 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.';
+        ? tr('sliq.premium_active_tip', 'Premium-Datendienst aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit laufen mit gelieferten Daten.')
+        : tr('sliq.premium_inactive_tip', 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
 }
 
 async function _renderPools(el) {
-    el.innerHTML = '<div class="wallet-loading">Lade Pools…</div>';
+    el.innerHTML = '<div class="wallet-loading">' + tr('sliq.loading_pools', 'Lade Pools…') + '</div>';
     try {
         const [poolsRes, addrsRes, oppRes, hintsRes] = await Promise.all([
             fetch(`/api/pools/liquidity?t=${Date.now()}`),
@@ -1934,8 +1923,8 @@ async function _renderPools(el) {
             fetch(`/api/pools/liquidity/opportunity?t=${Date.now()}`),
             fetch(`/api/pools/liquidity/advisor-hints?t=${Date.now()}`),
         ]);
-        if (!poolsRes.ok) throw new Error(`Pools konnten nicht geladen werden (HTTP ${poolsRes.status})`);
-        if (!addrsRes.ok) throw new Error(`Adressbuch konnte nicht geladen werden (HTTP ${addrsRes.status})`);
+        if (!poolsRes.ok) throw new Error(tr('sliq.pools_load_failed', 'Pools konnten nicht geladen werden (HTTP {status})', { status: poolsRes.status }));
+        if (!addrsRes.ok) throw new Error(tr('sb.addrbook_failed', 'Adressbuch konnte nicht geladen werden (HTTP {status})', { status: addrsRes.status }));
         const pools  = await poolsRes.json();
         const addrs  = await addrsRes.json();
         const opp    = oppRes.ok ? await oppRes.json() : { available: false };
@@ -1973,10 +1962,10 @@ function _findScore(scores, poolId) {
 function _formatAge(ms) {
     if (!ms || ms < 0) return '?';
     const min = Math.round(ms / 60000);
-    if (min < 1)   return 'gerade eben';
-    if (min < 60)  return `vor ${min} Min`;
+    if (min < 1)   return tr('sliq.just_now', 'gerade eben');
+    if (min < 60)  return tr('sliq.ago_min', 'vor {min} Min', { min });
     const h = Math.round(min / 60);
-    return `vor ${h}h`;
+    return tr('sliq.ago_hours', 'vor {h}h', { h });
 }
 
 /**
@@ -1999,14 +1988,14 @@ function _tierMeta(tier) {
 
 function _buildRankingBadge(score, scores, pool) {
     if (!score || score.error) {
-        return '<span class="pool-summary-off">— keine Bewertung —</span>';
+        return '<span class="pool-summary-off">' + tr('sliq.no_rating', '— keine Bewertung —') + '</span>';
     }
     const econ = score.economic;
     if (econ?.tier) {
         const m = _tierMeta(econ.tier);
-        return `<span class="ranking-info">Aktuelle Empfehlung: ${m.labelEn}</span>`;
+        return `<span class="ranking-info">${tr('sliq.current_recommendation', 'Aktuelle Empfehlung: {tier}', { tier: m.labelEn })}</span>`;
     }
-    return '<span class="pool-summary-off">— noch keine Daten —</span>';
+    return '<span class="pool-summary-off">' + tr('sliq.no_data_yet', '— noch keine Daten —') + '</span>';
 }
 
 function _findOppScore(opp, poolId) {
@@ -2080,7 +2069,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
     // sonst evtl. unbemerkt einen anderen Pool als gedacht).
     function _notifyPoolSwitch(poolId) {
         const p = pools.find(x => x.id === poolId);
-        if (p) _ctx.showToast?.(`Pool gewechselt: ${p.displayPair ?? p.pair}`, 'info');
+        if (p) _ctx.showToast?.(tr('sliq.pool_switched', 'Pool gewechselt: {pool}', { pool: p.displayPair ?? p.pair }), 'info');
     }
 
     function _switchToBestMatchIfNeeded() {
@@ -2100,7 +2089,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
 
     if (typeFilter && !typeFilter.dataset.bound) {
         typeFilter.dataset.bound = '1';
-        typeFilter.innerHTML = `<option value="all">Alle Typen</option>`
+        typeFilter.innerHTML = `<option value="all">${tr('liq.all_types', 'Alle Typen')}</option>`
             + Object.entries(POOL_TYPE_LABELS).map(([val, label]) =>
                 `<option value="${_esc(val)}">${_esc(label)}</option>`).join('');
         typeFilter.value = _poolTypeFilter;
@@ -2126,10 +2115,10 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
     if (activeFilter && !activeFilter.dataset.bound) {
         activeFilter.dataset.bound = '1';
         activeFilter.innerHTML = `
-            <option value="all">Alle</option>
-            <option value="active">Aktiv</option>
-            <option value="inactive">Inaktiv</option>
-            <option value="deactivated">Deaktiviert</option>`;
+            <option value="all">${tr('sliq.filter_all', 'Alle')}</option>
+            <option value="active">${tr('sliq.filter_active', 'Aktiv')}</option>
+            <option value="inactive">${tr('sliq.filter_inactive', 'Inaktiv')}</option>
+            <option value="deactivated">${tr('sb.disabled', 'Deaktiviert')}</option>`;
         activeFilter.value = _poolActiveFilter;
         activeFilter.addEventListener('change', () => {
             _poolActiveFilter = activeFilter.value;
@@ -2156,7 +2145,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
         if (_poolActiveFilter === 'deactivated') list = list.filter(o => !o.enabled);
         drop.innerHTML = list.map(o => {
             const hint = _advisorHints.some(h => h.poolId === o.id) ? ' &#9888;' : '';
-            const inactive = !o.enabled ? ' (deaktiviert)' : (o.active ? '' : ' (inaktiv)');
+            const inactive = !o.enabled ? tr('sb.suffix_deactivated', ' (deaktiviert)') : (o.active ? '' : tr('sb.suffix_inactive', ' (inaktiv)'));
             return `<div class="pool-picker-opt${o.active ? '' : ' pp-inactive'}"
                  data-pool-id="${_esc(o.id)}"
                  ${o.id === _activePool ? 'data-active="true"' : ''}>
@@ -2207,8 +2196,8 @@ function _ensurePoolTabsScaffold(card) {
     card.dataset.tabsInit = '1';
     card.innerHTML = `
         <div class="wm-tab-bar">
-            <button type="button" class="wm-tab active" data-tab="pools">Liquidity Pools</button>
-            <button type="button" class="wm-tab" data-tab="types">Pool Typen</button>
+            <button type="button" class="wm-tab active" data-tab="pools">${tr('sliq.liquidity_pools', 'Liquidity Pools')}</button>
+            <button type="button" class="wm-tab" data-tab="types">${tr('sliq.pool_types', 'Pool Typen')}</button>
         </div>
         <div id="pool-panel-pools"></div>
         <div id="pool-panel-types" hidden></div>`;
@@ -2240,7 +2229,7 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
     _ensurePoolTabsScaffold(card);
     const panel = card.querySelector('#pool-panel-pools');
     if (!pool) {
-        panel.innerHTML = `<p class="wallet-hint">Keine Pools konfiguriert.</p>`;
+        panel.innerHTML = `<p class="wallet-hint">${tr('sliq.no_pools', 'Keine Pools konfiguriert.')}</p>`;
         return;
     }
 
@@ -2269,46 +2258,46 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
     // forge-pub1 PUMP/SOL ohne erkennbaren Grund deaktiviert, siehe setPoolEnabled()).
     function disabledSinceTooltip() {
         const when = pool.enabledChangedAt
-            ? new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
+            ? new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' })
                 .format(new Date(pool.enabledChangedAt))
-              + ' um ' + new Intl.DateTimeFormat('de-DE', { hour: '2-digit', minute: '2-digit' })
+              + ' um ' + new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' })
                 .format(new Date(pool.enabledChangedAt)) + ' Uhr'
-            : 'unbekanntem Zeitpunkt';
-        const reason = pool.enabledReason ?? 'Grund nicht protokolliert';
+            : tr('sliq.unknown_time', 'unbekanntem Zeitpunkt');
+        const reason = pool.enabledReason ?? tr('sliq.no_reason_logged', 'Grund nicht protokolliert');
         return `<span class="info-tip-label pool-disabled-hint"
-            data-tooltip-title="🔒 Pool gesperrt"
-            data-tooltip-content="${_escTip(`Dieser Pool wurde am ${when} deaktiviert.\n\nGrund: ${reason}`)}">&#9432;</span>`;
+            data-tooltip-title="${tr('sliq.pool_locked', '🔒 Pool gesperrt')}"
+            data-tooltip-content="${_escTip(tr('sliq.disabled_since', 'Dieser Pool wurde am {when} deaktiviert.\n\nGrund: {reason}', { when, reason }))}">&#9432;</span>`;
     }
 
     let enableBtnHtml;
     if (!poolEnabled && gateBlocked) {
         const gateTooltip = dryRunGate?.status === 'failed'
-            ? `Dry-Run-Testlauf fehlgeschlagen: ${_esc(dryRunGate.error ?? 'unbekannter Fehler')}. Wird automatisch erneut versucht.`
-            : 'Automatischer Testlauf (deposit.js --dry-run) läuft noch – wartet auf erste Pool-Daten (~1 Bot-Zyklus nach der Übernahme).';
+            ? tr('sliq.dryrun_failed', 'Dry-Run-Testlauf fehlgeschlagen: {error}. Wird automatisch erneut versucht.', { error: _esc(dryRunGate.error ?? tr('sliq.unknown_error_short', 'unbekannter Fehler')) })
+            : tr('sliq.dryrun_pending_tip', 'Automatischer Testlauf (deposit.js --dry-run) läuft noch – wartet auf erste Pool-Daten (~1 Bot-Zyklus nach der Übernahme).');
         enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable" disabled
-            data-tooltip-title="⏳ Dry-Run-Gate ausstehend"
-            data-tooltip-content="${gateTooltip}">Aktivieren</button>`;
+            data-tooltip-title="${tr('sliq.dryrun_pending', '⏳ Dry-Run-Gate ausstehend')}"
+            data-tooltip-content="${gateTooltip}">${tr('sb.activate', 'Aktivieren')}</button>`;
     } else if (!poolEnabled) {
-        enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable">Aktivieren</button>`;
+        enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable">${tr('sb.activate', 'Aktivieren')}</button>`;
     } else if (hasBalance) {
         enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable" disabled
-            data-tooltip-title="Deaktivieren nicht möglich"
-            data-tooltip-content="Pool hält eine offene Position. Erst vollständig auszahlen, dann deaktivieren.">Deaktivieren</button>`;
+            data-tooltip-title="${tr('sliq.cannot_deactivate', 'Deaktivieren nicht möglich')}"
+            data-tooltip-content="${tr('sliq.cannot_deactivate_tip', 'Pool hält eine offene Position. Erst vollständig auszahlen, dann deaktivieren.')}">${tr('sb.deactivate', 'Deaktivieren')}</button>`;
     } else {
-        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable">Deaktivieren</button>`;
+        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable">${tr('sb.deactivate', 'Deaktivieren')}</button>`;
     }
 
     panel.innerHTML = `
         <table class="wallet-action-table">
             <tbody>
                 <tr>
-                    <td class="wat-label">Pool</td>
+                    <td class="wat-label">${tr('liq.pool', 'Pool')}</td>
                     <td class="wat-info">
                         <div style="display:flex;align-items:center">
                             <div class="pool-picker" id="pool-picker">
                                 <input type="text" id="pool-picker-input" class="modal-input pool-select"
                                        autocomplete="off" spellcheck="false"
-                                       placeholder="Pool suchen…"
+                                       placeholder="${tr('liq.search_pool', 'Pool suchen…')}"
                                        value="${_esc(pool.displayPair ?? pool.pair)}">
                                 <div id="pool-picker-drop" class="pool-picker-drop" style="display:none"></div>
                             </div>
@@ -2322,19 +2311,19 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                 </tr>
                 <tr>
                     <td class="wat-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Range
+                        ${tr('liq.range', 'Range')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Range &amp; Rebalance"
-                            data-tooltip-content="Zeigt die aktuelle Position-Range und ermöglicht einen manuellen Rebalance (Position wird geschlossen und mit neuer Range neu eröffnet).">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.range_rebalance', 'Range &amp; Rebalance')}"
+                            data-tooltip-content="${tr('sliq.range_tip', 'Zeigt die aktuelle Position-Range und ermöglicht einen manuellen Rebalance (Position wird geschlossen und mit neuer Range neu eröffnet).')}">&#9432;</span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">Range anzeigen und manuell rebalancen.</span>
+                        <span class="pool-summary">${tr('sliq.range_summary', 'Range anzeigen und manuell rebalancen.')}</span>
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="pool-btn-rebalance"
                             ${activeHint ? `style="background:var(--accent);color:#000;border-color:var(--accent);"
-                            data-tooltip-title="Range-Empfehlung (Konfidenz: ${activeHint.confidence === 'high' ? 'hoch' : 'mittel'})"
-                            data-tooltip-content="Range nicht mehr optimal: ±${activeHint.currentPct}% → ±${activeHint.recommendedPct}%.${activeHint.paybackHours != null ? `|Reopen amortisiert in ~${Math.round(activeHint.paybackHours)} Stunden.` : ''}|Verwalten → Rebalance um die Empfehlung sofort umzusetzen.|Ohne Aktion wird die neue Range beim nächsten natürlichen Rebalance automatisch übernommen."` : ''}>Verwalten</button>
+                            data-tooltip-title="${tr('sliq.range_hint_title', 'Range-Empfehlung (Konfidenz: {conf})', { conf: activeHint.confidence === 'high' ? tr('sliq.conf_high', 'hoch') : tr('sliq.conf_mid', 'mittel') })}"
+                            data-tooltip-content="${tr('sliq.range_hint_tip', 'Range nicht mehr optimal: ±{cur}% → ±{rec}%.', { cur: activeHint.currentPct, rec: activeHint.recommendedPct })}${activeHint.paybackHours != null ? tr('sliq.range_hint_payback', '|Reopen amortisiert in ~{hours} Stunden.', { hours: Math.round(activeHint.paybackHours) }) : ''}${tr('sliq.range_hint_action', '|Verwalten → Rebalance um die Empfehlung sofort umzusetzen.|Ohne Aktion wird die neue Range beim nächsten natürlichen Rebalance automatisch übernommen.')}"` : ''}>${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
                 <tr>
@@ -2342,72 +2331,72 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                         Fee Claim
                         <span class="info-tip-label"
                             data-tooltip-title="Fee Claim"
-                            data-tooltip-content="Steuert ab welchem Betrag Fees geclaimed werden und was danach damit passiert.\n\nAuto Compounding: Fees sofort wieder in den Pool reinvestieren (ganz oder anteilig).\n\nSenden an: Verbleibende Fees optional an eine Adresse senden – ggf. vorher in USDC tauschen.">&#9432;</span>
+                            data-tooltip-content="${tr('sliq.fee_claim_tip', 'Steuert ab welchem Betrag Fees geclaimed werden und was danach damit passiert.\n\nAuto Compounding: Fees sofort wieder in den Pool reinvestieren (ganz oder anteilig).\n\nSenden an: Verbleibende Fees optional an eine Adresse senden – ggf. vorher in USDC tauschen.')}">&#9432;</span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">Regelt den Umgang mit den Fee-Einnahmen.</span>
+                        <span class="pool-summary">${tr('sliq.fee_claim_summary', 'Regelt den Umgang mit den Fee-Einnahmen.')}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="pool-btn-ac">Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="pool-btn-ac">${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Risk-Management
+                        ${tr('sliq.risk_management', 'Risk-Management')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Risk-Management"
-                            data-tooltip-content="Zwei voneinander unabhängige Schutzmechanismen:||Score Limit: Schließt die Position automatisch, sobald der Opportunity Score des Pools unter eine einstellbare Schwelle fällt.||Trailing Stop (TS): Schließt die Position, wenn der Pool-Wert um einen einstellbaren Prozentsatz unter den bisherigen Höchststand fällt (High-Water-Mark).||Bei beiden Mechanismen kann das entnommene Kapital optional in USDC getauscht und an eine Adresse gesendet werden.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.risk_management', 'Risk-Management')}"
+                            data-tooltip-content="${tr('sliq.risk_tip', 'Zwei voneinander unabhängige Schutzmechanismen:||Score Limit: Schließt die Position automatisch, sobald der Opportunity Score des Pools unter eine einstellbare Schwelle fällt.||Trailing Stop (TS): Schließt die Position, wenn der Pool-Wert um einen einstellbaren Prozentsatz unter den bisherigen Höchststand fällt (High-Water-Mark).||Bei beiden Mechanismen kann das entnommene Kapital optional in USDC getauscht und an eine Adresse gesendet werden.')}">&#9432;</span>
                     </td>
                     <td class="wat-info">
                         <span class="pool-summary">${_buildSafetySummary(pool)}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="pool-btn-sltp">Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="pool-btn-sltp">${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Einzahlen
+                        ${tr('sb.deposit', 'Einzahlen')}
                         <span class="info-tip-label"
-                            data-tooltip-title="In den Pool einzahlen"
-                            data-tooltip-content="Fügt der bestehenden Pool-Position Kapital hinzu, oder eröffnet eine neue Position wenn der Pool gerade inaktiv ist.\n\nZwei Modi:\n• USDC-Betrag: Wallet-USDC wird in beide Pool-Tokens geswappt.\n• Wallet-Coins: Vorhandene Pool-Tokens werden direkt verwendet, kein Swap.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.deposit_into_pool', 'In den Pool einzahlen')}"
+                            data-tooltip-content="${tr('sliq.deposit_tip', 'Fügt der bestehenden Pool-Position Kapital hinzu, oder eröffnet eine neue Position wenn der Pool gerade inaktiv ist.\n\nZwei Modi:\n• USDC-Betrag: Wallet-USDC wird in beide Pool-Tokens geswappt.\n• Wallet-Coins: Vorhandene Pool-Tokens werden direkt verwendet, kein Swap.')}">&#9432;</span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">Liquidität dem Pool hinzufügen.</span>
+                        <span class="pool-summary">${tr('sliq.deposit_summary', 'Liquidität dem Pool hinzufügen.')}</span>
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="pool-btn-deposit"
-                            ${pool.uiDepositDisabled ? 'disabled title="Preis-Referenzpool – keine Einzahlungen möglich"'
-                              : (!poolEnabled ? 'disabled data-tooltip-title="Pool deaktiviert" data-tooltip-content="Pool ist deaktiviert – erst aktivieren, dann einzahlen."' : '')}>Einzahlen</button>
+                            ${pool.uiDepositDisabled ? 'disabled title="' + tr('sliq.deposit_refpool', 'Preis-Referenzpool – keine Einzahlungen möglich') + '"'
+                              : (!poolEnabled ? 'disabled data-tooltip-title="' + tr('sliq.pool_deactivated', 'Pool deaktiviert') + '" data-tooltip-content="' + tr('sliq.pool_deactivated_tip', 'Pool ist deaktiviert – erst aktivieren, dann einzahlen.') + '"' : '')}>${tr('sb.deposit', 'Einzahlen')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Auszahlen
+                        ${tr('sb.withdraw', 'Auszahlen')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Aus dem Pool auszahlen"
-                            data-tooltip-content="Entnimmt Liquidität aus der bestehenden Pool-Position. Optional können die entnommenen Coins vor dem Verbleib im Wallet in USDC getauscht und/oder an eine Adresse gesendet werden.\n\nZwei Modi:\n• USDC-Wert: Liquidität im Gegenwert dieses USDC-Betrags wird proportional entnommen.\n• Token-Menge: Anteilige Entnahme über einen Pool-Token als Anker — beide Seiten kommen anteilig zurück.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.withdraw_from_pool', 'Aus dem Pool auszahlen')}"
+                            data-tooltip-content="${tr('sliq.withdraw_tip', 'Entnimmt Liquidität aus der bestehenden Pool-Position. Optional können die entnommenen Coins vor dem Verbleib im Wallet in USDC getauscht und/oder an eine Adresse gesendet werden.\n\nZwei Modi:\n• USDC-Wert: Liquidität im Gegenwert dieses USDC-Betrags wird proportional entnommen.\n• Token-Menge: Anteilige Entnahme über einen Pool-Token als Anker — beide Seiten kommen anteilig zurück.')}">&#9432;</span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">Liquidität aus dem Pool entfernen.</span>
+                        <span class="pool-summary">${tr('sliq.withdraw_summary', 'Liquidität aus dem Pool entfernen.')}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="pool-btn-withdraw" ${pool.active ? '' : 'disabled'}>Auszahlen</button>
+                        <button class="btn btn-secondary btn-sm" id="pool-btn-withdraw" ${pool.active ? '' : 'disabled'}>${tr('sb.withdraw', 'Auszahlen')}</button>
                     </td>
                 </tr>
             </tbody>
         </table>
         ${noData
-            ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">Noch keine verlässlichen Pool-Daten – prüfe oben in der Zeile "Status", ob der Liquidity Bot läuft.</p>`
+            ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.no_pool_data_hint', 'Noch keine verlässlichen Pool-Daten – prüfe oben in der Zeile "Status", ob der Liquidity Bot läuft.')}</p>`
             : (!poolEnabled
-                ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">&#128274; Pool deaktiviert – nimmt kein Kapital auf (kein Cleanup-Reinvest), bis er wieder aktiviert wird. Einstellungen können trotzdem gespeichert werden.</p>`
-                : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.</p>` : ''))}`;
+                ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_off_hint', '&#128274; Pool deaktiviert – nimmt kein Kapital auf (kein Cleanup-Reinvest), bis er wieder aktiviert wird. Einstellungen können trotzdem gespeichert werden.')}</p>`
+                : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_idle_hint', '&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.')}</p>` : ''))}`;
 
     if (noData) {
         const input = panel.querySelector('#pool-picker-input');
         if (input) {
             input.value       = '';
-            input.placeholder = 'Bitte Liquidity Bot aktivieren';
+            input.placeholder = tr('sliq.activate_bot_first', 'Bitte Liquidity Bot aktivieren');
             input.disabled    = true;
         }
         panel.querySelector('#pool-type-filter')?.setAttribute('disabled', 'disabled');
@@ -2437,10 +2426,10 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
 // Typs durchgeschrieben werden (Bulk-Write, kein Template/Override-Konzept).
 
 function _renderPoolTypesTab(container) {
-    container.innerHTML = '<div class="wallet-loading">Lade Pool-Typen…</div>';
+    container.innerHTML = '<div class="wallet-loading">' + tr('sliq.loading_pool_types', 'Lade Pool-Typen…') + '</div>';
     fetch(`/api/pools/liquidity/pool-types?t=${Date.now()}`)
         .then(async res => {
-            if (!res.ok) throw new Error(`Pool-Typen konnten nicht geladen werden (HTTP ${res.status})`);
+            if (!res.ok) throw new Error(tr('sliq.pool_types_failed', 'Pool-Typen konnten nicht geladen werden (HTTP {status})', { status: res.status }));
             return res.json();
         })
         .then(rows => _drawPoolTypesTable(container, rows))
@@ -2455,8 +2444,8 @@ function _poolTypeRowHtml(r) {
     const investedPools = r.investedPools ?? [];
     const investedCount = investedPools.length;
     const lockDisable   = investedCount > 0 && s.enabled !== false;
-    const countLine     = `${r.poolCount} Pool${r.poolCount === 1 ? '' : 's'}`
-        + (investedCount > 0 ? ` / ${investedCount} Pool${investedCount === 1 ? '' : 's'} investiert` : '');
+    const countLine     = tr('sliq.n_pools', '{n} Pools', { n: r.poolCount })
+        + (investedCount > 0 ? tr('sliq.n_invested', ' / {n} Pools investiert', { n: investedCount }) : '');
     return `
         <tr data-pool-type="${r.poolType}">
             <td class="wat-label">
@@ -2474,26 +2463,26 @@ function _poolTypeRowHtml(r) {
                 <div class="input-unit-row">
                     <span class="input-unit">$</span>
                     <input type="number" class="modal-input input-short" id="pt-tvl1-${r.poolType}"
-                        min="0" step="100" placeholder="leer = aus" value="${s.tvlProtection.level1.thresholdUsd ?? ''}">
+                        min="0" step="100" placeholder="${tr('sliq.empty_is_off', 'leer = aus')}" value="${s.tvlProtection.level1.thresholdUsd ?? ''}">
                 </div>
             </td>
             <td class="wat-info">
                 <div class="input-unit-row">
                     <span class="input-unit">$</span>
                     <input type="number" class="modal-input input-short" id="pt-tvl2-${r.poolType}"
-                        min="0" step="100" placeholder="leer = aus" value="${s.tvlProtection.level2.thresholdUsd ?? ''}">
+                        min="0" step="100" placeholder="${tr('sliq.empty_is_off', 'leer = aus')}" value="${s.tvlProtection.level2.thresholdUsd ?? ''}">
                 </div>
             </td>
             <td class="wat-info">
                 <label class="toggle-switch toggle-sm"
-                    ${lockDisable ? `data-tooltip-title="Nicht deaktivierbar" data-tooltip-content="${_esc(investedPools.map(p => p.displayPair).join(', '))} – erst auszahlen, dann deaktivieren."` : ''}>
+                    ${lockDisable ? `data-tooltip-title="${tr('sliq.not_deactivatable', 'Nicht deaktivierbar')}" data-tooltip-content="${tr('sliq.invested_pools_hint', '{pools} – erst auszahlen, dann deaktivieren.', { pools: _esc(investedPools.map(p => p.displayPair).join(', ')) })}"` : ''}>
                     <input type="checkbox" id="pt-enabled-${r.poolType}" ${s.enabled !== false ? 'checked' : ''} ${lockDisable ? 'disabled' : ''}>
                     <span class="toggle-slider"></span>
                 </label>
             </td>
             <td class="wat-action">
                 <button class="btn btn-secondary btn-sm" id="pt-save-${r.poolType}"
-                    ${_ctx.getStatus?.(SVC_ID) !== 'active' ? 'disabled' : ''}>Speichern</button>
+                    ${_ctx.getStatus?.(SVC_ID) !== 'active' ? 'disabled' : ''}>${tr('msg.save', 'Speichern')}</button>
             </td>
         </tr>
         <tr>
@@ -2504,17 +2493,16 @@ function _poolTypeRowHtml(r) {
 function _drawPoolTypesTable(container, rows) {
     container.innerHTML = `
         <p class="wallet-hint" style="margin:0 0 0.8rem;font-size:0.8rem;">
-            Speichern überträgt die Werte einer Zeile sofort auf ALLE Pools dieses Typs und
-            überschreibt dort bestehende individuelle Einstellungen (Risk-Management-Modal).
+            ${tr('sliq.pool_types_hint', 'Speichern überträgt die Werte einer Zeile sofort auf ALLE Pools dieses Typs und überschreibt dort bestehende individuelle Einstellungen (Risk-Management-Modal).')}
         </p>
         <table class="wallet-action-table pool-types-table">
             <thead>
                 <tr>
-                    <th>Pool Typ</th>
-                    <th>Trailing Stop Drawdown</th>
-                    <th>TVL Schwelle 1</th>
-                    <th>TVL Schwelle 2</th>
-                    <th>Aktiviert</th>
+                    <th>${tr('sliq.pool_type', 'Pool Typ')}</th>
+                    <th>${tr('sliq.ts_drawdown', 'Trailing Stop Drawdown')}</th>
+                    <th>${tr('sliq.tvl_threshold_1', 'TVL Schwelle 1')}</th>
+                    <th>${tr('sliq.tvl_threshold_2', 'TVL Schwelle 2')}</th>
+                    <th>${tr('sliq.enabled_col', 'Aktiviert')}</th>
                     <th></th>
                 </tr>
             </thead>
@@ -2538,14 +2526,14 @@ function _confirmSavePoolType(container, row) {
 
     const thresholdPct = parseFloat(get(`pt-ts-${poolType}`)?.value ?? '');
     if (!Number.isFinite(thresholdPct) || thresholdPct < 1 || thresholdPct > 90) {
-        return setErr('Trailing-Stop-Drawdown muss zwischen 1 und 90 % liegen.');
+        return setErr(tr('sliq.ts_range_err', 'Trailing-Stop-Drawdown muss zwischen 1 und 90 % liegen.'));
     }
     const tvl1Raw = get(`pt-tvl1-${poolType}`)?.value ?? '';
     const tvl2Raw = get(`pt-tvl2-${poolType}`)?.value ?? '';
     const tvl1 = tvl1Raw === '' ? null : parseFloat(tvl1Raw);
     const tvl2 = tvl2Raw === '' ? null : parseFloat(tvl2Raw);
-    if (tvl1 != null && !(tvl1 > 0)) return setErr('TVL-Schwelle 1 muss größer als 0 sein (oder leer lassen).');
-    if (tvl2 != null && !(tvl2 > 0)) return setErr('TVL-Schwelle 2 muss größer als 0 sein (oder leer lassen).');
+    if (tvl1 != null && !(tvl1 > 0)) return setErr(tr('sliq.tvl1_gt0', 'TVL-Schwelle 1 muss größer als 0 sein (oder leer lassen).'));
+    if (tvl2 != null && !(tvl2 > 0)) return setErr(tr('sliq.tvl2_gt0', 'TVL-Schwelle 2 muss größer als 0 sein (oder leer lassen).'));
     const enabled = get(`pt-enabled-${poolType}`)?.checked ?? true;
     if (fb) { fb.textContent = ''; fb.className = 'modal-feedback'; }
 
@@ -2554,26 +2542,26 @@ function _confirmSavePoolType(container, row) {
     const mid = `pool-type-confirm-${poolType}`;
     showModal({
         id:    mid,
-        title: `Pool-Typ "${label}" speichern?`,
+        title: tr('sliq.pool_type_save_q', 'Pool-Typ "{type}" speichern?', { type: label }),
         body: `
             <p style="margin:0 0 0.5rem;">
-                Dies überschreibt Trailing-Stop- und TVL-Schutz-Werte bei
-                <strong>${row.poolCount} Pool${row.poolCount === 1 ? '' : 's'}</strong> vom Typ
-                <strong>${_esc(label)}</strong> sofort.
+                ${tr('sliq.overwrite_prefix', 'Dies überschreibt Trailing-Stop- und TVL-Schutz-Werte bei')}
+                <strong>${row.poolCount} Pool${row.poolCount === 1 ? '' : 's'}</strong> ${tr('sliq.of_type', 'vom Typ')}
+                <strong>${_esc(label)}</strong> ${tr('sliq.immediately', 'sofort.')}
             </p>
             <p style="margin:0;color:var(--text-muted);font-size:0.85rem;">
                 Bestehende individuelle Anpassungen bei diesen Pools gehen dabei verloren.
-                ${enabled === false ? ' Zusätzlich werden alle Pools dieses Typs deaktiviert (keine Cleanup-Zuweisung mehr).' : ''}
+                ${enabled === false ? tr('sliq.also_deactivates', ' Zusätzlich werden alle Pools dieses Typs deaktiviert (keine Cleanup-Zuweisung mehr).') : ''}
             </p>
             <div id="pt-confirm-feedback" style="margin-top:0.6rem;font-size:0.82rem"></div>`,
         actions: [
             {
-                label: 'Speichern', onClick: async () => {
+                label: tr('msg.save', 'Speichern'), onClick: async () => {
                     const modalEl = getModal(mid);
                     const cfb     = modalEl?.querySelector('#pt-confirm-feedback');
                     const btns    = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
                     btns.forEach(b => { b.disabled = true; });
-                    if (cfb) { cfb.style.color = 'var(--text-muted)'; cfb.textContent = 'Speichere…'; }
+                    if (cfb) { cfb.style.color = 'var(--text-muted)'; cfb.textContent = tr('sb.saving', 'Speichere…'); }
                     try {
                         const res = await fetch(`/api/pools/liquidity/pool-types/${poolType}`, {
                             method:  'PUT',
@@ -2591,9 +2579,9 @@ function _confirmSavePoolType(container, row) {
                         const failCount = data.failed?.length ?? 0;
                         if (failCount > 0) {
                             const reasons = data.failed.map(f => `${f.poolId}: ${f.reason}`).join(' | ');
-                            _ctx.showToast?.(`Gespeichert, aber ${failCount} Pool(s) übersprungen – ${reasons}`, 'error');
+                            _ctx.showToast?.(tr('sliq.saved_with_skips', 'Gespeichert, aber {n} Pool(s) übersprungen – {reasons}', { n: failCount, reasons }), 'error');
                         } else {
-                            _ctx.showToast?.(`Pool-Typ "${label}" gespeichert (${data.updated?.length ?? 0} Pools)`, 'success');
+                            _ctx.showToast?.(tr('sliq.pool_type_saved', 'Pool-Typ "{type}" gespeichert ({n} Pools)', { type: label, n: data.updated?.length ?? 0 }), 'success');
                         }
 
                         // Tab-Inhalt + darunterliegende Pool-Liste (falls schon geladen)
@@ -2604,12 +2592,12 @@ function _confirmSavePoolType(container, row) {
                             await _refreshPoolsCard(scaffoldCard);
                         }
                     } catch (err) {
-                        if (cfb) { cfb.style.color = 'var(--danger)'; cfb.textContent = `Fehler: ${err.message}`; }
+                        if (cfb) { cfb.style.color = 'var(--danger)'; cfb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); }
                         btns.forEach(b => { b.disabled = false; });
                     }
                 },
             },
-            { label: 'Abbrechen', onClick: () => closeModal(mid) },
+            { label: tr('sliq.cancel', 'Abbrechen'), onClick: () => closeModal(mid) },
         ],
     });
 }
@@ -2622,11 +2610,11 @@ function _toggleEnabled(pool, card) {
     const mid    = 'liquiditybot-toggle-enabled';
 
     const explain = enable
-        ? 'Der Pool kann danach wieder Kapital aufnehmen (Einzahlungen und Cleanup-Reinvest).'
-        : 'In den Pool wird kein Kapital mehr investiert (kein Cleanup-Reinvest, keine Einzahlung), bis er wieder aktiviert wird.';
+        ? tr('sliq.pool_enable_hint', 'Der Pool kann danach wieder Kapital aufnehmen (Einzahlungen und Cleanup-Reinvest).')
+        : tr('sliq.pool_disable_hint', 'In den Pool wird kein Kapital mehr investiert (kein Cleanup-Reinvest, keine Einzahlung), bis er wieder aktiviert wird.');
 
     const body = `
-        <p style="margin:0 0 0.5rem">Pool <strong>${name}</strong> ${enable ? 'aktivieren' : 'deaktivieren'}?</p>
+        <p style="margin:0 0 0.5rem">${enable ? tr('sliq.pool_enable_q', 'Pool <strong>{pool}</strong> aktivieren?', { pool: name }) : tr('sliq.pool_disable_q', 'Pool <strong>{pool}</strong> deaktivieren?', { pool: name })}</p>
         <p style="margin:0;color:var(--text-muted);font-size:0.85rem">${explain}</p>
         <div id="toggle-feedback" style="margin-top:0.6rem;font-size:0.82rem"></div>`;
 
@@ -2635,7 +2623,7 @@ function _toggleEnabled(pool, card) {
         const fb      = modalEl?.querySelector('#toggle-feedback');
         const btns    = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
         btns.forEach(b => { b.disabled = true; });
-        if (fb) { fb.style.color = 'var(--text-muted)'; fb.textContent = 'Wird gespeichert…'; }
+        if (fb) { fb.style.color = 'var(--text-muted)'; fb.textContent = tr('sliq.saving_dots', 'Wird gespeichert…'); }
         try {
             const res  = await fetch(`/api/pools/liquidity/${pool.id}/toggle-enabled`, {
                 method:  'POST',
@@ -2646,21 +2634,21 @@ function _toggleEnabled(pool, card) {
             if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
             closeModal(mid);
-            _ctx.showToast?.(data.message ?? (enable ? 'Pool aktiviert' : 'Pool deaktiviert'), 'success');
+            _ctx.showToast?.(data.message ?? (enable ? tr('sliq.pool_activated', 'Pool aktiviert') : tr('sliq.pool_deactivated', 'Pool deaktiviert')), 'success');
             _renderPools(card.parentElement);
         } catch (err) {
-            if (fb) { fb.style.color = 'var(--danger)'; fb.textContent = `Fehler: ${err.message}`; }
+            if (fb) { fb.style.color = 'var(--danger)'; fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); }
             btns.forEach(b => { b.disabled = false; });
         }
     };
 
     showModal({
         id:    mid,
-        title: enable ? 'Pool aktivieren' : 'Pool deaktivieren',
+        title: enable ? tr('sliq.activate_pool', 'Pool aktivieren') : tr('sliq.deactivate_pool', 'Pool deaktivieren'),
         body,
         actions: [
-            { label: enable ? 'Aktivieren' : 'Deaktivieren', onClick: doToggle },
-            { label: 'Abbrechen', onClick: () => closeModal(mid) },
+            { label: enable ? tr('sb.activate', 'Aktivieren') : tr('sb.deactivate', 'Deaktivieren'), onClick: doToggle },
+            { label: tr('sliq.cancel', 'Abbrechen'), onClick: () => closeModal(mid) },
         ],
     });
 }
@@ -2675,7 +2663,7 @@ function _buildFeeClaimSummary(pool) {
         const pct = s.fraction ?? 100;
         parts.push(`<span class="pool-summary-on">AC ${pct}%</span>`);
     } else {
-        parts.push(`<span class="pool-summary-off">AC Aus</span>`);
+        parts.push(`<span class="pool-summary-off">${tr('sliq.ac_off', 'AC Aus')}</span>`);
     }
     if (s.sendTo) {
         parts.push(`→ ${s.swapToUsdc ? 'USDC · ' : ''}${_esc(s.sendTo.slice(0, 6))}…`);
@@ -2685,15 +2673,15 @@ function _buildFeeClaimSummary(pool) {
 }
 
 function _buildSafetySummary(_pool) {
-    return 'Regeln um Verluste einzugrenzen und Gewinne zu sichern.';
+    return tr('sliq.risk_summary_tip', 'Regeln um Verluste einzugrenzen und Gewinne zu sichern.');
 }
 
 function _buildRMTip(pool) {
     const sl = pool.settings.scoreLimit ?? { enabled: false, minScore: 30 };
     const ts = pool.settings.trailingStop ?? { enabled: false, thresholdPct: 33 };
     return [
-        `Score Limit: ${sl.enabled ? 'Unter ' + (sl.minScore ?? 30) : 'Aus'}`,
-        `Trailing Stop: ${ts.enabled ? '-' + (ts.thresholdPct ?? 33) + ' %' : 'Aus'}`,
+        `Score Limit: ${sl.enabled ? tr('sliq.below_score', 'Unter {score}', { score: sl.minScore ?? 30 }) : tr('sb.off', 'Aus')}`,
+        `Trailing Stop: ${ts.enabled ? '-' + (ts.thresholdPct ?? 33) + ' %' : tr('sb.off', 'Aus')}`,
     ].join('\n');
 }
 
@@ -2709,7 +2697,7 @@ function _escTip(s) {
 function _fmtPct(n, dp = 0) {
     if (n === undefined || n === null || !isFinite(n)) return '—';
     const rounded = dp === 0 ? Math.round(n) : n;
-    return `${dp === 0 ? rounded.toLocaleString('de-DE') : rounded.toFixed(dp)}%`;
+    return `${dp === 0 ? rounded.toLocaleString(NUM_LOCALE) : rounded.toFixed(dp)}%`;
 }
 
 function _fmtUsd(n) {
@@ -2731,13 +2719,13 @@ function _fmtCost(n) {
 function _buildCleanupToggle(eligible) {
     return `
         <div class="ranking-section">
-            <div class="ranking-section-title">Cleanup-Berücksichtigung</div>
+            <div class="ranking-section-title">${tr('sliq.cleanup_consideration', 'Cleanup-Berücksichtigung')}</div>
             <div class="settings-row" style="border:none;padding:0.35rem 0;">
                 <span class="settings-label" style="flex:1;">
-                    Beim Cleanup (Bester Pool) berücksichtigen
+                    ${tr('sliq.cleanup_consider_label', 'Beim Cleanup (Bester Pool) berücksichtigen')}
                     <span class="info-tip-label"
-                        data-tooltip-title="Cleanup – Bester Pool"
-                        data-tooltip-content="Ist diese Option aktiviert, nimmt der Pool am stündlichen Cleanup im Modus „Bester Pool" teil.||Ist sie deaktiviert, wird der Pool dort übersprungen — auch wenn er den höchsten Opportunity-Score hätte. Manuelle Pool-Auswahl bleibt unverändert.">&#9432;</span>
+                        data-tooltip-title="${tr('sliq.cleanup_best_pool', 'Cleanup – Bester Pool')}"
+                        data-tooltip-content="${tr('sliq.cleanup_consider_tip', 'Ist diese Option aktiviert, nimmt der Pool am stündlichen Cleanup im Modus „Bester Pool“ teil.||Ist sie deaktiviert, wird der Pool dort übersprungen — auch wenn er den höchsten Opportunity-Score hätte. Manuelle Pool-Auswahl bleibt unverändert.')}">&#9432;</span>
                 </span>
                 <label class="toggle-switch">
                     <input type="checkbox" id="ranking-eligible" ${eligible ? 'checked' : ''}>
@@ -2792,9 +2780,9 @@ function _buildSimulationSection(econ) {
     if (val1d == null && val7d == null) return '';
 
     const badgeMeta = {
-        measured:  { label: 'gemessen',   cls: 'sim-badge-measured'  },
-        projected: { label: 'Projektion', cls: 'sim-badge-projected' },
-        simulated: { label: 'Simulation', cls: 'sim-badge-simulated' },
+        measured:  { label: tr('sliq.badge_measured', 'gemessen'),   cls: 'sim-badge-measured'  },
+        projected: { label: tr('sliq.badge_projected', 'Projektion'), cls: 'sim-badge-projected' },
+        simulated: { label: tr('sliq.badge_simulated', 'Simulation'), cls: 'sim-badge-simulated' },
     };
 
     const renderCell = (label, value, badgeKey) => {
@@ -2818,7 +2806,7 @@ function _buildSimulationSection(econ) {
         <div class="ranking-section">
             <div class="ranking-section-title"
                 data-tooltip-title="Profit and Loss (PnL)"
-                data-tooltip-content="Erwartete bzw. gemessene Wertentwicklung der LP-Position bei einem Einsatz von 1.000 USDC.||gemessen: echte Snapshot-Werte (nur aktive Pools)|Projektion: linear hochgerechnet aus Total Return p.a.|Simulation: aus Modell-APR für inaktive Pools">
+                data-tooltip-content="${tr('sliq.sim_tip', 'Erwartete bzw. gemessene Wertentwicklung der LP-Position bei einem Einsatz von 1.000 USDC.||gemessen: echte Snapshot-Werte (nur aktive Pools)|Projektion: linear hochgerechnet aus Total Return p.a.|Simulation: aus Modell-APR für inaktive Pools')}">
                 Profit and Loss (PnL) <span class="info-tip-label">&#9432;</span>
             </div>
             <div class="ranking-grid">
@@ -2831,35 +2819,35 @@ function _buildSimulationSection(econ) {
 function _buildBewertungTab(econ, eligible) {
     if (!econ) return `
         <div class="ranking-section">
-            <div class="ranking-section-title">Score-Aufschlüsselung (Legacy)</div>
+            <div class="ranking-section-title">${tr('sliq.score_breakdown_legacy', 'Score-Aufschlüsselung (Legacy)')}</div>
             <div style="font-size:0.8rem;opacity:0.7;padding:0.4rem 0;">
-                Noch keine Economic-Scorer-Daten — wird beim nächsten Cron-Lauf aktualisiert.
+                ${tr('sliq.no_econ_data', 'Noch keine Economic-Scorer-Daten — wird beim nächsten Cron-Lauf aktualisiert.')}
             </div>
         </div>
         ${_buildCleanupToggle(eligible)}`;
 
-    const aprLabel = econ.is_active ? 'Realized APR (7d)' : 'Geschätzter APR';
+    const aprLabel = econ.is_active ? 'Realized APR (7d)' : tr('sliq.estimated_apr', 'Geschätzter APR');
     const aprValue = econ.is_active ? econ.realized_apr_pct : econ.estimated_apr_pct;
 
     // Token-Wert-Zeile: nur anzeigen wenn Wert vorhanden (sonst Hinweis-Text)
     const tokenLine = econ.token_return_apr_pct != null
-        ? `<div><span>± Token-Wert-Bewegung p.a.</span><strong>${econ.token_return_apr_pct >= 0 ? '+' : ''}${_fmtPct(econ.token_return_apr_pct, 1)}</strong></div>`
-        : `<div><span>± Token-Wert-Bewegung p.a.</span><strong>— (nicht messbar)</strong></div>`;
+        ? `<div><span>${tr('sliq.token_value_move', '± Token-Wert-Bewegung p.a.')}</span><strong>${econ.token_return_apr_pct >= 0 ? '+' : ''}${_fmtPct(econ.token_return_apr_pct, 1)}</strong></div>`
+        : `<div><span>${tr('sliq.token_value_move', '± Token-Wert-Bewegung p.a.')}</span><strong>${tr('sliq.not_measurable', '— (nicht messbar)')}</strong></div>`;
 
     const totalReturn = econ.total_return_apr_pct ?? econ.net_econ_pct;
 
     return `
         <div class="ranking-section">
-            <div class="ranking-section-title">Wirtschaftlichkeit</div>
+            <div class="ranking-section-title">${tr('sliq.economics', 'Wirtschaftlichkeit')}</div>
             <div class="ranking-grid">
                 <div><span>${aprLabel}</span><strong>${_fmtPct(aprValue, 1)}</strong></div>
-                <div><span>− Rebalance-Kosten p.a.</span><strong>−${_fmtPct(econ.rebal_cost_apr_pct, 2)}</strong></div>
-                <div><span>− Reinvest-Effizienz-Verlust</span><strong>−${_fmtPct(econ.reinvest_loss_apr_pct, 2)}</strong></div>
+                <div><span>${tr('sliq.rebalance_cost_pa', '− Rebalance-Kosten p.a.')}</span><strong>−${_fmtPct(econ.rebal_cost_apr_pct, 2)}</strong></div>
+                <div><span>${tr('sliq.reinvest_loss', '− Reinvest-Effizienz-Verlust')}</span><strong>−${_fmtPct(econ.reinvest_loss_apr_pct, 2)}</strong></div>
                 ${tokenLine}
                 <div class="ranking-grid-total"
                     data-tooltip-title="Total Return"
-                    data-tooltip-content="Erwartete Jahresrendite der Position:|Realized APR aus Fees|− Rebalance-Kosten|− Reinvest-Effizienz-Verlust|± Token-Wert-Bewegung|||Die Token-Wert-Bewegung kann positiv oder negativ sein. Fällt der Wert der gehaltenen Tokens, kippt der Total Return ins Negative — auch wenn die Fees gut laufen.">
-                    <span>= Total Return p.a. <span class="info-tip-label">&#9432;</span></span>
+                    data-tooltip-content="${tr('sliq.total_return_tip', 'Erwartete Jahresrendite der Position:|Realized APR aus Fees|− Rebalance-Kosten|− Reinvest-Effizienz-Verlust|± Token-Wert-Bewegung|||Die Token-Wert-Bewegung kann positiv oder negativ sein. Fällt der Wert der gehaltenen Tokens, kippt der Total Return ins Negative — auch wenn die Fees gut laufen.')}">
+                    <span>${tr('sliq.total_return_pa', '= Total Return p.a.')} <span class="info-tip-label">&#9432;</span></span>
                     <strong>${totalReturn >= 0 ? '+' : ''}${_fmtPct(totalReturn, 1)}</strong>
                 </div>
             </div>
@@ -2871,42 +2859,42 @@ function _buildBewertungTab(econ, eligible) {
 function _buildDetailsTab(econ, score) {
     if (!econ) {
         const trendArrow = { up: '↗', down: '↘', sideways: '→' }[score.trend] ?? '';
-        const trendLabel = { up: 'Aufwärts', down: 'Abwärts', sideways: 'Seitwärts' }[score.trend] ?? '?';
+        const trendLabel = { up: tr('sliq.trend_up', 'Aufwärts'), down: tr('sliq.trend_down', 'Abwärts'), sideways: tr('sliq.trend_sideways', 'Seitwärts') }[score.trend] ?? '?';
         return `
             <div class="ranking-section">
-                <div class="ranking-section-title">Aufschlüsselung (Legacy)</div>
+                <div class="ranking-section-title">${tr('sliq.breakdown_legacy', 'Aufschlüsselung (Legacy)')}</div>
                 <div class="ranking-grid">
-                    <div><span>Brutto-APR (Fees)</span><strong>${_fmtPct(score.gross_apr_pct)}</strong></div>
-                    <div><span>− Rebalance-Kosten</span><strong>−${_fmtPct(score.rebal_cost_apr_pct)}</strong></div>
+                    <div><span>${tr('sliq.gross_apr', 'Brutto-APR (Fees)')}</span><strong>${_fmtPct(score.gross_apr_pct)}</strong></div>
+                    <div><span>${tr('sliq.rebalance_cost', '− Rebalance-Kosten')}</span><strong>−${_fmtPct(score.rebal_cost_apr_pct)}</strong></div>
                     <div><span>− Impermanent Loss</span><strong>−${_fmtPct(score.annual_il_pct)}</strong></div>
-                    <div class="ranking-grid-total"><span>= Netto-APR</span><strong>${_fmtPct(score.net_apr_pct)}</strong></div>
+                    <div class="ranking-grid-total"><span>${tr('sliq.net_apr', '= Netto-APR')}</span><strong>${_fmtPct(score.net_apr_pct)}</strong></div>
                 </div>
             </div>
             <div class="ranking-section">
-                <div class="ranking-section-title">Volatilität & Trend</div>
+                <div class="ranking-section-title">${tr('sliq.vola_trend', 'Volatilität & Trend')}</div>
                 <div class="ranking-grid">
-                    <div><span>Vola stündlich</span><strong>${_fmtPct(score.vola_hourly_pct, 2)}</strong></div>
-                    <div><span>Vola annualisiert</span><strong>${_fmtPct(score.vola_annualized_pct, 0)}</strong></div>
+                    <div><span>${tr('sliq.vola_hourly', 'Vola stündlich')}</span><strong>${_fmtPct(score.vola_hourly_pct, 2)}</strong></div>
+                    <div><span>${tr('sliq.vola_annual', 'Vola annualisiert')}</span><strong>${_fmtPct(score.vola_annualized_pct, 0)}</strong></div>
                     <div style="grid-column:1/-1;border-right:none;border-bottom:none;"
                         data-tooltip-title="EMA-Stack"
-                        data-tooltip-content="Trend-Bewertung anhand der drei exponentiellen gleitenden Durchschnitte über die letzten 10/20/30 Stunden:\n\nEMA 10 ${score.ema?.ema10?.toFixed(2)} / EMA 20 ${score.ema?.ema20?.toFixed(2)} / EMA 30 ${score.ema?.ema30?.toFixed(2)}\n\n↗ Aufwärts: Preis > EMA 10 > EMA 20 > EMA 30\n↘ Abwärts: Preis < EMA 10 < EMA 20 < EMA 30\n→ Seitwärts: gemischt">
-                        <span>Trend (EMA-Stack)</span><strong>${trendArrow} ${trendLabel}</strong></div>
+                        data-tooltip-content="${tr('sliq.ema_tip', 'Trend-Bewertung anhand der drei exponentiellen gleitenden Durchschnitte über die letzten 10/20/30 Stunden:\n\nEMA 10 {ema10} / EMA 20 {ema20} / EMA 30 {ema30}', { ema10: score.ema?.ema10?.toFixed(2), ema20: score.ema?.ema20?.toFixed(2), ema30: score.ema?.ema30?.toFixed(2) })}\n\n↗ Aufwärts: Preis > EMA 10 > EMA 20 > EMA 30\n↘ Abwärts: Preis < EMA 10 < EMA 20 < EMA 30\n→ Seitwärts: gemischt">
+                        <span>${tr('sliq.trend_ema_stack', 'Trend (EMA-Stack)')}</span><strong>${trendArrow} ${trendLabel}</strong></div>
                 </div>
             </div>
             <div class="ranking-section">
-                <div class="ranking-section-title">Rebalancing-Prognose</div>
+                <div class="ranking-section-title">${tr('sliq.rebalancing_forecast', 'Rebalancing-Prognose')}</div>
                 <div class="ranking-grid">
-                    <div><span>Range</span><strong>±${score.range_pct}%</strong></div>
-                    <div><span>OOR alle</span><strong>${score.hours_until_oor?.toFixed(1)} h</strong></div>
-                    <div><span>Rebalances/Tag</span><strong>${score.rebals_per_day?.toFixed(1)}</strong></div>
+                    <div><span>${tr('liq.range', 'Range')}</span><strong>±${score.range_pct}%</strong></div>
+                    <div><span>${tr('sliq.oor_every', 'OOR alle')}</span><strong>${score.hours_until_oor?.toFixed(1)} h</strong></div>
+                    <div><span>${tr('sliq.rebalances_per_day', 'Rebalances/Tag')}</span><strong>${score.rebals_per_day?.toFixed(1)}</strong></div>
                     <div><span>MyShare bei ${_fmtUsd(score.capital_usdc)}</span><strong>${_fmtPct(score.myShare * 100, 3)}</strong></div>
                 </div>
             </div>`;
     }
 
-    const trendDir   = { up: '↗ steigend', down: '↘ fallend', sideways: '→ seitwärts', unknown: '— unbekannt' }[econ.trend_direction] ?? '—';
+    const trendDir   = { up: tr('sliq.dir_rising', '↗ steigend'), down: tr('sliq.dir_falling', '↘ fallend'), sideways: tr('sliq.dir_sideways', '→ seitwärts'), unknown: tr('sliq.dir_unknown', '— unbekannt') }[econ.trend_direction] ?? '—';
     const trendSlope = econ.trend_7d_slope != null
-        ? `${econ.trend_7d_slope >= 0 ? '+' : ''}${econ.trend_7d_slope.toFixed(2)} %-Pkt/Tag`
+        ? tr('sliq.pp_per_day', '{value} %-Pkt/Tag', { value: (econ.trend_7d_slope >= 0 ? '+' : '') + econ.trend_7d_slope.toFixed(2) })
         : '—';
     const rebalsPerMonth = econ.rebals_per_year != null
         ? (econ.rebals_per_year / 12).toFixed(1)
@@ -2917,31 +2905,31 @@ function _buildDetailsTab(econ, score) {
 
     return `
         <div class="ranking-section">
-            <div class="ranking-section-title">Qualitäts-Modifikatoren</div>
+            <div class="ranking-section-title">${tr('sliq.quality_modifiers', 'Qualitäts-Modifikatoren')}</div>
             <div class="ranking-grid">
-                <div data-tooltip-title="Konfidenz" data-tooltip-content="Datenreife des Scorers: Wie viele Tage fee_history sind vorhanden?|Skaliert von 0 % (3 Tage) bis 100 % (14+ Tage).|Unter 3 Tagen: Pool landet automatisch in „Halten" (kein Invest-Signal).|Inaktive Pools: maximal 60 % (APR geschätzt, nicht gemessen).">
-                    <span>Konfidenz <span class="info-tip-label">&#9432;</span></span>
+                <div data-tooltip-title="${tr('sliq.confidence', 'Konfidenz')}" data-tooltip-content="${tr('sliq.confidence_tip', 'Datenreife des Scorers: Wie viele Tage fee_history sind vorhanden?|Skaliert von 0 % (3 Tage) bis 100 % (14+ Tage).|Unter 3 Tagen: Pool landet automatisch in „Halten“ (kein Invest-Signal).|Inaktive Pools: maximal 60 % (APR geschätzt, nicht gemessen).')}">
+                    <span>${tr('sliq.confidence', 'Konfidenz')} <span class="info-tip-label">&#9432;</span></span>
                     <strong>${_fmtPct(econ.confidence_pct, 0)}</strong>
                 </div>
-                <div><span>Daten-Tage</span><strong>${econ.confidence_days?.toFixed?.(1) ?? '—'}</strong></div>
-                <div><span>Trend (7d)</span><strong>${trendDir}</strong></div>
-                <div><span>Steigung</span><strong>${trendSlope}</strong></div>
+                <div><span>${tr('sliq.data_days', 'Daten-Tage')}</span><strong>${econ.confidence_days?.toFixed?.(1) ?? '—'}</strong></div>
+                <div><span>${tr('sliq.trend_7d', 'Trend (7d)')}</span><strong>${trendDir}</strong></div>
+                <div><span>${tr('sliq.slope', 'Steigung')}</span><strong>${trendSlope}</strong></div>
                 <div><span>Range-Hit-Rate</span><strong>${_fmtPct(econ.range_hit_rate_pct, 0)}</strong></div>
-                <div><span>TVL-Trend (7d)</span><strong>${_fmtPct(econ.tvl_trend_pct, 1)}</strong></div>
+                <div><span>${tr('sliq.tvl_trend_7d', 'TVL-Trend (7d)')}</span><strong>${_fmtPct(econ.tvl_trend_pct, 1)}</strong></div>
                 <div><span>Volume / TVL</span><strong>${econ.vol_tvl_ratio != null ? (econ.vol_tvl_ratio * 100).toFixed(1) + '%' : '—'}</strong></div>
                 <div><span>Realized − Pool-APR</span><strong>${_fmtPct(econ.apr_delta_pct, 1)}</strong></div>
             </div>
         </div>
         <div class="ranking-section">
-            <div class="ranking-section-title">Wertentwicklung</div>
+            <div class="ranking-section-title">${tr('sliq.value_development', 'Wertentwicklung')}</div>
             <div class="ranking-grid">
-                <div data-tooltip-title="Token-Wert-Bewegung"
-                    data-tooltip-content="Annualisierte Veränderung des LP-Werts in USDC über die letzten Tage (max 7 d).|Erfasst Token-Preis-Bewegungen — komplementär zur Fee-Sicht (Realized APR).|Bei stark fallenden Tokens kann dieser Wert deutlich negativ werden, auch wenn die Fees gut laufen.">
-                    <span>Token-Wert p.a. <span class="info-tip-label">&#9432;</span></span>
+                <div data-tooltip-title="${tr('sliq.token_value_move_title', 'Token-Wert-Bewegung')}"
+                    data-tooltip-content="${tr('sliq.token_value_tip', 'Annualisierte Veränderung des LP-Werts in USDC über die letzten Tage (max 7 d).|Erfasst Token-Preis-Bewegungen — komplementär zur Fee-Sicht (Realized APR).|Bei stark fallenden Tokens kann dieser Wert deutlich negativ werden, auch wenn die Fees gut laufen.')}">
+                    <span>${tr('sliq.token_value_pa', 'Token-Wert p.a.')} <span class="info-tip-label">&#9432;</span></span>
                     <strong>${econ.token_return_apr_pct != null ? (econ.token_return_apr_pct >= 0 ? '+' : '') + _fmtPct(econ.token_return_apr_pct, 1) : '—'}</strong>
                 </div>
                 <div data-tooltip-title="PnL 1D"
-                    data-tooltip-content="LP-Wert-Veränderung der letzten 24 Stunden.|Akut-Indikator für plötzliche Kursabstürze.|Trigger für „Abziehen": fällt der Wert um mehr als 10 %, wird der Pool sofort als withdraw markiert (Hysterese muss noch zustimmen).">
+                    data-tooltip-content="${tr('sliq.pnl1d_tip', 'LP-Wert-Veränderung der letzten 24 Stunden.|Akut-Indikator für plötzliche Kursabstürze.|Trigger für „Abziehen“: fällt der Wert um mehr als 10 %, wird der Pool sofort als withdraw markiert (Hysterese muss noch zustimmen).')}">
                     <span>PnL 1D <span class="info-tip-label">&#9432;</span></span>
                     <strong>${econ.daily_pnl_pct != null ? (econ.daily_pnl_pct >= 0 ? '+' : '') + _fmtPct(econ.daily_pnl_pct, 2) : '—'}</strong>
                 </div>
@@ -2950,8 +2938,8 @@ function _buildDetailsTab(econ, score) {
         <div class="ranking-section">
             <div class="ranking-section-title">Rebalancing</div>
             <div class="ranking-grid">
-                <div><span>Erw. Rebalances/Monat</span><strong>${rebalsPerMonth}</strong></div>
-                <div><span>Gesch. Kosten/Rebalance</span><strong>${_fmtCost(estimatedCostPerRebal)}</strong></div>
+                <div><span>${tr('sliq.exp_rebalances_month', 'Erw. Rebalances/Monat')}</span><strong>${rebalsPerMonth}</strong></div>
+                <div><span>${tr('sliq.est_cost_rebalance', 'Gesch. Kosten/Rebalance')}</span><strong>${_fmtCost(estimatedCostPerRebal)}</strong></div>
             </div>
         </div>`;
 }
@@ -2959,20 +2947,19 @@ function _buildDetailsTab(econ, score) {
 function _buildMarktTab(score, scores) {
     return `
         <div class="ranking-section">
-            <div class="ranking-section-title">Markt-Daten</div>
+            <div class="ranking-section-title">${tr('sliq.market_data', 'Markt-Daten')}</div>
             <div class="ranking-grid">
-                <div><span>Preis</span><strong>${score.price != null ? score.price.toFixed(4) + ' USDC' : '—'}</strong></div>
+                <div><span>${tr('sliq.price', 'Preis')}</span><strong>${score.price != null ? score.price.toFixed(4) + ' USDC' : '—'}</strong></div>
                 <div><span>24h-Change</span><strong>${_fmtPct(score.change24h_pct, 2)}</strong></div>
                 <div><span>TVL</span><strong>${_fmtUsd(score.tvl_usd)}</strong></div>
                 <div><span>Volume (24h)</span><strong>${_fmtUsd(score.vol24h_usd)}</strong></div>
                 <div><span>Vol/TVL</span><strong>${_fmtPct(score.volPerTvl * 100, 1)}</strong></div>
-                <div><span>Fee-Tier</span><strong>${score.feeTier_pct}%</strong></div>
+                <div><span>${tr('sliq.fee_tier', 'Fee-Tier')}</span><strong>${score.feeTier_pct}%</strong></div>
             </div>
         </div>
         <div class="ranking-footer">
-            Daten aktualisiert ${_formatAge(scores?.ageMs)} ·
-            Cron-Refresh alle 15 Min ·
-            Quelle: GeckoTerminal
+            ${tr('sliq.data_updated', 'Daten aktualisiert {age} ·', { age: _formatAge(scores?.ageMs) })}
+            ${tr('sliq.cron_refresh_note', 'Cron-Refresh alle 15 Min · Quelle: GeckoTerminal')}
         </div>`;
 }
 
@@ -3108,8 +3095,8 @@ function _openRankingModal(pool, score, scores, card) {
 
     // Englische Tier-Begriffe im Head (konsistent mit den Slider-Labels)
     const econHeader = tierMeta
-        ? `Empfehlung: ${tierMeta.labelEn}`
-        : `Platz ${score.rank}/${score.of}`;
+        ? tr('sliq.recommendation', 'Empfehlung: {tier}', { tier: tierMeta.labelEn })
+        : tr('sliq.rank_position', 'Platz {rank}/{of}', { rank: score.rank, of: score.of });
     const econHeaderClass = econ?.tier ? `tier-${econ.tier}` : `ranking-${score.verdict}`;
 
     showModal({
@@ -3124,9 +3111,9 @@ function _openRankingModal(pool, score, scores, card) {
                     ${_buildTierSlider(econ, scores)}
                 </div>
                 <div class="rk-tab-bar">
-                    <button class="rk-tab active" data-tab="bewertung">Bewertung</button>
+                    <button class="rk-tab active" data-tab="bewertung">${tr('liq.tab.rating', 'Bewertung')}</button>
                     <button class="rk-tab" data-tab="details">Details</button>
-                    <button class="rk-tab" data-tab="markt">Markt</button>
+                    <button class="rk-tab" data-tab="markt">${tr('sliq.market_tab', 'Markt')}</button>
                 </div>
                 <div class="rk-panel" data-panel="bewertung">${_buildBewertungTab(econ, eligible)}</div>
                 <div class="rk-panel" data-panel="details" hidden>${_buildDetailsTab(econ, score)}</div>
@@ -3134,8 +3121,8 @@ function _openRankingModal(pool, score, scores, card) {
                 <div class="modal-feedback" id="ranking-feedback"></div>
             </div>`,
         actions: [
-            { label: 'Speichern', primary: true, onClick: () => _saveRankingModal(mid, pool, card) },
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('msg.save', 'Speichern'), primary: true, onClick: () => _saveRankingModal(mid, pool, card) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
     requestAnimationFrame(() => _initRankingModalTabs(mid));
@@ -3154,7 +3141,9 @@ function _openRankingModal(pool, score, scores, card) {
         if (!freshPool || !freshScore || freshScore.error) return;
         const freshEcon   = freshScore.economic;
         const freshTier   = freshEcon?.tier ? _tierMeta(freshEcon.tier) : null;
-        const freshHeader = freshTier ? `Empfehlung: ${freshTier.labelEn}` : `Platz ${freshScore.rank}/${freshScore.of}`;
+        const freshHeader = freshTier
+            ? tr('sliq.recommendation', 'Empfehlung: {tier}', { tier: freshTier.labelEn })
+            : tr('sliq.rank_position', 'Platz {rank}/{of}', { rank: freshScore.rank, of: freshScore.of });
         const freshClass  = freshEcon?.tier ? `tier-${freshEcon.tier}` : `ranking-${freshScore.verdict}`;
         const freshEl     = getModal(mid);
         if (!freshEl) return;
@@ -3177,7 +3166,7 @@ function _openRankingModal(pool, score, scores, card) {
 async function _saveRankingModal(mid, pool, card) {
     const fb        = document.getElementById('ranking-feedback');
     const eligible  = document.getElementById('ranking-eligible')?.checked ?? true;
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -3185,10 +3174,10 @@ async function _saveRankingModal(mid, pool, card) {
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         closeModal(mid);
-        _ctx.showToast?.('Ranking-Einstellung gespeichert', 'success');
+        _ctx.showToast?.(tr('sliq.ranking_saved', 'Ranking-Einstellung gespeichert'), 'success');
         if (card) await _refreshPoolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -3219,17 +3208,17 @@ function _openFeeClaimModal(pool, addrs, card) {
         title: `Fee Claim – ${pool.displayPair ?? pool.pair}`,
         body:  `
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-fc="cfg">Allgemein</button>
+                <button class="wm-tab active" data-fc="cfg">${tr('sliq.general', 'Allgemein')}</button>
                 <button class="wm-tab"        data-fc="ac">Auto Compounding</button>
-                <button class="wm-tab"        data-fc="send">Senden an</button>
+                <button class="wm-tab"        data-fc="send">${tr('sb.send_to', 'Senden an')}</button>
             </div>
             <div id="fc-cfg-panel" class="fc-settings">
                 <div class="settings-row" style="border:none;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Mindestbetrag
+                        ${tr('sliq.min_amount', 'Mindestbetrag')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Mindestbetrag"
-                            data-tooltip-content="Fees werden nur geclaimed wenn der Gesamtwert diesen Betrag erreicht hat.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.min_amount', 'Mindestbetrag')}"
+                            data-tooltip-content="${tr('sliq.min_amount_tip', 'Fees werden nur geclaimed wenn der Gesamtwert diesen Betrag erreicht hat.')}">&#9432;</span>
                     </span>
                     <select class="modal-select" id="ac-min-claim" style="width:auto;">
                         ${minOptions}
@@ -3237,17 +3226,17 @@ function _openFeeClaimModal(pool, addrs, card) {
                 </div>
                 <div class="settings-row" style="border:none; opacity:0.55;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Claim-Intervall
+                        ${tr('sliq.claim_interval', 'Claim-Intervall')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Claim-Intervall"
-                            data-tooltip-content="Der Bot prüft alle 10 Minuten ob Fees geclaimed werden sollen. Dieser Wert ist nicht konfigurierbar.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.claim_interval', 'Claim-Intervall')}"
+                            data-tooltip-content="${tr('sliq.claim_interval_tip', 'Der Bot prüft alle {interval} ob Fees geclaimed werden sollen. Dieser Wert ist nicht konfigurierbar.', { interval: tr('sliq.ten_minutes', '10 Minuten') })}">&#9432;</span>
                     </span>
-                    <span style="font-size:0.85rem;">10 Minuten</span>
+                    <span style="font-size:0.85rem;">${tr('sliq.ten_minutes', '10 Minuten')}</span>
                 </div>
             </div>
             <div id="fc-ac-panel" class="fc-settings" hidden>
                 <div class="settings-row" style="border:none;">
-                    <span class="settings-label">Aktiviert</span>
+                    <span class="settings-label">${tr('sliq.enabled_col', 'Aktiviert')}</span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="ac-enabled" ${acEnabled ? 'checked' : ''}>
                         <span class="toggle-slider"></span>
@@ -3255,10 +3244,10 @@ function _openFeeClaimModal(pool, addrs, card) {
                 </div>
                 <div class="settings-row ac-dependent" style="border:none; opacity:${acEnabled ? '1' : '0.4'};">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Reinvest-Anteil
+                        ${tr('sliq.reinvest_share', 'Reinvest-Anteil')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Reinvest-Anteil"
-                            data-tooltip-content="Anteil der geclaimten Fees der sofort wieder in den Pool reinvestiert wird. Der Rest verbleibt im Wallet oder wird über „Senden an" weitergeleitet.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.reinvest_share', 'Reinvest-Anteil')}"
+                            data-tooltip-content="${tr('sliq.reinvest_share_tip', 'Anteil der geclaimten Fees der sofort wieder in den Pool reinvestiert wird. Der Rest verbleibt im Wallet oder wird über „Senden an“ weitergeleitet.')}">&#9432;</span>
                     </span>
                     <select class="modal-select" id="ac-fraction" ${acEnabled ? '' : 'disabled'} style="width:auto;">
                         ${fractionOptions}
@@ -3266,13 +3255,13 @@ function _openFeeClaimModal(pool, addrs, card) {
                 </div>
             </div>
             <div id="fc-send-panel" class="fc-settings" hidden>
-                <p class="wallet-hint" id="fc-send-hint" style="margin: 0.4rem 0 0.6rem;">${sendDisabled ? '⚠️ Nur verfügbar wenn Auto Compounding &lt; 100% oder deaktiviert.' : ''}</p>
+                <p class="wallet-hint" id="fc-send-hint" style="margin: 0.4rem 0 0.6rem;">${sendDisabled ? tr('sliq.ac_only_hint', '⚠️ Nur verfügbar wenn Auto Compounding &lt; 100% oder deaktiviert.') : ''}</p>
                 <div class="settings-row" style="border:none; opacity:${sendDisabled ? '0.4' : '1'};">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Swap → USDC
+                        ${tr('sliq.swap_usdc', 'Swap → USDC')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Swap → USDC"
-                            data-tooltip-content="Verbleibende Coins vor dem Transfer automatisch in USDC tauschen.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.swap_usdc', 'Swap → USDC')}"
+                            data-tooltip-content="${tr('sliq.fc_swap_tip', 'Verbleibende Coins vor dem Transfer automatisch in USDC tauschen.')}">&#9432;</span>
                     </span>
                     <label class="toggle-switch toggle-sm">
                         <input type="checkbox" id="ac-swap" ${swapVal ? 'checked' : ''} ${sendDisabled ? 'disabled' : ''}>
@@ -3280,17 +3269,17 @@ function _openFeeClaimModal(pool, addrs, card) {
                     </label>
                 </div>
                 <div class="settings-row" style="border:none; opacity:${sendDisabled ? '0.4' : '1'};">
-                    <span class="settings-label">Empfänger</span>
+                    <span class="settings-label">${tr('sliq.recipient', 'Empfänger')}</span>
                     <select class="modal-select" id="ac-sendto" ${sendDisabled ? 'disabled' : ''}>
-                        <option value="">– Nicht senden –</option>
+                        <option value="">${tr('sliq.dont_send', '– Nicht senden –')}</option>
                         ${_addrOptions(addrs, sendToVal)}
                     </select>
                 </div>
             </div>
             <div class="modal-feedback" id="ac-feedback"></div>`,
         actions: [
-            { label: 'Speichern', primary: true, onClick: () => _saveFeeClaimModal(mid, pool, card) },
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('msg.save', 'Speichern'), primary: true, onClick: () => _saveFeeClaimModal(mid, pool, card) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -3341,7 +3330,7 @@ async function _saveFeeClaimModal(mid, pool, card) {
         sendTo:       document.getElementById('ac-sendto')?.value ?? '',
         swapToUsdc:   document.getElementById('ac-swap')?.checked ?? false,
     };
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -3349,10 +3338,10 @@ async function _saveFeeClaimModal(mid, pool, card) {
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         closeModal(mid);
-        _ctx.showToast?.('Fee Claim gespeichert', 'success');
+        _ctx.showToast?.(tr('sliq.fee_claim_saved', 'Fee Claim gespeichert'), 'success');
         await _refreshPoolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -3361,11 +3350,11 @@ async function _saveFeeClaimModal(mid, pool, card) {
 function _openSLTPModal(pool, addrs, card) {
     const mid = 'liquiditybot-sltp-modal';
 
-    const saveAction = { label: 'Speichern', primary: true, onClick: null };
+    const saveAction = { label: tr('msg.save', 'Speichern'), primary: true, onClick: null };
 
     showModal({
         id:    mid,
-        title: `Risk-Management – ${pool.displayPair ?? pool.pair}`,
+        title: `${tr('sliq.risk_management', 'Risk-Management')} – ${pool.displayPair ?? pool.pair}`,
         body:  `
             <div class="wm-tab-bar">
                 <button class="wm-tab active" data-wm="ts">Trailing Stop</button>
@@ -3377,7 +3366,7 @@ function _openSLTPModal(pool, addrs, card) {
             <div id="sltp-sl"  hidden>${_buildScoreLimitPanel(pool, addrs)}</div>`,
         actions: [
             saveAction,
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -3394,7 +3383,7 @@ function _openSLTPModal(pool, addrs, card) {
         } else {
             saveAction.onClick = () => _saveTrailingStopPanel(pool, card, getModal(mid));
         }
-        if (saveBtn) saveBtn.textContent = 'Speichern';
+        if (saveBtn) saveBtn.textContent = tr('msg.save', 'Speichern');
     }
     setSaveTarget('ts');
 
@@ -3435,7 +3424,7 @@ function _openSLTPModal(pool, addrs, card) {
         const currentUsd = parseFloat(sb.dataset.current);
         if (!(hwmUsd > 0)) return;
         const trigger = hwmUsd * (1 - thr / 100);
-        const fmt     = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const fmt     = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
         // Liquidations-Label aktualisieren
         const valEl = backdrop.querySelector('#ts-liquidation-val');
@@ -3458,8 +3447,8 @@ function _openSLTPModal(pool, addrs, card) {
         if (pufferEl) {
             pufferEl.style.color = bufferOk ? '#86efac' : '#fca5a5';
             pufferEl.innerHTML   = bufferOk
-                ? `Puffer: ${fmt(bufferUsd)}&thinsp;USDC&ensp;/&ensp;${bufferPct.toFixed(1)}&thinsp;%`
-                : `⚠ Auslöser überschritten`;
+                ? tr('sliq.buffer', 'Puffer: {usd}&thinsp;USDC&ensp;/&ensp;{pct}&thinsp;%', { usd: fmt(bufferUsd), pct: bufferPct.toFixed(1) })
+                : `${tr('sliq.trigger_exceeded', '⚠ Auslöser überschritten')}`;
         }
     });
 
@@ -3483,7 +3472,7 @@ function _openSLTPModal(pool, addrs, card) {
             if (sb) {
                 const currentUsd = parseFloat(sb.dataset.current);
                 const thr        = parseFloat(backdrop.querySelector('#ts-threshold')?.value ?? '33');
-                const fmt        = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const fmt        = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                 if (currentUsd > 0 && Number.isFinite(thr)) {
                     const newTrigger = currentUsd * (1 - thr / 100);
                     const bufferUsd  = currentUsd - newTrigger;
@@ -3511,14 +3500,14 @@ function _openSLTPModal(pool, addrs, card) {
                     const pufferEl = sb.querySelector('#ts-puffer');
                     if (pufferEl) {
                         pufferEl.style.color = '#86efac';
-                        pufferEl.innerHTML   = `Puffer: ${fmt(bufferUsd)}&thinsp;USDC&ensp;/&ensp;${bufferPct.toFixed(1)}&thinsp;%`;
+                        pufferEl.innerHTML   = tr('sliq.buffer', 'Puffer: {usd}&thinsp;USDC&ensp;/&ensp;{pct}&thinsp;%', { usd: fmt(bufferUsd), pct: bufferPct.toFixed(1) });
                     }
                 }
             }
 
-            _ctx.showToast?.('Referenzwert zurückgesetzt', 'success');
+            _ctx.showToast?.(tr('sliq.hwm_reset', 'Referenzwert zurückgesetzt'), 'success');
         } catch (err) {
-            _ctx.showToast?.(`Fehler: ${err.message}`, 'error');
+            _ctx.showToast?.(tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }), 'error');
         } finally {
             if (btn) btn.disabled = false;
         }
@@ -3564,21 +3553,23 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
         return `
         <div class="ts-status-block">
             <p class="wallet-hint" style="font-size:0.78rem; margin:0;">
-                ℹ Referenzwert wird beim nächsten Snapshot (≤10 Min) etabliert.
+                ${tr('sliq.hwm_pending', 'ℹ Referenzwert wird beim nächsten Snapshot (≤10 Min) etabliert.')}
             </p>
         </div>`;
     }
 
     const triggerUsd = st.hwmUsd * (1 - threshold / 100);
-    const fmt        = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const fmt        = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     // Timestamp nur per Hover sichtbar
     const snapshotDate = st.snapshotAt ? new Date(st.snapshotAt) : null;
     const standTxt = snapshotDate
-        ? snapshotDate.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' })
-          + ' ' + snapshotDate.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr'
+        ? tr('time.hour_label', '{time} Uhr', {
+            time: snapshotDate.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: '2-digit' })
+                  + ' ' + snapshotDate.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' }),
+          })
         : '–';
-    const hoverAttrs = `data-tooltip-title="Letztes Update" data-tooltip-content="${standTxt}"`;
+    const hoverAttrs = `data-tooltip-title="${tr('sliq.last_update', 'Letztes Update')}" data-tooltip-content="${standTxt}"`;
 
     // Puffer
     const bufferUsd = st.currentUsd - triggerUsd;
@@ -3598,10 +3589,10 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
         <!-- Labels über der Bar: Liquidation links, Höchststand rechts -->
         <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:0.18rem; font-size:0.68rem; line-height:1.2;">
             <span style="color:#ef4444; white-space:nowrap;">
-                Liquidation: <span id="ts-liquidation-val" style="cursor:default;" ${hoverAttrs}>${fmt(triggerUsd)}</span> USDC
+                ${tr('sliq.liquidation_label', 'Liquidation:')} <span id="ts-liquidation-val" style="cursor:default;" ${hoverAttrs}>${fmt(triggerUsd)}</span> USDC
             </span>
             <span style="color:#94a3b8; white-space:nowrap;">
-                Höchststand: <span style="cursor:default;" ${hoverAttrs}>${fmt(st.hwmUsd)}</span> USDC
+                ${tr('sliq.hwm_label', 'Höchststand:')} <span style="cursor:default;" ${hoverAttrs}>${fmt(st.hwmUsd)}</span> USDC
             </span>
         </div>
 
@@ -3615,7 +3606,7 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
                 <div id="ts-curr-marker" style="position:absolute; top:0; left:${currPct.toFixed(1)}%; transform:translateX(${currPct > 80 ? '-100%' : currPct < 20 ? '0%' : '-50%'});">
                     <div style="width:2px; height:8px; background:#60a5fa; ${currPct > 80 ? 'margin-left:auto;' : currPct < 20 ? '' : 'margin:0 auto;'}"></div>
                     <div style="margin-top:4px; white-space:nowrap; font-size:0.68rem; color:#60a5fa; line-height:1.2; text-align:${currPct > 80 ? 'right' : currPct < 20 ? 'left' : 'center'};">
-                        Aktuell: <span style="cursor:default;" ${hoverAttrs}>${fmt(st.currentUsd)}</span> USDC
+                        ${tr('sliq.current_label', 'Aktuell:')} <span style="cursor:default;" ${hoverAttrs}>${fmt(st.currentUsd)}</span> USDC
                     </div>
                 </div>
             </div>
@@ -3625,16 +3616,16 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
         <!-- Puffer (Abstand Aktuell zu Liquidation) -->
         <div id="ts-puffer" style="margin-top:2.0rem; font-size:0.71rem; color:${bufferOk ? '#86efac' : '#fca5a5'};">
             ${bufferOk
-                ? `Puffer: ${fmt(bufferUsd)}&thinsp;USDC&ensp;/&ensp;${bufferPct.toFixed(1)}&thinsp;%`
-                : `⚠ Auslöser überschritten`}
+                ? tr('sliq.buffer', 'Puffer: {usd}&thinsp;USDC&ensp;/&ensp;{pct}&thinsp;%', { usd: fmt(bufferUsd), pct: bufferPct.toFixed(1) })
+                : `${tr('sliq.trigger_exceeded', '⚠ Auslöser überschritten')}`}
         </div>
 
         <!-- Reset-Button -->
         <div style="margin-top:0.9rem; text-align:right;">
             <button id="ts-hwm-reset-btn" class="btn btn-sm"
                 style="font-size:0.72rem; padding:0.25rem 0.65rem; opacity:0.75;"
-                title="Höchststand auf den aktuellen Pool-Wert zurücksetzen">
-                ↺ Höchststand zurücksetzen
+                title="${tr('sliq.hwm_reset_title', 'Höchststand auf den aktuellen Pool-Wert zurücksetzen')}">
+                ${tr('sliq.hwm_reset_btn', '↺ Höchststand zurücksetzen')}
             </button>
         </div>
     </div>`;
@@ -3643,7 +3634,7 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
 function _fmtUsdExact(v) {
     const n = Number(v);
     if (!Number.isFinite(n)) return '–';
-    return n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDC';
+    return n.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDC';
 }
 
 function _buildTrailingStopPanel(pool, addrs = []) {
@@ -3657,10 +3648,10 @@ function _buildTrailingStopPanel(pool, addrs = []) {
     return `
         <div class="settings-row" style="border:none;">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Trailing Stop aktiv
+                ${tr('sliq.ts_active', 'Trailing Stop aktiv')}
                 <span class="info-tip-label"
                     data-tooltip-title="Trailing Stop"
-                    data-tooltip-content="Zieht den Stop-Wert dynamisch nach: jeder neue Pool-Höchststand (High-Water-Mark) wird gemerkt. Fällt der aktuelle Pool-Wert um den eingestellten Prozentsatz unter die HWM, wird die Position geschlossen.||Snapshot-Quelle: position_snapshots (alle 5-10 Min, lp_value_usd inkl. offener Fees).||Einmalige Aktion — kein automatischer Wiedereinstieg. Cleanup im Modus „Bester Pool" reinvestiert das freie Kapital im nächsten Lauf.||HWM wird beim Öffnen einer neuen Position zurückgesetzt.">&#9432;</span>
+                    data-tooltip-content="${tr('sliq.ts_tip', 'Zieht den Stop-Wert dynamisch nach: jeder neue Pool-Höchststand (High-Water-Mark) wird gemerkt. Fällt der aktuelle Pool-Wert um den eingestellten Prozentsatz unter die HWM, wird die Position geschlossen.||Snapshot-Quelle: position_snapshots (alle 5-10 Min, lp_value_usd inkl. offener Fees).||Einmalige Aktion — kein automatischer Wiedereinstieg. Cleanup im Modus „Bester Pool“ reinvestiert das freie Kapital im nächsten Lauf.||HWM wird beim Öffnen einer neuen Position zurückgesetzt.')}">&#9432;</span>
             </span>
             <label class="toggle-switch">
                 <input type="checkbox" id="ts-enabled" ${on ? 'checked' : ''}>
@@ -3670,10 +3661,10 @@ function _buildTrailingStopPanel(pool, addrs = []) {
         <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};"
              data-current-value="${currentUsd ?? ''}">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Pool Mindestwert
+                ${tr('sliq.pool_min_value', 'Pool Mindestwert')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Pool Mindestwert"
-                    data-tooltip-content="Fällt der Pool-Betrag unter diesen USDC Betrag, wird er geschlossen.||Tipp: Sinnvoll als absoluter Kapitalschutz, unabhängig vom prozentualen Drawdown.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.pool_min_value', 'Pool Mindestwert')}"
+                    data-tooltip-content="${tr('sliq.pool_min_value_tip', 'Fällt der Pool-Betrag unter diesen USDC Betrag, wird er geschlossen.||Tipp: Sinnvoll als absoluter Kapitalschutz, unabhängig vom prozentualen Drawdown.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="ts-min-value"
@@ -3684,10 +3675,10 @@ function _buildTrailingStopPanel(pool, addrs = []) {
         </div>
         <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Drawdown-Schwelle
+                ${tr('sliq.drawdown_threshold', 'Drawdown-Schwelle')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Drawdown-Schwelle"
-                    data-tooltip-content="Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool" reinvestiert sie automatisch.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.drawdown_threshold', 'Drawdown-Schwelle')}"
+                    data-tooltip-content="${tr('sliq.drawdown_tip', 'Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool“ reinvestiert sie automatisch.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="ts-threshold"
@@ -3698,10 +3689,10 @@ function _buildTrailingStopPanel(pool, addrs = []) {
         </div>
         <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Swap → USDC
+                ${tr('sliq.swap_usdc', 'Swap → USDC')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Swap → USDC"
-                    data-tooltip-content="Coins nach Entnahme automatisch in USDC tauschen.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.swap_usdc', 'Swap → USDC')}"
+                    data-tooltip-content="${tr('sliq.ts_swap_tip', 'Coins nach Entnahme automatisch in USDC tauschen.')}">&#9432;</span>
             </span>
             <label class="toggle-switch toggle-sm">
                 <input type="checkbox" id="ts-swap" ${ts.autoSwapToUSDC ? 'checked' : ''} ${on ? '' : 'disabled'}>
@@ -3709,18 +3700,18 @@ function _buildTrailingStopPanel(pool, addrs = []) {
             </label>
         </div>
         <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
-            <span class="settings-label">Senden an</span>
+            <span class="settings-label">${tr('sb.send_to', 'Senden an')}</span>
             <select class="modal-select" id="ts-sendto" ${on ? '' : 'disabled'}>
-                <option value="">– Nicht senden –</option>
+                <option value="">${tr('sliq.dont_send', '– Nicht senden –')}</option>
                 ${_addrOptions(addrs, ts.sendTo ?? '')}
             </select>
         </div>
         <div class="settings-row ts-dependent" style="border:none; opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Cleanup-Cooldown
+                ${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Cleanup-Cooldown"
-                    data-tooltip-content="Nach einer Liquidation durch den Trailing Stop ist dieser Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Manuelle Einzahlungen bleiben jederzeit möglich.||Cooldown-Start: Zeitpunkt der Liquidation.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}"
+                    data-tooltip-content="${tr('sliq.ts_cooldown_tip', 'Nach einer Liquidation durch den Trailing Stop ist dieser Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Manuelle Einzahlungen bleiben jederzeit möglich.||Cooldown-Start: Zeitpunkt der Liquidation.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="ts-cooldown"
@@ -3744,7 +3735,7 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
 
     const threshold = parseFloat(thresholdRaw);
     if (!Number.isFinite(threshold) || threshold < 1 || threshold > 90) {
-        if (fb) { fb.textContent = 'Drawdown-Schwelle muss zwischen 1 und 90 % liegen.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sliq.drawdown_range_err', 'Drawdown-Schwelle muss zwischen 1 und 90 % liegen.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
@@ -3756,8 +3747,8 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
         if (enabled) {
             const currentUsd = pool.currentValue ?? null;
             if (currentUsd !== null && parsedMin >= currentUsd) {
-                const fmt = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                if (fb) { fb.textContent = `Pool Mindestwert (${parsedMin} USDC) muss kleiner sein als der aktuelle Pool-Wert (${fmt(currentUsd)} USDC).`; fb.className = 'modal-feedback error'; }
+                const fmt = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                if (fb) { fb.textContent = tr('sliq.pool_min_too_high', 'Pool Mindestwert ({min} USDC) muss kleiner sein als der aktuelle Pool-Wert ({current} USDC).', { min: parsedMin, current: fmt(currentUsd) }); fb.className = 'modal-feedback error'; }
                 return;
             }
         }
@@ -3766,26 +3757,26 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
 
     const cooldownHours = parseInt(cooldownRaw, 10);
     if (!Number.isFinite(cooldownHours) || cooldownHours < 1 || cooldownHours > 24) {
-        if (fb) { fb.textContent = 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ trailingStop: { enabled, thresholdPct: threshold, minimumValueUsd, autoSwapToUSDC, sendTo, cooldownHours } }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        if (fb) { fb.textContent = '✓ Gespeichert'; fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.('Trailing-Stop-Einstellungen gespeichert', 'success');
+        if (fb) { fb.textContent = tr('sliq.saved_no_dot', '✓ Gespeichert'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('sliq.ts_saved', 'Trailing-Stop-Einstellungen gespeichert'), 'success');
 
         // Gauge + Puffer im offenen Modal mit gespeichertem Threshold aktualisieren
         const sb = modalEl?.querySelector('.ts-status-block[data-hwm]');
         if (sb) {
             const hwmUsd     = parseFloat(sb.dataset.hwm);
             const currentUsd = parseFloat(sb.dataset.current);
-            const fmt        = v => v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const fmt        = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             if (hwmUsd > 0) {
                 const trigger   = hwmUsd * (1 - threshold / 100);
                 const barSpan   = hwmUsd - trigger;
@@ -3806,15 +3797,15 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
                 if (pufferEl) {
                     pufferEl.style.color = bufferOk ? '#86efac' : '#fca5a5';
                     pufferEl.innerHTML   = bufferOk
-                        ? `Puffer: ${fmt(bufferUsd)}&thinsp;USDC&ensp;/&ensp;${bufferPct.toFixed(1)}&thinsp;%`
-                        : `⚠ Auslöser überschritten`;
+                        ? tr('sliq.buffer', 'Puffer: {usd}&thinsp;USDC&ensp;/&ensp;{pct}&thinsp;%', { usd: fmt(bufferUsd), pct: bufferPct.toFixed(1) })
+                        : `${tr('sliq.trigger_exceeded', '⚠ Auslöser überschritten')}`;
                 }
             }
         }
 
         await _refreshPoolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -3863,9 +3854,9 @@ function _buildSlStatusBlock(pool, minScore, minConsecutive) {
     // bleibt für den Fall reserviert, dass die Daten schlicht noch nicht vorliegen.
     let scoreHtml;
     if (currentScore === null && pool.scoreSource === 'none') {
-        scoreHtml = `<span style="color:var(--text-muted);font-size:0.82rem;">Premium 🔒</span>`;
+        scoreHtml = `<span style="color:var(--text-muted);font-size:0.82rem;">${tr('sliq.premium_locked', 'Premium 🔒')}</span>`;
     } else if (currentScore === null) {
-        scoreHtml = `<span style="color:var(--text-muted);font-size:0.82rem;">keine Daten</span>`;
+        scoreHtml = `<span style="color:var(--text-muted);font-size:0.82rem;">${tr('sliq.no_data_lc', 'keine Daten')}</span>`;
     } else {
         const below = currentScore < Number(minScore);
         const color = below ? 'var(--danger)' : 'var(--success)';
@@ -3877,7 +3868,7 @@ function _buildSlStatusBlock(pool, minScore, minConsecutive) {
         // ist dann ohnehin schon fällig, nicht "im Zählvorgang".
         if (below && consecutiveBelow > 0 && minConsecutive > 1) {
             const displayCount = Math.min(consecutiveBelow, minConsecutive);
-            scoreHtml += `<div style="font-size:0.75rem;color:var(--danger);margin-top:0.15rem;">${displayCount}&thinsp;/&thinsp;${minConsecutive} Zyklen unterschritten</div>`;
+            scoreHtml += `<div style="font-size:0.75rem;color:var(--danger);margin-top:0.15rem;">${tr('sliq.cycles_below', '{n}&thinsp;/&thinsp;{max} Zyklen unterschritten', { n: displayCount, max: minConsecutive })}</div>`;
         }
     }
 
@@ -3886,14 +3877,14 @@ function _buildSlStatusBlock(pool, minScore, minConsecutive) {
         const d  = new Date(lastCheckedAt + checkIntervalMs);
         const hh = String(d.getHours()).padStart(2, '0');
         const mm = String(d.getMinutes()).padStart(2, '0');
-        nextCheckHtml = `<span style="font-size:0.75rem;color:var(--text-muted);">Nächster Check:&nbsp;${hh}:${mm}&nbsp;Uhr</span>`;
+        nextCheckHtml = `<span style="font-size:0.75rem;color:var(--text-muted);">${tr('sliq.next_check', 'Nächster Check:&nbsp;{time}&nbsp;Uhr', { time: `${hh}:${mm}` })}</span>`;
     }
 
     return `
         <div id="sl-status-block" data-score="${currentScore ?? ''}"
              style="margin-top:0.6rem;padding:0.55rem 0.75rem;background:var(--bg-2);border:1px solid var(--border);border-radius:7px;display:flex;justify-content:space-between;align-items:flex-end;gap:0.5rem;">
             <div>
-                <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);margin-bottom:0.25rem;">Aktueller Score</div>
+                <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.04em;color:var(--text-muted);margin-bottom:0.25rem;">${tr('sliq.current_score', 'Aktueller Score')}</div>
                 ${scoreHtml}
             </div>
             ${nextCheckHtml ? `<div style="text-align:right;flex-shrink:0;">${nextCheckHtml}</div>` : ''}
@@ -3907,15 +3898,12 @@ function _buildSlStatusBlock(pool, minScore, minConsecutive) {
 function _buildScoreStateNotice(pool) {
     if (pool.scoreSource === 'none') {
         return `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:var(--bg-2);border:1px solid var(--border);border-radius:7px;font-size:0.78rem;color:var(--text-muted);line-height:1.5;">
-            🔒&nbsp; Der Opportunity Score wird über den Premium-Datendienst geliefert und ist in
-            dieser Installation nicht aktiv. Die Einstellung wird gespeichert, <strong>löst aber
-            aktuell nicht aus</strong> — Trailing Stop und TVL-Schutz arbeiten unabhängig davon.
+            ${tr('sliq.score_premium_hint_1', '🔒&nbsp; Der Opportunity Score wird über den Premium-Datendienst geliefert und ist in dieser Installation nicht aktiv. Die Einstellung wird gespeichert,')} <strong>${tr('sliq.score_premium_hint_2', 'löst aber aktuell nicht aus')}</strong> ${tr('sliq.score_premium_hint_3', '— Trailing Stop und TVL-Schutz arbeiten unabhängig davon.')}
         </div>`;
     }
     if (pool.scoreSource === 'delivered' && pool.scoreStale) {
         return `<div style="margin-bottom:0.75rem;padding:0.6rem 0.75rem;background:var(--bg-2);border:1px solid var(--border);border-radius:7px;font-size:0.78rem;color:var(--text-muted);line-height:1.5;">
-            ⚠️&nbsp; Die gelieferten Premium-Score-Daten sind veraltet (&gt;2h). Score Limit ist
-            bis zur nächsten Lieferung ausgesetzt.
+            ${tr('sliq.score_stale_hint', '⚠️&nbsp; Die gelieferten Premium-Score-Daten sind veraltet (&gt;2h). Score Limit ist bis zur nächsten Lieferung ausgesetzt.')}
         </div>`;
     }
     return '';
@@ -3933,10 +3921,10 @@ function _buildScoreLimitPanel(pool, addrs) {
         ${_buildScoreStateNotice(pool)}
         <div class="settings-row">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.3rem;">
-                Aktiv
+                ${tr('sliq.filter_active', 'Aktiv')}
                 <span class="info-tip-label"
                     data-tooltip-title="Score Limit"
-                    data-tooltip-content="Fällt der Opportunity Score des Pools unter die eingestellte Schwelle, wird das gesamte Kapital automatisch abgezogen.||Gezeigt und verglichen wird der Score OHNE Volumen-Malus – dieser Malus darf nie einen Exit auslösen, deshalb kann der hier angezeigte Wert vom Dashboard-Score abweichen.||Null-Score (fehlende Daten) → kein Auslösen.||Einmalige Aktion – kein automatischer Wiedereinstieg.">&#9432;</span>
+                    data-tooltip-content="${tr('sliq.score_limit_tip', 'Fällt der Opportunity Score des Pools unter die eingestellte Schwelle, wird das gesamte Kapital automatisch abgezogen.||Gezeigt und verglichen wird der Score OHNE Volumen-Malus – dieser Malus darf nie einen Exit auslösen, deshalb kann der hier angezeigte Wert vom Dashboard-Score abweichen.||Null-Score (fehlende Daten) → kein Auslösen.||Einmalige Aktion – kein automatischer Wiedereinstieg.')}">&#9432;</span>
             </span>
             <label class="toggle-switch">
                 <input type="checkbox" id="sl-enabled" ${on ? 'checked' : ''}>
@@ -3945,10 +3933,10 @@ function _buildScoreLimitPanel(pool, addrs) {
         </div>
         <div class="settings-row sl-dependent" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Opportunity Score unter
+                ${tr('sliq.opp_score_below', 'Opportunity Score unter')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Opportunity Score unter"
-                    data-tooltip-content="Empfehlung: Schwelle 25–35. Position wird einmalig komplett geschlossen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool" reinvestiert sie automatisch.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.opp_score_below', 'Opportunity Score unter')}"
+                    data-tooltip-content="${tr('sliq.score_limit_rec_tip', 'Empfehlung: Schwelle 25–35. Position wird einmalig komplett geschlossen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool“ reinvestiert sie automatisch.')}">&#9432;</span>
             </span>
             <input class="modal-input input-short" id="sl-minscore"
                 type="number" min="0" max="100" step="1" value="${minScore}"
@@ -3956,10 +3944,10 @@ function _buildScoreLimitPanel(pool, addrs) {
         </div>
         <div class="settings-row sl-dependent" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Swap → USDC
+                ${tr('sliq.swap_usdc', 'Swap → USDC')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Swap → USDC"
-                    data-tooltip-content="Coins nach Entnahme automatisch in USDC tauschen.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.swap_usdc', 'Swap → USDC')}"
+                    data-tooltip-content="${tr('sliq.ts_swap_tip', 'Coins nach Entnahme automatisch in USDC tauschen.')}">&#9432;</span>
             </span>
             <label class="toggle-switch toggle-sm">
                 <input type="checkbox" id="sl-swap" ${s.swapToUsdc !== false ? 'checked' : ''} ${on ? '' : 'disabled'}>
@@ -3967,18 +3955,18 @@ function _buildScoreLimitPanel(pool, addrs) {
             </label>
         </div>
         <div class="settings-row sl-dependent" style="opacity:${on ? '1' : '0.4'};">
-            <span class="settings-label">Senden an</span>
+            <span class="settings-label">${tr('sb.send_to', 'Senden an')}</span>
             <select class="modal-select" id="sl-sendto" ${on ? '' : 'disabled'}>
-                <option value="">– Nicht senden –</option>
+                <option value="">${tr('sliq.dont_send', '– Nicht senden –')}</option>
                 ${_addrOptions(addrs, s.sendTo ?? '')}
             </select>
         </div>
         <div class="settings-row sl-dependent" style="border:none; opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Cleanup-Cooldown
+                ${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Cleanup-Cooldown"
-                    data-tooltip-content="Nach einer Liquidation durch das Score Limit ist dieser Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Manuelle Einzahlungen bleiben jederzeit möglich.||Cooldown-Start: Zeitpunkt der Liquidation.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}"
+                    data-tooltip-content="${tr('sliq.sl_cooldown_tip', 'Nach einer Liquidation durch das Score Limit ist dieser Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Manuelle Einzahlungen bleiben jederzeit möglich.||Cooldown-Start: Zeitpunkt der Liquidation.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="sl-cooldown"
@@ -3989,11 +3977,8 @@ function _buildScoreLimitPanel(pool, addrs) {
         </div>
         <div style="margin-top:0.9rem;padding:0.6rem 0.75rem;background:var(--bg-2);border:1px solid var(--border);border-radius:7px;font-size:0.78rem;color:var(--text-muted);line-height:1.5;">
             ${minConsecutive <= 1
-                ? `&#9432;&nbsp; Liquidation erfolgt <strong>sofort</strong> im ersten Zyklus, in dem der Score unter <strong>${minScore}</strong> liegt
-                   <em>und</em> die Position dabei nicht Out-of-Range ist.`
-                : `&#9432;&nbsp; Liquidation erfolgt nur, wenn der Score mindestens <strong>${minConsecutive} Zyklen&nbsp;in Folge</strong> unter <strong>${minScore}</strong> liegt
-                   <em>und</em> die Position dabei nicht Out-of-Range ist.
-                   OOR-Zyklen setzen den Zähler zurück.`}
+                ? tr('sliq.liq_immediate', '&#9432;&nbsp; Liquidation erfolgt <strong>sofort</strong> im ersten Zyklus, in dem der Score unter <strong>{score}</strong> liegt <em>und</em> die Position dabei nicht Out-of-Range ist.', { score: minScore })
+                : tr('sliq.liq_consecutive', '&#9432;&nbsp; Liquidation erfolgt nur, wenn der Score mindestens <strong>{n} Zyklen&nbsp;in Folge</strong> unter <strong>{score}</strong> liegt <em>und</em> die Position dabei nicht Out-of-Range ist. OOR-Zyklen setzen den Zähler zurück.', { n: minConsecutive, score: minScore })}
         </div>
         ${_buildSlStatusBlock(pool, minScore, minConsecutive)}
         <div class="modal-feedback" id="sl-feedback"></div>
@@ -4007,7 +3992,7 @@ async function _saveScoreLimitPanel(pool, addrs, card, backdrop) {
     const minScore      = parseFloat(panel?.querySelector('#sl-minscore')?.value ?? '30');
     const cooldownHours = parseInt(panel?.querySelector('#sl-cooldown')?.value ?? '1', 10);
     if (!Number.isFinite(cooldownHours) || cooldownHours < 1 || cooldownHours > 24) {
-        if (fb) { fb.textContent = 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'); fb.className = 'modal-feedback error'; }
         return;
     }
     const data = {
@@ -4018,14 +4003,14 @@ async function _saveScoreLimitPanel(pool, addrs, card, backdrop) {
         cooldownHours,
     };
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scoreLimit: data }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        _ctx.showToast?.('Score Limit gespeichert', 'success');
+        _ctx.showToast?.(tr('sliq.score_limit_saved', 'Score Limit gespeichert'), 'success');
 
         // Tab-Inhalt mit frischen Daten neu rendern
         const freshRes   = await fetch(`/api/pools/liquidity?t=${Date.now()}`);
@@ -4038,7 +4023,7 @@ async function _saveScoreLimitPanel(pool, addrs, card, backdrop) {
 
         await _refreshPoolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -4066,8 +4051,8 @@ function _buildTvlLevel(n, lvl, defaultThreshold) {
                 <span class="info-tip-label"
                     data-tooltip-title="TVL-Schutz Stufe ${n}"
                     data-tooltip-content="${n === 1
-                        ? 'Erste Eskalationsstufe (höhere Schwelle). Fällt der Pool-TVL unter diesen Wert, wird der eingestellte Anteil abgezogen.||Optional – kann deaktiviert werden. Dann reagiert nur Stufe 2.'
-                        : 'Zweite Eskalationsstufe (tiefere Schwelle). Default je Pool aktiv: 100 % abziehen und in USDC tauschen.||Die Schwelle muss kleiner als bei Stufe 1 sein.'}">&#9432;</span>
+                        ? tr('sliq.tvl_stage1_tip', 'Erste Eskalationsstufe (höhere Schwelle). Fällt der Pool-TVL unter diesen Wert, wird der eingestellte Anteil abgezogen.||Optional – kann deaktiviert werden. Dann reagiert nur Stufe 2.')
+                        : tr('sliq.tvl_stage2_tip', 'Zweite Eskalationsstufe (tiefere Schwelle). Default je Pool aktiv: 100 % abziehen und in USDC tauschen.||Die Schwelle muss kleiner als bei Stufe 1 sein.')}">&#9432;</span>
             </span>
             <label class="toggle-switch">
                 <input type="checkbox" id="tvl${n}-enabled" ${on ? 'checked' : ''}>
@@ -4076,10 +4061,10 @@ function _buildTvlLevel(n, lvl, defaultThreshold) {
         </div>
         <div class="settings-row ${dep}" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                TVL-Schwelle
+                ${tr('sliq.tvl_threshold', 'TVL-Schwelle')}
                 <span class="info-tip-label"
-                    data-tooltip-title="TVL-Schwelle Stufe ${n}"
-                    data-tooltip-content="Pool-TVL in USDC. Wird dieser Wert unterschritten, tritt die Aktion in Kraft.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.tvl_threshold_stage', 'TVL-Schwelle Stufe {n}', { n })}"
+                    data-tooltip-content="${tr('sliq.tvl_threshold_tip', 'Pool-TVL in USDC. Wird dieser Wert unterschritten, tritt die Aktion in Kraft.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input" id="tvl${n}-threshold" style="width:8rem;"
@@ -4089,10 +4074,10 @@ function _buildTvlLevel(n, lvl, defaultThreshold) {
         </div>
         <div class="settings-row ${dep}" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Aktion
+                ${tr('sliq.action_col', 'Aktion')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Aktion Stufe ${n}"
-                    data-tooltip-content="Anteil des Kapitals, der bei Unterschreiten aus dem Pool gezogen wird.||Sind beide Stufen aktiv, muss die Summe beider Aktionen 100 % ergeben – Stufe 2 wird dann automatisch ergänzt.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.tvl_action_stage', 'Aktion Stufe {n}', { n })}"
+                    data-tooltip-content="${tr('sliq.tvl_action_tip', 'Anteil des Kapitals, der bei Unterschreiten aus dem Pool gezogen wird.||Sind beide Stufen aktiv, muss die Summe beider Aktionen 100 % ergeben – Stufe 2 wird dann automatisch ergänzt.')}">&#9432;</span>
             </span>
             <select class="modal-select" id="tvl${n}-pct" style="width:6rem;" ${on ? '' : 'disabled'}>
                 ${_pctOptions(pct)}
@@ -4108,23 +4093,23 @@ function _buildTvlPanel(pool, addrs = []) {
 
     const currentTvl = pool.currentTvl != null
         ? `<strong style="color:var(--text);">${_fmtUsd(pool.currentTvl)}</strong>`
-        : `<strong style="color:var(--text-muted);">keine Daten</strong>`;
+        : `<strong style="color:var(--text-muted);">${tr('sliq.no_data_lc', 'keine Daten')}</strong>`;
     // Aktivierungs-TVL als Klammerwert mit eigenem Tooltip (nur wenn vorhanden)
     const activationTvl = tp.tvlAtActivation != null
         ? `<span style="color:var(--text-muted);font-weight:400;">(${_fmtUsd(tp.tvlAtActivation)}
                <span class="info-tip-label"
-                   data-tooltip-title="TVL bei Aktivierung"
-                   data-tooltip-content="Pool-TVL zum Zeitpunkt des ersten Deposits in diesen Pool. Dient als Referenz für die Schwellenwerte unten.">&#9432;</span>)</span>`
+                   data-tooltip-title="${tr('sliq.tvl_at_activation', 'TVL bei Aktivierung')}"
+                   data-tooltip-content="${tr('sliq.tvl_at_activation_tip', 'Pool-TVL zum Zeitpunkt des ersten Deposits in diesen Pool. Dient als Referenz für die Schwellenwerte unten.')}">&#9432;</span>)</span>`
         : '';
 
     return `
         <div class="sltp-settings">
         <div class="settings-row" style="background:var(--bg-soft, rgba(255,255,255,0.03)); border-radius:8px; padding:0.6rem 0.8rem;">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Aktueller TVL
+                ${tr('sb.current_tvl', 'Aktueller TVL')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Aktueller TVL"
-                    data-tooltip-content="Aktueller Total Value Locked des Pools (Dashboard-Wert).">&#9432;</span>
+                    data-tooltip-title="${tr('sb.current_tvl', 'Aktueller TVL')}"
+                    data-tooltip-content="${tr('sliq.current_tvl_tip', 'Aktueller Total Value Locked des Pools (Dashboard-Wert).')}">&#9432;</span>
             </span>
             <span style="text-align:right;">${currentTvl} ${activationTvl}</span>
         </div>
@@ -4132,10 +4117,10 @@ function _buildTvlPanel(pool, addrs = []) {
         ${_buildTvlLevel(2, l2, pool.tvlExitDefault)}
         <div class="settings-row" style="border-top:1px solid var(--border, #2a2a3a);">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Swap → USDC
+                ${tr('sliq.swap_usdc', 'Swap → USDC')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Swap → USDC"
-                    data-tooltip-content="Coins nach jeder Entnahme (Stufe 1 und Stufe 2) automatisch in USDC tauschen.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.swap_usdc', 'Swap → USDC')}"
+                    data-tooltip-content="${tr('sliq.tvl_swap_tip', 'Coins nach jeder Entnahme (Stufe 1 und Stufe 2) automatisch in USDC tauschen.')}">&#9432;</span>
             </span>
             <label class="toggle-switch toggle-sm">
                 <input type="checkbox" id="tvl-swap" ${tp.swapToUsdc !== false ? 'checked' : ''}>
@@ -4144,22 +4129,22 @@ function _buildTvlPanel(pool, addrs = []) {
         </div>
         <div class="settings-row">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Senden an
+                ${tr('sb.send_to', 'Senden an')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Senden an"
-                    data-tooltip-content="Empfänger-Adresse für das entnommene Kapital (gilt für beide Stufen).||Ohne Adresse bleibt das Kapital im Wallet.">&#9432;</span>
+                    data-tooltip-title="${tr('sb.send_to', 'Senden an')}"
+                    data-tooltip-content="${tr('sliq.tvl_sendto_tip', 'Empfänger-Adresse für das entnommene Kapital (gilt für beide Stufen).||Ohne Adresse bleibt das Kapital im Wallet.')}">&#9432;</span>
             </span>
             <select class="modal-select" id="tvl-sendto">
-                <option value="">– Nicht senden –</option>
+                <option value="">${tr('sliq.dont_send', '– Nicht senden –')}</option>
                 ${_addrOptions(addrs, tp.sendTo ?? '')}
             </select>
         </div>
         <div class="settings-row" style="opacity:1;">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Cleanup-Cooldown
+                ${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Cleanup-Cooldown"
-                    data-tooltip-content="Nach einem teilweisen TVL-Schutz-Abzug ist der Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Bei 100 %-Abzug ist der Pool ohnehin leer.">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}"
+                    data-tooltip-content="${tr('sliq.tvl_cooldown_tip', 'Nach einem teilweisen TVL-Schutz-Abzug ist der Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Bei 100 %-Abzug ist der Pool ohnehin leer.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="tvl-cooldown"
@@ -4202,7 +4187,7 @@ function _wireTvlPanel(backdrop) {
             if (l2sel) { l2sel.value = String(rest); l2sel.disabled = true; }
             if (hint) {
                 hint.style.color   = 'var(--success, #86efac)';
-                hint.textContent   = `Summe: ${l1pct} % + ${rest} % = 100 % (Stufe 2 automatisch ergänzt)`;
+                hint.textContent   = tr('sliq.tvl_sum_hint', 'Summe: {a} % + {b} % = 100 % (Stufe 2 automatisch ergänzt)', { a: l1pct, b: rest });
             }
         } else {
             if (l2sel) l2sel.disabled = !l2on;
@@ -4244,29 +4229,29 @@ async function _saveTvlPanel(pool, card, backdrop) {
     // ── Client-seitige Validierung (Backend prüft erneut) ──
     const setErr = msg => { if (fb) { fb.textContent = msg; fb.className = 'modal-feedback error'; } };
     if (!Number.isFinite(cooldownHours) || cooldownHours < 1 || cooldownHours > 24)
-        return setErr('Cleanup-Cooldown muss zwischen 1 und 24 h liegen.');
+        return setErr(tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'));
     if (level1.enabled && !(level1.thresholdUsd > 0))
-        return setErr('Stufe 1: TVL-Schwelle muss größer als 0 sein.');
+        return setErr(tr('sliq.tvl1_err', 'Stufe 1: TVL-Schwelle muss größer als 0 sein.'));
     if (level2.enabled && !(level2.thresholdUsd > 0))
-        return setErr('Stufe 2: TVL-Schwelle muss größer als 0 sein.');
+        return setErr(tr('sliq.tvl2_err', 'Stufe 2: TVL-Schwelle muss größer als 0 sein.'));
     if (level1.enabled && level2.enabled && level1.thresholdUsd <= level2.thresholdUsd)
-        return setErr('Schwelle Stufe 1 muss größer als Stufe 2 sein (Eskalation).');
+        return setErr(tr('sliq.tvl_escalation_err', 'Schwelle Stufe 1 muss größer als Stufe 2 sein (Eskalation).'));
     if (level1.enabled && level2.enabled && (level1.withdrawPct + level2.withdrawPct) !== 100)
-        return setErr('Aktionen von Stufe 1 und Stufe 2 müssen zusammen 100 % ergeben.');
+        return setErr(tr('sliq.tvl_actions_err', 'Aktionen von Stufe 1 und Stufe 2 müssen zusammen 100 % ergeben.'));
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tvlProtection: { level1, level2, swapToUsdc, sendTo, cooldownHours } }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        if (fb) { fb.textContent = '✓ Gespeichert'; fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.('TVL-Schutz gespeichert', 'success');
+        if (fb) { fb.textContent = tr('sliq.saved_no_dot', '✓ Gespeichert'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('sliq.tvl_guard_saved', 'TVL-Schutz gespeichert'), 'success');
         setTimeout(() => { if (fb) fb.textContent = ''; }, 2000);
         await _refreshPoolsCard(card);
     } catch (err) {
-        setErr(`Fehler: ${err.message}`);
+        setErr(tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }));
     }
 }
 
@@ -4300,10 +4285,10 @@ function _addrOptions(addrs, selectedAddr) {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function _statusLabel(s) {
-    if (s === 'active')   return 'Aktiv';
-    if (s === 'inactive') return 'Gestoppt';
-    if (s === 'failed')   return 'Fehler';
-    return s ?? 'Unbekannt';
+    if (s === 'active')   return tr('sb.status_active', 'Aktiv');
+    if (s === 'inactive') return tr('sb.status_stopped', 'Gestoppt');
+    if (s === 'failed')   return tr('sb.status_failed', 'Fehler');
+    return s ?? tr('sb.status_unknown', 'Unbekannt');
 }
 
 function _statusClass(s) {
@@ -4320,7 +4305,7 @@ function _fmt(n) {
     if (isNaN(v) || v === 0) return '0';
     const mag      = Math.floor(Math.log10(Math.abs(v)));
     const decimals = mag >= 0 ? 4 : Math.min(10, -mag + 4);
-    return v.toLocaleString('de-DE', { maximumFractionDigits: decimals });
+    return v.toLocaleString(NUM_LOCALE, { maximumFractionDigits: decimals });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4387,7 +4372,7 @@ function _renderPreviewResult(payload) {
     if (!payload) return '';
     const { dryRun, costs } = payload;
     if (!dryRun?.ok) {
-        return `<div class="modal-feedback err" style="display:block;">${_esc(dryRun?.error ?? 'Vorschau fehlgeschlagen')}</div>`;
+        return `<div class="modal-feedback err" style="display:block;">${_esc(dryRun?.error ?? tr('sliq.preview_failed', 'Vorschau fehlgeschlagen'))}</div>`;
     }
     const r = dryRun.result ?? {};
     const rowsLines = [];
@@ -4400,7 +4385,7 @@ function _renderPreviewResult(payload) {
         costLine = `<div style="margin-top:0.35rem;">Kosten: ~${_fmt(costs.costs.total)} USD (TX-Fees + Slippage)</div>`;
     }
     return `<div class="modal-feedback ok" style="display:block;">
-        <div><strong>Vorschau:</strong></div>
+        <div><strong>${tr('sliq.preview_label', 'Vorschau:')}</strong></div>
         ${rowsLines.map(l => `<div>${_esc(l)}</div>`).join('')}
         ${costLine}
     </div>`;
@@ -4441,7 +4426,7 @@ function _renderRebalanceChart(svgEl, state) {
 
     const xOf  = t => pad.left + ((t - minT) / ((maxT - minT) || 1)) * iW;
     const yOf  = v => pad.top  + (1 - (v - minV) / ((maxV - minV) || 1)) * iH;
-    const fmtP = (v, d = 2) => Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
+    const fmtP = (v, d = 2) => Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: d, maximumFractionDigits: d });
     const xLbl = t => { const d = new Date(t); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
 
     const tokenALbl = state?.tokenALabel ?? '';
@@ -4540,11 +4525,11 @@ function _renderCompositionBar(el, state) {
     const fmtAmt = (v, lbl) => {
         const stable = lbl === 'USDC' || lbl === 'EURC';
         const d = stable ? 2 : (v < 0.01 ? 6 : v < 1 ? 4 : 2);
-        return Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
+        return Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: d, maximumFractionDigits: d });
     };
 
     el.innerHTML = `
-        <div style="font-size:0.73rem; color:#64748b; margin-bottom:0.3rem;">Aktuelle Zusammensetzung</div>
+        <div style="font-size:0.73rem; color:#64748b; margin-bottom:0.3rem;">${tr('sliq.current_composition', 'Aktuelle Zusammensetzung')}</div>
         <div style="height:7px; border-radius:4px; overflow:hidden; background:#1e293b; display:flex;">
             <div style="width:${pctA}%; background:#00d4ff; min-width:${pctA > 0 ? 2 : 0}px;"></div>
             <div style="flex:1; background:#475569;"></div>
@@ -4563,31 +4548,29 @@ async function _openAdvisorRebalanceModal(pool, hint) {
         title: `${_esc(pair)} – Range-Empfehlung umsetzen`,
         body:  `
             <p style="margin:0 0 0.75rem; font-size:0.9rem; color:var(--text-secondary);">
-                Der Range Advisor empfiehlt eine engere Range für diesen Pool.
-                Die aktuelle Position wird <strong>geschlossen und neu eröffnet</strong>.
+                ${tr('sliq.advisor_intro', 'Der Range Advisor empfiehlt eine engere Range für diesen Pool. Die aktuelle Position wird')} <strong>${tr('sliq.advisor_closed_reopened', 'geschlossen und neu eröffnet')}</strong>.
             </p>
             <table style="width:100%; font-size:0.85rem; border-collapse:collapse; margin-bottom:0.9rem;">
                 <tr>
-                    <td style="padding:0.25rem 0; color:var(--text-muted); width:50%;">Aktuelle Range</td>
+                    <td style="padding:0.25rem 0; color:var(--text-muted); width:50%;">${tr('sliq.current_range', 'Aktuelle Range')}</td>
                     <td style="padding:0.25rem 0; font-weight:600;">±${hint.currentPct}%</td>
                 </tr>
                 <tr>
-                    <td style="padding:0.25rem 0; color:var(--text-muted);">Empfohlene Range</td>
+                    <td style="padding:0.25rem 0; color:var(--text-muted);">${tr('sliq.recommended_range', 'Empfohlene Range')}</td>
                     <td style="padding:0.25rem 0; font-weight:600;">±${hint.recommendedPct}%</td>
                 </tr>
                 ${hint.paybackHours != null ? `
                 <tr>
-                    <td style="padding:0.25rem 0; color:var(--text-muted);">Amortisation</td>
+                    <td style="padding:0.25rem 0; color:var(--text-muted);">${tr('sliq.amortisation', 'Amortisation')}</td>
                     <td style="padding:0.25rem 0; font-weight:600;">~${Math.round(hint.paybackHours)} Stunden</td>
                 </tr>` : ''}
             </table>
             <p style="margin:0 0 0.85rem; font-size:0.82rem; color:var(--text-muted);">
-                Das dauert ca. 1–2 Minuten und kann nicht abgebrochen werden.
-                Ein- und Auszahlungen sind währenddessen gesperrt.
+                ${tr('sliq.rebalance_duration_hint', 'Das dauert ca. 1–2 Minuten und kann nicht abgebrochen werden. Ein- und Auszahlungen sind währenddessen gesperrt.')}
             </p>
             <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
-                <button class="btn btn-secondary" id="arb-cancel-btn">Abbrechen</button>
-                <button class="btn btn-secondary" id="arb-confirm-btn">Jetzt umstellen</button>
+                <button class="btn btn-secondary" id="arb-cancel-btn">${tr('sliq.cancel', 'Abbrechen')}</button>
+                <button class="btn btn-secondary" id="arb-confirm-btn">${tr('sliq.switch_now', 'Jetzt umstellen')}</button>
             </div>
             <div id="arb-feedback" class="modal-feedback" style="display:none; margin-top:0.6rem;"></div>`,
     });
@@ -4600,25 +4583,25 @@ async function _openAdvisorRebalanceModal(pool, hint) {
         const fb         = bd.querySelector('#arb-feedback');
         confirmBtn.disabled    = true;
         cancelBtn.disabled     = true;
-        confirmBtn.textContent = 'Wird gestartet…';
+        confirmBtn.textContent = tr('sliq.starting', 'Wird gestartet…');
         try {
             const r    = await fetch(`/api/pools/liquidity/${encodeURIComponent(pool.id)}/advisor-rebalance`, { method: 'POST' });
             const data = await r.json();
             if (r.ok) {
                 fb.className     = 'modal-feedback ok';
-                fb.innerHTML     = `&#10003; ${_esc(data.message ?? 'Rebalancing gestartet.')}`;
+                fb.innerHTML     = `&#10003; ${_esc(data.message ?? tr('sliq.rebalancing_started', 'Rebalancing gestartet.'))}`;
                 fb.style.display = 'block';
                 confirmBtn.style.display = 'none';
-                cancelBtn.textContent = 'Schließen';
+                cancelBtn.textContent = tr('common.close', 'Schließen');
                 cancelBtn.disabled    = false;
                 cancelBtn.onclick     = () => closeModal(mid);
             } else {
                 fb.className     = 'modal-feedback err';
-                fb.textContent   = data.error ?? 'Unbekannter Fehler';
+                fb.textContent   = data.error ?? tr('set.unknown_error', 'Unbekannter Fehler');
                 fb.style.display = 'block';
                 confirmBtn.disabled    = false;
                 cancelBtn.disabled     = false;
-                confirmBtn.textContent = 'Jetzt umstellen';
+                confirmBtn.textContent = tr('sliq.switch_now', 'Jetzt umstellen');
             }
         } catch (e) {
             fb.className     = 'modal-feedback err';
@@ -4626,7 +4609,7 @@ async function _openAdvisorRebalanceModal(pool, hint) {
             fb.style.display = 'block';
             confirmBtn.disabled    = false;
             cancelBtn.disabled     = false;
-            confirmBtn.textContent = 'Jetzt umstellen';
+            confirmBtn.textContent = tr('sliq.switch_now', 'Jetzt umstellen');
         }
     });
 }
@@ -4637,29 +4620,27 @@ async function _openPoolRebalanceModal(pool, activeHint = null) {
 
     showModal({
         id:    mid,
-        title: `${_esc(pool.displayPair ?? pool.pair)} – Verwalten`,
+        title: `${_esc(pool.displayPair ?? pool.pair)} – ${tr('sb.manage', 'Verwalten')}`,
         body:  `
             <svg id="reb-chart-svg" width="100%" style="display:block; overflow:visible;"></svg>
             <p id="reb-chart-empty" style="display:none; text-align:center; color:var(--text-muted); padding:1.5rem 0; font-size:0.85rem;">
-                Keine Preishistorie verfügbar
+                ${tr('sliq.no_price_history', 'Keine Preishistorie verfügbar')}
             </p>
             <div id="reb-comp" style="margin-top:0.6rem; margin-bottom:0.25rem;"></div>
             <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:0.75rem;">
                 <button class="btn btn-secondary" id="reb-start-btn"
                     ${activeHint ? 'style="background:var(--accent);color:#000;border-color:var(--accent);"' : ''}>Rebalance</button>
-                <button class="btn btn-secondary" id="reb-close-btn">Schließen</button>
+                <button class="btn btn-secondary" id="reb-close-btn">${tr('common.close', 'Schließen')}</button>
             </div>
             <div id="reb-confirm" style="display:none; margin-top:0.8rem; padding:0.75rem; border:1px solid rgba(220,80,80,0.4); border-radius:6px; background:rgba(220,80,80,0.06); font-size:0.85rem;">
-                <p style="margin:0 0 0.5rem; font-weight:600;">Bist du sicher?</p>
+                <p style="margin:0 0 0.5rem; font-weight:600;">${tr('sliq.are_you_sure', 'Bist du sicher?')}</p>
                 <p style="margin:0 0 0.75rem; color:var(--text-muted);">
-                    Die Position wird geschlossen und neu eröffnet.
-                    Das dauert <strong>ca. 1–2 Minuten</strong> und kann
-                    <strong>nicht abgebrochen</strong> werden.
-                    Ein- und Auszahlungen sind währenddessen gesperrt.
+                    ${tr('sliq.confirm_reopen_1', 'Die Position wird geschlossen und neu eröffnet. Das dauert')} <strong>${tr('sliq.confirm_reopen_2', 'ca. 1–2 Minuten')}</strong> ${tr('sliq.confirm_reopen_3', 'und kann')}
+                    <strong>${tr('sliq.confirm_reopen_4', 'nicht abgebrochen')}</strong> ${tr('sliq.confirm_reopen_5', 'werden. Ein- und Auszahlungen sind währenddessen gesperrt.')}
                 </p>
                 <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
-                    <button class="btn btn-secondary" id="reb-cancel-btn">Abbrechen</button>
-                    <button class="btn btn-secondary" id="reb-confirm-btn">Ja, jetzt rebalancen</button>
+                    <button class="btn btn-secondary" id="reb-cancel-btn">${tr('sliq.cancel', 'Abbrechen')}</button>
+                    <button class="btn btn-secondary" id="reb-confirm-btn">${tr('sliq.yes_rebalance', 'Ja, jetzt rebalancen')}</button>
                 </div>
                 <div id="reb-feedback" class="modal-feedback" style="display:none; margin-top:0.6rem;"></div>
             </div>`,
@@ -4711,26 +4692,26 @@ async function _openPoolRebalanceModal(pool, activeHint = null) {
         const fb         = bd.querySelector('#reb-feedback');
         confirmBtn.disabled    = true;
         cancelBtn.disabled     = true;
-        confirmBtn.textContent = 'Wird gestartet…';
+        confirmBtn.textContent = tr('sliq.starting', 'Wird gestartet…');
         try {
             const r    = await fetch(`/api/pools/liquidity/${encodeURIComponent(pool.id)}/rebalance`, { method: 'POST' });
             const data = await r.json();
             if (r.ok) {
                 fb.className         = 'modal-feedback ok';
-                fb.innerHTML         = '&#10003; Rebalancing gestartet. Der Bot führt es beim nächsten Tick aus.';
+                fb.innerHTML         = tr('sliq.rebalance_queued', '&#10003; Rebalancing gestartet. Der Bot führt es beim nächsten Tick aus.');
                 fb.style.display     = 'block';
                 confirmBtn.style.display = 'none';
                 bd.querySelector('#reb-close-btn').style.display = 'none';
-                cancelBtn.textContent = 'Schließen';
+                cancelBtn.textContent = tr('common.close', 'Schließen');
                 cancelBtn.disabled    = false;
                 cancelBtn.onclick     = () => closeModal(mid);
             } else {
                 fb.className         = 'modal-feedback err';
-                fb.textContent       = data.error ?? 'Unbekannter Fehler';
+                fb.textContent       = data.error ?? tr('set.unknown_error', 'Unbekannter Fehler');
                 fb.style.display     = 'block';
                 confirmBtn.disabled  = false;
                 cancelBtn.disabled   = false;
-                confirmBtn.textContent = 'Ja, jetzt rebalancen';
+                confirmBtn.textContent = tr('sliq.yes_rebalance', 'Ja, jetzt rebalancen');
             }
         } catch (e) {
             fb.className         = 'modal-feedback err';
@@ -4738,7 +4719,7 @@ async function _openPoolRebalanceModal(pool, activeHint = null) {
             fb.style.display     = 'block';
             confirmBtn.disabled  = false;
             cancelBtn.disabled   = false;
-            confirmBtn.textContent = 'Ja, jetzt rebalancen';
+            confirmBtn.textContent = tr('sliq.yes_rebalance', 'Ja, jetzt rebalancen');
         }
     });
 }
@@ -4750,10 +4731,10 @@ async function _openPoolRebalanceModal(pool, activeHint = null) {
 function _buildDepositUsdcHint({ walletUsdc, minUsdc, isNew, isBtcPair, tokenALabel, tokenBLabel, gasEstimate }) {
     const effectiveMin = gasEstimate?.minUsdcTotal > minUsdc ? gasEstimate.minUsdcTotal : minUsdc;
     return `
-        Wallet-USDC wird in beide Pool-Tokens geswappt und dann eingezahlt.<br>
-        Wallet: ${_fmt(walletUsdc)} USDC · Mindestbetrag: ${_fmt(effectiveMin)} USDC
-        ${isNew ? '<br>&#9888; Pool aktuell inaktiv – es wird eine neue Position eröffnet.' : ''}
-        ${isBtcPair ? '<br>&#9432; btcPair: 2 Swaps nötig (USDC → ' + tokenALabel + ' + USDC → ' + tokenBLabel + ')' : ''}`;
+        ${tr('sliq.deposit_usdc_hint', 'Wallet-USDC wird in beide Pool-Tokens geswappt und dann eingezahlt.')}<br>
+        ${tr('sliq.wallet_min_line', 'Wallet: {wallet} USDC · Mindestbetrag: {min} USDC', { wallet: _fmt(walletUsdc), min: _fmt(effectiveMin) })}
+        ${isNew ? '<br>' + tr('slen.pool_inactive_new_position', '&#9888; Pool aktuell inaktiv – es wird eine neue Position eröffnet.') : ''}
+        ${isBtcPair ? '<br>' + tr('sliq.btc_pair_hint', '&#9432; btcPair: 2 Swaps nötig (USDC → {a} + USDC → {b})', { a: tokenALabel, b: tokenBLabel }) : ''}`;
 }
 
 async function _openPoolDepositModal(pool) {
@@ -4763,7 +4744,7 @@ async function _openPoolDepositModal(pool) {
         _fetchWalletBalanceFresh(),
         fetch('/api/config/liquiditybot').catch(() => null),
     ]);
-    if (!state) { alert('Pool-State konnte nicht geladen werden.'); return; }
+    if (!state) { alert(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
     const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'ranking';
 
     const tokenALabel = state.tokenALabel;
@@ -4810,7 +4791,7 @@ async function _openPoolDepositModal(pool) {
 
     const oorBannerHtml = () => blockedOutOfRange
         ? `<div class="modal-feedback err" style="display:block; margin-bottom:0.5rem;">
-             ⚠ Position ist <strong>out of Range</strong> – Einzahlen aktuell nicht möglich.
+             ${tr('sliq.position_is', '⚠ Position ist')} <strong>${tr('sliq.out_of_range_lc', 'out of Range')}</strong> ${tr('sliq.deposit_not_possible', '– Einzahlen aktuell nicht möglich.')}
            </div>`
         : '';
 
@@ -4821,12 +4802,12 @@ async function _openPoolDepositModal(pool) {
             <div id="pd-oor-banner">${oorBannerHtml()}</div>
             ${_cleanupHint(cleanupMode)}
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-pdtab="usdc">Per USDC-Betrag</button>
-                <button class="wm-tab" data-pdtab="pair">Per Token-Mengen</button>
+                <button class="wm-tab active" data-pdtab="usdc">${tr('sliq.by_usdc_amount', 'Per USDC-Betrag')}</button>
+                <button class="wm-tab" data-pdtab="pair">${tr('sliq.by_token_amounts', 'Per Token-Mengen')}</button>
             </div>
             <div id="pd-tab-usdc">
                 <div class="settings-row">
-                    <span class="settings-label">USDC-Betrag</span>
+                    <span class="settings-label">${tr('sliq.usdc_amount', 'USDC-Betrag')}</span>
                     <div class="send-amount-row">
                         <input class="modal-input" id="pd-usdc" type="number" min="0" step="any" placeholder="${minUsdc}.00">
                         <button class="btn btn-secondary btn-sm" id="pd-usdc-max">Max</button>
@@ -4855,10 +4836,10 @@ async function _openPoolDepositModal(pool) {
                     <input type="range" id="pd-slider" min="0" max="100" step="1" value="100"
                            style="width:100%; cursor:pointer;">
                     <div id="pd-slider-readout" style="text-align:center; font-size:0.85rem; margin-top:0.35rem; display:flex; align-items:center; justify-content:center; gap:0.4rem;">
-                        <span><strong>100%</strong> des Maximums</span>
+                        <span><strong>100%</strong> ${tr('sliq.of_maximum', 'des Maximums')}</span>
                         <span class="info-tip-label"
-                            data-tooltip-title="Schieberegler"
-                            data-tooltip-content="Schieberegler wählt den Anteil des wirtschaftlichen Maximums. Beim Einzahlen wird das limitierende Paar nach aktuellem Pool-Ratio verwendet (Toleranz für Preisbewegung ist eingebaut). Kein Swap.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.slider', 'Schieberegler')}"
+                            data-tooltip-content="${tr('sliq.slider_deposit_tip', 'Schieberegler wählt den Anteil des wirtschaftlichen Maximums. Beim Einzahlen wird das limitierende Paar nach aktuellem Pool-Ratio verwendet (Toleranz für Preisbewegung ist eingebaut). Kein Swap.')}">&#9432;</span>
                     </div>
                 </div>
                 <div class="wallet-hint" id="pd-ratio-hint" style="font-size:0.75rem; margin-top:0.6rem;"></div>
@@ -4868,11 +4849,11 @@ async function _openPoolDepositModal(pool) {
             </div>
             <div id="pd-preview" style="margin-top:0.6rem;"></div>
             <div class="modal-feedback" id="pd-feedback" style="margin-top:0.5rem;"></div>
-            <div class="wallet-hint" style="font-size:0.7rem; margin-top:0.5rem;">Aktualisiert sich automatisch jede Minute.</div>`,
+            <div class="wallet-hint" style="font-size:0.7rem; margin-top:0.5rem;">${tr('sliq.auto_refresh_hint', 'Aktualisiert sich automatisch jede Minute.')}</div>`,
         actions: [
             { label: 'Vorschau',   onClick: () => _runPoolPreview(mid, 'deposit', pool.id, isNew) },
-            { label: '&#10004; Einzahlen', onClick: () => _runPoolAction(mid, 'deposit', pool.id, isNew) },
-            { label: 'Schließen',  onClick: () => closeModal(mid) },
+            { label: tr('sb.deposit_btn', '&#10004; Einzahlen'), onClick: () => _runPoolAction(mid, 'deposit', pool.id, isNew) },
+            { label: tr('common.close', 'Schließen'),  onClick: () => closeModal(mid) },
         ],
         onClose: () => stopRefresh(),
     });
@@ -4903,7 +4884,7 @@ async function _openPoolDepositModal(pool) {
     function _checkUsdcMin() {
         const v = parseFloat(backdrop.querySelector('#pd-usdc')?.value) || 0;
         if (blockedOutOfRange) {
-            _setSubmitDisabled(backdrop, true, 'Position ist out of Range – Einzahlen nicht möglich');
+            _setSubmitDisabled(backdrop, true, tr('sliq.oor_deposit_blocked', 'Position ist out of Range – Einzahlen nicht möglich'));
         } else if (v < minUsdc) {
             _setSubmitDisabled(backdrop, true, `Mindesteinzahlung: ${minUsdc} USDC`);
         } else {
@@ -4934,14 +4915,14 @@ async function _openPoolDepositModal(pool) {
             if (hint) {
                 let reason;
                 if (tokenALabel === 'SOL' && walletASafe <= 0)
-                    reason = `${_esc(tokenALabel)}-Balance im Wallet (${_fmt(walletA)} SOL) zu niedrig – SOL-Reserve (0.10 SOL) deckt das gesamte Guthaben ab. Bitte SOL ins Wallet einzahlen oder den USDC-Modus verwenden.`;
+                    reason = tr('sliq.sol_reserve_blocks', '{token}-Balance im Wallet ({amount} SOL) zu niedrig – SOL-Reserve (0.10 SOL) deckt das gesamte Guthaben ab. Bitte SOL ins Wallet einzahlen oder den USDC-Modus verwenden.', { token: _esc(tokenALabel), amount: _fmt(walletA) });
                 else if (tokenBLabel === 'SOL' && walletBSafe <= 0)
-                    reason = `${_esc(tokenBLabel)}-Balance im Wallet (${_fmt(walletB)} SOL) zu niedrig – SOL-Reserve (0.10 SOL) deckt das gesamte Guthaben ab. Bitte SOL ins Wallet einzahlen oder den USDC-Modus verwenden.`;
+                    reason = tr('sliq.sol_reserve_blocks', '{token}-Balance im Wallet ({amount} SOL) zu niedrig – SOL-Reserve (0.10 SOL) deckt das gesamte Guthaben ab. Bitte SOL ins Wallet einzahlen oder den USDC-Modus verwenden.', { token: _esc(tokenBLabel), amount: _fmt(walletB) });
                 else
-                    reason = `Wallet-Balance für ${_esc(tokenALabel)} und/oder ${_esc(tokenBLabel)} zu niedrig. Bitte Tokens aufstocken oder den USDC-Modus verwenden.`;
+                    reason = tr('sliq.wallet_too_low_pair', 'Wallet-Balance für {a} und/oder {b} zu niedrig. Bitte Tokens aufstocken oder den USDC-Modus verwenden.', { a: _esc(tokenALabel), b: _esc(tokenBLabel) });
                 hint.innerHTML = `<span style="color:var(--danger);">⚠ ${reason}</span>`;
             }
-            _setSubmitDisabled(backdrop, true, 'Wallet-Balance zu niedrig für Token-Mengen-Modus');
+            _setSubmitDisabled(backdrop, true, tr('sliq.wallet_too_low_token_mode', 'Wallet-Balance zu niedrig für Token-Mengen-Modus'));
             return;
         }
 
@@ -5029,9 +5010,11 @@ function _cleanupHint(cleanupMode = 'ranking') {
     if (cleanupMode === 'disabled') return '';
     const mm  = new Date().getMinutes();
     const min = (65 - mm) % 60;
-    if (min === 0) return `<div class="wallet-hint" style="font-size:0.78rem; color:var(--danger);">⚠ Cleanup läuft gerade.</div>`;
+    if (min === 0) return `<div class="wallet-hint" style="font-size:0.78rem; color:var(--danger);">${tr('sliq.cleanup_running_now', '⚠ Cleanup läuft gerade.')}</div>`;
     const style = min < 10 ? 'color:var(--danger);' : 'color:var(--text-muted);';
-    return `<div class="wallet-hint" style="font-size:0.78rem; ${style}">Nächster Cleanup in ${min} Minute${min === 1 ? '' : 'n'}.</div>`;
+    return `<div class="wallet-hint" style="font-size:0.78rem; ${style}">${min === 1
+        ? tr('sliq.next_cleanup_one', 'Nächster Cleanup in 1 Minute.')
+        : tr('sliq.next_cleanup', 'Nächster Cleanup in {min} Minuten.', { min })}</div>`;
 }
 
 // Berechnet den effektiven CLMM-Deposit-Ratio (tokenB pro 1 tokenA) basierend auf
@@ -5102,7 +5085,7 @@ function _updateRatioHint(backdrop, tokenALabel, tokenBLabel, price, isBtcPair, 
 
     if (!Number.isFinite(a) || a <= 0 || !Number.isFinite(b) || b <= 0) {
         hint.innerHTML = ratioLine;
-        _setSubmitDisabled(backdrop, true, 'Bitte Schieberegler bewegen');
+        _setSubmitDisabled(backdrop, true, tr('sliq.move_slider', 'Bitte Schieberegler bewegen'));
         return;
     }
 
@@ -5112,21 +5095,21 @@ function _updateRatioHint(backdrop, tokenALabel, tokenBLabel, price, isBtcPair, 
     } else {
         const bForA = a * price;
         if (bForA <= b) {
-            engpass = `Engpass: ${tokenALabel} (${_fmt(a)} → ${_fmt(bForA)} ${tokenBLabel}, ${_fmt(b - bForA)} ${tokenBLabel} bleibt)`;
+            engpass = tr('sliq.bottleneck', 'Engpass: {token} ({amount} → {converted} {other}, {rest} {other} bleibt)', { token: tokenALabel, amount: _fmt(a), converted: _fmt(bForA), other: tokenBLabel, rest: _fmt(b - bForA) });
         } else {
             const aForB = b / price;
-            engpass = `Engpass: ${tokenBLabel} (${_fmt(b)} → ${_fmt(aForB)} ${tokenALabel}, ${_fmt(a - aForB)} ${tokenALabel} bleibt)`;
+            engpass = tr('sliq.bottleneck', 'Engpass: {token} ({amount} → {converted} {other}, {rest} {other} bleibt)', { token: tokenBLabel, amount: _fmt(b), converted: _fmt(aForB), other: tokenALabel, rest: _fmt(a - aForB) });
         }
     }
 
-    const usdcLine = estUsdc != null ? `<br>Wert: ≈ ${_fmt(estUsdc)} USDC` : '';
+    const usdcLine = estUsdc != null ? '<br>' + tr('sliq.value_approx', 'Wert: ≈ {usd} USDC', { usd: _fmt(estUsdc) }) : '';
     hint.innerHTML = `${ratioLine}<br>${engpass}${usdcLine}`;
 
     // Submit-Sperren: Out-of-Range hat Vorrang vor Min-Check
     if (blockedOutOfRange) {
-        _setSubmitDisabled(backdrop, true, 'Position ist out of Range – Einzahlen nicht möglich');
+        _setSubmitDisabled(backdrop, true, tr('sliq.oor_deposit_blocked', 'Position ist out of Range – Einzahlen nicht möglich'));
     } else if (estUsdc != null && minUsdc != null && estUsdc < minUsdc) {
-        _setSubmitDisabled(backdrop, true, `Mindesteinzahlung ≈ ${_fmt(minUsdc)} USDC (aktuell ${_fmt(estUsdc)} USDC)`);
+        _setSubmitDisabled(backdrop, true, tr('sliq.min_deposit_hint', 'Mindesteinzahlung ≈ {min} USDC (aktuell {cur} USDC)', { min: _fmt(minUsdc), cur: _fmt(estUsdc) }));
     } else {
         _setSubmitDisabled(backdrop, false);
     }
@@ -5137,12 +5120,12 @@ function _updateWithdrawHint(backdrop, tokenALabel, tokenBLabel, a, b, estUsdc, 
     if (!hint) return;
     if (estUsdc <= 0) {
         hint.innerHTML = '';
-        _setSubmitDisabled(backdrop, true, 'Bitte Schieberegler auf > 0 stellen');
+        _setSubmitDisabled(backdrop, true, tr('sliq.move_slider_gt0', 'Bitte Schieberegler auf > 0 stellen'));
         return;
     }
-    hint.innerHTML = `${_fmt(a)} ${_esc(tokenALabel)} + ${_fmt(b)} ${_esc(tokenBLabel)}<br>Wert: ≈ ${_fmt(estUsdc)} USDC`;
+    hint.innerHTML = `${_fmt(a)} ${_esc(tokenALabel)} + ${_fmt(b)} ${_esc(tokenBLabel)}<br>${tr('sliq.value_approx', 'Wert: ≈ {usd} USDC', { usd: _fmt(estUsdc) })}`;
     if (estUsdc < minUsdc) {
-        _setSubmitDisabled(backdrop, true, `Mindestauszahlung ≈ ${_fmt(minUsdc)} USDC (aktuell ${_fmt(estUsdc)} USDC)`);
+        _setSubmitDisabled(backdrop, true, tr('sliq.min_withdraw_hint', 'Mindestauszahlung ≈ {min} USDC (aktuell {cur} USDC)', { min: _fmt(minUsdc), cur: _fmt(estUsdc) }));
     } else {
         _setSubmitDisabled(backdrop, false);
     }
@@ -5168,8 +5151,8 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
         _fetchPoolState(pool.id),
         fetch('/api/config/liquiditybot').catch(() => null),
     ]);
-    if (!state) { alert('Pool-State konnte nicht geladen werden.'); return; }
-    if (!state.position) { alert('Keine offene Position – Auszahlung nicht möglich.'); return; }
+    if (!state) { alert(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
+    if (!state.position) { alert(tr('sliq.no_open_position', 'Keine offene Position – Auszahlung nicht möglich.')); return; }
     const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'ranking';
 
     const tokenALabel = state.tokenALabel;
@@ -5188,7 +5171,7 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
 
     const oorWarningHtml = () => inRange === false
         ? `<div class="modal-feedback" style="display:block; margin-bottom:0.5rem;">
-             &#9432; Position ist <strong>out of Range</strong> – enthält evtl. nur einen Token.
+             ${tr('sliq.position_is_info', '&#9432; Position ist')} <strong>${tr('sliq.out_of_range_lc', 'out of Range')}</strong> ${tr('sliq.maybe_one_token', '– enthält evtl. nur einen Token.')}
            </div>`
         : '';
 
@@ -5199,20 +5182,20 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
             <div id="pw-oor-banner">${oorWarningHtml()}</div>
             ${_cleanupHint(cleanupMode)}
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-pwtab="usdc">Per USDC-Wert</button>
-                <button class="wm-tab" data-pwtab="pair">Per Token-Mengen</button>
+                <button class="wm-tab active" data-pwtab="usdc">${tr('sliq.by_usdc_value', 'Per USDC-Wert')}</button>
+                <button class="wm-tab" data-pwtab="pair">${tr('sliq.by_token_amounts', 'Per Token-Mengen')}</button>
             </div>
             <div id="pw-tab-usdc">
                 <div class="settings-row">
-                    <span class="settings-label">USDC-Wert</span>
+                    <span class="settings-label">${tr('sliq.usdc_value', 'USDC-Wert')}</span>
                     <div class="send-amount-row">
                         <input class="modal-input" id="pw-usdc" type="number" min="0" step="any" placeholder="${minUsdc}.00">
                         <button class="btn btn-secondary btn-sm" id="pw-usdc-max">Max</button>
                     </div>
                 </div>
                 <div class="wallet-hint" style="font-size:0.78rem;">
-                    Liquidität im Gegenwert dieses USDC-Betrags wird proportional entnommen.<br>
-                    Position: ≈ <span id="pw-pos-value">${_fmt(posValue)}</span> USDC · Mindestbetrag: ${minUsdc} USDC
+                    ${tr('sliq.withdraw_usdc_hint', 'Liquidität im Gegenwert dieses USDC-Betrags wird proportional entnommen.')}<br>
+                    ${tr('sliq.position_approx', 'Position: ≈')} <span id="pw-pos-value">${_fmt(posValue)}</span> USDC · ${tr('sliq.min_amount', 'Mindestbetrag')}: ${minUsdc} USDC
                 </div>
             </div>
             <div id="pw-tab-pair" hidden>
@@ -5235,10 +5218,10 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
                            data-pos-value="${posValue}"
                            style="width:100%; cursor:pointer;">
                     <div id="pw-slider-readout" style="text-align:center; font-size:0.85rem; margin-top:0.35rem; display:flex; align-items:center; justify-content:center; gap:0.4rem;">
-                        <span><strong>100%</strong> der Position</span>
+                        <span><strong>100%</strong> ${tr('sliq.of_position', 'der Position')}</span>
                         <span class="info-tip-label"
-                            data-tooltip-title="Schieberegler"
-                            data-tooltip-content="Schieberegler wählt den prozentualen Anteil der Position zum Auszahlen. Beide Token werden proportional entnommen (LP-Ratio). Kein Swap.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.slider', 'Schieberegler')}"
+                            data-tooltip-content="${tr('sliq.slider_withdraw_tip', 'Schieberegler wählt den prozentualen Anteil der Position zum Auszahlen. Beide Token werden proportional entnommen (LP-Ratio). Kein Swap.')}">&#9432;</span>
                     </div>
                 </div>
                 <div class="wallet-hint" id="pw-ratio-hint" style="font-size:0.75rem; margin-top:0.6rem;"></div>
@@ -5249,10 +5232,10 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
             <div class="pw-settings">
                 <div class="settings-row" style="margin-top:0.6rem;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Swap → USDC
+                        ${tr('sliq.swap_usdc', 'Swap → USDC')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Swap → USDC"
-                            data-tooltip-content="Entnommene Coins vor dem Verbleib im Wallet (bzw. vor dem Senden) automatisch in USDC tauschen.">&#9432;</span>
+                            data-tooltip-title="${tr('sliq.swap_usdc', 'Swap → USDC')}"
+                            data-tooltip-content="${tr('sliq.pw_swap_tip', 'Entnommene Coins vor dem Verbleib im Wallet (bzw. vor dem Senden) automatisch in USDC tauschen.')}">&#9432;</span>
                     </span>
                     <label class="toggle-switch toggle-sm">
                         <input type="checkbox" id="pw-swap">
@@ -5260,20 +5243,20 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
                     </label>
                 </div>
                 <div class="settings-row">
-                    <span class="settings-label">Senden an</span>
+                    <span class="settings-label">${tr('sb.send_to', 'Senden an')}</span>
                     <select class="modal-select" id="pw-sendto">
-                        <option value="">– Nicht senden (im Wallet belassen) –</option>
+                        <option value="">${tr('sliq.dont_send_keep_wallet', '– Nicht senden (im Wallet belassen) –')}</option>
                         ${_addrOptions(addrs, '')}
                     </select>
                 </div>
             </div>
             <div id="pw-preview" style="margin-top:0.6rem;"></div>
             <div class="modal-feedback" id="pw-feedback" style="margin-top:0.5rem;"></div>
-            <div class="wallet-hint" style="font-size:0.7rem; margin-top:0.5rem;">Aktualisiert sich automatisch jede Minute.</div>`,
+            <div class="wallet-hint" style="font-size:0.7rem; margin-top:0.5rem;">${tr('sliq.auto_refresh_hint', 'Aktualisiert sich automatisch jede Minute.')}</div>`,
         actions: [
             { label: 'Vorschau',   onClick: () => _runPoolPreview(mid, 'withdraw', pool.id, false) },
-            { label: '&#10004; Auszahlen', onClick: () => _runPoolAction(mid, 'withdraw', pool.id, false) },
-            { label: 'Schließen',  onClick: () => closeModal(mid) },
+            { label: tr('sb.withdraw_btn', '&#10004; Auszahlen'), onClick: () => _runPoolAction(mid, 'withdraw', pool.id, false) },
+            { label: tr('common.close', 'Schließen'),  onClick: () => closeModal(mid) },
         ],
         onClose: () => stopRefresh(),
     });
@@ -5392,7 +5375,7 @@ function _buildPoolBody(backdrop, action, isNew) {
     if (active === 'usdc') {
         const input  = backdrop.querySelector(`#${prefix}-usdc`);
         const v      = parseFloat(input?.value);
-        if (isNaN(v) || v <= 0) return { error: 'Bitte einen USDC-Betrag eingeben.' };
+        if (isNaN(v) || v <= 0) return { error: tr('sliq.enter_usdc_amount', 'Bitte einen USDC-Betrag eingeben.') };
         // Max-Button gesetzt → Vollentnahme; manuell eingetippter Betrag → anteilig
         if (action === 'withdraw' && input?.dataset.full === 'true') {
             return { body: { action, mode: 'full', isNew, ...withdrawExtra } };
@@ -5404,7 +5387,7 @@ function _buildPoolBody(backdrop, action, isNew) {
             const a = parseFloat(backdrop.querySelector(`#${prefix}-max-a`)?.value);
             const b = parseFloat(backdrop.querySelector(`#${prefix}-max-b`)?.value);
             if (!Number.isFinite(a) || a <= 0 || !Number.isFinite(b) || b <= 0) {
-                return { error: 'Bitte Schieberegler auf > 0 stellen.' };
+                return { error: tr('sliq.move_slider_gt0_dot', 'Bitte Schieberegler auf > 0 stellen.') };
             }
             return { body: { action, mode: 'pair', maxA: a, maxB: b, isNew } };
         } else {
@@ -5414,7 +5397,7 @@ function _buildPoolBody(backdrop, action, isNew) {
             if (pct >= 100) return { body: { action, mode: 'full', isNew, ...withdrawExtra } };
             const posVal = parseFloat(slider?.dataset.posValue) || 0;
             const usdc   = posVal * pct / 100;
-            if (usdc <= 0) return { error: 'Bitte Schieberegler auf > 0 stellen.' };
+            if (usdc <= 0) return { error: tr('sliq.move_slider_gt0_dot', 'Bitte Schieberegler auf > 0 stellen.') };
             return { body: { action, mode: 'usdc', usdc, isNew, ...withdrawExtra } };
         }
     }
@@ -5435,10 +5418,10 @@ async function _runPoolPreview(mid, action, poolId, isNew) {
     // Buttons während Berechnung sperren
     const closeBtn = backdrop.querySelector('[data-mi="2"]');
     if (closeBtn) { closeBtn.disabled = true; closeBtn.style.opacity = '0.4'; closeBtn.style.cursor = 'not-allowed'; }
-    _setSubmitDisabled(backdrop, true, 'Vorschau wird berechnet…');
+    _setSubmitDisabled(backdrop, true, tr('sliq.calculating_preview', 'Vorschau wird berechnet…'));
     backdrop._actionRunning = true;
 
-    previewBox.innerHTML = '<div class="wallet-hint">Lade Vorschau…</div>';
+    previewBox.innerHTML = '<div class="wallet-hint">' + tr('sliq.loading_preview', 'Lade Vorschau…') + '</div>';
     try {
         const r = await fetch(`/api/pools/liquidity/${encodeURIComponent(poolId)}/preview`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5447,7 +5430,7 @@ async function _runPoolPreview(mid, action, poolId, isNew) {
         const data = await r.json();
         previewBox.innerHTML = _renderPreviewResult(data);
     } catch (err) {
-        previewBox.innerHTML = `<div class="modal-feedback err" style="display:block;">Vorschau-Fehler: ${_esc(err.message)}</div>`;
+        previewBox.innerHTML = `<div class="modal-feedback err" style="display:block;">${tr('sliq.preview_error', 'Vorschau-Fehler: {error}', { error: _esc(err.message) })}</div>`;
     } finally {
         backdrop._actionRunning = false;
         if (closeBtn) { closeBtn.disabled = false; closeBtn.style.opacity = ''; closeBtn.style.cursor = ''; }
@@ -5455,27 +5438,37 @@ async function _runPoolPreview(mid, action, poolId, isNew) {
     }
 }
 
-function _isRetryableError(msg) {
-    if (!msg) return false;
-    return msg.startsWith('Wallet-Balance konnte nicht gelesen werden') ||
-           msg.startsWith('Der Swap konnte nicht ausgeführt werden') ||
-           msg.startsWith('Konnte aktuelle Marktdaten nicht abrufen');
+/**
+ * Fehler, bei denen ein zweiter Versuch realistisch hilft (Marktpreis bewegt,
+ * Balance kurz nicht lesbar) — dann bietet das Modal einen 30s-Countdown an
+ * statt abzubrechen.
+ *
+ * 🔒 Der Abgleich läuft über `errorCode` aus bin/deposit.js, NICHT über den
+ * Meldungstext. Vorher wurde der (deutsche) Skripttext mit den hier übersetzten
+ * Vergleichstexten verglichen — auf einer englischen Installation traf das nie zu
+ * und der Retry entfiel stillschweigend (Fund 2026-08-11). Ein Vergleich auf Prosa
+ * ist auch einsprachig fragil: eine umformulierte Meldung hätte dasselbe bewirkt.
+ */
+const RETRYABLE_CODES = ['WALLET_BALANCE', 'SWAP_ROUTING', 'MARKET_DATA'];
+
+function _isRetryableError(data) {
+    return RETRYABLE_CODES.includes(data?.errorCode);
 }
 
 function _startRetryCountdown(feedbackBox, backdrop, seconds) {
-    _setSubmitDisabled(backdrop, true, `Bitte ${seconds}s warten`);
+    _setSubmitDisabled(backdrop, true, tr('sliq.wait_seconds', 'Bitte {n}s warten', { n: seconds }));
     feedbackBox.className   = 'modal-feedback err';
     feedbackBox.style.display = 'block';
     let remaining = seconds;
     (function tick() {
         if (remaining <= 0) {
-            feedbackBox.textContent = 'Wallet-Balance konnte nicht gelesen werden. Bitte versuche es noch einmal.';
+            feedbackBox.textContent = tr('sliq.wallet_read_failed_retry', 'Wallet-Balance konnte nicht gelesen werden. Bitte versuche es noch einmal.');
             backdrop._actionRunning = false;
             _setSubmitDisabled(backdrop, false);
             backdrop._revalidate?.();
             return;
         }
-        feedbackBox.textContent = `Wallet-Balance konnte nicht gelesen werden. Bitte warte noch ${remaining}s…`;
+        feedbackBox.textContent = tr('sliq.wallet_read_wait', 'Wallet-Balance konnte nicht gelesen werden. Bitte warte noch {n}s…', { n: remaining });
         remaining--;
         setTimeout(tick, 1000);
     })();
@@ -5495,9 +5488,9 @@ async function _runPoolAction(mid, action, poolId, isNew) {
     const built = _buildPoolBody(backdrop, action, isNew);
     if (built.error) { feedbackBox.textContent = built.error; feedbackBox.classList.add('err'); feedbackBox.style.display = 'block'; return; }
 
-    feedbackBox.textContent = `${action === 'deposit' ? 'Einzahlen' : 'Auszahlen'} läuft – das kann 30–60 Sekunden dauern…`;
+    feedbackBox.textContent = tr('sliq.action_running_long', '{action} läuft – das kann 30–60 Sekunden dauern…', { action: action === 'deposit' ? tr('sb.deposit', 'Einzahlen') : tr('sb.withdraw', 'Auszahlen') });
     feedbackBox.style.display = 'block';
-    _setSubmitDisabled(backdrop, true, `${action === 'deposit' ? 'Einzahlen' : 'Auszahlen'} läuft…`);
+    _setSubmitDisabled(backdrop, true, tr('sliq.action_running', '{action} läuft…', { action: action === 'deposit' ? tr('sb.deposit', 'Einzahlen') : tr('sb.withdraw', 'Auszahlen') }));
     backdrop._actionRunning = true;
     let retryMode = false;
     try {
@@ -5510,23 +5503,23 @@ async function _runPoolAction(mid, action, poolId, isNew) {
             feedbackBox.className = 'modal-feedback ok';
             const txHash = data.result?.txHash;
             const txLink = txHash
-                ? ` <a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener" style="color:inherit;">TX ansehen ↗</a>`
+                ? ` <a href="https://solscan.io/tx/${txHash}" target="_blank" rel="noopener" style="color:inherit;">${tr('sliq.view_tx_plain', 'TX ansehen ↗')}</a>`
                 : '';
-            feedbackBox.innerHTML = `✓ ${action === 'deposit' ? 'Eingezahlt' : 'Ausgezahlt'}.${txLink}`;
+            feedbackBox.innerHTML = `✓ ${action === 'deposit' ? tr('sliq.deposited', 'Eingezahlt') : tr('sliq.withdrawn', 'Ausgezahlt')}.${txLink}`;
             // Wallet-Karte nach Deposit/Withdraw aktualisieren (deposit.js hat refreshAfterAction
             // bereits abgeschlossen → wallet-monitor.db ist frisch → direktes Re-Render reicht)
             const walletEl = _container?.querySelector('.liquiditybot-grid-wallet');
             if (walletEl) _renderWallet(walletEl);
-        } else if (_isRetryableError(data.error)) {
+        } else if (_isRetryableError(data)) {
             retryMode = true;
             _startRetryCountdown(feedbackBox, backdrop, 30);
         } else {
             feedbackBox.className   = 'modal-feedback err';
-            feedbackBox.textContent = `Fehler: ${data.error ?? 'Unbekannter Fehler'}`;
+            feedbackBox.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: data.error ?? tr('set.unknown_error', 'Unbekannter Fehler') });
         }
     } catch (err) {
         feedbackBox.className   = 'modal-feedback err';
-        feedbackBox.textContent = `Netzwerk-Fehler: ${err.message}`;
+        feedbackBox.textContent = tr('sliq.network_error', 'Netzwerk-Fehler: {error}', { error: err.message });
     } finally {
         if (!retryMode) {
             backdrop._actionRunning = false;

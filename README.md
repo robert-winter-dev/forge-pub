@@ -1,5 +1,7 @@
 # FORGE.pub
 
+> Deutsche Fassung: [README.de.md](README.de.md)
+
 **Automated DEX Trading.**
 
 FORGE.pub manages liquidity positions and lending deposits for you,
@@ -88,9 +90,9 @@ without it.
 > the installer will ask for them and cannot finish without them.
 
 ```bash
-git clone <this-repo>
-cd forge-pub
-sudo bin/setup.sh install
+mkdir forge-pub && cd forge-pub
+curl -fsSL https://github.com/robert-winter-dev/forge-pub/releases/latest/download/current.tar.gz | tar xz
+sudo bash install.sh
 ```
 
 The installer walks you through API keys, wallet setup (generate a new one

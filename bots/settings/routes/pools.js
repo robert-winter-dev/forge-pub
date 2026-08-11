@@ -19,6 +19,8 @@ import path              from 'path';
 import { fileURLToPath } from 'url';
 import Database          from 'better-sqlite3';
 import { PATHS }         from '../../../config/paths.js';
+import { t } from '../../../lib/i18n.js';
+import { renderReason } from '../../../lib/pool-reason.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -383,7 +385,7 @@ function loadPools() {
             // Fürs Aktivieren-Tooltip in der Settings-UI: wann + warum wurde die
             // Freigabe zuletzt geändert (siehe setPoolEnabled() in lib/config.js).
             p.enabledChangedAt = row.enabled_changed_at ?? null;
-            p.enabledReason    = row.enabled_reason ?? null;
+            p.enabledReason    = renderReason(row.enabled_reason);
             if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
                 && p.rangeOverride && typeof p.rangeOverride === 'object') {
                 p.rangeOverride.fixedPct = row.range_override_fixed_pct;
@@ -476,25 +478,25 @@ function validateTvlProtection(merged) {
     const isStep10 = v => Number.isFinite(v) && v >= 0 && v <= 100 && v % 10 === 0;
 
     if (l1.enabled && !isStep10(l1.withdrawPct))
-        throw new Error('TVL-Schutz Stufe 1: Prozentwert muss 0–100 in 10er-Schritten sein.');
+        throw new Error(t('api.pools.tvl_pct_step_l1'));
     if (l2.enabled && !isStep10(l2.withdrawPct))
-        throw new Error('TVL-Schutz Stufe 2: Prozentwert muss 0–100 in 10er-Schritten sein.');
+        throw new Error(t('api.pools.tvl_pct_step_l2'));
 
     if (l1.enabled) {
         if (!(Number(l1.thresholdUsd) > 0))
-            throw new Error('TVL-Schutz Stufe 1: TVL-Schwelle muss größer als 0 sein.');
+            throw new Error(t('api.pools.tvl_threshold_l1'));
     }
     if (l2.enabled) {
         if (!(Number(l2.thresholdUsd) > 0))
-            throw new Error('TVL-Schutz Stufe 2: TVL-Schwelle muss größer als 0 sein.');
+            throw new Error(t('api.pools.tvl_threshold_l2'));
     }
     // Eskalation: L1 > L2 nur prüfbar wenn beide aktiv und beide gesetzt
     if (l1.enabled && l2.enabled && Number(l1.thresholdUsd) <= Number(l2.thresholdUsd))
-        throw new Error('TVL-Schutz: Schwelle Stufe 1 muss größer als Stufe 2 sein (Eskalation).');
+        throw new Error(t('api.pools.tvl_escalation'));
 
     // Summe-100-Regel nur wenn beide Stufen aktiv
     if (l1.enabled && l2.enabled && (Number(l1.withdrawPct) + Number(l2.withdrawPct)) !== 100)
-        throw new Error('TVL-Schutz: Prozentwerte von Stufe 1 und Stufe 2 müssen zusammen 100 % ergeben.');
+        throw new Error(t('api.pools.tvl_sum_100'));
 }
 
 function saveSettings(db, botId, poolId, partial) {
@@ -771,19 +773,19 @@ router.get('/liquidity/pool-types', (req, res) => {
 router.put('/liquidity/pool-types/:poolType', (req, res) => {
     const { poolType } = req.params;
     if (!POOL_TYPES.includes(poolType)) {
-        return res.status(400).json({ error: `Unbekannter Pool-Typ: ${poolType}` });
+        return res.status(400).json({ error: t('api.pools.unknown_pool_type', { poolType }) });
     }
 
     const body = req.body;
     if (typeof body !== 'object' || Array.isArray(body) || body === null) {
-        return res.status(400).json({ error: 'Body muss ein Objekt sein' });
+        return res.status(400).json({ error: t('api.common.body_object') });
     }
 
     const thresholdPctRaw = body.trailingStop?.thresholdPct;
     if (thresholdPctRaw !== undefined) {
         const v = Number(thresholdPctRaw);
         if (!Number.isFinite(v) || v < 1 || v > 90) {
-            return res.status(400).json({ error: 'Trailing-Stop-Drawdown muss zwischen 1 und 90 % liegen.' });
+            return res.status(400).json({ error: t('api.pools.trailing_drawdown_range') });
         }
     }
     for (const level of ['level1', 'level2']) {
@@ -791,12 +793,12 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         if (raw !== undefined && raw !== null && raw !== '') {
             const v = Number(raw);
             if (!Number.isFinite(v) || v <= 0) {
-                return res.status(400).json({ error: `TVL-Schwelle (${level}) muss größer als 0 sein.` });
+                return res.status(400).json({ error: t('api.pools.tvl_threshold_level', { level }) });
             }
         }
     }
     if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
-        return res.status(400).json({ error: '"enabled" muss ein boolean sein.' });
+        return res.status(400).json({ error: t('api.pools.enabled_boolean') });
     }
 
     try {
@@ -809,7 +811,7 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             const invested = pools.filter(p => hasOpenPosition(p.id));
             if (invested.length > 0) {
                 return res.status(409).json({
-                    error: `Pool-Typ kann nicht deaktiviert werden – ${invested.length} Pool(s) mit offener Position: ${invested.map(p => p.id).join(', ')}. Erst auszahlen, dann deaktivieren.`,
+                    error: t('api.pools.pool_type_has_positions', { count: invested.length, pools: invested.map(p => p.id).join(', ') }),
                     poolIds: invested.map(p => p.id),
                 });
             }
@@ -865,7 +867,7 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             try {
                 for (const pool of pools) {
                     if (body.enabled === false && hasOpenPosition(pool.id)) {
-                        failed.push({ poolId: pool.id, reason: 'Pool hat eine offene Position – erst auszahlen, dann deaktivieren.' });
+                        failed.push({ poolId: pool.id, reason: t('api.pools.pool_has_position') });
                         continue;
                     }
                     rwDb.prepare(`UPDATE pools SET enabled = ? WHERE id = ?`).run(body.enabled ? 1 : 0, pool.id);
@@ -885,7 +887,7 @@ router.get('/liquidity/:poolId', (req, res) => {
     try {
         const pools  = loadPools();
         const pool   = pools.find(p => p.id === req.params.poolId);
-        if (!pool) return res.status(404).json({ error: 'Pool nicht gefunden' });
+        if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
         const db       = openDb();
         const settings = loadSettings(db, 'liquidity', pool.id);
@@ -902,11 +904,11 @@ router.put('/liquidity/:poolId', (req, res) => {
     try {
         const pools = loadPools();
         const pool  = pools.find(p => p.id === req.params.poolId);
-        if (!pool) return res.status(404).json({ error: 'Pool nicht gefunden' });
+        if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
         const partial = req.body;
         if (typeof partial !== 'object' || Array.isArray(partial)) {
-            return res.status(400).json({ error: 'Body muss ein Objekt sein' });
+            return res.status(400).json({ error: t('api.common.body_object') });
         }
 
         const db      = openDb();
@@ -927,13 +929,13 @@ router.post('/liquidity/:poolId/trailing-stop/reset', (req, res) => {
     try {
         const pools = loadPools();
         const pool  = pools.find(p => p.id === req.params.poolId);
-        if (!pool) return res.status(404).json({ error: 'Pool unbekannt' });
+        if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
         const db      = openDb();
         const current = loadSettings(db, 'liquidity', pool.id);
         if (!current.trailingStop?.enabled) {
             db.close();
-            return res.status(400).json({ error: 'Trailing Stop ist für diesen Pool nicht aktiv' });
+            return res.status(400).json({ error: t('api.pools.trailing_not_active') });
         }
         const targetHwm = Number(req.body?.targetHwm) || null;
         current.trailingStop = {

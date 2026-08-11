@@ -1111,3 +1111,18 @@ body {
     padding: 0 3px; pointer-events: none;
 }
 .notif-badge.hidden { display: none; }
+
+/* ── Sprachwahl im Header ─────────────────────────────────────────────────── */
+/* Die Sprache gilt für die ganze Installation (Backend + Oberfläche), deshalb
+   im Header statt in einem Bot-Tab. */
+.lang-select {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 4px;
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    padding: 2px 6px;
+    cursor: pointer;
+    outline: none;
+}
+.lang-select:hover { border-color: #475569; color: #f1f5f9; }

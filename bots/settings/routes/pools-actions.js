@@ -32,6 +32,8 @@ import Database          from 'better-sqlite3';
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { PATHS }         from '../../../config/paths.js';
 import { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH } from './wallet.js';
+import { t } from '../../../lib/i18n.js';
+import { renderReason, reasonPayload } from '../../../lib/pool-reason.js';
 
 const __dirname        = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT       = PATHS.root;
@@ -72,7 +74,7 @@ function findPool(poolId) {
                 pool.enabled = row.enabled === 1;
             }
             pool.enabledChangedAt = row.enabled_changed_at ?? null;
-            pool.enabledReason    = row.enabled_reason ?? null;
+            pool.enabledReason    = renderReason(row.enabled_reason);
             if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
                 && pool.rangeOverride && typeof pool.rangeOverride === 'object') {
                 pool.rangeOverride.fixedPct = row.range_override_fixed_pct;
@@ -130,7 +132,7 @@ function writeFixedPct(poolId, newPct) {
     const db = openLiquidityDbRW();
     try {
         const row = db.prepare(`SELECT id FROM pools WHERE id = ?`).get(poolId);
-        if (!row) throw new Error(`Pool ${poolId} nicht in DB-Tabelle pools gefunden (syncPools ausstehend?)`);
+        if (!row) throw new Error(t('api.poolact.pool_row_missing', { pool: poolId }));
         db.prepare(`UPDATE pools SET range_override_fixed_pct = ? WHERE id = ?`).run(newPct, poolId);
     } finally {
         db.close();
@@ -142,12 +144,15 @@ function writeFixedPct(poolId, newPct) {
  * seit v0.4.85, identisch zu setPoolEnabled() in bots/liquidity/lib/config.js). pools.json bleibt
  * unangetastet — ein Schreiben dorthin würde beim nächsten Bot-Zyklus ohnehin vom
  * DB-Wert überschrieben und hätte keine Wirkung.
+ *
+ * `reason` ist kein Klartext, sondern ein Payload aus reasonPayload() (Katalog-Key +
+ * Parameter) — gerendert wird erst beim Lesen, siehe lib/pool-reason.js.
  */
 function writeEnabled(poolId, enabled, reason) {
     const db = openLiquidityDbRW();
     try {
         const row = db.prepare(`SELECT id FROM pools WHERE id = ?`).get(poolId);
-        if (!row) throw new Error(`Pool ${poolId} nicht in DB-Tabelle pools gefunden (syncPools ausstehend?)`);
+        if (!row) throw new Error(t('api.poolact.pool_row_missing', { pool: poolId }));
         db.prepare(`UPDATE pools SET enabled = ?, enabled_changed_at = ?, enabled_reason = ? WHERE id = ?`)
             .run(enabled ? 1 : 0, Date.now(), reason, poolId);
     } finally {
@@ -206,7 +211,7 @@ function runCli(scriptRelPath, cliArgs, { timeoutMs = 90_000 } = {}) {
         let stderr = '';
         const timer = setTimeout(() => {
             try { proc.kill('SIGTERM'); } catch {}
-            resolve({ ok: false, error: `Timeout nach ${timeoutMs / 1000}s`, log: [], result: {} });
+            resolve({ ok: false, error: t('api.common.timeout_s', { seconds: timeoutMs / 1000 }), log: [], result: {} });
         }, timeoutMs);
         proc.stdout.on('data', c => { stdout += c.toString(); });
         proc.stderr.on('data', c => { stderr += c.toString(); });
@@ -216,14 +221,14 @@ function runCli(scriptRelPath, cliArgs, { timeoutMs = 90_000 } = {}) {
             const lines = stdout.split('\n').map(l => l.trim()).filter(Boolean);
             const jsonLine = [...lines].reverse().find(l => l.startsWith('{') && l.endsWith('}'));
             if (!jsonLine) {
-                resolve({ ok: false, error: `Kein JSON-Output (exit=${code})`, log: [{ level: 'error', msg: stderr.slice(0, 500) }], result: {}, _raw: stdout });
+                resolve({ ok: false, error: t('api.common.no_json_output_exit', { code }), log: [{ level: 'error', msg: stderr.slice(0, 500) }], result: {}, _raw: stdout });
                 return;
             }
             try {
                 const parsed = JSON.parse(jsonLine);
                 resolve(parsed);
             } catch (err) {
-                resolve({ ok: false, error: `JSON-Parse fehlgeschlagen: ${err.message}`, log: [], result: {}, _raw: stdout });
+                resolve({ ok: false, error: t('api.common.json_parse_failed', { error: err.message }), log: [], result: {}, _raw: stdout });
             }
         });
     });
@@ -251,21 +256,21 @@ function runEstimateCosts(poolPair, action, amount) {
 function buildCliArgs(action, body, poolPair) {
     const args = ['--pool', poolPair, '--json'];
     if (body.mode === 'full') {
-        if (action !== 'withdraw') return { error: 'mode "full" ist nur für withdraw erlaubt' };
+        if (action !== 'withdraw') return { error: t('api.poolact.mode_full_withdraw_only') };
         args.push('--full');
     } else if (body.mode === 'usdc') {
-        if (body.usdc == null) return { error: 'usdc fehlt im Body' };
+        if (body.usdc == null) return { error: t('api.common.missing_in_body', { field: 'usdc' }) };
         args.push('--usdc', String(body.usdc));
     } else if (body.mode === 'token') {
-        if (!body.tokenSymbol || body.amount == null) return { error: 'tokenSymbol oder amount fehlt im Body' };
+        if (!body.tokenSymbol || body.amount == null) return { error: t('api.poolact.missing_token_amount') };
         args.push('--token', String(body.tokenSymbol), '--amount', String(body.amount));
     } else if (body.mode === 'pair') {
         // Beide Seiten als Obergrenze (Engpass-Logik) — nur für deposit, withdraw nutzt es nicht.
-        if (action !== 'deposit') return { error: 'mode "pair" ist nur für deposit erlaubt' };
-        if (body.maxA == null || body.maxB == null) return { error: 'maxA oder maxB fehlt im Body' };
+        if (action !== 'deposit') return { error: t('api.poolact.mode_pair_deposit_only') };
+        if (body.maxA == null || body.maxB == null) return { error: t('api.poolact.missing_max_ab') };
         args.push('--max-a', String(body.maxA), '--max-b', String(body.maxB));
     } else {
-        return { error: `unbekannter mode: "${body.mode}" (erlaubt: usdc | token | pair | full)` };
+        return { error: t('api.poolact.unknown_mode', { mode: body.mode }) };
     }
     if (action === 'deposit' && body.isNew) args.push('--new');
     if (action === 'withdraw') {
@@ -307,7 +312,7 @@ function triggerWalletMonitor() {
 
 router.get('/liquidity/:poolId/position-state', (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
     const state = readPositionState(req.params.poolId);
 
     // btcPrice aus data.json
@@ -374,10 +379,10 @@ router.get('/liquidity/:poolId/position-state', (req, res) => {
  */
 router.get('/liquidity/:poolId/position-state/live', async (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
     try {
         const live = await runCli('bin/position-state.js', ['--pool', pool.pair], { timeoutMs: 15_000 });
-        res.json(live ?? { ok: false, error: 'kein Ergebnis' });
+        res.json(live ?? { ok: false, error: t('api.common.no_result') });
     } catch (err) {
         res.json({ ok: false, error: err.message });
     }
@@ -395,7 +400,7 @@ router.get('/liquidity/:poolId/position-state/live', async (req, res) => {
  */
 router.get('/liquidity/:poolId/deposit-gas-estimate', async (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
     const isNew          = req.query.isNew === '1' || req.query.isNew === 'true';
     const minUsdcDeposit  = isNew ? 5 : (pool.btcPricePoolId ? 2 : 1);
@@ -407,12 +412,12 @@ router.get('/liquidity/:poolId/deposit-gas-estimate', async (req, res) => {
     try {
         const keypairPath = readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
         const kp          = keypairPath ? loadKeypair(keypairPath) : null;
-        if (!kp) throw new Error('Keypair nicht konfiguriert');
+        if (!kp) throw new Error(t('api.poolact.keypair_missing'));
         const conn     = new Connection(NEXUS_RPC_FRESH, 'confirmed');
         const lamports = await conn.getBalance(new PublicKey(kp.pubkey));
         walletSolTotal = lamports / LAMPORTS_PER_SOL;
     } catch (err) {
-        return res.status(500).json({ error: `SOL-Balance konnte nicht gelesen werden: ${err.message}` });
+        return res.status(500).json({ error: t('api.poolact.sol_balance_failed', { error: err.message }) });
     }
 
     let solPrice = 0;
@@ -448,14 +453,14 @@ router.get('/liquidity/:poolId/deposit-gas-estimate', async (req, res) => {
 
 router.post('/liquidity/:poolId/preview', async (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
     const action = req.body?.action;
     if (action !== 'deposit' && action !== 'withdraw') {
-        return res.status(400).json({ error: `action muss "deposit" oder "withdraw" sein (erhalten: "${action}")` });
+        return res.status(400).json({ error: t('api.poolact.invalid_action', { action }) });
     }
     if (action === 'deposit' && pool.uiDepositDisabled) {
-        return res.status(409).json({ error: 'Dieser Pool akzeptiert keine manuellen Einzahlungen (Preis-Referenzpool).' });
+        return res.status(409).json({ error: t('api.poolact.no_manual_deposit') });
     }
 
     const built = buildCliArgs(action, req.body, pool.pair);
@@ -486,9 +491,9 @@ router.post('/liquidity/:poolId/preview', async (req, res) => {
 
 router.post('/liquidity/:poolId/deposit', async (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
     if (pool.uiDepositDisabled) {
-        return res.status(409).json({ error: 'Dieser Pool akzeptiert keine manuellen Einzahlungen (Preis-Referenzpool).' });
+        return res.status(409).json({ error: t('api.poolact.no_manual_deposit') });
     }
 
     const built = buildCliArgs('deposit', req.body, pool.pair);
@@ -503,7 +508,7 @@ router.post('/liquidity/:poolId/deposit', async (req, res) => {
 
 router.post('/liquidity/:poolId/withdraw', async (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
     const built = buildCliArgs('withdraw', req.body, pool.pair);
     if (built.error) return res.status(400).json({ error: built.error });
@@ -517,17 +522,17 @@ router.post('/liquidity/:poolId/withdraw', async (req, res) => {
 
 router.post('/liquidity/:poolId/rebalance', (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
-    if (!pool.active) return res.status(409).json({ error: 'Pool ist inaktiv – kein Rebalancing möglich.' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
+    if (!pool.active) return res.status(409).json({ error: t('api.poolact.pool_inactive') });
 
     const flagFile = path.join(PATHS.liquidityData, `force-rebalance-${pool.id}.flag`);
     try {
         fs.writeFileSync(flagFile, '', 'utf8');
     } catch (err) {
-        return res.status(500).json({ error: `Flag konnte nicht gesetzt werden: ${err.message}` });
+        return res.status(500).json({ error: t('api.poolact.flag_failed', { error: err.message }) });
     }
 
-    res.json({ ok: true, message: 'Rebalancing beim nächsten Bot-Tick gestartet.' });
+    res.json({ ok: true, message: t('api.poolact.rebalance_queued') });
 });
 
 /** POST /api/pools/liquidity/:poolId/toggle-enabled
@@ -541,16 +546,16 @@ router.post('/liquidity/:poolId/rebalance', (req, res) => {
  */
 router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'pool not found' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
     const enabled = req.body?.enabled;
     if (typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'Body { enabled: boolean } erforderlich' });
+        return res.status(400).json({ error: t('api.poolact.body_enabled_required') });
     }
 
     if (enabled === false && hasOpenPosition(pool.id)) {
         return res.status(409).json({
-            error: 'Pool hat eine offene Position (Guthaben) – erst auszahlen, dann deaktivieren.',
+            error: t('api.poolact.pool_has_position'),
         });
     }
 
@@ -566,8 +571,8 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
             const gateStatus = poolSettings.dryRunGate?.status ?? 'pending';
             return res.status(409).json({
                 error: gateStatus === 'failed'
-                    ? `Dry-Run-Gate fehlgeschlagen: ${poolSettings.dryRunGate.error ?? 'unbekannter Fehler'} – Freigabe erst möglich, wenn der automatische Testlauf erfolgreich war.`
-                    : 'Dry-Run-Gate noch ausstehend – der automatische Testlauf (deposit.js --dry-run) läuft erst, sobald erste Pool-Daten vorliegen (~1 Bot-Zyklus nach der Übernahme).',
+                    ? t('api.poolact.dryrun_failed', { error: poolSettings.dryRunGate.error ?? t('api.common.unknown_error') })
+                    : t('api.poolact.dryrun_pending'),
                 gateStatus,
             });
         }
@@ -575,13 +580,13 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
 
     const current = pool.enabled !== false; // Default fehlend = freigegeben
     if (current === enabled) {
-        return res.json({ ok: true, enabled, message: 'Pool war bereits im gewünschten Zustand.', unchanged: true });
+        return res.json({ ok: true, enabled, message: t('api.poolact.already_in_state'), unchanged: true });
     }
 
     try {
-        writeEnabled(pool.id, enabled, enabled ? 'Manuell aktiviert über Settings-UI' : 'Manuell deaktiviert über Settings-UI');
+        writeEnabled(pool.id, enabled, reasonPayload(enabled ? 'reason.manual_enable' : 'reason.manual_disable'));
     } catch (err) {
-        return res.status(500).json({ error: `Konnte enabled nicht setzen: ${err.message}` });
+        return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
     }
 
     triggerExport();
@@ -589,14 +594,14 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
         ok: true,
         enabled,
         message: enabled
-            ? `Pool ${pool.displayPair ?? pool.pair} aktiviert – kann wieder Kapital aufnehmen.`
-            : `Pool ${pool.displayPair ?? pool.pair} deaktiviert – kein Cleanup-Reinvest mehr.`,
+            ? t('api.poolact.pool_enabled_msg', { pool: pool.displayPair ?? pool.pair })
+            : t('api.poolact.pool_disabled_msg', { pool: pool.displayPair ?? pool.pair }),
     });
 });
 
 router.post('/liquidity/cleanup/run', async (req, res) => {
     if (isCleanupRunning()) {
-        return res.status(409).json({ ok: false, error: 'Cleanup läuft bereits – bitte warten.' });
+        return res.status(409).json({ ok: false, error: t('api.poolact.cleanup_running') });
     }
     const result = await runCli('bin/cleanup.js', [], { timeoutMs: 300_000 });
     const status = result.ok ? 200 : 409;
@@ -610,32 +615,32 @@ router.post('/liquidity/cleanup/run', async (req, res) => {
  */
 router.post('/liquidity/:poolId/advisor-rebalance', (req, res) => {
     const pool = findPool(req.params.poolId);
-    if (!pool) return res.status(404).json({ error: 'Pool nicht gefunden.' });
-    if (!pool.active) return res.status(409).json({ error: 'Pool ist inaktiv – kein Rebalancing möglich.' });
+    if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
+    if (!pool.active) return res.status(409).json({ error: t('api.poolact.pool_inactive') });
 
     const hint = readAdvisorHint(pool);
     if (!hint) {
-        return res.status(409).json({ error: 'Keine aktuelle Advisor-Empfehlung vorhanden oder Range bereits auf Empfehlung.' });
+        return res.status(409).json({ error: t('api.poolact.no_advisor_hint') });
     }
 
     try {
         writeFixedPct(pool.id, hint.recommendedPct);
     } catch (err) {
-        return res.status(500).json({ error: `fixedPct konnte nicht in der DB gesetzt werden: ${err.message}` });
+        return res.status(500).json({ error: t('api.poolact.fixedpct_failed', { error: err.message }) });
     }
 
     const flagFile = path.join(PATHS.liquidityData, `force-rebalance-${pool.id}.flag`);
     try {
         fs.writeFileSync(flagFile, '', 'utf8');
     } catch (err) {
-        return res.status(500).json({ error: `Rebalance-Flag konnte nicht gesetzt werden: ${err.message}` });
+        return res.status(500).json({ error: t('api.poolact.rebalance_flag_failed', { error: err.message }) });
     }
 
     res.json({
         ok:          true,
         previousPct: hint.currentPct,
         newPct:      hint.recommendedPct,
-        message:     `Range ±${hint.currentPct}% → ±${hint.recommendedPct}% gesetzt. Rebalancing beim nächsten Bot-Tick.`,
+        message:     t('api.poolact.range_set', { from: hint.currentPct, to: hint.recommendedPct }),
     });
 });
 

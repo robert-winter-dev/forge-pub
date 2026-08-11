@@ -25,6 +25,7 @@ const SETTINGS_DB    = PATHS.settingsDb;
 const LIQUIDITY_DATA_PATH = resolve(__dirnameCleanup, '../../../html/liquidity/data/data.json');
 
 import { config, setPoolActive, isPoolEnabled } from '../lib/config.js';
+import { t } from '../../../lib/i18n.js';
 import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset } from '../lib/settings-auto.js';
 import {
     openDatabase, syncPools, insertTransaction, noteSwapFail, resetSwapFail,
@@ -126,7 +127,7 @@ const CLEANUP_MODE = process.env.CLEANUP_MODE
     ?? (process.env.CLEANUP_ENABLED === 'false' ? 'disabled' : 'ranking');
 
 if (CLEANUP_MODE === 'disabled') {
-    console.log('[cleanup] CLEANUP_MODE=disabled – Job übersprungen.');
+    console.log(`[cleanup] ${t('cli.cl.mode_disabled')}`);
     process.exit(0);
 }
 
@@ -265,7 +266,7 @@ async function swapTo(token, amount, outputMint, outputDecimals, outputSymbol, k
                 const directPool = findDirectOrcaPool(token.mint, outputMint);
                 if (directPool) {
                     try {
-                        console.warn(`[cleanup] ${label}: Jupiter-Mint-Order-Fehler (0x1788) – Fallback auf direkten Orca-Swap über ${directPool.pair}`);
+                        console.warn(`[cleanup] ${label}: ${t('cli.cl.mint_order_fallback', { pool: directPool.pair })}`);
                         const { amountOut, txSignature } = await getAdapter(directPool).swapExactIn({
                             poolAddress:   directPool.address,
                             inputMint:     token.mint,
@@ -284,7 +285,7 @@ async function swapTo(token, amount, outputMint, outputDecimals, outputSymbol, k
                         // weiter in den normalen Retry-/Notify-Pfad
                     }
                 } else {
-                    console.warn(`[cleanup] ${label}: Mint-Order-Fehler (0x1788), aber kein direkter Orca-Pool in config gefunden`);
+                    console.warn(`[cleanup] ${label}: ${t('cli.cl.mint_order_no_pool')}`);
                 }
             }
             console.warn(`[cleanup] swap ${label} fehlgeschlagen (Versuch ${attempt}): ${err.message}`);
@@ -294,7 +295,7 @@ async function swapTo(token, amount, outputMint, outputDecimals, outputSymbol, k
             } else {
                 const fails = noteSwapFail(db, swapKey, err.message);
                 if (fails < ESCALATE_AT) {
-                    console.warn(`[cleanup] swap ${label} transient (${fails}/${ESCALATE_AT} Läufe in Folge – oft selbstheilend via Cross-Swap, kein Alarm)`);
+                    console.warn(`[cleanup] swap ${label} ${t('cli.cl.swap_transient', { fails, max: ESCALATE_AT })}`);
                 } else {
                     await notify.warn(`cleanup swap ${label} ${fails}× in Folge fehlgeschlagen`, err);
                 }
@@ -380,7 +381,7 @@ async function sweepDust(db, keypair, connection) {
         const restPart = balance - solPart;
         const restUsd  = usdcValue - solDeficitUsd;
         if (restUsd < DUST_SWAP_MIN_USDC) {
-            console.log(`[cleanup:dust] ${token.symbol} → SOL komplett (Rest ${restUsd.toFixed(4)} USDC wäre unter der Dust-Grenze).`);
+            console.log(`[cleanup:dust] ${t('cli.cl.dust_full_swap', { token: token.symbol, rest: restUsd.toFixed(4) })}`);
             await swapTo(token, balance, WSOL_MINT, SOL_DECIMALS, 'SOL', keypair, connection, null, note);
             solDeficitUsd = 0;
             return;
@@ -409,7 +410,7 @@ async function sweepDust(db, keypair, connection) {
 
         if (usdcValue < DUST_SWAP_MIN_USDC) {
             clearDustWatch(db, token.mint);
-            console.log(`[cleanup:dust] ${token.symbol} ~${usdcValue.toFixed(4)} USDC – vernachlässigbar (< ${DUST_SWAP_MIN_USDC} USDC), liegen lassen.`);
+            console.log(`[cleanup:dust] ${t('cli.cl.dust_negligible', { token: token.symbol, usdc: usdcValue.toFixed(4), min: DUST_SWAP_MIN_USDC })}`);
             continue;
         }
         if (usdcValue >= DUST_SWAP_MAX_USDC) {
@@ -417,7 +418,7 @@ async function sweepDust(db, keypair, connection) {
             const now = Date.now();
             if (!watch) {
                 startDustWatch(db, token.mint, usdcValue);
-                console.log(`[cleanup:dust] ${token.symbol} ~${usdcValue.toFixed(2)} USDC – kein Dust (>= ${DUST_SWAP_MAX_USDC} USDC), bleibt für regulären Deposit liegen (Beobachtung gestartet).`);
+                console.log(`[cleanup:dust] ${t('cli.cl.dust_not_dust', { token: token.symbol, usdc: usdcValue.toFixed(2), max: DUST_SWAP_MAX_USDC })}`);
                 continue;
             }
             const elapsedHours = (now - watch.first_seen_at) / 3_600_000;
@@ -459,9 +460,9 @@ function _enableRankingExitForPool(poolId) {
             ON CONFLICT (bot_id, pool_id) DO UPDATE SET settings = excluded.settings
         `).run(poolId, json);
         sdb.close();
-        console.log(`[cleanup:ranking] Ranking-Exit für ${poolId} aktiviert (24h)`);
+        console.log(`[cleanup:ranking] ${t('cli.cl.ranking_exit_on', { pool: poolId })}`);
     } catch (err) {
-        console.warn(`[cleanup:ranking] Ranking-Exit konnte nicht aktiviert werden: ${err.message}`);
+        console.warn(`[cleanup:ranking] ${t('cli.cl.ranking_exit_failed', { error: err.message })}`);
     }
 }
 
@@ -485,7 +486,7 @@ function _loadRankingIneligiblePools() {
             } catch { /* korrupte JSON ignorieren */ }
         }
     } catch (err) {
-        console.warn(`[cleanup:ranking] Eligibility-Settings nicht lesbar: ${err.message}`);
+        console.warn(`[cleanup:ranking] ${t('cli.cl.eligibility_unreadable', { error: err.message })}`);
     }
     return ineligible;
 }
@@ -522,7 +523,7 @@ function _loadCleanupCooldownBlockedPools(db) {
     }
     for (const [poolId, { until, reason }] of blocked) {
         const remainingMin = Math.ceil((until - Date.now()) / 60_000);
-        console.log(`[cleanup:ranking] ${poolId} im ${reason}-Cooldown (noch ${remainingMin} Min) – vom Ranking ausgeschlossen.`);
+        console.log(`[cleanup:ranking] ${t('cli.cl.cooldown_excluded', { pool: poolId, reason, min: remainingMin })}`);
     }
     return blocked;
 }
@@ -541,19 +542,19 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
     const targetPool = allPools.find(p => p.id === targetPoolId);
 
     if (!targetPool) {
-        console.log(`[cleanup:invest] Pool '${targetPoolId}' nicht gefunden – Job übersprungen.`);
+        console.log(`[cleanup:invest] ${t('cli.cl.pool_not_found_skip', { pool: targetPoolId })}`);
         await notify.warn('cleanup:invest', new Error(`Ziel-Pool '${targetPoolId}' nicht konfiguriert`));
         return;
     }
 
     // Benutzer-Sperre: in gesperrte Pools (enabled=false) wird niemals investiert/reaktiviert.
     if (!isPoolEnabled(targetPool)) {
-        console.log(`[cleanup:invest] Pool ${targetPool.pair} ist gesperrt (enabled=false) – Invest übersprungen, Kapital bleibt liquide.`);
+        console.log(`[cleanup:invest] ${t('cli.cl.pool_locked_skip', { pool: targetPool.pair })}`);
         return;
     }
 
     const wasInactive = !targetPool.active;
-    console.log(`[cleanup:invest] Ziel-Pool: ${targetPool.pair}${wasInactive ? ' (inaktiv – wird bei Erfolg reaktiviert)' : ''}${skipCap ? ' (kein Cap)' : ''}`);
+    console.log(`[cleanup:invest] ${t('cli.cl.target_pool', { pool: targetPool.pair })}${wasInactive ? ` (${t('cli.cl.inactive_reactivate')})` : ''}${skipCap ? ` (${t('cli.cl.no_cap')})` : ''}`);
 
     if (targetPool.volatilePair) {
         await _investVolatilePair(targetPool, db, keypair, connection, { skipCap });
@@ -567,7 +568,7 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
             if (getOpenPosition(db, targetPoolId)) {
                 // Bestehende Position vorhanden → sofort aktivieren (Normalfall)
                 setPoolActive(targetPoolId, true);
-                console.log(`[cleanup:invest] Pool ${targetPool.pair} auf active=true gesetzt`);
+                console.log(`[cleanup:invest] ${t('cli.liq.pool_activated', { pool: targetPool.pair })}`);
                 ensureScoreLimitEnabled(targetPoolId);
                 const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
                 ensureTvlProtectionDefaults(targetPoolId, t, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
@@ -594,15 +595,14 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                 const walletUsdc = await getUsableUsdcBalanceFresh(keypair.publicKey);
                 if (walletUsdc >= minReactivateUsd) {
                     setPoolActive(targetPoolId, true);
-                    console.log(`[cleanup:invest] Pool ${targetPool.pair} auf active=true gesetzt – ${walletUsdc.toFixed(2)} USDC bereit, Bot öffnet Position im nächsten Zyklus`);
+                    console.log(`[cleanup:invest] ${t('cli.cl.reactivated_ready', { pool: targetPool.pair, usdc: walletUsdc.toFixed(2) })}`);
                     ensureScoreLimitEnabled(targetPoolId);
                     const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
                     ensureTvlProtectionDefaults(targetPoolId, t, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
                     ensureTrailingStopMinimumReset(targetPoolId);
                 } else {
                     const floorNote = CLEANUP_MIN_DEPOSIT > 0 ? `, Min-Floor ${CLEANUP_MIN_DEPOSIT}` : '';
-                    console.log(`[cleanup:invest] Pool ${targetPool.pair}: keine offene Position und zu wenig USDC ` +
-                        `(${walletUsdc.toFixed(2)} < ${minReactivateUsd.toFixed(2)}; 30 % von Ziel ${reactTargetUsdc.toFixed(2)}${floorNote}) – nicht aktiviert`);
+                    console.log(`[cleanup:invest] ${t('cli.cl.not_reactivated', { pool: targetPool.pair, have: walletUsdc.toFixed(2), min: minReactivateUsd.toFixed(2), target: reactTargetUsdc.toFixed(2), floorNote })}`);
                 }
             }
         } catch (err) {
@@ -630,7 +630,7 @@ async function runCleanupByRanking(db, keypair, connection) {
     try {
         scoreByPool = _loadAllOpportunityScores();
     } catch {
-        console.log(`[cleanup:ranking] data.json nicht lesbar – Cleanup übersprungen.`);
+        console.log(`[cleanup:ranking] ${t('cli.cl.data_json_unreadable')}`);
         await notify.warn('cleanup:ranking', new Error('data.json nicht lesbar'));
         return;
     }
@@ -649,7 +649,7 @@ async function runCleanupByRanking(db, keypair, connection) {
     }
 
     if (scored.length === 0) {
-        console.log(`[cleanup:ranking] Keine Opportunity-Score-Daten verfügbar – Kapital bleibt liquide.`);
+        console.log(`[cleanup:ranking] ${t('cli.cl.no_score_data')}`);
         await notify.info?.('cleanup:ranking', 'Keine Opportunity-Score-Daten – Cleanup übersprungen.');
         return;
     }
@@ -679,12 +679,12 @@ async function runCleanupByRanking(db, keypair, connection) {
     }
     const wasInactive = !targetPool?.active;
 
-    console.log(`[cleanup:ranking] Bester Pool: ${best.id} · Opportunity Score ${best.score}${best.hopiumVeto ? ' ⚠️ Hopium-Veto' : ''}${wasInactive ? ' (inaktiv – wird reaktiviert)' : ''}`);
+    console.log(`[cleanup:ranking] ${t('cli.cl.best_pool', { pool: best.id, score: best.score })}${best.hopiumVeto ? ' ⚠️ Hopium-Veto' : ''}${wasInactive ? ` (${t('cli.cl.inactive_reactivate_short')})` : ''}`);
 
     if (best.score < CLEANUP_MIN_SCORE) {
         console.log(`[cleanup:ranking] Opportunity Score ${best.score} < Mindestscore ${CLEANUP_MIN_SCORE} – Kapital bleibt liquide.`);
         await notify.info?.('cleanup:ranking',
-            `Bester Pool ${targetPool?.pair ?? best.id} hat Opportunity Score ${best.score} < ${CLEANUP_MIN_SCORE} – Cleanup übersprungen.`
+            t('cli.cl.best_below_min', { pool: targetPool?.pair ?? best.id, score: best.score, min: CLEANUP_MIN_SCORE })
         );
         return;
     }
@@ -723,7 +723,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
         if (tokenPrice === 0) {
             // Kein DB-Preispfad vorhanden (z.B. Token nur in nicht-USDC-Pool wie JTO/JitoSOL).
             // Jupiter wird den echten Preis bestimmen – Dust-Check überspringen.
-            console.log(`[cleanup:invest] ${token.symbol} ${bal.toFixed(6)} (Preis unbekannt) – Swap-Versuch via Jupiter`);
+            console.log(`[cleanup:invest] ${t('cli.cl.price_unknown_swap', { token: token.symbol, balance: bal.toFixed(6) })}`);
             await swapTo(token, bal, USDC_MINT, USDC_DECIMALS, 'USDC', keypair, connection, targetPool.id);
             continue;
         }
@@ -755,7 +755,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
                 console.log(`[cleanup:invest] SOL-Surplus ${solSurplus.toFixed(4)} (~${solSurplusUsd.toFixed(2)} USDC) → USDC`);
                 await swapTo(SOL_TOKEN, solSurplus, USDC_MINT, USDC_DECIMALS, 'USDC', keypair, connection, targetPool.id);
             } else if (solSurplus > 0) {
-                console.log(`[cleanup:invest] SOL-Surplus ~${solSurplusUsd.toFixed(2)} USDC < ${MIN_USDC_AMOUNT} – kein Swap.`);
+                console.log(`[cleanup:invest] ${t('cli.cl.sol_surplus_small', { usdc: solSurplusUsd.toFixed(2), min: MIN_USDC_AMOUNT })}`);
             }
         }
     }
@@ -883,7 +883,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
                     }
                     const usdcNeeded  = totalUsdc * (usdcPct / 100);
                     const swapAmount  = usdcNeeded / tokenPrice;
-                    console.log(`[cleanup:invest] ${targetPool.pair}: kein USDC → swap ${swapAmount.toFixed(6)} ${nonUsdcSym} (~${usdcNeeded.toFixed(2)} USDC) für Deposit`);
+                    console.log(`[cleanup:invest] ${targetPool.pair}: ${t('cli.cl.no_usdc_swap', { amount: swapAmount.toFixed(6), token: nonUsdcSym, usdc: usdcNeeded.toFixed(2) })}`);
                     await swapTo(
                         { mint: nonUsdcMint, decimals: nonUsdcDec, symbol: nonUsdcSym },
                         swapAmount, USDC_MINT, USDC_DECIMALS, 'USDC',
@@ -891,7 +891,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
                     );
                     walletUsdc = await getUsableUsdcBalanceFresh(keypair.publicKey);
                 } else {
-                    console.log(`[cleanup:invest] ${targetPool.pair}: Token-Rest ${totalUsdc.toFixed(4)} USDC zu gering für Pre-Swap – skip.`);
+                    console.log(`[cleanup:invest] ${targetPool.pair}: ${t('cli.cl.token_rest_small', { usdc: totalUsdc.toFixed(4) })}`);
                 }
             } catch (err) {
                 console.warn(`[cleanup:invest] ${targetPool.pair}: Pre-Swap fehlgeschlagen: ${err.message}`);
@@ -945,7 +945,7 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
         const tokenPrice = getTokenUsdPrice(token.mint, db) || 0;
         const usdEst     = bal * tokenPrice;
         if (tokenPrice === 0) {
-            console.log(`[cleanup:invest] ${token.symbol} ${bal.toFixed(6)} (Preis unbekannt) – Swap-Versuch via Jupiter`);
+            console.log(`[cleanup:invest] ${t('cli.cl.price_unknown_swap', { token: token.symbol, balance: bal.toFixed(6) })}`);
             await swapTo(token, bal, USDC_MINT, USDC_DECIMALS, 'USDC', keypair, connection, targetPool.id);
             continue;
         }
@@ -963,16 +963,16 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
         poolPrice = poolStats.price;
         quotePrice = getTokenUsdPrice(targetPool.quoteTokenMint, db);
         if (quotePrice <= 0) {
-            console.error(`[cleanup:invest] Kein USD-Preis für quoteToken ${targetPool.quoteTokenMint} – abgebrochen.`);
+            console.error(`[cleanup:invest] ${t('cli.cl.no_quote_price', { mint: targetPool.quoteTokenMint })}`);
             return;
         }
     } catch (err) {
-        console.error(`[cleanup:invest] Frische Preise nicht lesbar: ${err.message} – abgebrochen.`);
+        console.error(`[cleanup:invest] ${t('cli.cl.fresh_prices_unreadable', { error: err.message })}`);
         await notify.warn('cleanup:invest prices', err);
         return;
     }
     if (poolPrice <= 0 || quotePrice <= 0) {
-        console.error(`[cleanup:invest] Preise ungültig (pool=${poolPrice}, quote=${quotePrice}) – abgebrochen.`);
+        console.error(`[cleanup:invest] ${t('cli.cl.prices_invalid', { pool: poolPrice, quote: quotePrice })}`);
         return;
     }
 
@@ -1001,7 +1001,7 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
         clmmPctB = ratio.pctB;
         console.log(`[cleanup:invest] ${targetPool.pair}: CLMM-Ratio ${clmmPctA}%/${clmmPctB}% (${tokenASymbol}/${tokenBSymbol})`);
     } catch (err) {
-        console.warn(`[cleanup:invest] ${targetPool.pair}: CLMM-Ratio nicht bestimmbar – 50/50 Fallback (${err.message})`);
+        console.warn(`[cleanup:invest] ${targetPool.pair}: ${t('cli.cl.clmm_ratio_fallback', { error: err.message })}`);
     }
 
     // ─── 3. SOL-Surplus → USDC (nur wenn SOL kein Pool-Token ist) ─────────
@@ -1100,7 +1100,7 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
             await swapTo(tokenADef, swapAmount, targetPool.tokenB, targetPool.decimalsB, tokenBSymbol, keypair, connection, targetPool.id);
         } else {
             const rawSolDisp = walletAFinal + config.solReserve + SOL_TX_FEE_BUFFER;
-            console.log(`[cleanup:invest] Cross-swap ${tokenASymbol}→${tokenBSymbol} übersprungen – SOL-Reserve-Schutz (${rawSolDisp.toFixed(4)} SOL, Min: ${SOL_TOPUP_TRIGGER} SOL).`);
+            console.log(`[cleanup:invest] ${t('cli.cl.cross_swap_skipped', { from: tokenASymbol, to: tokenBSymbol, sol: rawSolDisp.toFixed(4), min: SOL_TOPUP_TRIGGER })}`);
         }
     } else if (surplusBUsd >= MIN_CROSS_SWAP_USDC && walletAFinalUsd < finalTargetAUsd) {
         let swapAmount = surplusBUsd / usdPerTokenB;
@@ -1156,22 +1156,22 @@ process.on('uncaughtException', (err) => { releaseLock(); console.error('[cleanu
 
 // SL-Flow hat Vorrang: wenn Stop-Loss gerade ausgeführt wird, diesen Lauf überspringen
 if (isSlLocked()) {
-    console.log('[cleanup] SL-Flow läuft – Cleanup-Lauf übersprungen.');
-    console.log(JSON.stringify({ ok: false, error: 'SL-Flow läuft – Cleanup übersprungen.', log: [], result: {} }));
+    console.log(`[cleanup] ${t('cli.cl.sl_running')}`);
+    console.log(JSON.stringify({ ok: false, error: t('cli.cl.sl_running_short'), log: [], result: {} }));
     process.exit(0);
 }
 
 // Manuelle Aktion (deposit/withdraw via UI) hat Vorrang
 if (isManualLocked()) {
-    console.log('[cleanup] Manuelle Aktion läuft – Cleanup-Lauf übersprungen.');
-    console.log(JSON.stringify({ ok: false, error: 'Manuelle Aktion läuft – Cleanup übersprungen.', log: [], result: {} }));
+    console.log(`[cleanup] ${t('cli.cl.manual_running')}`);
+    console.log(JSON.stringify({ ok: false, error: t('cli.cl.manual_running_short'), log: [], result: {} }));
     process.exit(0);
 }
 
 // Rebalancing hat Vorrang
 if (isRebalanceLocked()) {
-    console.log('[cleanup] Rebalancing läuft – Cleanup-Lauf übersprungen.');
-    console.log(JSON.stringify({ ok: false, error: 'Rebalancing läuft – Cleanup übersprungen.', log: [], result: {} }));
+    console.log(`[cleanup] ${t('cli.cl.rebalance_running')}`);
+    console.log(JSON.stringify({ ok: false, error: t('cli.cl.rebalance_running_short'), log: [], result: {} }));
     process.exit(0);
 }
 
@@ -1203,7 +1203,7 @@ try {
         const targetPoolId = CLEANUP_MODE.slice(5);
         await runCleanupInvestPool(targetPoolId, db, keypair, connection, { skipCap: true });
     } else {
-        console.log(`[cleanup] Unbekannter CLEANUP_MODE '${CLEANUP_MODE}' – Job übersprungen.`);
+        console.log(`[cleanup] ${t('cli.cl.unknown_mode', { mode: CLEANUP_MODE })}`);
     }
 
     // Dust-Sweep: kleine bekannte Pool-Token-Reste → USDC. Läuft unabhängig von
@@ -1212,7 +1212,7 @@ try {
     if (CLEANUP_DUST_ENABLED) {
         await sweepDust(db, keypair, connection);
     } else {
-        console.log('[cleanup:dust] Deaktiviert (CLEANUP_DUST_ENABLED=false) – übersprungen.');
+        console.log(`[cleanup:dust] ${t('cli.cl.dust_disabled')}`);
     }
 
     // Portfolio + frischer Wallet-Snapshot + Sync via Orchestrator. Pro-Pool-Snapshots
@@ -1220,7 +1220,7 @@ try {
     await refreshAfterAction(db);
     recordSuccess('cleanup');
     console.log('[cleanup] Fertig.');
-    console.log(JSON.stringify({ ok: true, result: {}, log: [{ level: 'info', msg: 'Cleanup erfolgreich abgeschlossen.' }] }));
+    console.log(JSON.stringify({ ok: true, result: {}, log: [{ level: 'info', msg: t('cli.cl.success') }] }));
 } catch (err) {
     console.error('[cleanup] FEHLER:', err.message);
     console.log(JSON.stringify({ ok: false, error: err.message, log: [], result: {} }));
@@ -1229,7 +1229,7 @@ try {
     if (streak >= FAIL_THRESHOLD) {
         await notify.error('cleanup', err);
     } else {
-        console.warn(`[cleanup] Alert unterdrückt (Streak ${streak}/${FAIL_THRESHOLD}) – vermutlich transienter Fehler.`);
+        console.warn(`[cleanup] ${t('cli.cl.alert_suppressed', { streak, max: FAIL_THRESHOLD })}`);
     }
     process.exit(1);
 } finally {

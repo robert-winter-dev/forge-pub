@@ -9,7 +9,7 @@
  *     (forge-nexus: zusätzlich Nexus-Statistiken)
  */
 
-import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260809b';
+import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260811b';
 import { initMessageBell } from './message-bell.js?v=20260809a';
 
 const DATA_URL      = 'data/health-status.json';

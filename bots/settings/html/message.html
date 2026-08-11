@@ -3,25 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE - public: Message Center</title>
+    <title data-i18n="msg.page_title">FORGE - public: Message Center</title>
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260731e">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
     <link rel="stylesheet" href="css/message.css?v=20260809g">
+    <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
+         damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
+    <script src="/forge/i18n/active.js"></script>
 </head>
 <body>
 
 <header class="header">
     <div class="header-content">
         <div class="header-col header-logo">
-            <a href="/forge/" title="Zur Hauptseite">
+            <a href="/forge/" title="Zur Hauptseite" data-i18n-attr="title:liq.to_main">
                 <img src="/forge/img/forge-logo.png" alt="FORGE Logo" class="logo-icon">
             </a>
-            <h1>Message <span class="title-word-monitor">Center</span></h1>
+            <h1><span data-i18n="msg.message">Message</span> <span class="title-word-monitor" data-i18n="msg.center">Center</span></h1>
         </div>
         <div class="header-right">
             <span class="last-update" id="lastUpdate">–</span>
-            <button class="notif-bell" id="notifBell" title="Support-Nachrichten">
+            <button class="notif-bell" id="notifBell" title="Support-Nachrichten" data-i18n-attr="title:msg.support_messages">
                 <span class="notif-envelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
             </button>
         </div>
@@ -35,7 +38,7 @@
          Vollbreite-Panel weiter unten. -->
     <div class="mc-detail" id="mcDetail">
         <div class="mc-detail-body" id="mcDetailBody">
-            <div class="msg-empty">Keine Nachricht ausgewählt.</div>
+            <div class="msg-empty" data-i18n="msg.none_selected">Keine Nachricht ausgewählt.</div>
         </div>
     </div>
 
@@ -44,9 +47,9 @@
          in message.js) -->
     <div class="mc-system-panel" id="mcSystemPanel" hidden>
         <div class="mcs-toprow">
-            <h2 class="mcs-title">Rubrik: System</h2>
+            <h2 class="mcs-title" data-i18n="msg.section_system">Rubrik: System</h2>
             <div class="mcs-toprow-right">
-                <input type="search" class="mcs-search" id="mcsSearchInput" placeholder="Suchen…" autocomplete="off">
+                <input type="search" class="mcs-search" id="mcsSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
             </div>
         </div>
         <div id="mcsGrid"></div>
@@ -54,7 +57,7 @@
             <div class="mcs-pagination" id="mcsPagination"></div>
             <button class="mcs-page-btn" id="mcsMarkAllBtn"
                 title="Alle geladenen System-Nachrichten als gelesen markieren"
-                aria-label="Alle als gelesen markieren">&#10003;</button>
+                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_system_read,aria-label:msg.mark_all_read">&#10003;</button>
         </div>
     </div>
 
@@ -62,9 +65,9 @@
          (mcp*) -->
     <div class="mc-system-panel" id="mcPremiumPanel" hidden>
         <div class="mcs-toprow">
-            <h2 class="mcs-title">Rubrik: Premium</h2>
+            <h2 class="mcs-title" data-i18n="msg.section_premium">Rubrik: Premium</h2>
             <div class="mcs-toprow-right">
-                <input type="search" class="mcs-search" id="mcpSearchInput" placeholder="Suchen…" autocomplete="off">
+                <input type="search" class="mcs-search" id="mcpSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
             </div>
         </div>
         <div id="mcpGrid"></div>
@@ -72,7 +75,7 @@
             <div class="mcs-pagination" id="mcpPagination"></div>
             <button class="mcs-page-btn" id="mcpMarkAllBtn"
                 title="Alle geladenen Premium-Nachrichten als gelesen markieren"
-                aria-label="Alle als gelesen markieren">&#10003;</button>
+                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_premium_read,aria-label:msg.mark_all_read">&#10003;</button>
         </div>
     </div>
 
@@ -83,10 +86,10 @@
          alle drei Rubriken hinweg möglich, siehe .mct-table in message.css). -->
     <div class="mc-system-panel" id="mcSupportPanel" hidden>
         <div class="mcs-toprow">
-            <h2 class="mcs-title">Rubrik: Support</h2>
+            <h2 class="mcs-title" data-i18n="msg.section_support">Rubrik: Support</h2>
             <div class="mcs-toprow-right">
-                <button class="msg-new-btn" id="msgNewBtn" hidden>Neue Nachricht</button>
-                <input type="search" class="mcs-search" id="mcSupSearchInput" placeholder="Suchen…" autocomplete="off">
+                <button class="msg-new-btn" id="msgNewBtn" hidden data-i18n="msg.new_message">Neue Nachricht</button>
+                <input type="search" class="mcs-search" id="mcSupSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
             </div>
         </div>
         <div id="mcSupGrid"></div>
@@ -94,7 +97,7 @@
             <div class="mcs-pagination" id="mcSupPagination"></div>
             <button class="mcs-page-btn" id="mcSupMarkAllBtn"
                 title="Alle Konversationen als gelesen markieren"
-                aria-label="Alle als gelesen markieren">&#10003;</button>
+                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_conversations_read,aria-label:msg.mark_all_read">&#10003;</button>
         </div>
     </div>
 

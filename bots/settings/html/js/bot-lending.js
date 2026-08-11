@@ -11,6 +11,9 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+// `t` ist in diesem Modul mehrfach ein lokaler Variablenname (Token/Element) —
+// der Helfer wird deshalb als `tr` importiert (bin/i18n-check.js kennt beide).
+import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 
 // ── Konstanten ─────────────────────────────────────────────────────────────────
 const SVC_ID = 'forge-lendingbot';
@@ -83,16 +86,16 @@ async function _renderService(el) {
     const card = document.createElement('div');
     card.className = 'settings-card';
     card.innerHTML = `
-        <div class="settings-card-header"><span class="sch-title">Lending Bot</span></div>
+        <div class="settings-card-header"><span class="sch-title">${tr('nav.lending', 'Lending Bot')}</span></div>
         <table class="wallet-action-table">
             <tbody>
                 <tr>
-                    <td class="wat-label">Status</td>
+                    <td class="wat-label">${tr('set.status', 'Status')}</td>
                     <td class="wat-info">
-                        <span class="key-status" id="lb-status-text">laden…</span>
+                        <span class="key-status" id="lb-status-text">${tr('sb.loading_short', 'laden…')}</span>
                     </td>
                     <td class="wat-action">
-                        <button class="btn btn-secondary btn-sm" id="lb-btn-status-manage">Verwalten</button>
+                        <button class="btn btn-secondary btn-sm" id="lb-btn-status-manage">${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
             </tbody>
@@ -112,23 +115,23 @@ function _openBotControlModal() {
     const mid = 'lb-control-modal';
     showModal({
         id: mid,
-        title: 'Lending Bot verwalten',
+        title: tr('slen.manage_bot', 'Lending Bot verwalten'),
         body: `
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="lb-btn-start">&#9654; Start</button>
-                <span class="bcm-hint">Startet den Bot, falls er aktuell gestoppt ist.</span>
+                <button class="btn btn-secondary btn-uniform" id="lb-btn-start">${tr('sb.start_btn', '&#9654; Start')}</button>
+                <span class="bcm-hint">${tr('sb.start_hint', 'Startet den Bot, falls er aktuell gestoppt ist.')}</span>
             </div>
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="lb-btn-stop">&#9632; Stop</button>
-                <span class="bcm-hint">Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.</span>
+                <button class="btn btn-secondary btn-uniform" id="lb-btn-stop">${tr('sb.stop_btn', '&#9632; Stop')}</button>
+                <span class="bcm-hint">${tr('sb.stop_hint', 'Stoppt den Bot vollständig. Bei investiertem Kapital (offener Position) gesperrt — erst auszahlen.')}</span>
             </div>
             <div class="bcm-row">
-                <button class="btn btn-secondary btn-uniform" id="lb-btn-restart">&#8635; Restart</button>
-                <span class="bcm-hint">Stoppt und startet den Bot neu, z.&nbsp;B. nach einer Konfigurationsänderung.</span>
+                <button class="btn btn-secondary btn-uniform" id="lb-btn-restart">${tr('sb.restart_btn', '&#8635; Restart')}</button>
+                <span class="bcm-hint">${tr('sb.restart_hint', 'Stoppt und startet den Bot neu, z.&nbsp;B. nach einer Konfigurationsänderung.')}</span>
             </div>
             <div class="task-status" id="lb-task-status"></div>`,
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -151,15 +154,15 @@ function _parseAutoDeployMode(cfg) {
 }
 
 function _buildAutoDeploySummary(mode, protocols) {
-    if (mode === 'disabled') return '<span class="pool-summary-off">Deaktiviert</span>';
-    if (mode === 'ranking')  return '<span class="pool-summary-on">Bester Pool</span>';
+    if (mode === 'disabled') return '<span class="pool-summary-off">' + tr('sb.disabled', 'Deaktiviert') + '</span>';
+    if (mode === 'ranking')  return '<span class="pool-summary-on">' + tr('sb.best_pool', 'Bester Pool') + '</span>';
     if (mode.startsWith('protocol:')) {
         const id    = mode.slice('protocol:'.length);
         const proto = protocols.find(p => p.id === id);
         const name  = proto?.label ?? id;
-        return `<span class="pool-summary-on">Bestimmter Pool: ${_esc(name)}</span>`;
+        return `<span class="pool-summary-on">${tr('slen.fixed_pool', 'Bestimmter Pool')}: ${_esc(name)}</span>`;
     }
-    return '<span class="pool-summary-off">Deaktiviert</span>';
+    return '<span class="pool-summary-off">' + tr('sb.disabled', 'Deaktiviert') + '</span>';
 }
 
 // Auto-Deploy prüft alle SYNC_INTERVAL_MS (bin/bot.js) im selben Tick wie der
@@ -172,10 +175,12 @@ function _autoDeployCountdownHtml(mode, recordedAtMs) {
     const elapsedMin = (Date.now() - recordedAtMs) / 60000;
     const min = Math.ceil(AUTO_DEPLOY_CHECK_INTERVAL_MIN - elapsedMin);
     if (min <= 0) {
-        return `<div class="wallet-hint" style="font-size:0.78rem;color:var(--danger);margin-bottom:0.75rem;">⚠ Auto-Deploy-Check läuft gerade.</div>`;
+        return `<div class="wallet-hint" style="font-size:0.78rem;color:var(--danger);margin-bottom:0.75rem;">${tr('slen.autodeploy_running', '⚠ Auto-Deploy-Check läuft gerade.')}</div>`;
     }
     const style = min < 2 ? 'color:var(--danger);' : 'color:var(--text-muted);';
-    return `<div class="wallet-hint" style="font-size:0.78rem;${style}margin-bottom:0.75rem;">Nächster Auto-Deploy-Check in ${min} Minute${min === 1 ? '' : 'n'}.</div>`;
+    return `<div class="wallet-hint" style="font-size:0.78rem;${style}margin-bottom:0.75rem;">${min === 1
+        ? tr('slen.autodeploy_next_one', 'Nächster Auto-Deploy-Check in 1 Minute.')
+        : tr('slen.autodeploy_next', 'Nächster Auto-Deploy-Check in {min} Minuten.', { min })}</div>`;
 }
 
 async function _loadAndRenderAutoDeployRow(wrap) {
@@ -202,15 +207,15 @@ function _buildAutoDeployRow(wrap, mode, cfg, protocols, recordedAt) {
     wrap.innerHTML = `
         <tr>
             <td class="wat-label" style="display:flex;align-items:center;gap:0.4rem;">
-                Auto-Deploy
+                ${tr('slen.autodeploy', 'Auto-Deploy')}
                 <span class="info-tip-label"
-                    data-tooltip-title="Auto-Deploy"
-                    data-tooltip-content="Erkennt neues USDC im Wallet und deployed es automatisch. Modus 'Bester Pool' wählt automatisch das Protokoll mit dem höchsten APY. 'Bestimmter Pool' deployt immer in ein von dir festgelegtes Protokoll.">&#9432;</span>
+                    data-tooltip-title="${tr('slen.autodeploy', 'Auto-Deploy')}"
+                    data-tooltip-content="${tr('slen.autodeploy_tip', 'Erkennt neues USDC im Wallet und deployed es automatisch. Modus \'Bester Pool\' wählt automatisch das Protokoll mit dem höchsten APY. \'Bestimmter Pool\' deployt immer in ein von dir festgelegtes Protokoll.')}">&#9432;</span>
             </td>
             <td class="wat-info">${_buildAutoDeploySummary(mode, protocols)}</td>
             <td class="wat-action">
                 <button class="btn btn-secondary btn-sm" id="lb-autodeploy-row-btn"
-                    ${_ctx.getStatus?.(SVC_ID) !== 'active' ? 'disabled' : ''}>Verwalten</button>
+                    ${_ctx.getStatus?.(SVC_ID) !== 'active' ? 'disabled' : ''}>${tr('sb.manage', 'Verwalten')}</button>
             </td>
         </tr>`;
 
@@ -225,36 +230,36 @@ function _depositRangeFieldsHtml(minId, maxId, minVal, maxVal, maxTooltip) {
         <div style="display:flex;gap:1rem;">
             <div style="flex:1">
                 <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                    Minimale Einzahlung
+                    ${tr('sb.min_deposit', 'Minimale Einzahlung')}
                     <span class="info-tip-label"
-                        data-tooltip-title="Minimale Einzahlung"
-                        data-tooltip-content="Mindestbetrag der im Wallet akkumuliert sein muss, bevor Auto-Deploy ausgelöst wird. Kleinere Beträge werden ignoriert und wachsen weiter an.||Leer lassen oder 0 = kein Minimum (deployt ab 1 USDC).">&#9432;</span>
+                        data-tooltip-title="${tr('sb.min_deposit', 'Minimale Einzahlung')}"
+                        data-tooltip-content="${tr('slen.min_deposit_tip', 'Mindestbetrag der im Wallet akkumuliert sein muss, bevor Auto-Deploy ausgelöst wird. Kleinere Beträge werden ignoriert und wachsen weiter an.||Leer lassen oder 0 = kein Minimum (deployt ab 1 USDC).')}">&#9432;</span>
                 </label>
                 <div style="display:flex;align-items:center;gap:0.4rem;">
                     <input type="number" id="${minId}" min="0" step="5"
                            value="${minVal > 0 ? _esc(String(minVal)) : ''}"
-                           placeholder="kein Minimum"
+                           placeholder="${tr('sb.no_minimum', 'kein Minimum')}"
                            style="width:115px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
                     <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
                 </div>
             </div>
             <div style="flex:1">
                 <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                    Maximale Einzahlung
+                    ${tr('sb.max_deposit', 'Maximale Einzahlung')}
                     <span class="info-tip-label"
-                        data-tooltip-title="Maximale Einzahlung"
+                        data-tooltip-title="${tr('sb.max_deposit', 'Maximale Einzahlung')}"
                         data-tooltip-content="${_esc(maxTooltip)}">&#9432;</span>
                 </label>
                 <div style="display:flex;align-items:center;gap:0.4rem;">
                     <input type="number" id="${maxId}" min="0" step="5"
                            value="${maxVal > 0 ? _esc(String(maxVal)) : ''}"
-                           placeholder="kein Limit"
+                           placeholder="${tr('sb.no_limit', 'kein Limit')}"
                            style="width:115px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
                     <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
                 </div>
             </div>
         </div>
-        <p style="margin:-0.3rem 0 0;font-size:0.78rem;color:var(--text-muted)">leer = kein Minimum/Limit</p>`;
+        <p style="margin:-0.3rem 0 0;font-size:0.78rem;color:var(--text-muted)">${tr('sb.empty_no_min_limit', 'leer = kein Minimum/Limit')}</p>`;
 }
 
 function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
@@ -274,12 +279,12 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
 
     showModal({
         id:    mid,
-        title: 'Auto-Deploy',
+        title: tr('slen.autodeploy', 'Auto-Deploy'),
         body:  `
             ${_autoDeployCountdownHtml(mode, recordedAt)}
             <div class="cu-tab-bar">
-                <button class="cu-tab active" data-cu-tab="bestimmter-pool" id="lb-ad-tab-fixed">Bestimmter Pool</button>
-                <button class="cu-tab" data-cu-tab="bester-pool" id="lb-ad-tab-bester">Bester Pool</button>
+                <button class="cu-tab active" data-cu-tab="bestimmter-pool" id="lb-ad-tab-fixed">${tr('slen.fixed_pool', 'Bestimmter Pool')}</button>
+                <button class="cu-tab" data-cu-tab="bester-pool" id="lb-ad-tab-bester">${tr('sb.best_pool', 'Bester Pool')}</button>
             </div>
 
             <div style="min-height:13rem;">
@@ -287,22 +292,22 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
                 <div style="display:flex;flex-direction:column;gap:0.85rem">
                     ${_depositRangeFieldsHtml(
                         'lb-ad-fixed-min-deposit', 'lb-ad-fixed-max-deposit', fixedMinDep, fixedMaxDep,
-                        'Begrenzt wie viel USDC pro Auto-Deploy-Lauf in diesen Pool investiert werden darf. Überschüssiges Guthaben bleibt für den nächsten Lauf im Wallet.||Leer lassen oder 0 = kein Limit.'
+                        tr('slen.fixed_max_tip', 'Begrenzt wie viel USDC pro Auto-Deploy-Lauf in diesen Pool investiert werden darf. Überschüssiges Guthaben bleibt für den nächsten Lauf im Wallet.||Leer lassen oder 0 = kein Limit.')
                     )}
                     <div style="border-top:1px solid var(--border);padding-top:0.75rem">
-                        <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">Pool</label>
+                        <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">${tr('liq.pool', 'Pool')}</label>
                         <select id="lb-ad-fixed-select" class="modal-select"
                                 style="width:100%;box-sizing:border-box;padding:0.3rem 0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:0.875rem">
-                            <option value="" ${currentFixedId === '' ? 'selected' : ''}>Deaktivieren</option>
+                            <option value="" ${currentFixedId === '' ? 'selected' : ''}>${tr('sb.deactivate', 'Deaktivieren')}</option>
                             ${sortedProtos.map(p => `
                                 <option value="${_esc(p.id)}" ${currentFixedId === p.id ? 'selected' : ''}>
-                                    ${_esc(p.label ?? p.id)}${p.active ? '' : ' (inaktiv)'}
+                                    ${_esc(p.label ?? p.id)}${p.active ? '' : tr('sb.suffix_inactive', ' (inaktiv)')}
                                 </option>`).join('')}
                         </select>
                     </div>
                 </div>
                 <div class="bot-actions" style="margin-top:0.9rem;">
-                    <button class="btn btn-secondary btn-uniform" id="lb-ad-fixed-save-btn">Speichern</button>
+                    <button class="btn btn-secondary btn-uniform" id="lb-ad-fixed-save-btn">${tr('msg.save', 'Speichern')}</button>
                 </div>
                 <div class="modal-feedback" id="lb-ad-fixed-feedback"></div>
             </div>
@@ -311,18 +316,18 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
                 <div style="display:flex;flex-direction:column;gap:0.85rem">
                     <label class="cleanup-radio-option">
                         <input type="radio" name="lb-ad-bester-mode" value="ranking" ${mode === 'ranking' ? 'checked' : ''}>
-                        <span>Bester Pool <small style="opacity:0.7;">— Protokoll mit dem höchsten APY</small></span>
+                        <span>${tr('sb.best_pool', 'Bester Pool')} <small style="opacity:0.7;">${tr('slen.best_pool_hint', '— Protokoll mit dem höchsten APY')}</small></span>
                     </label>
                     <label class="cleanup-radio-option">
                         <input type="radio" name="lb-ad-bester-mode" value="disabled" ${mode !== 'ranking' ? 'checked' : ''}>
-                        <span>Deaktiviert</span>
+                        <span>${tr('sb.disabled', 'Deaktiviert')}</span>
                     </label>
                     <div style="border-top:1px solid var(--border);padding-top:0.75rem">
                         <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                            Minimum APR
+                            ${tr('slen.min_apr', 'Minimum APR')}
                             <span class="info-tip-label"
-                                data-tooltip-title="Minimum APR"
-                                data-tooltip-content="Mindest-APY (in Prozent) den ein Protokoll bieten muss, damit Auto-Deploy dort investiert. Protokolle unterhalb dieser Schwelle werden übersprungen.">&#9432;</span>
+                                data-tooltip-title="${tr('slen.min_apr', 'Minimum APR')}"
+                                data-tooltip-content="${tr('slen.min_apr_tip', 'Mindest-APY (in Prozent) den ein Protokoll bieten muss, damit Auto-Deploy dort investiert. Protokolle unterhalb dieser Schwelle werden übersprungen.')}">&#9432;</span>
                         </label>
                         <div style="display:flex;align-items:center;gap:0.5rem;">
                             <input type="number" id="lb-ad-min-apr" min="0" step="0.1"
@@ -335,18 +340,18 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
                     <div style="border-top:1px solid var(--border);padding-top:0.75rem">
                         ${_depositRangeFieldsHtml(
                             'lb-ad-min-deposit', 'lb-ad-max-deposit', minDeposit, maxDeposit,
-                            'Begrenzt wie viel USDC pro Auto-Deploy-Lauf im Bester-Pool-Modus investiert werden darf. Überschüssiges Guthaben bleibt für den nächsten Lauf im Wallet.||Leer lassen oder 0 = kein Limit.'
+                            tr('slen.best_max_tip', 'Begrenzt wie viel USDC pro Auto-Deploy-Lauf im Bester-Pool-Modus investiert werden darf. Überschüssiges Guthaben bleibt für den nächsten Lauf im Wallet.||Leer lassen oder 0 = kein Limit.')
                         )}
                     </div>
                 </div>
                 <div class="bot-actions" style="margin-top:0.9rem;">
-                    <button class="btn btn-secondary btn-uniform" id="lb-ad-bester-save-btn">Speichern</button>
+                    <button class="btn btn-secondary btn-uniform" id="lb-ad-bester-save-btn">${tr('msg.save', 'Speichern')}</button>
                 </div>
                 <div class="modal-feedback" id="lb-ad-bester-feedback"></div>
             </div>
             </div>`,
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -388,7 +393,7 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
             const fb       = modalEl.querySelector(`#${fbId}`);
             if (saveBtn) saveBtn.disabled = conflict;
             if (fb) {
-                if (conflict) { fb.textContent = 'Minimale Einzahlung darf nicht größer als die Maximale sein.'; fb.className = 'modal-feedback error'; }
+                if (conflict) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
                 else if (fb.classList.contains('error')) { fb.textContent = ''; fb.className = 'modal-feedback'; }
             }
         };
@@ -407,13 +412,13 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
         const minVal = minRaw !== '' ? parseFloat(minRaw) : 0;
         const maxVal = maxRaw !== '' ? parseFloat(maxRaw) : 0;
         if (minVal > 0 && maxVal > 0 && minVal > maxVal) {
-            if (fb) { fb.textContent = 'Minimale Einzahlung darf nicht größer als die Maximale sein.'; fb.className = 'modal-feedback error'; }
+            if (fb) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
             return;
         }
 
         const newMode = selectedId === '' ? 'disabled' : `protocol:${selectedId}`;
 
-        if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+        if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
         try {
             const res = await fetch('/api/config/lendingbot', {
                 method:  'PUT',
@@ -427,17 +432,17 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
             if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
 
             mode = newMode;
-            if (fb) { fb.textContent = '✓ Gespeichert.'; fb.className = 'modal-feedback success'; }
+            if (fb) { fb.textContent = tr('sb.saved_dot', '✓ Gespeichert.'); fb.className = 'modal-feedback success'; }
             if (selectedId === '') {
-                _ctx.showToast?.('Auto-Deploy deaktiviert', 'success');
+                _ctx.showToast?.(tr('slen.autodeploy_off', 'Auto-Deploy deaktiviert'), 'success');
             } else {
                 const p = sortedProtos.find(pp => pp.id === selectedId);
-                _ctx.showToast?.(`"Bestimmter Pool" aktiviert: ${p?.label ?? selectedId}`, 'success');
+                _ctx.showToast?.(tr('slen.fixed_pool_on', '"Bestimmter Pool" aktiviert: {pool}', { pool: p?.label ?? selectedId }), 'success');
             }
             _applyModeUI(mode);
             await _loadAndRenderAutoDeployRow(wrap);
         } catch (err) {
-            if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+            if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
         }
     });
 
@@ -446,7 +451,7 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
         const fb       = modalEl.querySelector('#lb-ad-bester-feedback');
         const selected = modalEl.querySelector('input[name="lb-ad-bester-mode"]:checked');
         if (!selected) {
-            if (fb) { fb.textContent = 'Bitte eine Option wählen.'; fb.className = 'modal-feedback error'; }
+            if (fb) { fb.textContent = tr('sb.choose_option', 'Bitte eine Option wählen.'); fb.className = 'modal-feedback error'; }
             return;
         }
         const minAprRaw = modalEl.querySelector('#lb-ad-min-apr')?.value.trim() ?? '';
@@ -455,7 +460,7 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
         const minDepVal = minDepRaw !== '' ? parseFloat(minDepRaw) : 0;
         const maxDepVal = maxDepRaw !== '' ? parseFloat(maxDepRaw) : 0;
         if (minDepVal > 0 && maxDepVal > 0 && minDepVal > maxDepVal) {
-            if (fb) { fb.textContent = 'Minimale Einzahlung darf nicht größer als die Maximale sein.'; fb.className = 'modal-feedback error'; }
+            if (fb) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
             return;
         }
 
@@ -465,7 +470,7 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
         payload.AUTO_DEPLOY_MIN_DEPOSIT = minDepRaw !== '' ? minDepRaw : '0';
         payload.AUTO_DEPLOY_MAX_DEPOSIT = maxDepRaw !== '' ? maxDepRaw : '0';
 
-        if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+        if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
         try {
             const res = await fetch('/api/config/lendingbot', {
                 method:  'PUT',
@@ -475,8 +480,8 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
             if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
 
             mode = newMode;
-            if (fb) { fb.textContent = '✓ Gespeichert.'; fb.className = 'modal-feedback success'; }
-            _ctx.showToast?.(newMode === 'ranking' ? '"Bester Pool" aktiviert' : 'Auto-Deploy deaktiviert', 'success');
+            if (fb) { fb.textContent = tr('sb.saved_dot', '✓ Gespeichert.'); fb.className = 'modal-feedback success'; }
+            _ctx.showToast?.(newMode === 'ranking' ? tr('slen.best_pool_on', '"Bester Pool" aktiviert') : tr('slen.autodeploy_off', 'Auto-Deploy deaktiviert'), 'success');
 
             // "Bester Pool" (aktiv oder bewusst deaktiviert) ist jetzt die
             // gültige Regel — eine zuvor gewählte feste Pool-Auswahl entfernen.
@@ -488,7 +493,7 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
             _applyModeUI(mode);
             await _loadAndRenderAutoDeployRow(wrap);
         } catch (err) {
-            if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+            if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
         }
     });
 }
@@ -506,7 +511,7 @@ function _fmtTvlUsdc(n) {
 
 /** Kurz-Zusammenfassung der TVL-Schutz-Einstellung eines Protokolls. */
 function _tvlGuardSummary(guard) {
-    if (!guard?.enabled) return '<span class="pool-summary-off">Aus</span>';
+    if (!guard?.enabled) return '<span class="pool-summary-off">' + tr('sb.off', 'Aus') + '</span>';
     return `<span class="pool-summary-on">TVL &lt; ${_fmtTvlUsdc(guard.thresholdUsd)}</span>`;
 }
 
@@ -531,25 +536,25 @@ async function _openTvlGuardModal(proto, card) {
         : `<strong style="color:var(--text-muted);">—</strong>`;
     const actTvl = proto.tvlAtActivation != null
         ? ` <span style="color:var(--text-muted);font-weight:400;">(${_fmtTvlUsdc(proto.tvlAtActivation)}
-               <span class="info-tip-label" data-tooltip-title="TVL bei Aktivierung"
-                   data-tooltip-content="Markt-TVL zum Zeitpunkt des Deposits in dieses Protokoll.">&#9432;</span>)</span>`
+               <span class="info-tip-label" data-tooltip-title="${tr('slen.tvl_at_activation', 'TVL bei Aktivierung')}"
+                   data-tooltip-content="${tr('slen.tvl_at_activation_tip', 'Markt-TVL zum Zeitpunkt des Deposits in dieses Protokoll.')}">&#9432;</span>)</span>`
         : '';
 
     showModal({
         id:    mid,
-        title: `TVL-Schutz – ${_esc(proto.label)}`,
+        title: tr('slen.tvl_guard_modal_title', 'TVL-Schutz – {pool}', { pool: _esc(proto.label) }),
         body:  `
             <div style="display:flex;flex-direction:column;gap:0.95rem;">
                 <div class="settings-row" style="background:var(--bg-soft, rgba(255,255,255,0.03));border-radius:8px;padding:0.6rem 0.8rem;">
-                    <span class="settings-label">Aktueller TVL</span>
+                    <span class="settings-label">${tr('sb.current_tvl', 'Aktueller TVL')}</span>
                     <span style="text-align:right;">${curTvl}${actTvl}</span>
                 </div>
                 <div class="settings-row" style="border:none;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                        Auto-Exit aktiv
+                        ${tr('slen.autoexit_active', 'Auto-Exit aktiv')}
                         <span class="info-tip-label"
-                            data-tooltip-title="TVL-Schutz (Auto-Exit)"
-                            data-tooltip-content="Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen.">&#9432;</span>
+                            data-tooltip-title="${tr('sb.tvl_guard_title', 'TVL-Schutz (Auto-Exit)')}"
+                            data-tooltip-content="${tr('slen.tvl_guard_tip', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen.')}">&#9432;</span>
                     </span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="lb-tg-enabled" ${on ? 'checked' : ''}>
@@ -558,10 +563,10 @@ async function _openTvlGuardModal(proto, card) {
                 </div>
                 <div class="tg-dependent" style="opacity:${on ? '1' : '0.4'};">
                     <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                        TVL-Schwelle
+                        ${tr('slen.tvl_threshold', 'TVL-Schwelle')}
                         <span class="info-tip-label"
-                            data-tooltip-title="TVL-Schwelle"
-                            data-tooltip-content="Fällt der Markt-TVL unter diesen Wert, wird die Position zu 100 % abgezogen.">&#9432;</span>
+                            data-tooltip-title="${tr('slen.tvl_threshold', 'TVL-Schwelle')}"
+                            data-tooltip-content="${tr('slen.tvl_threshold_tip', 'Fällt der Markt-TVL unter diesen Wert, wird die Position zu 100 % abgezogen.')}">&#9432;</span>
                     </label>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <input type="number" id="lb-tg-threshold" min="0" step="10000" value="${Number(guard.thresholdUsd) || 100000}"
@@ -571,21 +576,21 @@ async function _openTvlGuardModal(proto, card) {
                 </div>
                 <div class="tg-dependent" style="opacity:${on ? '1' : '0.4'};">
                     <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                        Senden an
+                        ${tr('sb.send_to', 'Senden an')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Senden an"
-                            data-tooltip-content="Empfänger-Adresse für das abgezogene Kapital. Ohne Adresse bleibt es im Wallet (und wird ggf. von Auto-Deploy neu verteilt).">&#9432;</span>
+                            data-tooltip-title="${tr('sb.send_to', 'Senden an')}"
+                            data-tooltip-content="${tr('slen.send_to_tip', 'Empfänger-Adresse für das abgezogene Kapital. Ohne Adresse bleibt es im Wallet (und wird ggf. von Auto-Deploy neu verteilt).')}">&#9432;</span>
                     </label>
                     <select class="modal-select" id="lb-tg-sendto" style="width:100%;" ${on ? '' : 'disabled'}>
-                        <option value="">– Nicht senden (ins Wallet) –</option>
+                        <option value="">${tr('slen.dont_send_wallet', '– Nicht senden (ins Wallet) –')}</option>
                         ${addrOpts}
                     </select>
                 </div>
                 <div class="modal-feedback" id="lb-tg-feedback"></div>
             </div>`,
         actions: [
-            { label: 'Speichern', primary: true, onClick: () => _saveTvlGuardModal(mid, proto, card) },
-            { label: 'Schließen',               onClick: () => closeModal(mid) },
+            { label: tr('msg.save', 'Speichern'), primary: true, onClick: () => _saveTvlGuardModal(mid, proto, card) },
+            { label: tr('common.close', 'Schließen'),               onClick: () => closeModal(mid) },
         ],
     });
 
@@ -612,11 +617,11 @@ async function _saveTvlGuardModal(mid, proto, card) {
     const sendTo    = modalEl?.querySelector('#lb-tg-sendto')?.value ?? '';
 
     if (enabled && (!Number.isFinite(threshold) || threshold <= 0)) {
-        if (fb) { fb.textContent = 'TVL-Schwelle muss größer als 0 sein.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('slen.tvl_threshold_gt0', 'TVL-Schwelle muss größer als 0 sein.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
-    if (fb) { fb.textContent = 'Speichere…'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/lending/tvl-guard/${proto.id}`, {
             method:  'PUT',
@@ -625,12 +630,12 @@ async function _saveTvlGuardModal(mid, proto, card) {
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
 
-        if (fb) { fb.textContent = '✓ Gespeichert.'; fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.(`TVL-Schutz (${proto.label}) gespeichert`, 'success');
+        if (fb) { fb.textContent = tr('sb.saved_dot', '✓ Gespeichert.'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('slen.tvl_guard_saved', 'TVL-Schutz ({pool}) gespeichert', { pool: proto.label }), 'success');
         await _refreshProtocolsCard(card);
         setTimeout(() => closeModal(mid), 600);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
@@ -678,7 +683,7 @@ function _applyButtonStates(status) {
     const hasCapital = _ctx.getHasCapital?.(SVC_ID) ?? false;
     if (hasCapital) canStop = false;
     btnStop.title = hasCapital
-        ? 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.'
+        ? tr('sb.stop_blocked_capital', 'Kann nicht gestoppt werden – es ist noch Kapital investiert (offene Position). Erst auszahlen, dann stoppen.')
         : '';
 
     btnStart.disabled   = !canStart;
@@ -702,8 +707,8 @@ async function _doAction(action) {
         const { taskId } = await res.json();
         await _pollTask(taskId, action, taskEl);
     } catch (err) {
-        if (taskEl) { taskEl.textContent = `Fehler: ${err.message}`; taskEl.className = 'task-status failed'; }
-        _ctx.showToast?.(`${action} fehlgeschlagen: ${err.message}`, 'error');
+        if (taskEl) { taskEl.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); taskEl.className = 'task-status failed'; }
+        _ctx.showToast?.(tr('sb.action_failed', '{action} fehlgeschlagen: {error}', { action, error: err.message }), 'error');
     } finally {
         buttons.forEach(b => b.disabled = false);
         setTimeout(() => _ctx.refreshStatus?.(), 1500);
@@ -719,12 +724,12 @@ async function _pollTask(taskId, action, taskEl) {
             const task = await res.json();
 
             if (task.status === 'done') {
-                if (taskEl) { taskEl.textContent = `✅ ${action} erfolgreich`; taskEl.className = 'task-status done'; }
+                if (taskEl) { taskEl.textContent = tr('sb.action_ok', '✅ {action} erfolgreich', { action }); taskEl.className = 'task-status done'; }
                 _ctx.showToast?.(`LendingBot: ${action} OK`, 'success');
                 return;
             }
             if (task.status === 'failed') {
-                const msg = task.error ?? 'Unbekannter Fehler';
+                const msg = task.error ?? tr('set.unknown_error', 'Unbekannter Fehler');
                 if (taskEl) { taskEl.textContent = `❌ ${msg}`; taskEl.className = 'task-status failed'; }
                 _ctx.showToast?.(`LendingBot: ${msg}`, 'error');
                 return;
@@ -732,21 +737,19 @@ async function _pollTask(taskId, action, taskEl) {
             if (taskEl) { taskEl.textContent = `${task.status}…`; }
         } catch { /* ignorieren, weiter warten */ }
     }
-    if (taskEl) { taskEl.textContent = 'Timeout – kein Ergebnis'; taskEl.className = 'task-status failed'; }
+    if (taskEl) { taskEl.textContent = tr('set.timeout_no_result', 'Timeout – kein Ergebnis'); taskEl.className = 'task-status failed'; }
 }
 
 // ── Wallet-Karte ───────────────────────────────────────────────────────────────
 
 // Datum/Uhrzeit + Minuten seit dem letzten Wallet-Monitor-Check.
 function _formatLastCheck(ms) {
-    if (!ms) return 'noch kein Check';
+    if (!ms) return tr('sb.no_check_yet', 'noch kein Check');
     const d      = new Date(ms);
-    const dd     = String(d.getDate()).padStart(2, '0');
-    const mo     = String(d.getMonth() + 1).padStart(2, '0');
-    const hh     = String(d.getHours()).padStart(2, '0');
-    const mi     = String(d.getMinutes()).padStart(2, '0');
+    const date   = d.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const time   = d.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
     const ageMin = Math.max(0, Math.round((Date.now() - ms) / 60000));
-    return `${dd}.${mo}.${d.getFullYear()} ${hh}:${mi} Uhr (vor ${ageMin} Min.)`;
+    return tr('sb.last_check_fmt', '{date} {time} Uhr (vor {age} Min.)', { date, time, age: ageMin });
 }
 
 /**
@@ -758,11 +761,11 @@ function _formatLastCheck(ms) {
 function _walletRowHtml(label, balance, status = null) {
     const amountText = balance?.recorded_at
         ? `${(balance.total_usd ?? 0).toFixed(2)} USDC`
-        : '<span class="wat-muted">noch keine Daten – auf Aktualisieren klicken</span>';
+        : '<span class="wat-muted">' + tr('sb.no_data_click_refresh', 'noch keine Daten – auf Aktualisieren klicken') + '</span>';
 
     const infoHtml = (balance?.recorded_at && status)
         ? `<span class="key-status ${status.ok ? 'set' : 'crit'}"
-                ${!status.ok ? `data-tooltip-title="Zu wenig SOL" data-tooltip-content="${_esc(status.tooltip)}"` : ''}>
+                ${!status.ok ? `data-tooltip-title="${tr('sb.sol_low_title', 'Zu wenig SOL')}" data-tooltip-content="${_esc(status.tooltip)}"` : ''}>
                 ${status.ok ? '&#10003;' : '&#10007;'} ${amountText}
            </span>`
         : amountText;
@@ -772,7 +775,7 @@ function _walletRowHtml(label, balance, status = null) {
             <td class="wat-label">${_esc(label)}</td>
             <td class="wat-info">${infoHtml}</td>
             <td class="wat-action">
-                <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>Verwalten</button>
+                <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
             </td>
         </tr>`;
 }
@@ -782,37 +785,37 @@ async function _refreshWalletMonitor(card, el) {
     if (!btn || btn.disabled) return;
     const origLabel = btn.textContent;
     btn.disabled = true;
-    btn.textContent = 'Aktualisiere…';
+    btn.textContent = tr('sb.refreshing', 'Aktualisiere…');
     try {
         const r = await fetch('/api/wallet/refresh-monitor', { method: 'POST' });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error ?? `HTTP ${r.status}`);
-        _ctx.showToast?.('Wallet aktualisiert', 'success');
+        _ctx.showToast?.(tr('sb.wallet_refreshed', 'Wallet aktualisiert'), 'success');
         await _renderWallet(el);
     } catch (err) {
         btn.disabled = false;
         btn.textContent = origLabel;
-        _ctx.showToast?.(`Wallet-Update fehlgeschlagen: ${err.message}`, 'error');
+        _ctx.showToast?.(tr('sb.wallet_update_failed', 'Wallet-Update fehlgeschlagen: {error}', { error: err.message }), 'error');
     }
 }
 
 async function _renderWallet(el) {
-    el.innerHTML = '<div class="wallet-loading">Lade…</div>';
+    el.innerHTML = '<div class="wallet-loading">' + tr('msg.loading', 'Lade…') + '</div>';
     try {
         const [infoRes, balRes, addrRes] = await Promise.all([
             fetch('/api/wallet/lending/info'),
             fetch('/api/wallet/lending/balance'),
             fetch('/api/addresses'),
         ]);
-        if (!infoRes.ok) throw new Error(`Wallet-Info konnte nicht geladen werden (HTTP ${infoRes.status})`);
-        if (!balRes.ok) throw new Error(`Wallet-Bestand konnte nicht geladen werden (HTTP ${balRes.status})`);
-        if (!addrRes.ok) throw new Error(`Adressbuch konnte nicht geladen werden (HTTP ${addrRes.status})`);
+        if (!infoRes.ok) throw new Error(tr('sb.wallet_info_failed', 'Wallet-Info konnte nicht geladen werden (HTTP {status})', { status: infoRes.status }));
+        if (!balRes.ok) throw new Error(tr('sb.wallet_balance_failed', 'Wallet-Bestand konnte nicht geladen werden (HTTP {status})', { status: balRes.status }));
+        if (!addrRes.ok) throw new Error(tr('sb.addrbook_failed', 'Adressbuch konnte nicht geladen werden (HTTP {status})', { status: addrRes.status }));
         const info    = await infoRes.json();
         const balance = await balRes.json();
         const addrs   = await addrRes.json();
 
         const lendingStatus = balance?.sol != null
-            ? { ok: balance.sol > SOL_LOW_THRESHOLD_LENDING, tooltip: 'Zu wenig SOL im Wallet für den Betrieb des Bots.' }
+            ? { ok: balance.sol > SOL_LOW_THRESHOLD_LENDING, tooltip: tr('sb.sol_low_tip', 'Zu wenig SOL im Wallet für den Betrieb des Bots.') }
             : null;
 
         el.innerHTML = '';
@@ -820,16 +823,16 @@ async function _renderWallet(el) {
         card.className = 'settings-card';
         card.innerHTML = `
             <div class="settings-card-header">
-                <span class="sch-title">Wallet</span>
+                <span class="sch-title">${tr('liq.wallet', 'Wallet')}</span>
             </div>
             <table class="wallet-action-table">
                 <tbody>
-                    ${_walletRowHtml('Lending Bot', balance, lendingStatus)}
+                    ${_walletRowHtml(tr('nav.lending', 'Lending Bot'), balance, lendingStatus)}
                     <tr>
-                        <td class="wat-label">Letzter Check</td>
+                        <td class="wat-label">${tr('sb.last_check', 'Letzter Check')}</td>
                         <td class="wat-info">${_esc(_formatLastCheck(balance?.recorded_at))}</td>
                         <td class="wat-action">
-                            <button class="btn btn-secondary btn-sm" id="lb-wallet-btn-refresh-all">Aktualisieren</button>
+                            <button class="btn btn-secondary btn-sm" id="lb-wallet-btn-refresh-all">${tr('sb.refresh', 'Aktualisieren')}</button>
                         </td>
                     </tr>
                 </tbody>
@@ -855,7 +858,7 @@ async function _renderWallet(el) {
         });
 
     } catch (err) {
-        el.innerHTML = `<div class="settings-card settings-error">Fehler: ${err.message}</div>`;
+        el.innerHTML = `<div class="settings-card settings-error">${tr('sb.error_prefix', 'Fehler: {error}', { error: err.message })}</div>`;
     }
 }
 
@@ -890,13 +893,13 @@ function _openWalletManageModal(el, info, balance, addrs) {
 
     showModal({
         id:    mid,
-        title: 'Wallet verwalten',
+        title: tr('sb.manage_wallet', 'Wallet verwalten'),
         body: `
             <div class="wb-tab-bar">
-                <button class="wb-tab active" data-wb="guthaben">Guthaben</button>
-                <button class="wb-tab" data-wb="senden">Senden</button>
-                <button class="wb-tab" data-wb="empfangen">Empfangen</button>
-                <button class="wb-tab" data-wb="key">Private Key</button>
+                <button class="wb-tab active" data-wb="guthaben">${tr('len.balance', 'Guthaben')}</button>
+                <button class="wb-tab" data-wb="senden">${tr('msg.send', 'Senden')}</button>
+                <button class="wb-tab" data-wb="empfangen">${tr('sb.receive', 'Empfangen')}</button>
+                <button class="wb-tab" data-wb="key">${tr('sb.private_key', 'Private Key')}</button>
             </div>
             <div id="wb-tab-guthaben">${buildWalletDetailHtml(_walletMonitorShape(balance))}</div>
             <div id="wb-tab-senden" hidden>
@@ -906,9 +909,9 @@ function _openWalletManageModal(el, info, balance, addrs) {
             </div>
             <div id="wb-tab-empfangen" hidden>${_buildReceivePanelHtml(info)}</div>
             <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(info)}</div>`,
-        footerNote: '<span id="wb-footer-note">Wert &gt; 0,00 USDC</span>',
+        footerNote: '<span id="wb-footer-note">' + tr('sb.value_gt_zero', 'Wert &gt; 0,00 USDC') + '</span>',
         actions: [
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
@@ -936,16 +939,16 @@ function _openWalletManageModal(el, info, balance, addrs) {
 function _buildReceivePanelHtml(info) {
     return `
         <div class="settings-row">
-            <span class="settings-label">Adresse</span>
+            <span class="settings-label">${tr('sb.address', 'Adresse')}</span>
             <div class="addr-display-row">
                 <span class="addr-text" title="${_esc(info.pubkey)}">${_esc(info.preview)}</span>
-                <button class="btn btn-secondary btn-icon" id="wb-receive-copy-btn" title="Kopieren">&#128203;</button>
+                <button class="btn btn-secondary btn-icon" id="wb-receive-copy-btn" title="${tr('sb.copy', 'Kopieren')}">&#128203;</button>
             </div>
         </div>
         <div class="settings-row" style="border:none; align-items:flex-start; margin-top:0.75rem;">
-            <span class="settings-label">QR-Code</span>
+            <span class="settings-label">${tr('sb.qr_code', 'QR-Code')}</span>
             <div class="qr-wrapper">
-                <img src="/api/wallet/lending/qr" alt="QR-Code" class="qr-img">
+                <img src="/api/wallet/lending/qr" alt="${tr('sb.qr_code', 'QR-Code')}" class="qr-img">
             </div>
         </div>`;
 }
@@ -979,26 +982,26 @@ function _buildKeyPanelHtml(info) {
             <span class="key-status ${info.keypairSet ? 'set' : 'unset'}">
                 ${info.keypairSet
                     ? `&#10003; Gesetzt &nbsp;<span class="key-preview">${_esc(info.preview)}</span>`
-                    : '&#9888; Kein Key konfiguriert'}
+                    : tr('sb.key_missing', '&#9888; Kein Key konfiguriert')}
             </span>
         </div>
         ${info.keypairSet ? `
         <div class="bot-actions" style="margin:0.6rem 0;">
-            <a class="btn btn-secondary btn-sm" href="/api/wallet/lending/keypair/export" download>&#11015; Herunterladen</a>
+            <a class="btn btn-secondary btn-sm" href="/api/wallet/lending/keypair/export" download>${tr('sb.download', '&#11015; Herunterladen')}</a>
         </div>
         <p class="modal-hint" style="margin:0 0 0.9rem;">
-            Bewahre die heruntergeladene Datei sicher auf — wer sie besitzt, hat vollen Zugriff auf dieses Wallet.
+            ${tr('sb.key_download_hint', 'Bewahre die heruntergeladene Datei sicher auf — wer sie besitzt, hat vollen Zugriff auf dieses Wallet.')}
         </p>` : ''}
         <p class="modal-hint" style="margin-top:0.5rem;">
-            ${info.keypairSet ? 'Neuen Key importieren, um den bestehenden zu ersetzen:' : 'Key einfügen:'}<br>
-            Akzeptierte Formate:<br>
-              &bull; Base58-String (64 Bytes, Solana CLI Format)<br>
-              &bull; JSON-Array: <code>[1, 2, &hellip;, 64]</code></p>
+            ${info.keypairSet ? tr('sb.key_import_replace', 'Neuen Key importieren, um den bestehenden zu ersetzen:') : tr('sb.key_paste', 'Key einfügen:')}<br>
+            ${tr('sb.key_formats', 'Akzeptierte Formate:')}<br>
+              ${tr('sb.key_format_base58', '&bull; Base58-String (64 Bytes, Solana CLI Format)')}<br>
+              ${tr('sb.key_format_json', '&bull; JSON-Array:')} <code>[1, 2, &hellip;, 64]</code></p>
         <textarea id="wb-key-input" class="key-textarea"
-            placeholder="${info.keypairSet ? 'Neuen Key einfügen um zu ersetzen…' : 'Key einfügen (Strg+V)…'}"
+            placeholder="${info.keypairSet ? tr('sb.key_ph_replace', 'Neuen Key einfügen um zu ersetzen…') : tr('sb.key_ph_paste', 'Key einfügen (Strg+V)…')}"
             autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
         <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="wb-key-save-btn">Speichern</button>
+            <button class="btn btn-secondary btn-uniform" id="wb-key-save-btn">${tr('msg.save', 'Speichern')}</button>
         </div>
         <div class="modal-feedback" id="wb-key-feedback"></div>`;
 }
@@ -1013,10 +1016,10 @@ async function _saveKey(mid, modalEl, el) {
     const content  = input?.value.trim();
 
     if (!content) {
-        if (feedback) { feedback.textContent = 'Bitte Key einfügen.'; feedback.className = 'modal-feedback error'; }
+        if (feedback) { feedback.textContent = tr('sb.key_required', 'Bitte Key einfügen.'); feedback.className = 'modal-feedback error'; }
         return;
     }
-    if (feedback) { feedback.textContent = 'Speichere…'; feedback.className = 'modal-feedback'; }
+    if (feedback) { feedback.textContent = tr('sb.saving', 'Speichere…'); feedback.className = 'modal-feedback'; }
 
     try {
         const res  = await fetch('/api/wallet/lending/keypair', {
@@ -1028,10 +1031,10 @@ async function _saveKey(mid, modalEl, el) {
         if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
         closeModal(mid);
-        _ctx.showToast?.(`Key gespeichert. Adresse: ${data.preview}`, 'success');
+        _ctx.showToast?.(tr('sb.key_saved', 'Key gespeichert. Adresse: {address}', { address: data.preview }), 'success');
         if (el) await _renderWallet(el);
     } catch (err) {
-        if (feedback) { feedback.textContent = `Fehler: ${err.message}`; feedback.className = 'modal-feedback error'; }
+        if (feedback) { feedback.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); feedback.className = 'modal-feedback error'; }
     }
 }
 
@@ -1044,8 +1047,8 @@ function _buildSendPanel(tokens) {
             <span class="settings-label">
                 Token
                 <span id="wm-sol-hint" style="margin-left:0.3rem;${isSol ? '' : 'display:none;'}"
-                    data-tooltip-title="SOL-Reserve"
-                    data-tooltip-content="0,1 SOL werden für den Betrieb des Bots auf dem Wallet benötigt und können nicht über diese Funktion abgezogen werden.">&#9432;</span>
+                    data-tooltip-title="${tr('sb.sol_reserve', 'SOL-Reserve')}"
+                    data-tooltip-content="${tr('sb.sol_reserve_tip', '0,1 SOL werden für den Betrieb des Bots auf dem Wallet benötigt und können nicht über diese Funktion abgezogen werden.')}">&#9432;</span>
             </span>
             <div style="display:flex;gap:0.4rem;align-items:center;">
                 <select class="modal-select" id="wm-token">
@@ -1055,24 +1058,24 @@ function _buildSendPanel(tokens) {
                         </option>`
                     ).join('')}
                 </select>
-                <button class="btn btn-secondary btn-icon" id="wm-refresh" title="Guthaben aktualisieren">&#8635;</button>
+                <button class="btn btn-secondary btn-icon" id="wm-refresh" title="${tr('sb.refresh_balance', 'Guthaben aktualisieren')}">&#8635;</button>
             </div>
         </div>
         <div class="settings-row">
-            <span class="settings-label">Betrag</span>
+            <span class="settings-label">${tr('msg.amount', 'Betrag')}</span>
             <div class="send-amount-row">
                 <input class="modal-input" id="wm-amount" type="number" min="0" step="any" placeholder="0.00">
                 <button class="btn btn-secondary btn-sm" id="wm-max">Max</button>
             </div>
         </div>
         <div class="settings-row">
-            <span class="settings-label">An</span>
+            <span class="settings-label">${tr('msg.to', 'An')}</span>
             <div class="addr-select-row">
                 <div class="addr-selected-display${sel ? '' : ' empty'}" id="wm-addr-display"
                      title="${sel ? _esc(sel.address) : ''}">
-                    ${sel ? _esc(sel.name) : 'Keine Adresse gewählt'}
+                    ${sel ? _esc(sel.name) : tr('sb.no_address_selected', 'Keine Adresse gewählt')}
                 </div>
-                <button class="btn btn-secondary btn-sm wm-to-addrbook" title="Adressbuch">&#128218;</button>
+                <button class="btn btn-secondary btn-sm wm-to-addrbook" title="${tr('sb.address_book', 'Adressbuch')}">&#128218;</button>
             </div>
         </div>
         <div class="modal-feedback" id="wm-send-feedback" style="margin-top:0.5rem;"></div>`;
@@ -1080,7 +1083,7 @@ function _buildSendPanel(tokens) {
 
 function _buildAddrbookList(addrs) {
     if (addrs.length === 0) {
-        return `<p class="wallet-hint" style="margin-bottom:0.75rem;">Noch keine Adressen gespeichert.</p>`;
+        return `<p class="wallet-hint" style="margin-bottom:0.75rem;">${tr('sb.no_addresses', 'Noch keine Adressen gespeichert.')}</p>`;
     }
     return `
         <div class="ab-modal-list">
@@ -1091,9 +1094,9 @@ function _buildAddrbookList(addrs) {
                         <div class="ab-modal-addr">${_esc(a.address)}</div>
                     </div>
                     <div class="ab-modal-actions">
-                        <button class="btn btn-secondary btn-sm ab-select" data-id="${a.id}">&#8629; Wählen</button>
-                        <button class="btn btn-secondary btn-icon ab-edit" data-id="${a.id}" title="Bearbeiten">&#9998;</button>
-                        <button class="btn btn-secondary btn-icon ab-del" data-id="${a.id}" title="Löschen">&#10005;</button>
+                        <button class="btn btn-secondary btn-sm ab-select" data-id="${a.id}">${tr('sb.select_btn', '&#8629; Wählen')}</button>
+                        <button class="btn btn-secondary btn-icon ab-edit" data-id="${a.id}" title="${tr('sb.edit', 'Bearbeiten')}">&#9998;</button>
+                        <button class="btn btn-secondary btn-icon ab-del" data-id="${a.id}" title="${tr('msg.delete', 'Löschen')}">&#10005;</button>
                     </div>
                 </div>`).join('')}
         </div>`;
@@ -1101,13 +1104,13 @@ function _buildAddrbookList(addrs) {
 
 function _buildAddrbookForm(row) {
     return `
-        <span class="ab-form-title">${row ? 'Adresse bearbeiten' : 'Neue Adresse'}</span>
+        <span class="ab-form-title">${row ? tr('sb.edit_address', 'Adresse bearbeiten') : tr('sb.new_address', 'Neue Adresse')}</span>
         <label class="modal-label" style="margin-top:0.75rem;">Name</label>
         <input id="ab-form-name" class="modal-input" type="text"
-            value="${row ? _esc(row.name) : ''}" placeholder="z. B. Coinbase Wallet" autocomplete="off">
-        <label class="modal-label" style="margin-top:0.75rem;">Solana-Adresse</label>
+            value="${row ? _esc(row.name) : ''}" placeholder="${tr('sb.addr_name_ph', 'z. B. Coinbase Wallet')}" autocomplete="off">
+        <label class="modal-label" style="margin-top:0.75rem;">${tr('sb.solana_address', 'Solana-Adresse')}</label>
         <input id="ab-form-address" class="modal-input" type="text"
-            value="${row ? _esc(row.address) : ''}" placeholder="Base58-Adresse…"
+            value="${row ? _esc(row.address) : ''}" placeholder="${tr('sb.base58_ph', 'Base58-Adresse…')}"
             autocomplete="off" autocorrect="off" spellcheck="false">
         <div class="modal-feedback" id="ab-form-feedback"></div>`;
 }
@@ -1131,7 +1134,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
     function showSend() {
         backdrop.querySelector('#wm-send').hidden     = false;
         backdrop.querySelector('#wm-addrbook').hidden = true;
-        setActionBar('<button class="btn btn-secondary btn-uniform" id="wb-send-btn">&#9654; Senden</button>');
+        setActionBar('<button class="btn btn-secondary btn-uniform" id="wb-send-btn">' + tr('sb.send_btn', '&#9654; Senden') + '</button>');
         wireSendButton();
     }
 
@@ -1205,7 +1208,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
             display.title       = _selectedSendAddr.address;
             display.classList.remove('empty');
         } else {
-            display.textContent = 'Keine Adresse gewählt';
+            display.textContent = tr('sb.no_address_selected', 'Keine Adresse gewählt');
             display.title       = '';
             display.classList.add('empty');
         }
@@ -1218,7 +1221,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
         const panel = backdrop.querySelector('#wm-addrbook');
         panel.innerHTML = _buildAddrbookList(currentAddrs);
         wireList(panel);
-        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-new">+ Neue Adresse</button>');
+        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-new">' + tr('sb.new_address_btn', '+ Neue Adresse') + '</button>');
         bar?.querySelector('#ab-new')?.addEventListener('click', () => showForm(null));
     }
 
@@ -1229,14 +1232,14 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
         const panel = backdrop.querySelector('#wm-addrbook');
         panel.innerHTML = _buildAddrbookForm(row);
 
-        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-form-save">Speichern</button>');
+        const bar = setActionBar('<button class="btn btn-secondary btn-uniform" id="ab-form-save">' + tr('msg.save', 'Speichern') + '</button>');
         bar?.querySelector('#ab-form-save')?.addEventListener('click', async () => {
             const name    = panel.querySelector('#ab-form-name')?.value.trim();
             const address = panel.querySelector('#ab-form-address')?.value.trim();
             const fb      = panel.querySelector('#ab-form-feedback');
 
             if (!name || !address) {
-                if (fb) { fb.textContent = 'Name und Adresse ausfüllen.'; fb.className = 'modal-feedback error'; }
+                if (fb) { fb.textContent = tr('sb.name_addr_required', 'Name und Adresse ausfüllen.'); fb.className = 'modal-feedback error'; }
                 return;
             }
             try {
@@ -1261,7 +1264,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                 showList();
             } catch (err) {
                 const fb2 = panel.querySelector('#ab-form-feedback');
-                if (fb2) { fb2.textContent = `Fehler: ${err.message}`; fb2.className = 'modal-feedback error'; }
+                if (fb2) { fb2.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb2.className = 'modal-feedback error'; }
             }
         });
     }
@@ -1285,7 +1288,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
 
         panel.querySelectorAll('.ab-del').forEach(btn => {
             btn.addEventListener('click', async () => {
-                if (!confirm('Adresse wirklich löschen?')) return;
+                if (!confirm(tr('sb.delete_address_q', 'Adresse wirklich löschen?'))) return;
                 const delId = Number(btn.dataset.id);
 
                 const delRes = await fetch(`/api/addresses/${delId}`, { method: 'DELETE' });
@@ -1295,9 +1298,9 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                         const where = err.usages.map(u =>
                             `• ${u.botId} / ${u.poolId}: ${u.fields.join(', ')}`
                         ).join('\n');
-                        alert(`Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n${where}`);
+                        alert(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
                     } else {
-                        alert(err.error ?? 'Löschen fehlgeschlagen.');
+                        alert(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
                     }
                     return;
                 }
@@ -1327,28 +1330,28 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
 
             // Validierung (client-seitig, Server prüft nochmal)
             if (!symbol) {
-                fb.textContent = 'Bitte einen Token auswählen.';
+                fb.textContent = tr('sb.select_token', 'Bitte einen Token auswählen.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (!amount || amount <= 0) {
-                fb.textContent = 'Bitte einen Betrag eingeben.';
+                fb.textContent = tr('sb.enter_amount', 'Bitte einen Betrag eingeben.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (!toAddress) {
-                fb.textContent = 'Bitte eine Empfänger-Adresse im Adressbuch wählen.';
+                fb.textContent = tr('sb.select_recipient', 'Bitte eine Empfänger-Adresse im Adressbuch wählen.');
                 fb.className   = 'modal-feedback error';
                 return;
             }
             if (symbol === 'SOL' && amount > getMaxSendable()) {
-                fb.textContent = `Betrag überschreitet das verfügbare Guthaben (max. ${getMaxSendable().toFixed(4)} SOL nach Reserve).`;
+                fb.textContent = tr('sb.amount_exceeds_sol', 'Betrag überschreitet das verfügbare Guthaben (max. {max} SOL nach Reserve).', { max: getMaxSendable().toFixed(4) });
                 fb.className   = 'modal-feedback error';
                 return;
             }
 
             sendBtn.disabled = true;
-            fb.textContent   = 'Transaktion wird gesendet…';
+            fb.textContent   = tr('sb.tx_sending', 'Transaktion wird gesendet…');
             fb.className     = 'modal-feedback';
 
             try {
@@ -1362,8 +1365,8 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                 if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
                 const explorerUrl = `https://solscan.io/tx/${data.txHash}`;
-                fb.innerHTML  = `✓ Gesendet: ${_fmt(amount)} ${_esc(symbol)} → ${_esc(_selectedSendAddr.name)} `
-                              + `<a href="${explorerUrl}" target="_blank" rel="noopener" class="tx-link">TX&nbsp;ansehen&nbsp;↗</a>`;
+                fb.innerHTML  = tr('sb.sent_ok', '✓ Gesendet: {amount} {symbol} → {to}', { amount: _fmt(amount), symbol: _esc(symbol), to: _esc(_selectedSendAddr.name) }) + ' '
+                              + `<a href="${explorerUrl}" target="_blank" rel="noopener" class="tx-link">${tr('sb.view_tx', 'TX&nbsp;ansehen&nbsp;↗')}</a>`;
                 fb.className  = 'modal-feedback ok';
                 if (amountInp) amountInp.value = '';
                 // Nach 3 Sekunden refreshen – Zeit für on-chain settle
@@ -1373,7 +1376,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                     if (walletEl) _renderWallet(walletEl);
                 }, 3000);
             } catch (err) {
-                fb.textContent = `Fehler: ${err.message}`;
+                fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message });
                 fb.className   = 'modal-feedback error';
             } finally {
                 sendBtn.disabled = false;
@@ -1387,7 +1390,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
 // ── Protokoll-Karte ───────────────────────────────────────────────────────────
 
 async function _renderProtocols(el) {
-    el.innerHTML = '<div class="wallet-loading">Lade…</div>';
+    el.innerHTML = '<div class="wallet-loading">' + tr('msg.loading', 'Lade…') + '</div>';
     try {
         const [lendingRes, cfgRes] = await Promise.all([
             fetch('/api/lending/config'),
@@ -1402,7 +1405,7 @@ async function _renderProtocols(el) {
         el.appendChild(card);
         _renderProtocolsTable(card, lending, cfg);
     } catch (err) {
-        el.innerHTML = `<div class="settings-card settings-error">Fehler: ${err.message}</div>`;
+        el.innerHTML = `<div class="settings-card settings-error">${tr('sb.error_prefix', 'Fehler: {error}', { error: err.message })}</div>`;
     }
 }
 
@@ -1437,18 +1440,18 @@ function _renderProtocolsTable(card, lending, cfg) {
     }
 
     const poolOptionsHtml = noData
-        ? `<option disabled selected>Bitte Lending Bot aktivieren</option>`
+        ? `<option disabled selected>${tr('slen.activate_bot_first', 'Bitte Lending Bot aktivieren')}</option>`
         : sorted.map(p => `
             <option value="${_esc(p.id)}" ${p.id === active?.id ? 'selected' : ''}${p.active ? '' : ' style="color:#888"'}>
-                [${_aprLabel(p.apy)}] ${_esc(p.label)}${p.active ? '' : p.qualified ? '' : ' ⊘'}${p.enabled ? '' : ' (deaktiviert)'}
+                [${_aprLabel(p.apy)}] ${_esc(p.label)}${p.active ? '' : p.qualified ? '' : ' ⊘'}${p.enabled ? '' : tr('sb.suffix_deactivated', ' (deaktiviert)')}
             </option>`).join('');
 
     card.innerHTML = `
-        <div class="settings-card-header"><span class="sch-title">Lending Pools</span></div>
+        <div class="settings-card-header"><span class="sch-title">${tr('slen.lending_pools', 'Lending Pools')}</span></div>
         <table class="wallet-action-table">
             <tbody>
                 <tr>
-                    <td class="wat-label">Pool</td>
+                    <td class="wat-label">${tr('liq.pool', 'Pool')}</td>
                     <td class="wat-info">
                         <select class="modal-select pool-select" id="lb-pool-selector" ${noData ? 'disabled' : ''}>
                             ${poolOptionsHtml}
@@ -1456,63 +1459,62 @@ function _renderProtocolsTable(card, lending, cfg) {
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-pool-enabled"
-                            ${noData ? 'disabled' : ''}>${active?.enabled ? 'Deaktivieren' : 'Aktivieren'}</button>
+                            ${noData ? 'disabled' : ''}>${active?.enabled ? tr('sb.deactivate', 'Deaktivieren') : tr('sb.activate', 'Aktivieren')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label">
-                        <span style="display:flex;align-items:center;gap:0.4rem;">TVL-Schutz
+                        <span style="display:flex;align-items:center;gap:0.4rem;">${tr('sb.tvl_guard', 'TVL-Schutz')}
                         <span class="info-tip-label"
-                            data-tooltip-title="TVL-Schutz (Auto-Exit)"
-                            data-tooltip-content="Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen – optional an eine Adresse versendet.">&#9432;</span></span>
+                            data-tooltip-title="${tr('sb.tvl_guard_title', 'TVL-Schutz (Auto-Exit)')}"
+                            data-tooltip-content="${tr('slen.tvl_guard_tip_addr', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen – optional an eine Adresse versendet.')}">&#9432;</span></span>
                     </td>
                     <td class="wat-info">${noData || (active && active.disabledReason) ? '<span class="pool-summary-off">—</span>' : _tvlGuardSummary(active?.tvlGuard)}</td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-tvlguard"
-                            ${noData ? 'disabled' : (active && active.disabledReason ? 'disabled title="Pool nicht nutzbar – kein TVL-Schutz nötig"' : '')}>Verwalten</button>
+                            ${noData ? 'disabled' : (active && active.disabledReason ? 'disabled title="' + tr('slen.pool_unusable_no_guard', 'Pool nicht nutzbar – kein TVL-Schutz nötig') + '"' : '')}>${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label">
-                        <span style="display:flex;align-items:center;gap:0.4rem;">Einzahlen
+                        <span style="display:flex;align-items:center;gap:0.4rem;">${tr('sb.deposit', 'Einzahlen')}
                         <span class="info-tip-label"
-                            data-tooltip-title="In Protokoll einzahlen"
-                            data-tooltip-content="Zahlt USDC aus dem Wallet direkt in ein Lending-Protokoll ein. Während der TX wird Auto-Deploy kurz pausiert.">&#9432;</span></span>
+                            data-tooltip-title="${tr('slen.deposit_into_protocol', 'In Protokoll einzahlen')}"
+                            data-tooltip-content="${tr('slen.deposit_tip', 'Zahlt USDC aus dem Wallet direkt in ein Lending-Protokoll ein. Während der TX wird Auto-Deploy kurz pausiert.')}">&#9432;</span></span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">in Protokoll</span>
+                        <span class="pool-summary">${tr('slen.into_protocol', 'in Protokoll')}</span>
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-deposit-proto"
-                            ${noData ? 'disabled' : (active && !active.qualified ? 'disabled title="Pool deaktiviert oder erfüllt die APY-Schwelle nicht"' : '')}>Einzahlen</button>
+                            ${noData ? 'disabled' : (active && !active.qualified ? 'disabled title="' + tr('slen.pool_disabled_or_apy', 'Pool deaktiviert oder erfüllt die APY-Schwelle nicht') + '"' : '')}>${tr('sb.deposit', 'Einzahlen')}</button>
                     </td>
                 </tr>
                 <tr>
                     <td class="wat-label">
-                        <span style="display:flex;align-items:center;gap:0.4rem;">Auszahlen
+                        <span style="display:flex;align-items:center;gap:0.4rem;">${tr('sb.withdraw', 'Auszahlen')}
                         <span class="info-tip-label"
-                            data-tooltip-title="Aus Protokoll auszahlen"
-                            data-tooltip-content="Hebt USDC aus einem Lending-Protokoll zurück ins Wallet ab. Während der TX wird Auto-Deploy pausiert – schalte ihn ggf. dauerhaft aus, damit die Mittel nicht sofort wieder deployed werden.">&#9432;</span></span>
+                            data-tooltip-title="${tr('slen.withdraw_from_protocol', 'Aus Protokoll auszahlen')}"
+                            data-tooltip-content="${tr('slen.withdraw_tip', 'Hebt USDC aus einem Lending-Protokoll zurück ins Wallet ab. Während der TX wird Auto-Deploy pausiert – schalte ihn ggf. dauerhaft aus, damit die Mittel nicht sofort wieder deployed werden.')}">&#9432;</span></span>
                     </td>
                     <td class="wat-info">
-                        <span class="pool-summary">aus Protokoll</span>
+                        <span class="pool-summary">${tr('slen.from_protocol', 'aus Protokoll')}</span>
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-withdraw-proto"
-                            ${noData ? 'disabled' : (active && !active.active ? 'disabled title="Kein Guthaben in diesem Pool"' : '')}>Auszahlen</button>
+                            ${noData ? 'disabled' : (active && !active.active ? 'disabled title="' + tr('slen.no_balance_in_pool', 'Kein Guthaben in diesem Pool') + '"' : '')}>${tr('sb.withdraw', 'Auszahlen')}</button>
                     </td>
                 </tr>
             </tbody>
         </table>
         ${noData ? `
         <p style="margin:0.6rem 0 0;font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
-            Noch keine Pool-Daten verfügbar. Prüfe oben in der Zeile "Status", ob der Lending Bot läuft –
-            nach dem Start dauert es nur wenige Sekunden bis zum ersten Tick.
+            ${tr('slen.no_pool_data_hint', 'Noch keine Pool-Daten verfügbar. Prüfe oben in der Zeile "Status", ob der Lending Bot läuft – nach dem Start dauert es nur wenige Sekunden bis zum ersten Tick.')}
         </p>` : ''}
         ${!noData && active && active.disabledReason ? `
         <p style="margin:0.6rem 0 0;font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
-            ⊘ <strong>${_esc(active.label)}</strong> ist derzeit nicht nutzbar: ${_esc(active.disabledReason)}.
-            Der Pool wird nur zur Information gelistet – Einzahlen, Auszahlen und TVL-Schutz sind deaktiviert.
+            ${tr('slen.pool_not_usable', '⊘ <strong>{pool}</strong> ist derzeit nicht nutzbar: {reason}.', { pool: _esc(active.label), reason: _esc(active.disabledReason) })}
+            ${tr('slen.pool_info_only', 'Der Pool wird nur zur Information gelistet – Einzahlen, Auszahlen und TVL-Schutz sind deaktiviert.')}
         </p>` : ''}`;
 
     card.querySelector('#lb-pool-selector')?.addEventListener('change', e => {
@@ -1550,12 +1552,16 @@ async function _togglePoolEnabled(proto, card, btn) {
         if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
         _ctx.showToast?.(
-            newEnabled ? `Pool "${proto.label}" aktiviert` : `Pool "${proto.label}" deaktiviert`,
+            newEnabled
+                ? tr('slen.pool_enabled',  'Pool "{pool}" aktiviert',    { pool: proto.label })
+                : tr('slen.pool_disabled', 'Pool "{pool}" deaktiviert', { pool: proto.label }),
             'success'
         );
         if (data.tvlGuard) {
             _ctx.showToast?.(
-                `TVL-Schutz-Schwelle für "${proto.label}" auf ${Math.round(data.tvlGuard.thresholdUsd).toLocaleString('de-DE')} USDC gesenkt (50 % des aktuellen TVL) – verhindert sofortiges Wieder-Deaktivieren.`,
+                tr('slen.tvl_guard_lowered',
+                    'TVL-Schutz-Schwelle für "{pool}" auf {value} USDC gesenkt (50 % des aktuellen TVL) – verhindert sofortiges Wieder-Deaktivieren.',
+                    { pool: proto.label, value: Math.round(data.tvlGuard.thresholdUsd).toLocaleString(NUM_LOCALE) }),
                 'success'
             );
         }
@@ -1563,7 +1569,7 @@ async function _togglePoolEnabled(proto, card, btn) {
     } catch (err) {
         btn.disabled = false;
         btn.textContent = origLabel;
-        _ctx.showToast?.(`Fehler: ${err.message}`, 'error');
+        _ctx.showToast?.(tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }), 'error');
     }
 }
 
@@ -1573,7 +1579,7 @@ async function _openProtoDepositModal(proto, card) {
     const mid = 'lb-proto-deposit-modal';
 
     if (!proto.qualified) {
-        _ctx.showToast?.(`${proto.label} besteht den internen Filter nicht – Einzahlen nicht möglich.`, 'error');
+        _ctx.showToast?.(tr('slen.deposit_filter_fail', '{pool} besteht den internen Filter nicht – Einzahlen nicht möglich.', { pool: proto.label }), 'error');
         return;
     }
 
@@ -1586,10 +1592,10 @@ async function _openProtoDepositModal(proto, card) {
 
     showModal({
         id:    mid,
-        title: `Einzahlen – ${_esc(proto.label)}`,
+        title: tr('slen.deposit_title', 'Einzahlen – {pool}', { pool: _esc(proto.label) }),
         body:  `
             <div class="settings-row">
-                <span class="settings-label">Betrag</span>
+                <span class="settings-label">${tr('msg.amount', 'Betrag')}</span>
                 <div class="send-amount-row">
                     <input class="modal-input input-short" id="lb-dep-amount"
                         type="number" min="0" step="any" placeholder="0.00">
@@ -1598,16 +1604,16 @@ async function _openProtoDepositModal(proto, card) {
                 </div>
             </div>
             <p class="modal-hint" style="margin-top:0.5rem;">
-                Wallet: <strong>${_fmt(walletUsdc)} USDC</strong>
-                ${!proto.active ? '<br>&#9888; Pool aktuell inaktiv – es wird eine neue Position eröffnet.' : ''}
+                ${tr('sb.wallet_label', 'Wallet:')} <strong>${_fmt(walletUsdc)} USDC</strong>
+                ${!proto.active ? '<br>' + tr('slen.pool_inactive_new_position', '&#9888; Pool aktuell inaktiv – es wird eine neue Position eröffnet.') + '' : ''}
             </p>
             <p class="modal-hint">
-                Auto-Deploy wird während der Transaktion automatisch pausiert.
+                ${tr('slen.autodeploy_paused', 'Auto-Deploy wird während der Transaktion automatisch pausiert.')}
             </p>
             <div class="modal-feedback" id="lb-dep-feedback"></div>`,
         actions: [
-            { label: '&#10004; Einzahlen', primary: true, onClick: () => _execDeposit(mid, proto, card) },
-            { label: 'Schließen',          onClick: () => closeModal(mid) },
+            { label: tr('sb.deposit_btn', '&#10004; Einzahlen'), primary: true, onClick: () => _execDeposit(mid, proto, card) },
+            { label: tr('common.close', 'Schließen'),          onClick: () => closeModal(mid) },
         ],
     });
 
@@ -1622,14 +1628,14 @@ async function _execDeposit(modalId, proto, card) {
     const amount = parseFloat(document.getElementById('lb-dep-amount')?.value ?? '0');
 
     if (!amount || amount <= 0) {
-        if (fb) { fb.textContent = 'Bitte Betrag eingeben.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.enter_amount_short', 'Bitte Betrag eingeben.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
     const modalEl = getModal(modalId);
     const btns    = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
     btns.forEach(b => b.disabled = true);
-    if (fb) { fb.textContent = 'Transaktion läuft… (kann bis zu 2 Min. dauern)'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.tx_running', 'Transaktion läuft… (kann bis zu 2 Min. dauern)'); fb.className = 'modal-feedback'; }
 
     try {
         const res  = await fetch('/api/lending/deposit', {
@@ -1640,12 +1646,12 @@ async function _execDeposit(modalId, proto, card) {
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
-        if (fb) { fb.textContent = `✓ ${amount} USDC in ${data.result?.protoLabel ?? proto.label} eingezahlt.`; fb.className = 'modal-feedback success'; }
+        if (fb) { fb.textContent = tr('slen.deposit_ok', '✓ {amount} USDC in {pool} eingezahlt.', { amount, pool: data.result?.protoLabel ?? proto.label }); fb.className = 'modal-feedback success'; }
         _ctx.showToast?.(`Deposit ${_fmt(amount)} USDC → ${data.result?.protoLabel ?? proto.label}`, 'success');
         _refreshProtocolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
-        _ctx.showToast?.(`Deposit fehlgeschlagen: ${err.message}`, 'error');
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
+        _ctx.showToast?.(tr('slen.deposit_failed', 'Deposit fehlgeschlagen: {error}', { error: err.message }), 'error');
     } finally {
         btns.forEach(b => b.disabled = false);
     }
@@ -1657,7 +1663,7 @@ async function _openProtoWithdrawModal(proto, card) {
     const mid = 'lb-proto-withdraw-modal';
 
     if (!proto.active) {
-        _ctx.showToast?.(`${proto.label} hat kein Guthaben – Auszahlen nicht möglich.`, 'error');
+        _ctx.showToast?.(tr('slen.withdraw_no_balance', '{pool} hat kein Guthaben – Auszahlen nicht möglich.', { pool: proto.label }), 'error');
         return;
     }
 
@@ -1665,28 +1671,27 @@ async function _openProtoWithdrawModal(proto, card) {
 
     showModal({
         id:    mid,
-        title: `Auszahlen – ${_esc(proto.label)}`,
+        title: tr('slen.withdraw_title', 'Auszahlen – {pool}', { pool: _esc(proto.label) }),
         body:  `
             <div class="settings-row">
-                <span class="settings-label">Betrag</span>
+                <span class="settings-label">${tr('msg.amount', 'Betrag')}</span>
                 <div class="send-amount-row">
                     <input class="modal-input input-short" id="lb-wd-amount"
                         type="number" min="0" step="any" placeholder="0.00">
-                    <button class="btn btn-secondary btn-sm" id="lb-wd-all">Alles</button>
+                    <button class="btn btn-secondary btn-sm" id="lb-wd-all">${tr('sb.all_btn', 'Alles')}</button>
                     <span class="input-unit">USDC</span>
                 </div>
             </div>
             <p class="modal-hint" style="margin-top:0.5rem;">
-                Position: <strong>${_fmt(posAmount)} USDC</strong>
+                ${tr('sb.position_label', 'Position:')} <strong>${_fmt(posAmount)} USDC</strong>
             </p>
             <p class="modal-hint">
-                Auto-Deploy wird während der Transaktion pausiert. Schalte ihn ggf. dauerhaft
-                aus (Auto-Deploy → Verwalten), damit die Mittel nicht sofort wieder deployed werden.
+                ${tr('slen.withdraw_autodeploy_hint', 'Auto-Deploy wird während der Transaktion pausiert. Schalte ihn ggf. dauerhaft aus (Auto-Deploy → Verwalten), damit die Mittel nicht sofort wieder deployed werden.')}
             </p>
             <div class="modal-feedback" id="lb-wd-feedback"></div>`,
         actions: [
-            { label: '&#10004; Auszahlen', primary: true, onClick: () => _execWithdraw(mid, proto, card) },
-            { label: 'Schließen',          onClick: () => closeModal(mid) },
+            { label: tr('sb.withdraw_btn', '&#10004; Auszahlen'), primary: true, onClick: () => _execWithdraw(mid, proto, card) },
+            { label: tr('common.close', 'Schließen'),          onClick: () => closeModal(mid) },
         ],
     });
 
@@ -1702,14 +1707,14 @@ async function _execWithdraw(modalId, proto, card) {
     const amount = parseFloat(raw ?? '0');
 
     if (!amount || amount <= 0) {
-        if (fb) { fb.textContent = 'Bitte Betrag eingeben oder „Alles" klicken.'; fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.enter_amount_or_all', 'Bitte Betrag eingeben oder „Alles" klicken.'); fb.className = 'modal-feedback error'; }
         return;
     }
 
     const modalEl = getModal(modalId);
     const btns    = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
     btns.forEach(b => b.disabled = true);
-    if (fb) { fb.textContent = 'Transaktion läuft… (kann bis zu 2 Min. dauern)'; fb.className = 'modal-feedback'; }
+    if (fb) { fb.textContent = tr('sb.tx_running', 'Transaktion läuft… (kann bis zu 2 Min. dauern)'); fb.className = 'modal-feedback'; }
 
     try {
         const res  = await fetch('/api/lending/withdraw', {
@@ -1722,17 +1727,17 @@ async function _execWithdraw(modalId, proto, card) {
 
         const r = data.result;
         if (r?.withdrawType === 'cooldown') {
-            const readyStr = r.readyAt ? new Date(r.readyAt).toLocaleString('de-DE') : '?';
-            if (fb) { fb.textContent = `⏳ Cooldown gestartet. Mittel verfügbar ab: ${readyStr}`; fb.className = 'modal-feedback'; }
-            _ctx.showToast?.(`Withdraw-Cooldown gestartet – bereit ab ${readyStr}`, 'success');
+            const readyStr = r.readyAt ? new Date(r.readyAt).toLocaleString(NUM_LOCALE) : '?';
+            if (fb) { fb.textContent = tr('slen.cooldown_started', '⏳ Cooldown gestartet. Mittel verfügbar ab: {time}', { time: readyStr }); fb.className = 'modal-feedback'; }
+            _ctx.showToast?.(tr('slen.cooldown_toast', 'Withdraw-Cooldown gestartet – bereit ab {time}', { time: readyStr }), 'success');
         } else {
-            if (fb) { fb.textContent = `✓ ${_fmt(r?.effectiveAmount ?? amount)} USDC aus ${r?.protoLabel ?? proto.label} abgehoben.`; fb.className = 'modal-feedback success'; }
+            if (fb) { fb.textContent = tr('slen.withdraw_ok', '✓ {amount} USDC aus {pool} abgehoben.', { amount: _fmt(r?.effectiveAmount ?? amount), pool: r?.protoLabel ?? proto.label }); fb.className = 'modal-feedback success'; }
             _ctx.showToast?.(`Withdraw ${_fmt(r?.effectiveAmount ?? amount)} USDC ← ${r?.protoLabel ?? proto.label}`, 'success');
         }
         _refreshProtocolsCard(card);
     } catch (err) {
-        if (fb) { fb.textContent = `Fehler: ${err.message}`; fb.className = 'modal-feedback error'; }
-        _ctx.showToast?.(`Withdraw fehlgeschlagen: ${err.message}`, 'error');
+        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
+        _ctx.showToast?.(tr('slen.withdraw_failed', 'Withdraw fehlgeschlagen: {error}', { error: err.message }), 'error');
     } finally {
         btns.forEach(b => b.disabled = false);
     }
@@ -1760,10 +1765,10 @@ async function _refreshProtocolsCard(card) {
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function _statusLabel(s) {
-    if (s === 'active')   return 'Aktiv';
-    if (s === 'inactive') return 'Gestoppt';
-    if (s === 'failed')   return 'Fehler';
-    return s ?? 'Unbekannt';
+    if (s === 'active')   return tr('sb.status_active', 'Aktiv');
+    if (s === 'inactive') return tr('sb.status_stopped', 'Gestoppt');
+    if (s === 'failed')   return tr('sb.status_failed', 'Fehler');
+    return s ?? tr('sb.status_unknown', 'Unbekannt');
 }
 
 function _statusClass(s) {
@@ -1775,4 +1780,4 @@ function _statusClass(s) {
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function _esc(s)    { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function _fmt(n)    { const v = parseFloat(n); return isNaN(v) ? '0' : v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 6 }); }
+function _fmt(n)    { const v = parseFloat(n); return isNaN(v) ? '0' : v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 6 }); }

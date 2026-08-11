@@ -19,6 +19,7 @@ import path              from 'path';
 import { fileURLToPath } from 'url';
 import Database          from 'better-sqlite3';
 import { PATHS }         from '../../../config/paths.js';
+import { t } from '../../../lib/i18n.js';
 
 const __dirname   = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
@@ -114,13 +115,13 @@ router.get('/', wrap((req, res) => {
 router.post('/', wrap((req, res) => {
     const { name, address } = req.body;
     if (!name || typeof name !== 'string' || !name.trim()) {
-        return res.status(400).json({ error: 'name fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'name' }) });
     }
     if (!address || typeof address !== 'string') {
-        return res.status(400).json({ error: 'address fehlt' });
+        return res.status(400).json({ error: t('api.common.missing_field', { field: 'address' }) });
     }
     if (!isValidSolanaAddress(address.trim())) {
-        return res.status(400).json({ error: 'Ungültige Solana-Adresse' });
+        return res.status(400).json({ error: t('api.common.invalid_address') });
     }
 
     const db     = openDb();
@@ -135,22 +136,22 @@ router.post('/', wrap((req, res) => {
 // PUT /api/addresses/:id
 router.put('/:id', wrap((req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Ungültige ID' });
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: t('api.common.invalid_id') });
 
     const { name, address } = req.body;
     const db  = openDb();
     const row = db.prepare(`SELECT id FROM shared_addresses WHERE id = ?`).get(id);
-    if (!row) { db.close(); return res.status(404).json({ error: 'Adresse nicht gefunden' }); }
+    if (!row) { db.close(); return res.status(404).json({ error: t('api.common.address_not_found') }); }
 
     if (name !== undefined) {
         if (typeof name !== 'string' || !name.trim()) {
-            db.close(); return res.status(400).json({ error: 'Ungültiger Name' });
+            db.close(); return res.status(400).json({ error: t('api.common.invalid_name') });
         }
         db.prepare(`UPDATE shared_addresses SET name = ? WHERE id = ?`).run(name.trim(), id);
     }
     if (address !== undefined) {
         if (!isValidSolanaAddress(address.trim())) {
-            db.close(); return res.status(400).json({ error: 'Ungültige Solana-Adresse' });
+            db.close(); return res.status(400).json({ error: t('api.common.invalid_address') });
         }
         db.prepare(`UPDATE shared_addresses SET address = ? WHERE id = ?`).run(address.trim(), id);
     }
@@ -162,18 +163,18 @@ router.put('/:id', wrap((req, res) => {
 // DELETE /api/addresses/:id
 router.delete('/:id', wrap((req, res) => {
     const id = Number(req.params.id);
-    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Ungültige ID' });
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: t('api.common.invalid_id') });
 
     const db  = openDb();
     const row = db.prepare(`SELECT id, name, address FROM shared_addresses WHERE id = ?`).get(id);
-    if (!row) { db.close(); return res.status(404).json({ error: 'Adresse nicht gefunden' }); }
+    if (!row) { db.close(); return res.status(404).json({ error: t('api.common.address_not_found') }); }
 
     // Schutz: Adresse darf nicht gelöscht werden, solange sie irgendwo verwendet wird
     const usages = findUsages(db, row.address);
     if (usages.length > 0) {
         db.close();
         return res.status(409).json({
-            error:  'Adresse wird noch verwendet und kann nicht gelöscht werden.',
+            error:  t('api.addr.in_use'),
             usages, // [{ botId, poolId, fields: ['Auto Payout', ...] }]
         });
     }

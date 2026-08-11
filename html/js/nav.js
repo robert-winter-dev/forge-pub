@@ -23,7 +23,13 @@
  * (192.168.x.x / 10.x.x.x / 172.16-31.x.x), erscheinen zusätzlich die
  * Bot-Settings-Links, die komplette Message-Center-Gruppe sowie
  * SSL-Zertifikat/Settings unter System.
+ *
+ * Sprache: alle Beschriftungen laufen über t() (html/js/i18n.js). Der deutsche
+ * Text steht dabei als zweites Argument direkt am Aufruf — er ist zugleich
+ * Fallback und Vorlage, bin/i18n-check.js hält ihn mit html/i18n/de.json synchron.
  */
+
+import { t } from './i18n.js';
 
 /** Gibt true zurück wenn der Aufruf aus dem lokalen Netz kommt. */
 function isLanAccess() {
@@ -38,18 +44,18 @@ function buildNavTree() {
     const lan = isLanAccess();
     const ip  = window.location.hostname;
 
-    const overview = { id: 'overview', label: 'Overview', href: '/forge/' };
+    const overview = { id: 'overview', label: t('nav.overview', 'Overview'), href: '/forge/' };
 
     const liquidity = {
-        id: 'liquidity', label: 'Liquidity Bot', group: true, items: [
-            { id: 'liquidity-dashboard', label: 'Dashboard', href: '/forge/liquidity/' },
-            ...(lan ? [{ id: 'settings-liquidity', label: 'Settings', href: `https://${ip}:3200/#liquidity` }] : []),
+        id: 'liquidity', label: t('nav.liquidity', 'Liquidity Bot'), group: true, items: [
+            { id: 'liquidity-dashboard', label: t('nav.dashboard', 'Dashboard'), href: '/forge/liquidity/' },
+            ...(lan ? [{ id: 'settings-liquidity', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/#liquidity` }] : []),
         ],
     };
     const lending = {
-        id: 'lending', label: 'Lending Bot', group: true, items: [
-            { id: 'lending-dashboard', label: 'Dashboard', href: '/forge/lending/' },
-            ...(lan ? [{ id: 'settings-lending', label: 'Settings', href: `https://${ip}:3200/#lending` }] : []),
+        id: 'lending', label: t('nav.lending', 'Lending Bot'), group: true, items: [
+            { id: 'lending-dashboard', label: t('nav.dashboard', 'Dashboard'), href: '/forge/lending/' },
+            ...(lan ? [{ id: 'settings-lending', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/#lending` }] : []),
         ],
     };
 
@@ -58,27 +64,24 @@ function buildNavTree() {
     // Ungelesen-Zähler, die früher im jetzt entfallenen Spalten-Menü von
     // message.html standen – message.js aktualisiert sie live per setNavBadge().
     const messageCenter = lan ? {
-        id: 'message', label: 'Message Center', group: true, items: [
-            { id: 'message-system',       label: 'System',   href: `https://${ip}:3200/message.html#system`,   hasBadge: true },
-            { id: 'message-support',      label: 'Support',  href: `https://${ip}:3200/message.html#support`,  hasBadge: true },
-            { id: 'message-premium',      label: 'Premium',  href: `https://${ip}:3200/message.html#premium`,  hasBadge: true },
-            { id: 'message-einstellungen', label: 'Settings', href: `https://${ip}:3200/message.html#einstellungen` },
+        id: 'message', label: t('nav.message_center', 'Message Center'), group: true, items: [
+            { id: 'message-system',       label: t('nav.message.system',  'System'),  href: `https://${ip}:3200/message.html#system`,   hasBadge: true },
+            { id: 'message-support',      label: t('nav.message.support', 'Support'), href: `https://${ip}:3200/message.html#support`,  hasBadge: true },
+            { id: 'message-premium',      label: t('nav.message.premium', 'Premium'), href: `https://${ip}:3200/message.html#premium`,  hasBadge: true },
+            { id: 'message-einstellungen', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/message.html#einstellungen` },
         ],
     } : null;
 
     const system = {
-        id: 'system', label: 'System', group: true, items: [
-            { id: 'health', label: 'Health Monitor', href: '/forge/health.html' },
+        id: 'system', label: t('nav.system', 'System'), group: true, items: [
+            { id: 'health', label: t('nav.health', 'Health Monitor'), href: '/forge/health.html' },
             // Port 3201 ist bewusst reines HTTP (kein TLS-Zertifikat gebunden, siehe
             // bots/settings/server.js) – https:// hier würde am TLS-Handshake scheitern.
-            ...(lan ? [{ id: 'ssl-cert', label: 'SSL-Zertifikat', href: `http://${ip}:3201/` }] : []),
-            // Noch keine eigene Seite (Stand 2026-08-08) — Platzhalter, bis die System-Settings-Seite existiert.
-            ...(lan ? [{ id: 'system-settings', label: 'Settings', href: null }] : []),
-            // forkOnly: nur auf einem FORGE.pub-Fork sinnvoll (nur er bezieht Releases
-            // von GitHub) – bleibt bis zum Fork-Nachweis per /forge/version.json
-            // versteckt (siehe renderLeaf() + die bestehende version.json-Abfrage
-            // weiter unten, die ohnehin schon genau diesen Fork-Nachweis liefert).
-            ...(lan ? [{ id: 'updates', label: 'Updates', href: `https://${ip}:3200/updates.html`, forkOnly: true }] : []),
+            ...(lan ? [{ id: 'ssl-cert', label: t('nav.ssl_cert', 'SSL-Zertifikat'), href: `http://${ip}:3201/` }] : []),
+            // War früher forkOnly (Updates nur auf FORGE.pub sinnvoll) – die Seite heißt jetzt
+            // "Settings" und zeigt auch auf dem Master Sprache/Zeitzone/Update-Status an,
+            // ist also für beide Installationsarten sichtbar.
+            ...(lan ? [{ id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/updates.html` }] : []),
         ],
     };
 
@@ -401,8 +404,8 @@ export function initNav({ current = '', logout = '' } = {}) {
     const btn = document.createElement('button');
     btn.className = 'nav-hamburger';
     btn.innerHTML = '&#9776;';  // ☰
-    btn.title = 'Navigation';
-    btn.setAttribute('aria-label', 'Navigation');
+    btn.title = t('nav.aria.navigation', 'Navigation');
+    btn.setAttribute('aria-label', t('nav.aria.navigation', 'Navigation'));
 
     // In .header-logo als erstes Element einfügen
     const headerLogo = document.querySelector('.header-logo');
@@ -479,7 +482,7 @@ export function initNav({ current = '', logout = '' } = {}) {
         return `<div class="nav-group${isOpen ? ' open' : ''}" data-group="${group.id}">
             <div class="nav-group-header">
                 <div class="${headerCls}" data-nav-id="${group.id}"><span class="nav-label">${group.label}</span></div>
-                <button class="nav-group-toggle" aria-label="Erweitern/Einklappen">
+                <button class="nav-group-toggle" aria-label="${t('nav.aria.toggle_group', 'Erweitern/Einklappen')}">
                     <i class="nav-chevron">›</i>
                 </button>
             </div>
@@ -502,7 +505,7 @@ export function initNav({ current = '', logout = '' } = {}) {
 
     const logoutHtml = logout
         ? `<div class="nav-panel-footer">
-               <a href="${logout}" class="nav-logout">Logout</a>
+               <a href="${logout}" class="nav-logout">${t('nav.logout', 'Logout')}</a>
            </div>`
         : '';
 
@@ -637,7 +640,7 @@ export function initFooter({ botName } = {}) {
     const line2 = '';
 
     footer.innerHTML =
-        `<div class="footer-forge"><img src="${logoSrc}" alt="FORGE" style="height:18px;vertical-align:middle;margin-right:4px;border-radius:3px;"> FORGE public – Automated DEX Trading</div>
+        `<div class="footer-forge"><img src="${logoSrc}" alt="FORGE" style="height:18px;vertical-align:middle;margin-right:4px;border-radius:3px;"> ${t('footer.tagline', 'FORGE public – Automated DEX Trading')}</div>
         ${line2}
         <div class="footer-legal">
             Aus dem Roman: <a href="https://uag.de/buch/der-exploit/" target="_blank" rel="noopener">Der EXPLOIT</a>
@@ -650,7 +653,7 @@ export function setLastUpdate(ts, { disabled = false } = {}) {
     if (!el) return;
 
     if (disabled) {
-        el.textContent = 'Bots deaktiviert';
+        el.textContent = t('status.bots_disabled', 'Bots deaktiviert');
         el.className   = 'last-update disabled';
         return;
     }
@@ -660,7 +663,7 @@ export function setLastUpdate(ts, { disabled = false } = {}) {
         : null;
 
     if (!tsMs || isNaN(tsMs)) {
-        el.textContent = 'Kein Signal';
+        el.textContent = t('status.no_signal', 'Kein Signal');
         el.className   = 'last-update offline';
         return;
     }
@@ -671,6 +674,6 @@ export function setLastUpdate(ts, { disabled = false } = {}) {
     const ageSec = (Date.now() - tsMs) / 1000;
     const cls    = ageSec < 600 ? 'online' : ageSec < 1800 ? 'warning' : 'offline';
 
-    el.textContent = `Letztes Update: ${h}:${m} Uhr`;
+    el.textContent = t('status.last_update', 'Letztes Update: {time} Uhr', { time: `${h}:${m}` });
     el.className   = `last-update ${cls}`;
 }

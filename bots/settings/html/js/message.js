@@ -24,7 +24,8 @@
  * komplett entfernt, seitdem keine der vier Ansichten sie mehr braucht.
  */
 
-import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260808h';
+import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260811b';
+import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast } from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal } from '/forge/js/modal.js?v=20260731a';
 import {
@@ -37,13 +38,14 @@ const hashMenu = location.hash.slice(1);
 const initialMenu = VALID_MENUS.includes(hashMenu) ? hashMenu : 'system';
 
 initNav({ current: `message-${initialMenu}` });
-initFooter({ botName: 'Message Center' });
+initFooter({ botName: tr('nav.message_center', 'Message Center') });
 
 // ── Helfer ───────────────────────────────────────────────────────────────────
 function fmtDateTime(ts) {
-    return new Date(ts).toLocaleString('de-DE', {
+    const text = new Date(ts).toLocaleString(NUM_LOCALE, {
         day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit',
-    }) + ' Uhr';
+    });
+    return tr('time.hour_label', '{time} Uhr', { time: text });
 }
 // Lange Form für die Absender-Zeile in der Detailansicht: vierstelliges Jahr, kein
 // Komma ("30.07.2026 13:10 Uhr", Vorgabe 2026-07-30). Bewusst NICHT in den
@@ -51,8 +53,9 @@ function fmtDateTime(ts) {
 // und die Kurzform genügt, weil der Kontext daneben steht.
 function fmtDateTimeLong(ts) {
     const d = new Date(ts);
-    return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' })
-        + ' ' + d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }) + ' Uhr';
+    const text = d.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' })
+        + ' ' + d.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
+    return tr('time.hour_label', '{time} Uhr', { time: text });
 }
 function fmtTime(ts) {
     const d = new Date(ts);
@@ -91,7 +94,7 @@ async function copyNpub(npub) {
         await navigator.clipboard.writeText(npub);
         showToast('npub in die Zwischenablage kopiert', 'success');
     } catch {
-        showToast('Kopieren fehlgeschlagen', 'error');
+        showToast(tr('msg.copy_failed', 'Kopieren fehlgeschlagen'), 'error');
     }
 }
 
@@ -104,9 +107,9 @@ async function copyNpub(npub) {
  */
 function peerLabelWithNpub(npub, peerName) {
     const short = npub
-        ? `<span class="msg-peer-pubkey msg-npub-copy" data-npub="${esc(npub)}" title="npub kopieren">(${esc(shortPeer(npub))})</span>`
+        ? `<span class="msg-peer-pubkey msg-npub-copy" data-npub="${esc(npub)}" title="${tr('msg.copy_npub', 'npub kopieren')}">(${esc(shortPeer(npub))})</span>`
         : '';
-    return peerName ? `${esc(peerName)} ${short}` : (short || 'Lade…');
+    return peerName ? `${esc(peerName)} ${short}` : (short || tr('msg.loading', 'Lade…'));
 }
 
 // ── Zustand ──────────────────────────────────────────────────────────────────
@@ -259,7 +262,7 @@ async function renderSystemPanel() {
 
     const grid = document.getElementById('mcsGrid');
     if (!systemCache.length) {
-        grid.innerHTML = '<div class="msg-empty">Keine System-Benachrichtigungen.</div>';
+        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_system_notifications', 'Keine System-Benachrichtigungen.') + '</div>';
     } else {
         grid.innerHTML = mctTableHtml(systemCache.map(n => systemRowHtml(n)).join(''));
         grid.querySelectorAll('.mct-row').forEach(row => {
@@ -291,7 +294,12 @@ function stripEmoji(text) {
         .trim();
 }
 
-const LEVEL_LABEL = { info: 'Info', warn: 'Warnung', error: 'Fehler', lifecycle: 'Status' };
+const LEVEL_LABEL = {
+    info:      tr('msg.level_info',  'Info'),
+    warn:      tr('msg.level_warn',  'Warnung'),
+    error:     tr('msg.level_error', 'Fehler'),
+    lifecycle: tr('set.status',      'Status'),
+};
 
 /**
  * Kopfzeile + Zeilen-HTML zu einer Tabelle zusammensetzen (System/Premium/
@@ -302,7 +310,7 @@ const LEVEL_LABEL = { info: 'Info', warn: 'Warnung', error: 'Fehler', lifecycle:
  */
 function mctTableHtml(rowsHtml) {
     return `<div class="mct-table">
-        <div class="mct-header"><span>Thema</span><span>Absender</span><span>Datum</span></div>
+        <div class="mct-header"><span>${tr('msg.topic', 'Thema')}</span><span>${tr('msg.sender', 'Absender')}</span><span>${tr('msg.date', 'Datum')}</span></div>
         ${rowsHtml}
     </div>`;
 }
@@ -377,8 +385,8 @@ function openSystemMessageModal(id) {
         // Premium-Freischaltung ansetzt. Tooltip per natives title-Attribut (gleiche
         // Konvention wie #msgCopyBtn/#msgQrBtn weiter unten in dieser Datei).
         footerNote: `<button type="button" class="msg-icon-btn msg-icon-btn-accent" id="msgForwardBtn"
-            title="Diese Nachricht an den FORGE Support weiterleiten" aria-label="Weiterleiten">↪</button>`,
-        actions: [{ label: 'Schließen', onClick: () => closeModal('msg-system-detail') }],
+            title="${tr('msg.forward_to_support', 'Diese Nachricht an den FORGE Support weiterleiten')}" aria-label="${tr('msg.forward', 'Weiterleiten')}">↪</button>`,
+        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('msg-system-detail') }],
     });
     detailModal.querySelector('#msgForwardBtn').addEventListener('click', () => {
         closeModal('msg-system-detail');
@@ -393,8 +401,8 @@ function confirmForwardSystemMessage(n) {
     const cid = 'msg-forward-confirm';
     showModal({
         id:    cid,
-        title: 'Nachricht weiterleiten?',
-        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">Hast Du eine Frage zu dieser Meldung und möchtest sie an den Support weiterleiten?</p>',
+        title: tr('msg.forward_q', 'Nachricht weiterleiten?'),
+        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.forward_question', 'Hast Du eine Frage zu dieser Meldung und möchtest sie an den Support weiterleiten?') + '</p>',
         actions: [
             { label: 'Weiter', onClick: () => { closeModal(cid); forwardSystemMessage(n); } },
             { label: 'Abbrechen', onClick: () => closeModal(cid) },
@@ -491,7 +499,7 @@ async function renderPremiumPanel() {
 
     const grid = document.getElementById('mcpGrid');
     if (!pageItems.length) {
-        grid.innerHTML = '<div class="msg-empty">Noch keine Premium-Nachrichten.</div>';
+        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_premium_messages', 'Noch keine Premium-Nachrichten.') + '</div>';
     } else {
         grid.innerHTML = mctTableHtml(pageItems.map(m => premiumRowHtml(m)).join(''));
         grid.querySelectorAll('.mct-row').forEach(row => {
@@ -510,7 +518,7 @@ function premiumRowHtml(m) {
     const unread = m.direction === 'in' && !m.read;
     const sender = m.peerName
         ? esc(m.peerName)
-        : (m.peerPubkey ? esc(shortPeer(m.peerPubkey)) : (m.direction === 'out' ? 'Diese Instanz' : 'FORGE Master'));
+        : (m.peerPubkey ? esc(shortPeer(m.peerPubkey)) : (m.direction === 'out' ? tr('msg.this_instance', 'Diese Instanz') : tr('msg.forge_master', 'FORGE Master')));
     return `
         <div class="mct-row${unread ? ' unread' : ''}" data-id="${esc(m.id)}">
             <span class="mct-subject">${esc(stripEmoji(m.summary))}</span>
@@ -535,19 +543,19 @@ function premiumPaymentDetailBody(m, sender) {
             </div>
             <div class="msg-thread-modal-header" style="margin-top:0.6rem;">
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">Betrag</span>
+                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.amount', 'Betrag')}</span>
                     <span>${esc(p.amountUsdc)} USDC</span>
                 </div>
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">Zeitraum</span>
+                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.period', 'Zeitraum')}</span>
                     <span>${esc(p.hourRange)}</span>
                 </div>
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">An</span>
+                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.to', 'An')}</span>
                     <span class="msg-peer-pubkey">${esc(p.toWallet)}</span>
                 </div>
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">TX</span>
+                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.tx', 'TX')}</span>
                     <span><a href="https://solscan.io/tx/${esc(p.signature)}" target="_blank" rel="noopener" style="color:inherit;">${esc(truncateToAddressLength(p.signature))} ↗</a></span>
                 </div>
             </div>
@@ -565,11 +573,13 @@ async function openPremiumMessageModal(id) {
     const sender = m.peerPubkey
         ? (m.direction === 'in'
             ? (m.peerName ? `${m.peerName} (${shortPeer(m.peerPubkey)})` : shortPeer(m.peerPubkey))
-            : 'Diese Instanz')
-        : 'Diese Instanz';
+            : tr('msg.this_instance', 'Diese Instanz'))
+        : tr('msg.this_instance', 'Diese Instanz');
     showModal({
         id:    'msg-premium-detail',
-        title: m.payment ? 'Automatische Premium Zahlung' : (m.direction === 'in' ? 'Nachricht' : 'Ereignis'),
+        title: m.payment
+            ? tr('msg.auto_premium_pay', 'Automatische Premium Zahlung')
+            : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')),
         body:  m.payment
             ? premiumPaymentDetailBody(m, sender)
             : messageDetailBody({
@@ -578,7 +588,7 @@ async function openPremiumMessageModal(id) {
                 timestamp: m.timestamp,
                 message:   m.detail,
             }),
-        actions: [{ label: 'Schließen', onClick: () => closeModal('msg-premium-detail') }],
+        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('msg-premium-detail') }],
     });
 
     if (m.direction === 'in' && !m.read) {
@@ -668,7 +678,7 @@ async function renderSupportPanel() {
 
     const grid = document.getElementById('mcSupGrid');
     if (!pageItems.length) {
-        grid.innerHTML = '<div class="msg-empty">Noch keine Konversationen. Über "Neue Nachricht" eine starten.</div>';
+        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.') + '</div>';
     } else {
         grid.innerHTML = mctTableHtml(pageItems.map(t => supportRowHtml(t)).join(''));
         grid.querySelectorAll('.mct-row').forEach(row => {
@@ -738,23 +748,23 @@ async function openSupportThreadModal(peerPubkeyHex, threadId) {
         body: `
             <div class="msg-thread-modal-header">
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label">Von</span>
+                    <span class="msg-thread-modal-label">${tr('msg.from', 'Von')}</span>
                     <span>${meLabel}</span>
                 </div>
                 <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label">Mit</span>
-                    <span id="msgThreadPeer">Lade…</span>
+                    <span class="msg-thread-modal-label">${tr('msg.with', 'Mit')}</span>
+                    <span id="msgThreadPeer">${tr('msg.loading', 'Lade…')}</span>
                 </div>
             </div>
-            <div class="msg-thread" id="msgThread"><div class="msg-empty">Lade…</div></div>
+            <div class="msg-thread" id="msgThread"><div class="msg-empty">${tr('msg.loading', 'Lade…')}</div></div>
             <form class="msg-compose" id="msgComposeForm">
-                <textarea id="msgComposeInput" rows="3" placeholder="Antworten…" maxlength="1000"></textarea>
-                <button type="submit">Senden</button>
+                <textarea id="msgComposeInput" rows="3" placeholder="${tr('msg.reply_ph', 'Antworten…')}" maxlength="1000"></textarea>
+                <button type="submit">${tr('msg.send', 'Senden')}</button>
             </form>
             <div class="msg-status" id="msgStatus"></div>`,
         actions: [
-            { label: 'Konversation löschen', onClick: () => deleteSupportThread(peerPubkeyHex, threadId, mid) },
-            { label: 'Schließen', onClick: () => closeModal(mid) },
+            { label: tr('msg.delete_conv', 'Konversation löschen'), onClick: () => deleteSupportThread(peerPubkeyHex, threadId, mid) },
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
         onClose: () => { activePeer = null; activeThreadId = null; },
     });
@@ -775,22 +785,22 @@ async function deleteSupportThread(peerPubkeyHex, threadId, closeThreadModalId =
     const confirmMid = 'msg-support-delete-confirm';
     showModal({
         id:    confirmMid,
-        title: 'Konversation löschen?',
-        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">Diese Konversation wird unwiderruflich gelöscht.</p>',
+        title: tr('msg.delete_conv_q', 'Konversation löschen?'),
+        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.delete_conv_note', 'Diese Konversation wird unwiderruflich gelöscht.') + '</p>',
         actions: [
             {
-                label: 'Löschen', onClick: async () => {
+                label: tr('msg.delete', 'Löschen'), onClick: async () => {
                     try {
                         const r = await fetch(supportThreadUrl(peerPubkeyHex, threadId), { method: 'DELETE' });
                         const data = await r.json().catch(() => ({}));
-                        if (!r.ok) { showToast(data.error ?? 'Löschen fehlgeschlagen', 'error'); return; }
+                        if (!r.ok) { showToast(data.error ?? tr('msg.delete_failed', 'Löschen fehlgeschlagen'), 'error'); return; }
                         closeModal(confirmMid);
                         closeModal(closeThreadModalId);
-                        showToast('Konversation gelöscht', 'success');
+                        showToast(tr('msg.conv_deleted', 'Konversation gelöscht'), 'success');
                         await renderSupportPanel();
                         refreshBadges();
                     } catch {
-                        showToast('Löschen fehlgeschlagen (Netzwerk)', 'error');
+                        showToast(tr('msg.delete_failed_net', 'Löschen fehlgeschlagen (Netzwerk)'), 'error');
                     }
                 },
             },
@@ -809,7 +819,7 @@ async function loadThreadMessages() {
         const peerEl = document.getElementById('msgThreadPeer');
         if (peerEl) peerEl.innerHTML = peerLabelWithNpub(peerNpub, peerName);
         if (!messages.length) {
-            thread.innerHTML = '<div class="msg-empty">Noch keine Nachrichten.</div>';
+            thread.innerHTML = '<div class="msg-empty">' + tr('msg.no_messages', 'Noch keine Nachrichten.') + '</div>';
             return;
         }
         thread.innerHTML = messages.map(m => `
@@ -822,7 +832,7 @@ async function loadThreadMessages() {
         renderSupportPanel(); // Badge/Preview nach "gelesen" aktualisieren
         refreshBadges();      // Menü-Badge korrekt nachziehen (nur dieses Anliegen wurde gelesen)
     } catch {
-        thread.innerHTML = '<div class="msg-empty">⚠️ Verlauf konnte nicht geladen werden.</div>';
+        thread.innerHTML = '<div class="msg-empty">' + tr('msg.history_load_failed', '⚠️ Verlauf konnte nicht geladen werden.') + '</div>';
     }
 }
 
@@ -843,7 +853,7 @@ async function onComposeSubmit(e) {
         });
         const data = await r.json();
         if (!r.ok) {
-            status.textContent = `⚠️ ${data.error ?? 'Senden fehlgeschlagen'}`;
+            status.textContent = `⚠️ ${data.error ?? tr('msg.send_failed', 'Senden fehlgeschlagen')}`;
             return;
         }
         input.value = '';
@@ -915,7 +925,7 @@ function renderMessageBody(rawText) {
     const quoteHtml   = esc(stripEmoji(m[1])).replace(/\n/g, '<br>');
     const commentHtml = esc(stripEmoji(m[2]));
     return `
-        <div class="msg-quote-label">↪ Weitergeleitete Meldung</div>
+        <div class="msg-quote-label">${tr('msg.forwarded_marker', '↪ Weitergeleitete Meldung')}</div>
         <div class="msg-quote-block">${quoteHtml}</div>
         ${commentHtml ? `<div class="msg-own-comment">${commentHtml}</div>` : ''}`;
 }
@@ -931,26 +941,26 @@ async function openNewMessageModal(quoteText = null) {
 
     showModal({
         id: 'msg-new',
-        title: 'Neue Nachricht',
+        title: tr('msg.new_message', 'Neue Nachricht'),
         body: `
             <div class="msg-modal-field">
-                <label>An</label>
+                <label>${tr('msg.to', 'An')}</label>
                 <div class="mcs-infotext">${master
                     ? `${esc(master.label)} <span class="msg-peer-pubkey">(${esc(shortPeer(master.npub))})</span>`
-                    : '⚠️ FORGE-Master-Kontakt nicht verfügbar'}</div>
+                    : tr('msg.master_contact_unavailable_warn', '⚠️ FORGE-Master-Kontakt nicht verfügbar')}</div>
             </div>
             ${quoteText ? `
             <div class="msg-modal-field">
-                <label>Weitergeleitete Meldung (nicht bearbeitbar)</label>
+                <label>${tr('msg.forwarded_readonly', 'Weitergeleitete Meldung (nicht bearbeitbar)')}</label>
                 <div class="msg-quote-block msg-quote-block-compose">${esc(quoteText).replace(/\n/g, '<br>')}</div>
             </div>` : ''}
             <div class="msg-modal-field">
-                <label for="msgNewText">${quoteText ? 'Deine Frage/Anmerkung dazu' : 'Nachricht'}</label>
-                <textarea id="msgNewText" rows="6" maxlength="1000" placeholder="${quoteText ? 'Was möchtest Du dazu wissen…' : 'Nachricht…'}"></textarea>
+                <label for="msgNewText">${quoteText ? tr('msg.your_question', 'Deine Frage/Anmerkung dazu') : 'Nachricht'}</label>
+                <textarea id="msgNewText" rows="6" maxlength="1000" placeholder="${quoteText ? tr('msg.what_to_know', 'Was möchtest Du dazu wissen…') : 'Nachricht…'}"></textarea>
             </div>
             <div class="msg-status" id="msgNewStatus"></div>`,
         actions: [
-            { label: 'Senden', onClick: () => sendNewMessage(master, quoteText) },
+            { label: tr('msg.send', 'Senden'), onClick: () => sendNewMessage(master, quoteText) },
             { label: 'Abbrechen', onClick: () => closeModal('msg-new') },
         ],
     });
@@ -961,11 +971,11 @@ async function sendNewMessage(master, quoteText = null) {
     const status    = document.getElementById('msgNewStatus');
     const comment   = textInput.value.trim();
 
-    if (!master) { status.textContent = 'FORGE-Master-Kontakt nicht verfügbar.'; return; }
+    if (!master) { status.textContent = tr('msg.master_contact_unavailable', 'FORGE-Master-Kontakt nicht verfügbar.'); return; }
     if (!comment) {
         status.textContent = quoteText
-            ? 'Bitte eine Frage/Anmerkung zur weitergeleiteten Meldung eingeben.'
-            : 'Bitte eine Nachricht eingeben.';
+            ? tr('msg.enter_question', 'Bitte eine Frage/Anmerkung zur weitergeleiteten Meldung eingeben.')
+            : tr('msg.enter_message', 'Bitte eine Nachricht eingeben.');
         return;
     }
     const text = quoteText ? `${QUOTE_OPEN}\n${quoteText}\n${QUOTE_CLOSE}\n\n${comment}` : comment;
@@ -979,11 +989,11 @@ async function sendNewMessage(master, quoteText = null) {
         });
         const data = await r.json();
         if (!r.ok) {
-            status.textContent = `⚠️ ${data.error ?? 'Senden fehlgeschlagen'}`;
+            status.textContent = `⚠️ ${data.error ?? tr('msg.send_failed', 'Senden fehlgeschlagen')}`;
             return;
         }
         closeModal('msg-new');
-        showToast('Nachricht gesendet', 'success');
+        showToast(tr('msg.sent', 'Nachricht gesendet'), 'success');
         openSupportThreadModal(master.pubkeyHex, data.threadId ?? null);
     } catch {
         status.textContent = '⚠️ Senden fehlgeschlagen (Netzwerk)';
@@ -996,15 +1006,15 @@ async function renderSettingsPanel() {
         <div class="msg-settings">
             <label class="msg-setting-row">
                 <span>
-                    <span class="msg-setting-label">Kasching-Sound</span>
-                    <span class="msg-setting-hint">Ton bei neuen Umsätzen (Fee-Claims / Yield)</span>
+                    <span class="msg-setting-label">${tr('msg.chaching_sound', 'Kasching-Sound')}</span>
+                    <span class="msg-setting-hint">${tr('msg.sound_on_revenue', 'Ton bei neuen Umsätzen (Fee-Claims / Yield)')}</span>
                 </span>
                 <input type="checkbox" id="setSound">
             </label>
             <label class="msg-setting-row">
                 <span>
-                    <span class="msg-setting-label">Umsatz-Popups</span>
-                    <span class="msg-setting-hint">Toast-Einblendungen bei neuen Umsätzen</span>
+                    <span class="msg-setting-label">${tr('msg.revenue_popups', 'Umsatz-Popups')}</span>
+                    <span class="msg-setting-hint">${tr('msg.toast_on_revenue', 'Toast-Einblendungen bei neuen Umsätzen')}</span>
                 </span>
                 <input type="checkbox" id="setPopups">
             </label>
@@ -1012,54 +1022,54 @@ async function renderSettingsPanel() {
                 Gilt für alle lokalen Dashboards (gleiche Origin).
             </p>
 
-            <h3 class="msg-settings-heading">Benachrichtigungen</h3>
+            <h3 class="msg-settings-heading">${tr('msg.notifications', 'Benachrichtigungen')}</h3>
             <label class="msg-setting-row">
                 <span>
-                    <span class="msg-setting-label">System-Nachrichten</span>
+                    <span class="msg-setting-label">${tr('msg.system_messages', 'System-Nachrichten')}</span>
                     <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen System-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben im System-Tab trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifySystem">
             </label>
             <label class="msg-setting-row">
                 <span>
-                    <span class="msg-setting-label">Support-Nachrichten</span>
+                    <span class="msg-setting-label">${tr('msg.support_messages', 'Support-Nachrichten')}</span>
                     <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen Antworten. Ausgeschaltet: keine Zähler/Hinweise, die Konversationen bleiben im Support-Tab trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifySupport">
             </label>
             <label class="msg-setting-row">
                 <span>
-                    <span class="msg-setting-label">Premium-Nachrichten</span>
+                    <span class="msg-setting-label">${tr('msg.premium_messages', 'Premium-Nachrichten')}</span>
                     <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen Premium-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben im Premium-Tab trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifyPremium">
             </label>
 
-            <h3 class="msg-settings-heading">Nostr-Account</h3>
+            <h3 class="msg-settings-heading">${tr('msg.nostr_account', 'Nostr-Account')}</h3>
             <div class="msg-account-row">
-                <span class="msg-setting-label">Identität (npub)</span>
+                <span class="msg-setting-label">${tr('msg.identity_npub', 'Identität (npub)')}</span>
                 <div class="mc-identity" id="msgIdentity">
-                    <span class="msg-identity-text" id="msgIdentityText">Lade Identität…</span>
-                    <button type="button" class="msg-icon-btn" id="msgCopyBtn" title="npub kopieren" aria-label="npub kopieren" hidden>⧉</button>
-                    <button type="button" class="msg-icon-btn" id="msgQrBtn" title="QR-Code anzeigen" aria-label="QR-Code anzeigen" hidden>▦</button>
+                    <span class="msg-identity-text" id="msgIdentityText">${tr('msg.loading_identity', 'Lade Identität…')}</span>
+                    <button type="button" class="msg-icon-btn" id="msgCopyBtn" title="${tr('msg.copy_npub', 'npub kopieren')}" aria-label="${tr('msg.copy_npub', 'npub kopieren')}" hidden>⧉</button>
+                    <button type="button" class="msg-icon-btn" id="msgQrBtn" title="${tr('msg.show_qr', 'QR-Code anzeigen')}" aria-label="${tr('msg.show_qr', 'QR-Code anzeigen')}" hidden>▦</button>
                 </div>
             </div>
             <div class="msg-account-row">
-                <span class="msg-setting-label">Anzeigename</span>
+                <span class="msg-setting-label">${tr('msg.display_name', 'Anzeigename')}</span>
                 <div class="msg-account-controls">
-                    <input type="text" id="setAlias" maxlength="60" placeholder="FORGE Public User">
-                    <button type="button" id="setAliasBtn" class="msg-account-btn">Speichern</button>
+                    <input type="text" id="setAlias" maxlength="60" placeholder="${tr('msg.forge_public_user', 'FORGE Public User')}">
+                    <button type="button" id="setAliasBtn" class="msg-account-btn">${tr('msg.save', 'Speichern')}</button>
                 </div>
             </div>
             <div class="msg-account-row">
-                <span class="msg-setting-label">Account zurücksetzen</span>
+                <span class="msg-setting-label">${tr('msg.account_reset', 'Account zurücksetzen')}</span>
                 <span class="msg-setting-hint" id="msgResetHint">
                     Erzeugt einen neuen Nostr-Account. Der bisherige Account und
-                    <strong>alle bisherigen Nachrichten</strong> werden dabei
+                    <strong>${tr('msg.all_previous_messages', 'alle bisherigen Nachrichten')}</strong> werden dabei
                     unwiderruflich gelöscht.
                 </span>
                 <div class="msg-account-controls">
-                    <button type="button" id="setRegenBtn" class="msg-account-btn">Zurücksetzen…</button>
+                    <button type="button" id="setRegenBtn" class="msg-account-btn">${tr('msg.resetting', 'Zurücksetzen…')}</button>
                 </div>
             </div>
             <div class="msg-status" id="msgAccountStatus"></div>
@@ -1102,7 +1112,7 @@ async function loadSettingsIdentity() {
         const r = await fetch('/api/messages/identity');
         if (!r.ok) {
             const err = await r.json().catch(() => ({}));
-            if (idTextEl) idTextEl.textContent = `⚠️ ${err.error ?? 'Identität nicht verfügbar'}`;
+            if (idTextEl) idTextEl.textContent = `⚠️ ${err.error ?? tr('msg.identity_unavailable', 'Identität nicht verfügbar')}`;
             return;
         }
         const id = await r.json();
@@ -1119,11 +1129,11 @@ async function loadSettingsIdentity() {
         // hier zusätzlich in der UI sichtbar machen statt nur den Klick scheitern zu lassen.
         if (id.resetLocked) {
             regenBtn.disabled = true;
-            regenBtn.title = 'Auf dem FORGE Master gesperrt';
+            regenBtn.title = tr('msg.blocked_master', 'Auf dem FORGE Master gesperrt');
             regenHint.textContent =
-                'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE.pub-Forks) ' +
-                'müssten die neue npub erst wieder finden. Der Anzeigename kann trotzdem ' +
-                'geändert werden.';
+                tr('msg.blocked_master_note', 'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE.pub-Forks) ') +
+                tr('msg.would_need_npub', 'müssten die neue npub erst wieder finden. Der Anzeigename kann trotzdem ') +
+                tr('msg.can_be_changed', 'geändert werden.');
         }
     } catch {
         if (idTextEl) idTextEl.textContent = '⚠️ Nostr-Service nicht erreichbar';
@@ -1136,7 +1146,7 @@ async function loadSettingsIdentity() {
             await navigator.clipboard.writeText(currentNpub);
             showToast('npub kopiert', 'success');
         } catch {
-            showToast('Kopieren fehlgeschlagen', 'error');
+            showToast(tr('msg.copy_failed', 'Kopieren fehlgeschlagen'), 'error');
         }
     });
 
@@ -1144,7 +1154,7 @@ async function loadSettingsIdentity() {
         if (!currentNpub) return;
         showModal({
             id: 'msg-qr',
-            title: 'Nostr-Kontakt scannen',
+            title: tr('msg.scan_contact', 'Nostr-Kontakt scannen'),
             body: `
                 <div class="qr-wrapper" style="margin: 0 auto;">
                     <img class="qr-img" alt="Nostr-QR-Code" src="/api/messages/identity/qr">
@@ -1152,7 +1162,7 @@ async function loadSettingsIdentity() {
                 <div class="msg-qr-hint" style="text-align:center;margin-top:0.75rem;">
                     In Amethyst per „QR scannen" als Kontakt hinzufügen.
                 </div>`,
-            actions: [{ label: 'Schließen', onClick: () => closeModal('msg-qr') }],
+            actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('msg-qr') }],
         });
     });
 }
@@ -1170,7 +1180,7 @@ async function onSaveAlias() {
         });
         const data = await r.json();
         if (!r.ok) {
-            status.textContent = `⚠️ ${data.error ?? 'Speichern fehlgeschlagen'}`;
+            status.textContent = `⚠️ ${data.error ?? tr('msg.save_failed', 'Speichern fehlgeschlagen')}`;
             return;
         }
         input.value = data.alias;
@@ -1187,25 +1197,25 @@ async function onSaveAlias() {
 function onRegenerateClick() {
     showModal({
         id: 'msg-regen',
-        title: 'Nostr-Account zurücksetzen?',
+        title: tr('msg.nostr_account_reset_q', 'Nostr-Account zurücksetzen?'),
         body: `
             <p style="margin:0 0 0.75rem;font-size:0.88rem;line-height:1.5">
-                Es wird ein <b>neuer</b> Nostr-Account erzeugt. Dabei gehen unwiderruflich verloren:
+                Es wird ein <b>${tr('msg.new_short', 'neuer')}</b> Nostr-Account erzeugt. Dabei gehen unwiderruflich verloren:
             </p>
             <ul style="margin:0 0 0.75rem 1.1rem;font-size:0.85rem;line-height:1.6">
-                <li>der bisherige Account (deine bisherige npub wird ungültig)</li>
-                <li><b>alle bisherigen Nachrichten</b>, auch laufende Konversationen</li>
+                <li>${tr('msg.previous_account', 'der bisherige Account (deine bisherige npub wird ungültig)')}</li>
+                <li><b>${tr('msg.all_previous_messages', 'alle bisherigen Nachrichten')}</b>${tr('msg.also_running_conv', ', auch laufende Konversationen')}</li>
             </ul>
             <p style="margin:0 0 0.75rem;font-size:0.85rem;line-height:1.5">
                 Gegenstellen können dich danach nur noch über die neue npub erreichen.
             </p>
             <div class="msg-modal-field">
-                <label for="msgRegenAlias">Anzeigename für den neuen Account (optional)</label>
-                <input type="text" id="msgRegenAlias" maxlength="60" placeholder="FORGE Public User">
+                <label for="msgRegenAlias">${tr('msg.display_name_new', 'Anzeigename für den neuen Account (optional)')}</label>
+                <input type="text" id="msgRegenAlias" maxlength="60" placeholder="${tr('msg.forge_public_user', 'FORGE Public User')}">
             </div>
             <div class="msg-status" id="msgRegenStatus"></div>`,
         actions: [
-            { label: 'Ja, zurücksetzen', onClick: regenerateAccount },
+            { label: tr('msg.yes_reset', 'Ja, zurücksetzen'), onClick: regenerateAccount },
             { label: 'Abbrechen', onClick: () => closeModal('msg-regen') },
         ],
     });
@@ -1214,7 +1224,7 @@ function onRegenerateClick() {
 async function regenerateAccount() {
     const status = document.getElementById('msgRegenStatus');
     const alias = document.getElementById('msgRegenAlias').value.trim();
-    status.textContent = 'Erzeuge neuen Account…';
+    status.textContent = tr('msg.creating_account', 'Erzeuge neuen Account…');
     try {
         const r = await fetch('/api/messages/identity/regenerate', {
             method: 'POST',
@@ -1223,14 +1233,14 @@ async function regenerateAccount() {
         });
         const data = await r.json();
         if (!r.ok) {
-            status.textContent = `⚠️ ${data.error ?? 'Zurücksetzen fehlgeschlagen'}`;
+            status.textContent = `⚠️ ${data.error ?? tr('msg.reset_failed', 'Zurücksetzen fehlgeschlagen')}`;
             return;
         }
         closeModal('msg-regen');
         showToast(`Neuer Nostr-Account aktiv. ${data.deletedMessages} Nachricht(en) gelöscht.`, 'success');
         loadSettingsIdentity();
     } catch {
-        status.textContent = '⚠️ Zurücksetzen fehlgeschlagen (Netzwerk)';
+        status.textContent = tr('msg.reset_failed_net', '⚠️ Zurücksetzen fehlgeschlagen (Netzwerk)');
     }
 }
 
@@ -1283,4 +1293,4 @@ document.addEventListener('click', (e) => {
     if (el?.dataset.npub) copyNpub(el.dataset.npub);
 });
 
-document.getElementById('lastUpdate').textContent = 'Letztes Update: ' + fmtTime(Date.now());
+document.getElementById('lastUpdate').textContent = tr('msg.last_update_prefix', 'Letztes Update: ') + fmtTime(Date.now());

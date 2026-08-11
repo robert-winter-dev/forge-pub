@@ -27,6 +27,7 @@ import * as web3         from '@solana/web3.js';
 import { createUtils, resolveToken, getQuote, TOKEN_MINTS }
     from '../../../lib/emergency-utils.js';
 import { PATHS } from '../../../config/paths.js';
+import { reasonPayload } from '../../../lib/pool-reason.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BOT_DIR   = path.join(__dirname, '..');
@@ -301,7 +302,7 @@ async function executeWithdraw() {
             // wie nach einem TVL-Voll-Exit.
             try {
                 setPoolActive(pos.pool_id, false);
-                setPoolEnabled(pos.pool_id, false, `Emergency-Exit: Position live geschlossen (TX ${closed.txHash.slice(0, 12)}…)`);
+                setPoolEnabled(pos.pool_id, false, reasonPayload('reason.emergency_exit', { tx: closed.txHash.slice(0, 12) }));
                 log(`${pos.pair}: Pool gesperrt (enabled=false) – manuelle Freigabe im Backend nötig, sonst keine Reinvestition`);
             } catch (err) {
                 log(`${pos.pair}: Pool-Sperre fehlgeschlagen (nicht kritisch): ${err.message}`);

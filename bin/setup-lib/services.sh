@@ -52,8 +52,20 @@ do_cron() {
     step "$(t CRON_STEP)"
     command -v crontab &>/dev/null || { c_warn "$(t CRON_CRONTAB_MISSING)"; return 0; }
     local env_line="FORGE_ENV_DIR=$ENV_DIR"
+    # FORGE_TZ als eigene crontab-Zeile, nicht nur in den .env-Dateien (do_config):
+    # standalone Cron-Skripte wie bin/anomaly-check.js laden kein dotenv, sondern
+    # lesen core/config.js' FORGE_TZ direkt aus dem geerbten Prozess-Environment.
+    # OPT_TIMEZONE ist nur bei do_install() gesetzt (do_timezone) — bei do_update()/
+    # do_repair() leer, dann die zuvor gesetzte Crontab-Zeile 1:1 übernehmen statt
+    # sie mit einer leeren FORGE_TZ= zu überschreiben.
+    local tz_line=""
+    if [[ -n "$OPT_TIMEZONE" ]]; then
+        tz_line="FORGE_TZ=$OPT_TIMEZONE"
+    else
+        tz_line="$(sudo -u "$INSTALL_USER" crontab -l 2>/dev/null | grep '^FORGE_TZ=' | tail -1 || true)"
+    fi
     local line="* * * * * cd $APP_DIR && /usr/bin/node bin/forge-cron.js >> $LOG_DIR/cron/forge-cron-wrapper.log 2>&1"
-    ( sudo -u "$INSTALL_USER" crontab -l 2>/dev/null | grep -v 'bin/forge-cron.js' | grep -v '^FORGE_ENV_DIR=' || true; echo "$env_line"; echo "$line" ) \
+    ( sudo -u "$INSTALL_USER" crontab -l 2>/dev/null | grep -v 'bin/forge-cron.js' | grep -v '^FORGE_ENV_DIR=' | grep -v '^FORGE_TZ=' || true; echo "$env_line"; [[ -n "$tz_line" ]] && echo "$tz_line"; echo "$line" ) \
         | sudo -u "$INSTALL_USER" crontab -
     c_ok "$(t CRON_SET_UP)"
 
@@ -84,7 +96,7 @@ do_cron() {
     [[ -f "$LOG_DIR/cron/update-check.log" ]] || touch "$LOG_DIR/cron/update-check.log"
     chown "$INSTALL_USER:$INSTALL_USER" "$LOG_DIR/cron/update-check.log"
 
-    local update_line="15 4 * * * cd $APP_DIR && $env_line /usr/bin/node bin/update-check.js >> $LOG_DIR/cron/update-check.log 2>&1"
+    local update_line="15 4 * * * cd $APP_DIR && $env_line $tz_line /usr/bin/node bin/update-check.js >> $LOG_DIR/cron/update-check.log 2>&1"
     ( crontab -l 2>/dev/null | grep -v 'bin/update-check.js' || true; echo "$update_line" ) | crontab -
     c_ok "$(t CRON_AUTO_UPDATE_SET_UP)"
 }

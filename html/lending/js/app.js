@@ -20,7 +20,11 @@ import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
 import { initMessageBell } from '../../js/message-bell.js?v=20260809a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260809b';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260811b';
+// Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
+// durchgängig ein Timestamp (15 Fundstellen) – ein gleichnamiger Import wäre eine
+// Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
+import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
 import { filterOutliers, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260411a';
 import {
     TZ, todayISO, startOfDayMs, zonedWallClockToMs,
@@ -40,7 +44,7 @@ earningsToast.startPolling('../liquidity/data/data.json', null);
 /** Zahlen-Formatierung mit Fallback */
 function fmt(n, decimals = 2, fallback = '—') {
     if (n == null || isNaN(n)) return fallback;
-    return Number(n).toLocaleString('de-DE', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    return Number(n).toLocaleString(NUM_LOCALE, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 }
 
 /** Kompaktes Datum + Uhrzeit aus Unix-Timestamp (ms) – in FORGE_TZ */
@@ -153,7 +157,7 @@ function renderStatus(data) {
         stateIcon.className   = 'bot-state-icon state-paused';
         const lastUpdateEl = document.getElementById('lastUpdate');
         if (lastUpdateEl) {
-            lastUpdateEl.textContent = 'Bot deaktiviert';
+            lastUpdateEl.textContent = tr('liq.bot_disabled', 'Bot deaktiviert');
             lastUpdateEl.className   = 'last-update';
         }
         titleEl.className = '';
@@ -262,11 +266,11 @@ function openGebundenModal(data) {
 
     bodyEl.innerHTML = `
         <table class="wallet-detail-table">
-            <thead><tr><th>Pool</th><th>Kapital</th><th>Yield</th><th>APY</th></tr></thead>
+            <thead><tr><th>${tr('liq.pool', 'Pool')}</th><th>${tr('len.capital', 'Kapital')}</th><th>${tr('len.yield', 'Yield')}</th><th>${tr('len.apy', 'APY')}</th></tr></thead>
             <tbody>${rows}</tbody>
             <tfoot>
                 <tr class="wallet-detail-total">
-                    <td>Gesamt</td>
+                    <td>${tr('overview.total', 'Gesamt')}</td>
                     <td>${fmt(totalAmount)}&nbsp;USDC</td>
                     <td>${fmt(totalYield, 4)}&nbsp;USDC</td>
                     <td></td>
@@ -287,7 +291,7 @@ let _portfolioChartFilterOutliers = localStorage.getItem(LS_PORTFOLIO_OUTLIERS) 
 function _updatePortfolioOutlierBtn(btn, active) {
     if (!btn) return;
     btn.classList.toggle('active', active);
-    btn.title = active ? 'Ausreißer einblenden' : 'Ausreißer ausblenden';
+    btn.title = active ? tr('len.show_outliers', 'Ausreißer einblenden') : tr('len.hide_outliers', 'Ausreißer ausblenden');
 }
 
 function renderDetailPortfolioChart(data) {
@@ -297,7 +301,7 @@ function renderDetailPortfolioChart(data) {
     const H       = svg.getBoundingClientRect().height || 380;
     const history = filterByRange(data?.portfolioHistory ?? [], portfolioRange, r => r.ts);
     if (history.length < 2) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
 
@@ -558,7 +562,7 @@ const PROTOCOL_NOTES = {
 };
 
 const PROTOCOL_NOTE_TITLES = {
-    jupiter: 'Hinweis zu Jupiter Lend',
+    jupiter: tr('len.jupiter_note', 'Hinweis zu Jupiter Lend'),
 };
 
 function renderPositions(data) {
@@ -643,30 +647,30 @@ function renderActiveCard(pos) {
         if (pos.breakEven !== true) return '';
         const totalFee = ((pos.txFeeUsdc ?? 0) + (pos.exitFeeUsdc ?? 0));
         const tip = `Yield deckt alle bisherigen TX-Gebühren\n+ geschätzte Auszahlungsgebühr\n(${fmt(totalFee, 4)} USDC gesamt).\nEin Ausstieg ist jetzt netto profitabel.`;
-        return ` <span class="break-even-badge has-tooltip" data-tooltip-title="Break-Even erreicht" data-tooltip-content="${tip}">✓</span>`;
+        return ` <span class="break-even-badge has-tooltip" data-tooltip-title="${tr('len.break_even', 'Break-Even erreicht')}" data-tooltip-content="${tip}">✓</span>`;
     })();
 
     return `
         <div class="position-card ${proto}">
             <div class="pc-header">
                 <span class="pc-protocol">${label}${noteIcon}</span>
-                <span class="pc-apy ${apyCls} apy-clickable" data-protocol="${proto}" data-label="${label}" title="APY-Verlauf anzeigen">${apyStr}</span>
+                <span class="pc-apy ${apyCls} apy-clickable" data-protocol="${proto}" data-label="${label}" title="${tr('len.apy_show', 'APY-Verlauf anzeigen')}">${apyStr}</span>
             </div>
             <div class="pc-tvl-row">
-                <span class="pc-label">TVL</span>
-                <span class="pc-value pc-tvl tvl-clickable" data-protocol="${proto}" data-label="${label}" title="TVL-Verlauf anzeigen">${tvlStr}</span>
+                <span class="pc-label">${tr('liq.tvl', 'TVL')}</span>
+                <span class="pc-value pc-tvl tvl-clickable" data-protocol="${proto}" data-label="${label}" title="${tr('len.tvl_show', 'TVL-Verlauf anzeigen')}">${tvlStr}</span>
             </div>
             <div class="pc-body">
                 <div class="pc-row">
-                    <span class="pc-label">Investment</span>
+                    <span class="pc-label">${tr('len.investment', 'Investment')}</span>
                     <span class="pc-value investment-clickable" data-protocol="${proto}" data-label="${label}">${fmt(investVal)} <span class="pc-unit">${asset}</span></span>
                 </div>
                 <div class="pc-row">
-                    <span class="pc-label">Yield</span>
+                    <span class="pc-label">${tr('len.yield', 'Yield')}</span>
                     <span class="pc-value ${yieldPosCls}">${yieldStr} <span class="pc-unit">${asset}</span></span>
                 </div>
                 <div class="pc-row pc-row-guthaben">
-                    <span class="pc-label">Guthaben</span>
+                    <span class="pc-label">${tr('len.balance', 'Guthaben')}</span>
                     <span class="pc-value">${guthabenStr} <span class="pc-unit">${asset}</span></span>
                 </div>
             </div>
@@ -690,28 +694,28 @@ function renderInactiveCard(proto, stats) {
         <div class="position-card ${proto.id} pc-inactive">
             <div class="pc-header">
                 <span class="pc-protocol">${proto.label}${noteIcon}</span>
-                <span class="pc-apy apy-inactive apy-clickable" data-protocol="${proto.id}" data-label="${proto.label}" title="APY-Verlauf anzeigen">${apyStr}</span>
+                <span class="pc-apy apy-inactive apy-clickable" data-protocol="${proto.id}" data-label="${proto.label}" title="${tr('len.apy_show', 'APY-Verlauf anzeigen')}">${apyStr}</span>
             </div>
             <div class="pc-tvl-row">
-                <span class="pc-label">TVL</span>
-                <span class="pc-value pc-tvl tvl-clickable" data-protocol="${proto.id}" data-label="${proto.label}" title="TVL-Verlauf anzeigen">${tvlStr}</span>
+                <span class="pc-label">${tr('liq.tvl', 'TVL')}</span>
+                <span class="pc-value pc-tvl tvl-clickable" data-protocol="${proto.id}" data-label="${proto.label}" title="${tr('len.tvl_show', 'TVL-Verlauf anzeigen')}">${tvlStr}</span>
             </div>
             <div class="pc-body">
                 <div class="pc-row">
-                    <span class="pc-label">Investment</span>
+                    <span class="pc-label">${tr('len.investment', 'Investment')}</span>
                     <span class="pc-value investment-clickable" data-protocol="${proto.id}" data-label="${proto.label}">— <span class="pc-unit">USDC</span></span>
                 </div>
                 <div class="pc-row">
-                    <span class="pc-label">Yield</span>
+                    <span class="pc-label">${tr('len.yield', 'Yield')}</span>
                     <span class="pc-value pc-dimmed">—</span>
                 </div>
                 <div class="pc-row pc-row-guthaben">
-                    <span class="pc-label">Guthaben</span>
+                    <span class="pc-label">${tr('len.balance', 'Guthaben')}</span>
                     <span class="pc-value pc-dimmed">—</span>
                 </div>
             </div>
             <div class="pc-meta">
-                <span>Laufzeit: —</span>
+                <span>${tr('len.runtime_none', 'Laufzeit: —')}</span>
             </div>
         </div>`;
 }
@@ -727,7 +731,7 @@ function renderAvailablePools(data) {
 
     if (data?.botActive === false) {
         container.innerHTML = '';
-        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        renderBotInactivePanel(container, tr('liq.no_open_positions', 'Keine offenen Positionen'));
         return;
     }
 
@@ -750,21 +754,21 @@ function renderAvailablePools(data) {
                : allRows;
 
     const filterSelect = `<select id="lbPoolsVisFilterSelect" class="pools-header-select" data-stop-tooltip="1">
-        <option value="all"${_poolsVisFilter==='all'?' selected':''}>Alle Pools</option>
-        <option value="active"${_poolsVisFilter==='active'?' selected':''}>Aktive Pools</option>
-        <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>Inaktive Pools</option>
+        <option value="all"${_poolsVisFilter==='all'?' selected':''}>${tr('liq.all_pools', 'Alle Pools')}</option>
+        <option value="active"${_poolsVisFilter==='active'?' selected':''}>${tr('liq.active_pools', 'Aktive Pools')}</option>
+        <option value="inactive"${_poolsVisFilter==='inactive'?' selected':''}>${tr('liq.inactive_pools', 'Inaktive Pools')}</option>
     </select>`;
 
     const header = `
         <div class="lb-pools-header">
             <span>${filterSelect}</span>
-            <span class="col-r lb-pools-col-asset">Asset</span>
-            <span class="col-r">APY</span>
-            <span class="col-r">TVL</span>
+            <span class="col-r lb-pools-col-asset">${tr('len.asset', 'Asset')}</span>
+            <span class="col-r">${tr('len.apy', 'APY')}</span>
+            <span class="col-r">${tr('liq.tvl', 'TVL')}</span>
         </div>`;
 
     if (rows.length === 0) {
-        container.innerHTML = header + '<p class="empty-state">— Keine Pools in dieser Ansicht</p>';
+        container.innerHTML = header + '<p class="empty-state">— ' + tr('len.no_pools_view_plain', 'Keine Pools in dieser Ansicht') + '</p>';
     } else {
         let rowsHtml = '';
         for (const r of rows) {
@@ -779,8 +783,8 @@ function renderAvailablePools(data) {
             <div class="lb-pools-row ${rowCls}">
                 <span>${escHtml(r.label)}${noteHtml}</span>
                 <span class="col-r lb-pools-col-asset" style="color:var(--text-muted);font-size:0.78rem">USDC</span>
-                <span class="col-r"><span class="apy-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="APY-Verlauf">${apyStr}</span></span>
-                <span class="col-r"><span class="tvl-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="TVL-Verlauf">${fmtTvl(r.tvl)}</span></span>
+                <span class="col-r"><span class="apy-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.apy_history', 'APY-Verlauf')}">${apyStr}</span></span>
+                <span class="col-r"><span class="tvl-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.tvl_history', 'TVL-Verlauf')}">${fmtTvl(r.tvl)}</span></span>
             </div>`;
         }
         container.innerHTML = header + `<div class="lb-pools-scroll">${rowsHtml}</div>`;
@@ -808,7 +812,7 @@ function renderActivePools(data) {
 
     if (data?.botActive === false) {
         container.innerHTML = '';
-        renderBotInactivePanel(container, 'Keine offenen Positionen');
+        renderBotInactivePanel(container, tr('liq.no_open_positions', 'Keine offenen Positionen'));
         return;
     }
 
@@ -822,16 +826,16 @@ function renderActivePools(data) {
 
     const colMode = _activePoolsColMode;
     const colSelect = `<select id="activePoolsColSelect" class="active-pools-col-select">
-        <option value="investment"${colMode === 'investment' ? ' selected' : ''}>Investment</option>
-        <option value="inout1d"${colMode === 'inout1d' ? ' selected' : ''}>In- / Out (1D)</option>
+        <option value="investment"${colMode === 'investment' ? ' selected' : ''}>${tr('len.investment', 'Investment')}</option>
+        <option value="inout1d"${colMode === 'inout1d' ? ' selected' : ''}>${tr('len.in_out_1d', 'In- / Out (1D)')}</option>
     </select>`;
 
     let html = `
         <div class="lb-active-header">
-            <span>Aktive Pools</span>
+            <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
             <span class="col-r">${colSelect}</span>
-            <span class="col-r lb-active-col-yield">Yield</span>
-            <span class="col-r">Guthaben</span>
+            <span class="col-r lb-active-col-yield">${tr('len.yield', 'Yield')}</span>
+            <span class="col-r">${tr('len.balance', 'Guthaben')}</span>
         </div>`;
 
     for (const pos of positions) {
@@ -898,12 +902,12 @@ function renderPendingWithdrawals(data) {
         const remaining = Math.max(0, pw.readyAt - now);
 
         const remainingLabel = isReady
-            ? 'Bereit zum Abschließen!'
+            ? tr('len.ready_to_finish', 'Bereit zum Abschließen!')
             : fmtCooldown(remaining);
 
         const badge = isReady
-            ? `<span class="pending-ready-badge">✓ Bereit</span>`
-            : `<span class="pending-waiting-badge">⏳ Wartet</span>`;
+            ? `<span class="pending-ready-badge">${tr('len.ready', '✓ Bereit')}</span>`
+            : `<span class="pending-waiting-badge">${tr('len.waiting', '⏳ Wartet')}</span>`;
 
         return `
         <div class="pending-item" data-id="${pw.id}">
@@ -1115,7 +1119,7 @@ function openStatPayedFeesModal(period, data, b) {
     const body  = document.getElementById('statPayedFeesModalBody');
     if (!modal) return;
 
-    const labels   = { today: 'Heute', yesterday: 'Gestern', month: 'Monat' };
+    const labels   = { today: tr('liq.today', 'Heute'), yesterday: tr('liq.yesterday', 'Gestern'), month: tr('liq.month', 'Monat') };
     const dateLabel = period === 'today' ? b.todayDE : period === 'yesterday' ? b.yesterdayDE : b.monthDE;
     title.textContent = `TX-Fees – ${labels[period]}: ${dateLabel}`;
 
@@ -1128,7 +1132,7 @@ function openStatPayedFeesModal(period, data, b) {
 
     const total = txs.reduce((s, t) => s + (t.feeUsdc ?? 0), 0);
 
-    const fmtDT = ms => makeFmt('de-DE', {
+    const fmtDT = ms => makeFmt(NUM_LOCALE, {
         day: '2-digit', month: '2-digit', year: 'numeric',
         hour: '2-digit', minute: '2-digit',
     }).format(new Date(ms));
@@ -1136,7 +1140,7 @@ function openStatPayedFeesModal(period, data, b) {
     const typeLabel = { deposit: 'Einzahlung', withdraw: 'Auszahlung', rebalance: 'Rebalancing', claim: 'Claim' };
 
     if (txs.length === 0) {
-        body.innerHTML = `<p class="empty-state" style="padding:1rem">— Keine Transaktionen im Zeitraum</p>`;
+        body.innerHTML = `<p class="empty-state" style="padding:1rem">${tr('liq.no_tx_period', '— Keine Transaktionen im Zeitraum')}</p>`;
     } else {
         const rows = txs.map(t => `<tr>
             <td style="white-space:nowrap">${fmtDT(t.createdAt)}</td>
@@ -1147,7 +1151,7 @@ function openStatPayedFeesModal(period, data, b) {
         body.innerHTML = `
             <div class="fees-table-scroll">
                 <table class="wallet-detail-table">
-                    <thead><tr><th>Zeit</th><th>Typ</th><th>Pool</th><th style="text-align:right">Fee</th></tr></thead>
+                    <thead><tr><th>${tr('liq.col.time', 'Zeit')}</th><th>${tr('liq.col.type', 'Typ')}</th><th>${tr('liq.pool', 'Pool')}</th><th style="text-align:right">${tr('len.fee', 'Fee')}</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>
             </div>
@@ -1176,7 +1180,7 @@ function openStatYieldModal(period, data, b) {
     const body  = document.getElementById('statYieldModalBody');
     if (!modal) return;
 
-    const labels   = { today: 'Heute', yesterday: 'Gestern', month: 'Monat' };
+    const labels   = { today: tr('liq.today', 'Heute'), yesterday: tr('liq.yesterday', 'Gestern'), month: tr('liq.month', 'Monat') };
     const dateLabel = period === 'today' ? b.todayDE : period === 'yesterday' ? b.yesterdayDE : b.monthDE;
     title.textContent = `Yield – ${labels[period]}: ${dateLabel}`;
 
@@ -1194,7 +1198,7 @@ function openStatYieldModal(period, data, b) {
     const fmtDate = iso => { const [y, m, d] = iso.split('-'); return `${d}.${m}.${y}`; };
 
     if (rows.length === 0) {
-        body.innerHTML = `<p class="empty-state" style="padding:1rem">— Keine Daten im Zeitraum</p>`;
+        body.innerHTML = `<p class="empty-state" style="padding:1rem">${tr('len.no_data_period', '— Keine Daten im Zeitraum')}</p>`;
     } else {
         const trs = rows.map(p => `<tr>
             <td>${fmtDate(p.date)}</td>
@@ -1203,13 +1207,13 @@ function openStatYieldModal(period, data, b) {
         body.innerHTML = `
             <div class="fees-table-scroll">
                 <table class="wallet-detail-table">
-                    <thead><tr><th>Datum</th><th style="text-align:right">Yield</th></tr></thead>
+                    <thead><tr><th>${tr('liq.date', 'Datum')}</th><th style="text-align:right">${tr('len.yield', 'Yield')}</th></tr></thead>
                     <tbody>${trs}</tbody>
                 </table>
             </div>
             <table class="wallet-detail-table">
                 <tfoot><tr class="wallet-detail-total">
-                    <td>Gesamt</td>
+                    <td>${tr('overview.total', 'Gesamt')}</td>
                     <td style="text-align:right">+${fmt(total, 4)}&nbsp;USDC</td>
                 </tr></tfoot>
             </table>`;
@@ -1340,7 +1344,7 @@ function renderApyChart(data) {
 
     if (avgHistory.length < 2) {
         svg.style.display      = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'APY-Verlauf wird aufgebaut…';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('len.apy_building', 'APY-Verlauf wird aufgebaut…');
         emptyMsg.style.display = 'block';
         if (legend) legend.innerHTML = '';
         return;
@@ -1363,7 +1367,7 @@ function renderDetailApyChart(data) {
     const avg      = filtered.length >= 2 ? _calcAvgApyHistory(filtered, data) : [];
 
     if (avg.length < 2) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
 
@@ -1543,7 +1547,7 @@ function _yieldBarTooltipText(bar) {
     const isHour  = dateStr.length > 10;
     const lbl     = isHour
         ? dateStr.slice(11, 13) + ':00 Uhr'
-        : makeFmt('de-DE', { weekday: 'short', day: 'numeric', month: 'short' })
+        : makeFmt(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' })
             .format(new Date(dateStr + 'T12:00:00Z')); // noon UTC → eindeutig
     return `${lbl}: ${fmt(usdc, 4)} USDC`;
 }
@@ -1560,7 +1564,7 @@ function renderYieldChart(data) {
 
     if (bars.length === 0) {
         svg.style.display      = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? 'Keine offenen Positionen' : 'Keine Yield-Daten vorhanden…';
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('len.no_yield_data', 'Keine Yield-Daten vorhanden…');
         emptyMsg.style.display = 'block';
         return;
     }
@@ -1586,7 +1590,7 @@ function renderDetailYieldChart(data) {
     const bars = _getYieldData(data, _yieldRange);
 
     if (bars.length === 0) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">Keine Daten für diesen Zeitraum</text>`;
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
 
@@ -1710,7 +1714,7 @@ let _poolApyCtx   = null;  // { protoKey, label, data }
 function openPoolApyModal(protoKey, label, data) {
     _poolApyCtx = { protoKey, label, data };
 
-    document.getElementById('poolApyModalTitle').textContent = label + ' – APY-Verlauf';
+    document.getElementById('poolApyModalTitle').textContent = label + tr('len.apy_hist_suffix', ' – APY-Verlauf');
 
     const history = (data?.apyHistory ?? []).filter(r => r[protoKey] != null);
 
@@ -1842,7 +1846,7 @@ let _poolTvlCtx   = null;  // { protoKey, label, data }
 function openPoolTvlModal(protoKey, label, data) {
     _poolTvlCtx = { protoKey, label, data };
 
-    document.getElementById('poolTvlModalTitle').textContent = label + ' – TVL-Verlauf';
+    document.getElementById('poolTvlModalTitle').textContent = label + tr('len.tvl_hist_suffix', ' – TVL-Verlauf');
 
     const history = (data?.tvlHistory ?? []).filter(r => r[protoKey] != null);
 
@@ -1913,7 +1917,7 @@ let _poolInOutLabel  = null;
 function openPoolInOutModal(proto, label, data) {
     _poolInOutProto = proto;
     _poolInOutLabel = label;
-    document.getElementById('poolInOutModalTitle').textContent = label + ' – Ein-/Auszahlungen';
+    document.getElementById('poolInOutModalTitle').textContent = label + tr('len.inout_suffix', ' – Ein-/Auszahlungen');
     _renderPoolInOutRangeBtns(data);
     document.getElementById('poolInOutModal').classList.remove('hidden');
     document.getElementById('poolInOutModalClose').focus();
