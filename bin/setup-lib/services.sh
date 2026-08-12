@@ -16,14 +16,14 @@ do_services() {
     # sechs systemd-Unit-Namen merken zu müssen.
     cat > "$BASE_DIR/start.sh" <<EOF
 #!/bin/bash
-# FORGE.pub – alle Dienste starten (vom Setup erzeugt)
+# FORGE public – alle Dienste starten (vom Setup erzeugt)
 set -e
 systemctl start ${SERVICES[*]}
 systemctl --no-pager --plain status ${SERVICES[*]} | grep -E 'Loaded|Active|●' || true
 EOF
     cat > "$BASE_DIR/stop.sh" <<EOF
 #!/bin/bash
-# FORGE.pub – alle Dienste stoppen (vom Setup erzeugt)
+# FORGE public – alle Dienste stoppen (vom Setup erzeugt)
 set -e
 systemctl stop ${SERVICES[*]}
 EOF
@@ -31,7 +31,7 @@ EOF
     c_ok "$(t SERVICES_START_STOP_CREATED)"
 
     # setup.sh selbst zusätzlich sichtbar neben start.sh/stop.sh ablegen — ein
-    # Neuling, der FORGE.pub nicht kennt, sucht nie unter app/bin/. Die Kopie wird
+    # Neuling, der FORGE public nicht kennt, sucht nie unter app/bin/. Die Kopie wird
     # bei jedem Install/Update frisch geschrieben (bleibt also immer aktuell,
     # exakt wie start.sh/stop.sh), die Quelle im Artefakt (bin/setup.sh) bleibt
     # unverändert der Ort, aus dem install/update tatsächlich laufen MUSS (siehe

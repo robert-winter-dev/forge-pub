@@ -67,7 +67,7 @@ MSG=(
     [DEPLOY_RESTORE_STARTING_SERVICES]="  → Starting services ..."
     [DEPLOY_RESTORE_DONE]="Restore complete."
     [DEPLOY_DEPLOY_STEP]="Files to %s"
-    [DEPLOY_DEPLOY_NO_PACKAGE_JSON]="Must be run from the unpacked FORGE.pub artifact (package.json missing in %s)."
+    [DEPLOY_DEPLOY_NO_PACKAGE_JSON]="Must be run from the unpacked FORGE public artifact (package.json missing in %s)."
     [DEPLOY_DEPLOY_SAME_DIR]="install/update must run from the freshly unpacked artifact, not from %s itself (would delete the running installation). Unpack the artifact again and run from there."
     [DEPLOY_DEPLOY_COPIED]="Copied (%s)."
     [DEPLOY_NPM_STEP]="Dependencies (npm install, parallel)"
@@ -176,7 +176,7 @@ MSG=(
     # lifecycle.sh
     [LIFECYCLE_ABORTED]="Aborted."
     [LIFECYCLE_UNKNOWN]="unknown"
-    [LIFECYCLE_INSTALL_HEADER_TITLE]="FORGE.pub – Setup"
+    [LIFECYCLE_INSTALL_HEADER_TITLE]="FORGE public – Setup"
     [LIFECYCLE_INSTALL_HEADER_SOURCE]="Source: %s"
     [LIFECYCLE_INSTALL_HEADER_TARGET]="Target: %s"
     [LIFECYCLE_INSTALL_EXISTS_WARNING]="An installation already exists under %s."
@@ -230,7 +230,7 @@ MSG=(
     [LIFECYCLE_REPAIR_DONE]="Repair complete (services, cron, logrotate, file ownership re-applied)."
 
     # menu.sh
-    [MENU_TITLE]="FORGE.pub – Setup"
+    [MENU_TITLE]="FORGE public – Setup"
     [MENU_ITEM_INSTALL]="1) Install     – Fresh install (replaces existing state)"
     [MENU_ITEM_UPDATE]="2) Update      – Check for and apply a new release"
     [MENU_ITEM_UNINSTALL]="3) Uninstall   – Remove everything (backups are kept)"
@@ -238,7 +238,7 @@ MSG=(
     [MENU_ITEM_HELP]="5) Help        – Show all commands/options"
     [MENU_ITEM_EXIT]="6) Exit        – Quit"
     [MENU_PROMPT]="Choice [1-6]:"
-    [MENU_INSTALL_NEEDS_ARTIFACT_1]="A fresh install must run from a freshly unpacked FORGE.pub"
+    [MENU_INSTALL_NEEDS_ARTIFACT_1]="A fresh install must run from a freshly unpacked FORGE public"
     [MENU_INSTALL_NEEDS_ARTIFACT_2]="installation package, not from the running installation."
     [MENU_INSTALL_NEEDS_ARTIFACT_3]="Steps:"
     [MENU_INSTALL_NEEDS_ARTIFACT_STEP1]="Get the current installation package and unpack it"
@@ -252,7 +252,7 @@ MSG=(
     [MENU_INVALID_CHOICE]="Invalid choice."
 
     # help.sh — write_getting_started
-    [GETTING_STARTED_TITLE]="FORGE.pub – installation complete"
+    [GETTING_STARTED_TITLE]="FORGE public – installation complete"
     [GETTING_STARTED_VERSION]="Version: %s"
     [GETTING_STARTED_ACCESS_HEADER]="Access (LAN only)"
     [GETTING_STARTED_DASHBOARD]="Dashboard:"
@@ -301,7 +301,7 @@ MSG=(
     [GETTING_STARTED_CONTROL_BACKUP]="Backup"
 
     # help.sh — show_help
-    [HELP_TITLE]="FORGE.pub – Setup"
+    [HELP_TITLE]="FORGE public – Setup"
     [HELP_USAGE]="%s <command> [options]"
     [HELP_COMMANDS_HEADER]="Commands:"
     [HELP_CMD_INSTALL]="Full install (default when nothing is given)"

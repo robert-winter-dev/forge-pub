@@ -729,10 +729,15 @@ function renderAvailablePools(data) {
     const container = document.getElementById('availablePoolsContainer');
     if (!container) return;
 
-    if (data?.botActive === false) {
-        container.innerHTML = '';
-        renderBotInactivePanel(container, tr('liq.no_open_positions', 'Keine offenen Positionen'));
-        return;
+    // Anders als bei den positionsbezogenen Boxen (Operative Metriken) ist
+    // "keine offene Position" hier KEIN Grund, die Tabelle auszublenden — Pool
+    // Metriken listet die verfügbaren Pools, nicht Positionen. Ohne offene
+    // Position wird stattdessen der Filter auf "Alle Pools" gezwungen, damit
+    // die Tabelle nicht leer bleibt, falls zuletzt "Aktive Pools" gewählt war.
+    // Analog zur Lösung im Liquidity Bot (html/liquidity/js/app.js).
+    if (data?.botActive === false && _poolsVisFilter !== 'all') {
+        _poolsVisFilter = 'all';
+        localStorage.setItem(LS_POOL_VIS_FILTER, _poolsVisFilter);
     }
 
     const activeIds = new Set((data?.positions ?? []).map(p => p.protocol));

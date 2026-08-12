@@ -1,5 +1,5 @@
 #!/bin/bash
-# FORGE.pub – Installer-Einstiegspunkt
+# FORGE public – Installer-Einstiegspunkt
 #
 # Reiner Passthrough nach bin/setup.sh, damit ein Neuling nach dem Entpacken
 # sofort eine Datei findet, ohne unter bin/ nachschauen zu müssen. Keine eigene

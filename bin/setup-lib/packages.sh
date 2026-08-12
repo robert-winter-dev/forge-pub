@@ -253,7 +253,7 @@ do_config() {
     set_env_var "$nexus_env" JUPITER_API_KEY "$OPT_JUPITER_KEY"
     set_env_var "$nexus_env" HELIUS_API_KEY  "$OPT_HELIUS_KEY"
     # Telegram-Support existiert derzeit nur auf FORGE Master, nicht auf einem
-    # FORGE.pub-Fork. .env.example enthält trotzdem die Platzhalter-Zeilen
+    # FORGE-public-Fork. .env.example enthält trotzdem die Platzhalter-Zeilen
     # "dein-token-hier"/"dein-chat-id-hier" (Vorlage auch fürs Master-Doku-Beispiel) —
     # die sind als Nicht-Leerstring "konfiguriert" genug, dass core/nexus/server.js
     # (sendTelegram(): `if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return false;`)

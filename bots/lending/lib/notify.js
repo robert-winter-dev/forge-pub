@@ -34,7 +34,7 @@ const NEXUS_BOT_ID    = config.botId ?? 'lending';
 const UPDATE_SUPPRESS_FLAG = path.join(PATHS.data, 'update-notify-suppress');
 
 /**
- * Während eines FORGE.pub-Updates gesetzt (bin/setup-lib/common.sh
+ * Während eines FORGE-public-Updates gesetzt (bin/setup-lib/common.sh
  * update_notify_suppress_on) – do_update() sendet am Ende EINE Zusammenfassung
  * statt der Einzel-"gestartet"/"gestoppt"-Meldungen jedes neu gestarteten Bots
  * (Fund 2026-08-09). Ein Crash-Restart außerhalb eines Updates hat den Marker

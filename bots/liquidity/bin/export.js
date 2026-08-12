@@ -39,7 +39,7 @@ import { clmmLpValue as _clmmLpValue, clmmLpReturn as _clmmLpReturn,
          clmmLpReturnPath as _clmmLpReturnPath, clmmIlPct as _clmmIlPct }
     from '../lib/clmm-lp.js';
 // Dust-Schwelle aus der neutralen Einzelquelle – NICHT aus invest-score-config.js:
-// dort liegen die Score-Gewichte, die nicht in den FORGE.pub-Fork gelangen dürfen.
+// dort liegen die Score-Gewichte, die nicht in den FORGE-public-Fork gelangen dürfen.
 import { VOLUME_DUST_USD as VOLUME_MALUS_DUST_USD } from '../lib/volume-dust.js';
 import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS as BTC_EMA_SPANS } from '../lib/btc-trend/index.js';
 import { PATHS } from '../../../config/paths.js';
@@ -379,7 +379,7 @@ for (const r of _oppRows) {
 
 // ─── Score-Naht (2026-07-25) ──────────────────────────────────────────────────
 // Opportunity Score und InvestScore kommen ausschließlich über den Provider:
-// der Master rechnet (lib/invest-score-compute.js), der FORGE.pub-Fork erhält sie
+// der Master rechnet (lib/invest-score-compute.js), der FORGE-public-Fork erhält sie
 // als Premium-Daten. export.js selbst kennt die Score-Algorithmen nicht mehr.
 // `scoreSource` wird bis ins Dashboard durchgereicht ('none' → Platzhalter).
 const _oppRes           = await loadOpportunityScores({
@@ -914,11 +914,12 @@ const pnlHistory = _pnlData.pnlHistory;
 //
 // Heute:   pnlForPeriod() seit Tagesstart (Portfolio, alle Pools).
 // Gestern: aus pnl_daily.pnl_value — null wenn noch kein Eintrag (→ "no data").
-// Monat:   Summe aller pnl_daily.pnl_value dieses Monats + pnlToday.
+//          pnl_daily schreibt der Bot selbst über pnlForPeriod, ist also derselbe
+//          Wert wie eine direkte Abfrage, nur vorberechnet.
+// Monat:   pnlForPeriod() über den Kalendermonat (siehe unten).
 
 const _pnlDailyRow   = date => db.prepare(`SELECT lp_close, pnl_value FROM pnl_daily WHERE date = ?`).get(date);
 const _yesterdayIso  = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ }).format(new Date(todayStartMs - 1));
-const _monthStartIso = _todayIso.slice(0, 8) + '01';
 
 // Heute: Portfolio-PnL seit 00:00 (Berlin) über die zentrale Lib.
 const pnlToday = pnlForPeriod(db, { flavor: config.botId, fromMs: todayStartMs });
@@ -926,13 +927,16 @@ const pnlToday = pnlForPeriod(db, { flavor: config.botId, fromMs: todayStartMs }
 // Gestern: direkt aus pnl_daily.pnl_value (null = no data)
 const pnlYesterday = _pnlDailyRow(_yesterdayIso)?.pnl_value ?? null;
 
-// Monat: Summe der abgeschlossenen Tageswerte + heutiger laufender PnL
-const _monthDaysSum = db.prepare(`
-    SELECT COALESCE(SUM(pnl_value), 0) AS total
-    FROM pnl_daily
-    WHERE date >= ? AND date < ? AND pnl_value IS NOT NULL
-`).get(_monthStartIso, _todayIso).total;
-const pnlMonth = _monthDaysSum + (pnlToday ?? 0);
+// Monat: EINE Zeitraum-Abfrage derselben Quelle wie "heute" — nicht die Summe
+// der pnl_daily-Tageswerte.
+//
+// Vereinheitlichung 2026-08-12: Beide Wege liefern seit der additiven
+// earningsOut-Rechnung dasselbe Ergebnis, die Summe jedoch nur bis auf
+// Rundungsdifferenzen (jeder Tageswert ist auf 2 Stellen gerundet, die Fehler
+// addieren sich). Die direkte Abfrage ist die kürzere Kette, deckt Tage ohne
+// pnl_daily-Eintrag mit ab und stimmt exakt mit der Übersichtsseite überein
+// (analysis/01-export-status.js).
+const pnlMonth = pnlForPeriod(db, { flavor: config.botId, fromMs: monthStartMs });
 
 // Rollierender 24h-PnL: Portfolio-PnL über gleitendes 24h-Fenster (zentrale Lib).
 const _now24hMs = Date.now() - 24 * 3600 * 1000;

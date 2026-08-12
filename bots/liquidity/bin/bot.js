@@ -3448,7 +3448,7 @@ async function mainLoop() {
             }
         }
 
-        // FORGE.pub Premium: übernommene Pools gegen die Angebotsliste abgleichen.
+        // FORGE public Premium: übernommene Pools gegen die Angebotsliste abgleichen.
         // Bewusst hier und nicht in der Aktiv-Schleife unten — ein zurückgestufter Pool
         // ohne offene Position ist active=false und käme dort nie vorbei, muss aber
         // trotzdem gesperrt und gemeldet werden. Ohne übernommene Offer-Pools (Master,

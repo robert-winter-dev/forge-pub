@@ -1,9 +1,9 @@
 /**
- * forge-premium – Nostr-Identität (Message Center + künftige FORGE.pub-Premium-Auslieferung)
+ * forge-premium – Nostr-Identität (Message Center + künftige FORGE-public-Premium-Auslieferung)
  *
  * Hält die Master-Nostr-Identität "FORGE.Master" und die Relay-Subscription für
  * eingehende DMs — vorher in bots/settings/server.js (startNostrService()).
- * Umgezogen 2026-07-27 (FORGE.pub Master-Architektur, Weiche 1): die Auslieferung
+ * Umgezogen 2026-07-27 (FORGE public Master-Architektur, Weiche 1): die Auslieferung
  * bezahlter Premium-Keys darf nicht am Neustart der Admin-UI (forge-settings) hängen,
  * und eine Nostr-Identität kann nur einem Prozess gehören (sonst doppelter DM-Empfang).
  *
@@ -60,14 +60,14 @@ const PORT = parseInt(process.env.PORT || '3110');
 
 // Name der eigenen Identität (Dateiname im secrets-Verzeichnis).
 //   Master:          FORGE.Master        (Default – die zentrale Support-Identität)
-//   FORGE.pub-Fork:  forge-pub-nostr     (per NOSTR_IDENTITY in der .env gesetzt)
+//   FORGE-public-Fork:  forge-pub-nostr     (per NOSTR_IDENTITY in der .env gesetzt)
 // Der Fork kann FORGE.Master gar nicht besitzen: dessen Private Key liegt nur auf dem
 // Master und wird nie exportiert. Ohne diese Konfigurierbarkeit suchte jede Fork-
 // Installation nach einer Datei, die dort niemals existieren kann → "Nostr-Service nicht
 // bereit" (so 2026-07-27 auf der Staging-Instanz beobachtet).
 const IDENTITY_NAME = process.env.NOSTR_IDENTITY?.trim() || 'FORGE.Master';
 
-// Ob dieser Prozess die zentrale Master-Identität hält (statt eines FORGE.pub-Forks).
+// Ob dieser Prozess die zentrale Master-Identität hält (statt eines FORGE-public-Forks).
 const IS_MASTER_IDENTITY = IDENTITY_NAME === 'FORGE.Master';
 
 // ── Blob-Ingest-Concurrency-Guard ────────────────────────────────────────────
@@ -174,7 +174,7 @@ function classifyPremiumCommand(text) {
 
 /**
  * `hourId` (Math.floor(unix_ms / 3.600.000), siehe lib/premium-memo.js) ist die
- * Abrechnungseinheit von FORGE.pub Premium, aber als reine Zahl für Menschen
+ * Abrechnungseinheit von FORGE public Premium, aber als reine Zahl für Menschen
  * bedeutungslos ("Stunde 495973"). Übersetzt sie in die tatsächliche Uhrzeit-Spanne
  * (Europe/Berlin, wie der Rest von FORGE — siehe config/config.js FORGE_TZ).
  * Stundengrenzen sind in UTC exakt, CEST/CET-Offset ist ganzzahlig → keine
@@ -458,7 +458,7 @@ function startNostrService() {
             const timestamp = (rumor.created_at ?? Math.floor(Date.now() / 1000)) * 1000;
             const category = cmd ? 'premium' : 'support';
 
-            // FORGE.pub-Fork-Seite: Der Support-Posteingang ist ausschließlich für den
+            // FORGE-public-Fork-Seite: Der Support-Posteingang ist ausschließlich für den
             // Dialog mit dem FORGE Master gedacht (Menüpunkt heißt "Support") – fremde
             // Absender werden gar nicht erst gespeichert, sonst könnte das Postfach mit
             // Spam vollaufen. Der Master selbst empfängt hier bewusst von JEDER
@@ -510,7 +510,7 @@ function startNostrService() {
                         console.error(`[premium] Versions-Meldung fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
                     });
                 } else {
-                    // FORGE.pub-Fork-Seite: premium-blob-sealed wird bereits weiter oben
+                    // FORGE-public-Fork-Seite: premium-blob-sealed wird bereits weiter oben
                     // (vor dem DB-Insert) an handleBlobDelivery() durchgereicht – hier nur
                     // noch die signierte Preisliste, mitgeschickt in der premium-token-
                     // Antwort (Bootstrap vor der ersten Zahlung, s. handlePricingDelivery),
@@ -673,7 +673,7 @@ function startNostrService() {
     }
 
     /**
-     * FORGE.pub-Fork-Seite: empfängt {cmd:'premium-blob-sealed', sealed} vom Master
+     * FORGE-public-Fork-Seite: empfängt {cmd:'premium-blob-sealed', sealed} vom Master
      * (core/premium/deliver-blob.js ist das Master-seitige Gegenstück, seit 2026-07-29
      * an die zahlende Wallet gebunden, siehe lib/premium-payer-binding.js). Entschlüsselt
      * mit dem privaten Key des PREMIUM-Wallets (das ist die zahlende Wallet — derselbe
@@ -975,7 +975,7 @@ app.post('/identity/alias', async (req, res) => {
 });
 
 /**
- * Nostr-Account NEU anlegen (FORGE.pub: „Account zurücksetzen").
+ * Nostr-Account NEU anlegen (FORGE public: „Account zurücksetzen").
  *
  * 🔴 Unwiederbringlich: der alte Private Key wird überschrieben, die alte Identität ist
  * für alle Gegenstellen tot. Laufende Threads verwaisen — deshalb werden per

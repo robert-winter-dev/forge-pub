@@ -46,7 +46,7 @@ const APP_VERSION = displayVersion();
 
 const PORT      = parseInt(process.env.PORT      || '3200');
 const PORT_CA   = parseInt(process.env.PORT_CA   || '3201');
-// Master: bots/settings/certs — FORGE.pub-Fork: <FORGE_SECRETS_DIR>/certs, damit
+// Master: bots/settings/certs — FORGE-public-Fork: <FORGE_SECRETS_DIR>/certs, damit
 // die mkcert-Root-CA ein Update übersteht (geht sie verloren, müssen ALLE Clients
 // im LAN das Zertifikat neu importieren). Auflösung in config/paths.js.
 const CERT_FILE = path.join(PATHS.certs, 'cert.pem');

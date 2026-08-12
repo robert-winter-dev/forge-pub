@@ -472,7 +472,7 @@ $('upRollbackBtn').addEventListener('click', () => {
 // ── Sprache + Zeitzone ─────────────────────────────────────────────────────────
 // Gelten pro Installation, nicht pro Nutzer – auf dem FORGE Master gesperrt
 // (masterLocked kommt vom Backend, lib/master-lock.js: die Master-Nostr-Identität
-// existiert nur dort), auf einem FORGE.pub-Fork editierbar. Gesperrt wird als
+// existiert nur dort), auf einem FORGE-public-Fork editierbar. Gesperrt wird als
 // reiner Text gerendert statt als deaktiviertes Feld, damit auf einen Blick klar
 // ist, dass hier nichts einzustellen ist (kein "warum reagiert das nicht?").
 async function loadLanguage() {

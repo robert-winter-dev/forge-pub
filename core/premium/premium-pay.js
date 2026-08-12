@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub Premium – Zahl-Skript (FORK-ONLY, FINANZ-SKRIPT)
+ * FORGE public Premium – Zahl-Skript (FORK-ONLY, FINANZ-SKRIPT)
  *
  * Zahlt aus dem Premium-Wallet (lib/premium-wallet.js) die aktuelle Stunde des
- * FORGE.pub-Datendienstes: eine USDC-Transaktion an die vom Master signiert
+ * FORGE-public-Datendienstes: eine USDC-Transaktion an die vom Master signiert
  * mitgeteilte Empfangsadresse, mit dem Memo `FP1:<T>:<hourId>` (lib/premium-memo.js).
  * Der Master-seitige Zahlungs-Watcher (payment-watcher.js) ordnet die Zahlung
  * darüber der eigenen Aktivierung zu und schaltet die nächste Blob-Zustellung frei.
@@ -84,7 +84,7 @@ const MEMO_PROGRAM_ID  = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmf
 const NEXUS_RPC = 'http://127.0.0.1:3100/rpc';
 
 const HELP = `
-FORGE.pub Premium – Stunde bezahlen
+FORGE public Premium – Stunde bezahlen
 
   node core/premium/premium-pay.js [--dry-run] [--hour <hourId>] [--json] [--help]
 
@@ -101,7 +101,7 @@ Optionen:
   --help, -h      Dieser Text, keine Zahlung.
 
 Voraussetzungen (mit klarer Fehlermeldung, falls nicht erfüllt):
-  - läuft nur auf einem FORGE.pub-Fork
+  - läuft nur auf einem FORGE-public-Fork
   - Premium-Wallet konfiguriert (bin/install.sh) und mit SOL + USDC gefüllt
   - eigener Aktivierungs-Token vorhanden (per premium-activate-DM erhalten)
   - aktuelle, signiert geprüfte Preisliste vorhanden (kommt mit der Aktivierung)
@@ -139,7 +139,60 @@ function openPayLogDb() {
             sent_at    INTEGER
         )
     `);
+    // confirmed_at (2026-08-12): NULL = gesendet, Ausgang noch offen. Vorher gab es
+    // diesen Zustand nicht – eine Zeile existierte nur nach bestätigter Zahlung, jeder
+    // andere Ausgang galt als "nicht bezahlt" und führte zu einem neuen Zahlungsversuch.
+    // Genau daran sind am 2026-08-12 auf forge-pub1 bis zu sechs echte Zahlungen für
+    // dieselbe Stunde entstanden (siehe Kommentar bei submitAndConfirm unten).
+    const cols = db.prepare(`PRAGMA table_info(premium_pay_log)`).all().map(c => c.name);
+    if (!cols.includes('confirmed_at')) {
+        db.exec(`ALTER TABLE premium_pay_log ADD COLUMN confirmed_at INTEGER`);
+        // Bestandszeilen sind per Definition bestätigt – vor dieser Spalte wurde eine
+        // Zeile ausschließlich nach erfolgreicher Confirmation geschrieben. Ohne dieses
+        // Nachziehen würden sie als "offen" gelesen und unnötig nachgeprüft.
+        db.exec(`UPDATE premium_pay_log SET confirmed_at = sent_at WHERE confirmed_at IS NULL`);
+    }
     return db;
+}
+
+// Wie lange eine gesendete, aber nicht auffindbare Transaktion als "vielleicht noch
+// unterwegs" gilt. Ein Solana-Blockhash ist rund 150 Slots (~60–90s) gültig; danach
+// kann das Netz die Transaktion nicht mehr annehmen. 5 Min liegt komfortabel darüber,
+// damit erst dann neu gezahlt wird, wenn die alte Transaktion sicher tot ist.
+const UNCONFIRMED_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * Fragt den tatsächlichen On-Chain-Ausgang einer Signatur ab (readonly, ein RPC-Call
+ * über den Nexus – nie direkt gegen Helius, siehe FORGE-Rate-Limit-Grundregel).
+ *
+ * `searchTransactionHistory: true` ist hier zwingend: die zu prüfende Transaktion ist
+ * typischerweise Minuten alt und damit längst aus dem Kurzzeit-Statuscache gefallen.
+ *
+ * @returns {Promise<'confirmed'|'failed'|'pending'|'unknown'>}
+ *   confirmed – bestätigt, Geld ist geflossen
+ *   failed    – on-chain fehlgeschlagen, kein Geld geflossen, Neuversuch sicher
+ *   pending   – gesehen, aber noch nicht bestätigt
+ *   unknown   – dem RPC nicht bekannt (nie gelandet ODER noch nicht sichtbar)
+ */
+async function fetchSignatureOutcome(signature) {
+    const res = await fetch(NEXUS_RPC, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            jsonrpc: '2.0', id: 1, method: 'getSignatureStatuses',
+            params: [[signature], { searchTransactionHistory: true }],
+        }),
+        signal: AbortSignal.timeout(20_000),
+    });
+    if (!res.ok) throw new Error(`Nexus HTTP ${res.status} bei getSignatureStatuses`);
+    const json = await res.json();
+    if (json.error) throw new Error(`RPC-Fehler: ${JSON.stringify(json.error)}`);
+
+    const status = json.result?.value?.[0];
+    if (!status) return 'unknown';
+    if (status.err) return 'failed';
+    if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') return 'confirmed';
+    return 'pending';
 }
 
 function deriveAta(ownerPubkey, mintPubkey) {
@@ -174,7 +227,7 @@ function buildMemoIx(memoText, signerPubkey) {
 }
 
 /**
- * Meldet dem Master bei jedem Lauf die eigene installierte FORGE.pub-Version
+ * Meldet dem Master bei jedem Lauf die eigene installierte FORGE-public-Version
  * (config/version.json – EINE Quelle für Master und Fork, siehe lib/version.js).
  * cleanVersion() liefert bewusst reines a.b.c ohne '+buildNumber' — der Master vergleicht
  * strikt per Semver (lib/premium-min-version.js isValidVersion), Build-Metadata würde
@@ -226,7 +279,7 @@ async function main() {
     if (!Number.isInteger(hourId) || hourId <= 0) fail('--hour muss eine positive Ganzzahl sein', { json });
 
     if (!isForkInstance()) {
-        skip('läuft nur auf einem FORGE.pub-Fork – auf dem Master gibt es kein Premium-Wallet.', { json });
+        skip('läuft nur auf einem FORGE-public-Fork – auf dem Master gibt es kein Premium-Wallet.', { json });
     }
 
     // Eigene Version melden (Versions-Gate, siehe core/premium/server.js
@@ -296,7 +349,41 @@ async function main() {
 
     const payLogDb = openPayLogDb();
     const already = payLogDb.prepare(`SELECT * FROM premium_pay_log WHERE hour_id = ?`).get(hourId);
-    if (already && !dryRun) {
+
+    // Offener Ausgang aus einem früheren Lauf: erst den tatsächlichen On-Chain-Stand
+    // klären, BEVOR auch nur erwogen wird, erneut zu zahlen. Ohne diesen Schritt wird
+    // aus jedem Bestätigungs-Timeout eine echte Doppelzahlung (Vorfall 2026-08-12).
+    if (already && already.confirmed_at == null && !dryRun) {
+        let outcome;
+        try {
+            outcome = await fetchSignatureOutcome(already.signature);
+        } catch (err) {
+            // Der Status ließ sich nicht klären (RPC gerade nicht erreichbar – meist
+            // genau die Störung, die den Timeout überhaupt verursacht hat). Im Zweifel
+            // NICHT zahlen: eine ausgelassene Stunde kostet Daten, eine Doppelzahlung
+            // kostet Geld.
+            payLogDb.close();
+            skip(`Stunde ${hourId}: Ausgang der bereits gesendeten Zahlung (TX ${already.signature}) ist unklar und ließ sich nicht prüfen (${err.message}) – keine zweite Zahlung, nächster Lauf versucht es erneut.`, { json });
+        }
+
+        if (outcome === 'confirmed') {
+            payLogDb.prepare(`UPDATE premium_pay_log SET confirmed_at = ? WHERE hour_id = ?`).run(Date.now(), hourId);
+            payLogDb.close();
+            setPayFailureNotified(false);
+            skip(`Stunde ${hourId} ist doch bezahlt – die zuvor unbestätigte Zahlung (TX ${already.signature}) wurde inzwischen on-chain bestätigt und nachgetragen.`, { json });
+        }
+        if (outcome === 'pending' || (outcome === 'unknown' && Date.now() - already.sent_at < UNCONFIRMED_GRACE_MS)) {
+            payLogDb.close();
+            skip(`Stunde ${hourId}: Zahlung (TX ${already.signature}) ist gesendet, aber noch nicht bestätigt – keine zweite Zahlung, nächster Lauf prüft erneut.`, { json });
+        }
+
+        // 'failed' oder nach der Karenzzeit weiterhin 'unknown': die alte Transaktion ist
+        // endgültig tot (kein Geld geflossen), ein neuer Versuch ist jetzt sicher. Die
+        // Zeile wird weiter unten beim Erfolg per ON CONFLICT überschrieben.
+        console.warn(`[premium-pay] Vorherige Zahlung für Stunde ${hourId} (TX ${already.signature}) ist endgültig fehlgeschlagen (${outcome}) – neuer Zahlungsversuch.`);
+    }
+
+    if (already && already.confirmed_at != null && !dryRun) {
         payLogDb.close();
         // skip() statt fail(): seit dem 10-Min-Takt (2026-08-09) ist "diese Stunde ist
         // schon bezahlt" der ERWARTETE Ausgang von 5 der 6 Läufe pro Stunde und damit
@@ -363,7 +450,11 @@ async function main() {
 
     if (dryRun) {
         payLogDb.close();
-        if (already) summary.note = `Stunde ${hourId} wurde bereits bezahlt (TX ${already.signature}) – ein echter Lauf würde jetzt ablehnen.`;
+        if (already) {
+            summary.note = already.confirmed_at != null
+                ? `Stunde ${hourId} wurde bereits bezahlt (TX ${already.signature}) – ein echter Lauf würde jetzt ablehnen.`
+                : `Stunde ${hourId} hat eine gesendete, aber noch unbestätigte Zahlung (TX ${already.signature}) – ein echter Lauf würde erst deren On-Chain-Status prüfen, statt erneut zu zahlen.`;
+        }
         if (json) console.log(JSON.stringify({ ok: true, dryRun: true, ...summary }, null, 2));
         else {
             console.log('[premium-pay] DRY-RUN – es wird NICHTS gesendet.');
@@ -390,6 +481,28 @@ async function main() {
     try {
         signature = await submitAndConfirm(tx.serialize());
     } catch (err) {
+        // Unklarer, ausdrücklich NICHT negativer Ausgang: die Transaktion ist gesendet,
+        // nur ihre Bestätigung kam nicht rechtzeitig (siehe core/tx-queue-client.js).
+        // Sie kann jeden Moment noch landen – deshalb wird die Signatur hier
+        // festgehalten statt verworfen, und der nächste Lauf klärt den Ausgang oben,
+        // bevor irgendetwas erneut gezahlt wird.
+        //
+        // Bewusst skip() (Exit 0), nicht fail(): das ist kein Defekt, sondern ein noch
+        // offener Vorgang. Ein Exit 1 würde über cron-state.json einen technischen
+        // Ausfallalarm auslösen, der weder zutrifft noch weiterhilft – dieselbe Falle
+        // wie bei "Auto-Pay ausgeschaltet" (2026-08-07). Bleiben die Daten trotzdem
+        // dauerhaft aus, greift der Ingest-Watchdog nach 1h (bin/health-check.js).
+        if (err.unconfirmed && err.signature) {
+            payLogDb.prepare(`
+                INSERT INTO premium_pay_log (hour_id, signature, amount_raw, sent_at, confirmed_at)
+                VALUES (?, ?, ?, ?, NULL)
+                ON CONFLICT(hour_id) DO UPDATE SET signature = excluded.signature,
+                    amount_raw = excluded.amount_raw, sent_at = excluded.sent_at, confirmed_at = NULL
+            `).run(hourId, err.signature, priceRaw, Date.now());
+            payLogDb.close();
+            skip(`Zahlung für Stunde ${hourId} gesendet (TX ${err.signature}), aber nicht innerhalb des Zeitfensters bestätigt – wird beim nächsten Lauf geprüft, KEINE zweite Zahlung.`, { json });
+        }
+
         payLogDb.close();
         // Häufigste Ursache neben Netzwerkfehlern: zu wenig SOL für die Netzwerkgebühr
         // (wird hier nicht separat geprüft, siehe Dateikopf – der Preis kommt signiert,
@@ -407,10 +520,11 @@ async function main() {
     setPayFailureNotified(false);
 
     payLogDb.prepare(`
-        INSERT INTO premium_pay_log (hour_id, signature, amount_raw, sent_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(hour_id) DO UPDATE SET signature = excluded.signature, amount_raw = excluded.amount_raw, sent_at = excluded.sent_at
-    `).run(hourId, signature, priceRaw, Date.now());
+        INSERT INTO premium_pay_log (hour_id, signature, amount_raw, sent_at, confirmed_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(hour_id) DO UPDATE SET signature = excluded.signature, amount_raw = excluded.amount_raw,
+            sent_at = excluded.sent_at, confirmed_at = excluded.confirmed_at
+    `).run(hourId, signature, priceRaw, Date.now(), Date.now());
     payLogDb.close();
 
     // Sichtbar im Message Center (Premium-Tab) machen – bewusst OHNE Nostr-Versand,

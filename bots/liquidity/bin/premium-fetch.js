@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub Premium – manueller Fetch+Ingest-Test
+ * FORGE public Premium – manueller Fetch+Ingest-Test
  *
  * Ruft fetchAndIngest() gegen die ECHTE Bot-DB dieser Installation auf (openDatabase()
  * ohne Override). Für den echten Produktivbetrieb übernimmt später der Zahlungs-Watcher

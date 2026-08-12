@@ -1,5 +1,5 @@
 /**
- * /api/update – System > Updates (nur FORGE.pub-Fork)
+ * /api/update – System > Updates (nur FORGE-public-Fork)
  *
  * GET  /status            → Ergebnis von bin/update-check.js (bereitliegendes, noch
  *                            nicht eingespieltes Update). Siehe html/js/nav.js.

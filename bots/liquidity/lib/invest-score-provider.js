@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════════════════════════
-// LMB – Score-Provider: die Naht zwischen Master und FORGE.pub-Fork
+// LMB – Score-Provider: die Naht zwischen Master und FORGE-public-Fork
 // ══════════════════════════════════════════════════════════════════════════════
 // EINE Quelle für Opportunity Score + InvestScore. bin/export.js fragt nur hier,
 // nie die Rechenmodule direkt — dadurch existiert genau eine Stelle, an der sich

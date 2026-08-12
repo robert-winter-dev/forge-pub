@@ -664,7 +664,7 @@ export async function opportunityParamCheck(status, summary, details) {
     }, details);
 }
 
-// ─── FORGE.pub Premium: Pool-Offer-Lebenszyklus ──────────────────────────────
+// ─── FORGE public Premium: Pool-Offer-Lebenszyklus ──────────────────────────────
 
 /**
  * Erste Feststellung, dass ein übernommener Pool zurückgestuft wurde. Noch passiert

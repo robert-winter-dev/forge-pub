@@ -1124,14 +1124,14 @@ async function loadSettingsIdentity() {
             document.getElementById('msgCopyBtn').hidden = false;
             document.getElementById('msgQrBtn').hidden = false;
         }
-        // FORGE Master: npub muss stabil bleiben, damit ihn Gegenstellen (u.a. FORGE.pub-
+        // FORGE Master: npub muss stabil bleiben, damit ihn Gegenstellen (u.a. FORGE-public-
         // Forks) weiterhin finden – Reset serverseitig gesperrt (siehe /identity/regenerate),
         // hier zusätzlich in der UI sichtbar machen statt nur den Klick scheitern zu lassen.
         if (id.resetLocked) {
             regenBtn.disabled = true;
             regenBtn.title = tr('msg.blocked_master', 'Auf dem FORGE Master gesperrt');
             regenHint.textContent =
-                tr('msg.blocked_master_note', 'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE.pub-Forks) ') +
+                tr('msg.blocked_master_note', 'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE-public-Forks) ') +
                 tr('msg.would_need_npub', 'müssten die neue npub erst wieder finden. Der Anzeigename kann trotzdem ') +
                 tr('msg.can_be_changed', 'geändert werden.');
         }

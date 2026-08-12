@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub – Zusammenfassende System-Message nach einem Update.
+ * FORGE public – Zusammenfassende System-Message nach einem Update.
  *
  * Ersetzt die sonst üblichen Einzel-"gestartet"-Meldungen jedes neu gestarteten
  * Bots (die während eines Updates unterdrückt werden, siehe

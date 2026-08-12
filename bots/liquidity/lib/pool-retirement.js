@@ -1,5 +1,5 @@
 /**
- * FORGE.pub Premium – Exit nach Rückstufung eines übernommenen Pools
+ * FORGE public Premium – Exit nach Rückstufung eines übernommenen Pools
  *
  * Produktentscheidung 2026-07-29 (pool-offers.md): stuft der Master einen per
  * Premium-Offer übernommenen Pool zurück — oder fällt er aus einer nachweislich

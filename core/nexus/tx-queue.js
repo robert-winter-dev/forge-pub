@@ -138,11 +138,33 @@ export class TxQueue {
             console.log(`[tx-queue] CONFIRMED – ticket=${ticketId} | sig=${signature.slice(0, 12)}... | ${durationMs}ms`);
 
         } catch (err) {
-            result.status      = 'failed';
+            // 'timeout' ist NICHT dasselbe wie 'failed' und darf nie dazu verschmelzen:
+            // die Transaktion ist nachweislich gesendet (Signatur liegt vor), nur ihr
+            // Ausgang ist innerhalb des Zeitfensters unbekannt geblieben. Sie kann
+            // Sekunden später trotzdem noch landen – solange der Blockhash gültig ist,
+            // nimmt das Netz sie weiter an.
+            //
+            // Vorfall forge-pub1 2026-08-12: die Premium-Stundenzahlung lief 14× in den
+            // 60s-Timeout und wurde jedes Mal als 'failed' gemeldet. premium-pay.js baute
+            // daraufhin jedes Mal eine NEUE Transaktion – tatsächlich waren die alten
+            // längst on-chain. Der Master protokollierte für dieselbe Stunde bis zu sechs
+            // echte Zahlungen ('repeat-payment'), also mehrfach abgebuchtes Geld. Beim
+            // damaligen Testpreis von 0.05 USDC war das folgenlos, bei echten Beträgen
+            // wäre es ein direkter finanzieller Schaden.
+            //
+            // Ein on-chain fehlgeschlagener Transfer (status.err) bleibt bewusst 'failed':
+            // der ist endgültig tot, ein Neuversuch ist dort sicher und richtig.
+            const unconfirmed = err.unconfirmed === true && !!result.signature;
+
+            result.status      = unconfirmed ? 'timeout' : 'failed';
             result.error       = err.message;
             result.completedAt = Date.now();
 
-            console.error(`[tx-queue] FAILED   – ticket=${ticketId} | ${err.message}`);
+            if (unconfirmed) {
+                console.error(`[tx-queue] TIMEOUT  – ticket=${ticketId} | sig=${result.signature.slice(0, 12)}... | Ausgang unbekannt, NICHT als fehlgeschlagen werten | ${err.message}`);
+            } else {
+                console.error(`[tx-queue] FAILED   – ticket=${ticketId} | ${err.message}`);
+            }
         }
     }
 
@@ -250,7 +272,11 @@ export class TxQueue {
             // 'processed' → noch nicht confirmed, weiter pollen
         }
 
-        throw new Error(`Transaction confirmation timeout after ${TX_CONFIRM_TIMEOUT_MS}ms`);
+        // `unconfirmed` unterscheidet diesen Ausgang für _executeJob() von jedem anderen
+        // Fehler: die Signatur existiert, der Ausgang ist offen (siehe dort).
+        const err = new Error(`Transaction confirmation timeout after ${TX_CONFIRM_TIMEOUT_MS}ms`);
+        err.unconfirmed = true;
+        throw err;
     }
 
     /**

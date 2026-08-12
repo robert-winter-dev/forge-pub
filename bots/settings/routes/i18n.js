@@ -4,7 +4,7 @@
  * GET  /api/i18n   → { lang, supported }
  * PUT  /api/i18n   → { lang } setzen
  *
- * Die Sprache gilt für die GANZE Installation, nicht pro Nutzer (FORGE.pub ist
+ * Die Sprache gilt für die GANZE Installation, nicht pro Nutzer (FORGE public ist
  * Single-Tenant – Core/forge-pub/i18n.md, Entscheidung E3). Sie
  * liegt in <DATA_ROOT>/i18n.json und überlebt damit ein Update.
  *

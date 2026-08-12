@@ -1,5 +1,5 @@
 /**
- * /api/premium – FORGE.pub Premium-Service verwalten (Liquidity → Premium → Verwalten)
+ * /api/premium – FORGE public Premium-Service verwalten (Liquidity → Premium → Verwalten)
  *
  * GET  /status    → Wallet-Adresse, Guthaben, Restlaufzeit, Preis, Aktivierungsstatus,
  *                    Ein/Aus-Zustand. Läuft auf Master UND Fork (geteilte Datei!) —

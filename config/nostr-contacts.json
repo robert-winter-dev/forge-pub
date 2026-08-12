@@ -1,5 +1,5 @@
 {
-  "_comment": "Fest mitgeliefertes Nostr-Adressbuch. Erscheint im Message Center als vorhandener Kontakt, damit ein Nutzer ohne Suchen oder Abtippen Kontakt aufnehmen kann. Ausschließlich ÖFFENTLICHE Pubkeys – niemals private Schlüssel (die liegen im secrets-Verzeichnis, siehe lib/nostr-client.js). Diese Datei ist bewusst git-versioniert und Teil des FORGE.pub-Forks: jede Installation bringt denselben Support-Kontakt mit. Analog zu config/nostr-relays.json.",
+  "_comment": "Fest mitgeliefertes Nostr-Adressbuch. Erscheint im Message Center als vorhandener Kontakt, damit ein Nutzer ohne Suchen oder Abtippen Kontakt aufnehmen kann. Ausschließlich ÖFFENTLICHE Pubkeys – niemals private Schlüssel (die liegen im secrets-Verzeichnis, siehe lib/nostr-client.js). Diese Datei ist bewusst git-versioniert und Teil des FORGE-public-Forks: jede Installation bringt denselben Support-Kontakt mit. Analog zu config/nostr-relays.json.",
   "contacts": [
     {
       "id": "forge-master",

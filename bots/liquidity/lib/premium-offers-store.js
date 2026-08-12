@@ -1,5 +1,5 @@
 /**
- * FORGE.pub Premium – Ablage der gelieferten Pool-Offers (Klasse C)
+ * FORGE public Premium – Ablage der gelieferten Pool-Offers (Klasse C)
  *
  * Eine einzige Lesestelle für `data/premium/pool-offers.json`, damit Validator,
  * Übernahme-UI, Offer-Update-Sync und Retirement-Erkennung nicht je eigene

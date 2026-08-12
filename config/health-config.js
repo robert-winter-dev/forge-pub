@@ -34,7 +34,7 @@ import { identityExists } from '../lib/nostr-client.js';
 // wirklich aktiviert ist ('systemctl enable', so wie bin/install.sh es für
 // tatsächlich installierte Dienste tut) – kein separates Config-Flag nötig,
 // der Zustand kommt direkt vom System. Löst zwei Fälle einheitlich: (1) auf dem
-// FORGE.pub-Fork gibt es den Lending-Bot-Dienst heute schlicht noch nicht
+// FORGE-public-Fork gibt es den Lending-Bot-Dienst heute schlicht noch nicht
 // ('not-found') – ohne diesen Filter würde der Health-Check dort dauerhaft einen
 // Fehler für einen nie existierenden Dienst melden; (2) ein künftiger Fork mit
 // optionalem Lending-Bot zeigt ihn nur, wenn der Betreiber ihn beim Install
@@ -48,7 +48,7 @@ function isBotEnabled(serviceId) {
 }
 
 // Relay-Liste kommt aus config/nostr-relays.json (git-versioniert, Master und
-// FORGE.pub-Fork teilen dieselbe Datei) – hier nicht zweite Quelle der Wahrheit
+// FORGE-public-Fork teilen dieselbe Datei) – hier nicht zweite Quelle der Wahrheit
 // anlegen, sondern direkt einlesen. Leere Liste bei fehlender/kaputter Datei statt
 // Absturz der gesamten Health-Config.
 function loadNostrRelays() {
@@ -65,7 +65,7 @@ function relayServiceId(url) {
     return `nostr-${url.replace(/^wss?:\/\//, '').replace(/[^a-z0-9]+/gi, '-')}`;
 }
 
-// Umkehrung von isBotEnabled(): dieser Check ist NUR auf einem FORGE.pub-Fork
+// Umkehrung von isBotEnabled(): dieser Check ist NUR auf einem FORGE-public-Fork
 // sinnvoll (Master publiziert Premium-Blobs, ingested aber nie welche). Die
 // Master-Identität "FORGE.Master" existiert ausschließlich auf dem Master (ihr
 // Private Key verlässt ihn nie, siehe lib/nostr-client.js) – ihre Abwesenheit ist
@@ -108,7 +108,7 @@ export const chains = [
                 bots:        ['liq'],
                 description: 'Bot 3 – stellt in konzentrierten Liquiditätspools (Orca Whirlpools) Kapital bereit und vereinnahmt Handelsgebühren aus dem DEX-Handel.',
             },
-            // Nur auf einem FORGE.pub-Fork relevant (siehe IS_FORK) – der Master publiziert
+            // Nur auf einem FORGE-public-Fork relevant (siehe IS_FORK) – der Master publiziert
             // Premium-Blobs, ingested aber selbst nie welche. Vorfall 2026-08-01: forge-premium
             // verlor auf forge-pub1 lautlos den DM-Empfang (WebSocket blieb laut `ss -tnp`
             // durchgehend verbunden, das Relay lieferte nur nichts mehr) – weder systemd

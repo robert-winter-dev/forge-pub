@@ -31,17 +31,16 @@ import {
     getNotifications,
     kvGet,
     getDailySnapshot,
-    getDailySnapshotTotals,
     getDb,
 } from '../lib/db.js';
 import { config } from '../lib/config.js';
 import { FORGE_TZ } from '../../../core/config.js';
 import { displayVersion } from '../../../lib/version.js';
-// PnL/Yield-Cashflowbereinigung: ausschließlich über die zentrale FORGE-Lib.
-// adjustForCashflows() besitzt die Cashflow- UND earningsOut-Logik; dieser Bot
-// liefert nur Wert-Anker + Zeitraum und behält seine Präsentations-Schicht
-// (Floor, Median-Glättung, Sanity-Cap, pnl = yield − fees). Siehe FORGE/lib/pnl.js.
-import { adjustForCashflows } from '../../../lib/pnl.js';
+// PnL/Yield: ausschließlich über die zentrale FORGE-Lib. Dieser Bot übergibt nur
+// noch den Zeitraum — Wert-Anker, Cashflow- und Ertragsbereinigung liegen
+// vollständig in FORGE/lib/pnl.js. Hier bleibt reine Präsentation
+// (pct-Nenner, pnl = yield − tx_fees).
+import { pnlForPeriod } from '../../../lib/pnl.js';
 import { PATHS } from '../../../config/paths.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
 
@@ -451,7 +450,8 @@ export async function runExport() {
     //   1. smoothedCurrentTotal (aktuell bekannter Gesamtwert inkl. Wallet)
     //      → korrekt nach echten Withdrawals; verhindert Sprung am rechten Rand
     //   2. letzter bekannter History-Wert (Fallback wenn noch kein korrekter Tick)
-    // Für Yield-Berechnungen bleibt portfolioHistory (mit 0en) unverändert.
+    // Betrifft nur den Chart — die Yield-Zahlen kommen seit 2026-08-12 aus
+    // lib/pnl.js und nicht mehr aus dieser Reihe.
     let lastHistV = null;
     const portfolioHistoryChart = portfolioHistory.map(point => {
         if (point.v > 0) { lastHistV = point.v; return point; }
@@ -484,112 +484,39 @@ export async function runExport() {
         return berlinMidnightMs(`${y}-${m}-01`);
     })();
 
-    // Boundary-Smoothing: Median von bis zu 3 Werten an jeder Grenze
-    // Reduziert API-Rauschen (±0.2 USDC auf 2500 USDC Portfolio) auf ±0.05 USDC
-    const med = arr => { const s = [...arr].sort((a,b) => a-b); return s[Math.floor(s.length/2)]; };
-
-    // DB-Handle für die zentrale Cashflow-/Ertragsbereinigung (FORGE/lib/pnl.js).
-    // Kapitalflüsse (deposits/withdraws) werden NICHT mehr lokal gerechnet — sie
-    // kommen ausschließlich aus adjustForCashflows() der zentralen Lib.
+    // DB-Handle für die zentrale PnL-Berechnung (FORGE/lib/pnl.js).
     const _pnlDb = getDb();
 
-    // calcYield(history, fromMs, toMs): rauschgeglätteter Tages-Yield.
-    // Wert-Anker = Median der Slice-Ränder (lokale Rauschunterdrückung); die
-    // Cashflow-/earningsOut-Bereinigung über [fromMs, toMs) liefert die zentrale Lib.
-    const calcYield = (history, fromMs, toMs) => {
-        if (history.length === 0) return null;
-        const half     = Math.max(1, Math.floor(history.length / 2));
-        const n        = Math.min(3, half);
-        const startVal = med(history.slice(0, n).map(p => p.v));
-        const endVal   = med(history.slice(-n).map(p => p.v));
-        // Sanity-Cap: max. 15 % APY/Tag – filtert API-Settlement-Lag und fehlende TX-Einträge.
-        const maxDailyYield = startVal > 0 ? startVal * 0.15 / 365 : Infinity;
-        const adjusted = adjustForCashflows(_pnlDb, {
-            flavor: 'lendingbot', startValue: startVal, endValue: endVal, fromMs, toMs,
-        });
-        // Negative Werte (Rauschen) auf 0 klemmen.
-        const usdc = Math.min(
-            Math.max(0, parseFloat(adjusted.toFixed(6))),
-            maxDailyYield
-        );
-        const pct  = smoothedCurrentTotal > 0
+    // periodYield(fromMs, toMs): PnL eines Zeitraums, direkt aus der zentralen Lib.
+    // toMs = null bedeutet "bis jetzt".
+    //
+    // Vereinheitlichung 2026-08-12: Vorher gab es hier drei Rechenwege
+    // (calcYield über die Wertreihe, calcTodayFromSnapshot und
+    // calcYieldFromSnapshots über Tagesanker), jeweils mit Floor `Math.max(0, …)`
+    // und 15-%-APY-Cap. Dadurch wich das Dashboard von der Übersichtsseite ab
+    // (August 2026: +4,63 gegen −65,56 USDC) und Verluste wurden unsichtbar —
+    // der reale −70,20-USDC-Tag am 09.08. erschien als 0. Jetzt speist EINE
+    // Quelle alle Periodenzahlen; die Summe der Tageswerte ergibt exakt den
+    // Zeitraumwert (earningsOut rechnet seit demselben Tag additiv).
+    //
+    // Die Klemmen entfallen bewusst: Rauschunterdrückung leistet die Lib über
+    // Transient-Filter und Teardown-Schutz, und ein echter Verlust muss sichtbar
+    // sein statt auf 0 gezogen zu werden.
+    const periodYield = (fromMs, toMs) => {
+        const usdc = pnlForPeriod(_pnlDb, { flavor: 'lendingbot', fromMs, toMs });
+        if (usdc == null) return null;
+        const pct = smoothedCurrentTotal > 0
             ? parseFloat((usdc / smoothedCurrentTotal * 100).toFixed(4))
             : null;
-        return { usdc, pct };
+        return { usdc: parseFloat(usdc.toFixed(6)), pct };
     };
 
-    const todayHistory     = portfolioHistory.filter(p => p.ts >= startOfTodayMs);
-    const yesterdayHistory = portfolioHistory.filter(p => p.ts >= startOfYesterdayMs && p.ts < startOfTodayMs);
-    const monthHistory     = portfolioHistory.filter(p => p.ts >= startOfMonthMs);
-
-    // ── statistics.today: rauschfreie Berechnung aus Tagesanfangs-Snapshot ───────
-    // Statt portfolio_history (±0.10–0.15 USDC Rauschen) nutzen wir die
-    // positions.amount-Werte vom ersten Tick des Tages. positions.amount steigt
-    // monoton (on-chain akkumuliert), das Delta ist immer ≥ 0 und sofort korrekt.
-    // Fallback auf calcYield wenn noch kein Snapshot für heute existiert
-    // (erster Boot des Tages vor dem ersten Tick).
+    // Tagesanfangs-Snapshot — dient nur noch als Chart-Baseline (todayBaselineUsdc).
+    // Die Yield-Zahlen kommen seit der Vereinheitlichung 2026-08-12 alle aus
+    // periodYield() → lib/pnl.js.
     const dailySnap = getDailySnapshot(todayBerlin); // [{ protocol, amount_usdc }, ...]
 
-    const calcTodayFromSnapshot = () => {
-        // Iteriert über alle Protokolle im Snapshot – auch solche die heute geschlossen wurden.
-        // Geschlossene Positionen fließen mit amount=0 ein (Geld wurde abgezogen).
-        // Wichtig: todayNetFlow enthält die Auszahlung dieser Protokolle und muss daher
-        // auch im Zähler berücksichtigt werden, sonst entsteht ein falscher Yield-Überschuss.
-        const snapByProtocol = new Map(dailySnap.map(s => [s.protocol, s.amount_usdc]));
-        const activeAmounts  = new Map(mergedPositions.map(p => [p.protocol, p.amount]));
-        let totalCurrent = 0;
-        let totalSnap    = 0;
-        for (const [protocol, snapAmt] of snapByProtocol) {
-            totalCurrent += activeAmounts.get(protocol) ?? 0; // 0 wenn heute geschlossen
-            totalSnap    += snapAmt;
-        }
-        if (totalSnap === 0) return null;
-        // Kapitalflüsse heute (Einzahlungen − Abhebungen, + künftig earningsOut)
-        // zentral herausrechnen → nur echter Yield bleibt übrig (00:00 → jetzt).
-        const adjusted = adjustForCashflows(_pnlDb, {
-            flavor: 'lendingbot', startValue: totalSnap, endValue: totalCurrent,
-            fromMs: startOfTodayMs, toMs: Date.now(),
-        });
-        const usdc = Math.max(0, parseFloat(adjusted.toFixed(6)));
-        const pct  = smoothedCurrentTotal > 0
-            ? parseFloat((usdc / smoothedCurrentTotal * 100).toFixed(4))
-            : null;
-        return { usdc, pct };
-    };
-
-    const todayYield = dailySnap.length > 0 ? calcTodayFromSnapshot() : calcYield(todayHistory, startOfTodayMs, Date.now());
-
-    // ── Snapshot-basierte Yield-Berechnung für historische Tage ──────────────────
-    // Nutzt dieselbe Methode wie statistics.today: Delta zweier aufeinanderfolgender
-    // Tagesanfangs-Snapshots (daily_position_snapshots). Damit sind "gestern" und
-    // "heute" immer konsistent – kein Bucketing-/Noise-Clamp-Artefakt mehr.
-    // Frühestes benötigtes Datum: 30 Tage zurück (für dailyProfits) + 1 Tag Puffer.
-    const snapFromDate = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ })
-        .format(new Date(startOfTodayMs - 31 * 86_400_000));
-    const snapTotals = getDailySnapshotTotals(snapFromDate);
-
-    // calcYieldFromSnapshots(dayStr, nextDayStr, fromMs, toMs)
-    // dayStr/nextDayStr = YYYY-MM-DD (Tagesanfangs-Snapshot-Keys)
-    // fromMs/toMs       = ms-Grenzen desselben Tages (für die zentrale Cashflowbereinigung)
-    // Gibt null zurück wenn für einen der beiden Tage kein Snapshot vorliegt.
-    const calcYieldFromSnapshots = (dayStr, nextDayStr, fromMs, toMs) => {
-        const startSnap = snapTotals.get(dayStr);
-        const endSnap   = snapTotals.get(nextDayStr);
-        if (startSnap == null || endSnap == null) return null;
-        // Sanity-Cap: max. 15 % APY/Tag – filtert API-Settlement-Lag und fehlende TX-Einträge.
-        const maxDailyYield = startSnap > 0 ? startSnap * 0.15 / 365 : Infinity;
-        const adjusted = adjustForCashflows(_pnlDb, {
-            flavor: 'lendingbot', startValue: startSnap, endValue: endSnap, fromMs, toMs,
-        });
-        const usdc = Math.min(
-            Math.max(0, parseFloat(adjusted.toFixed(6))),
-            maxDailyYield
-        );
-        const pct  = smoothedCurrentTotal > 0
-            ? parseFloat((usdc / smoothedCurrentTotal * 100).toFixed(4))
-            : null;
-        return { usdc, pct };
-    };
+    const todayYield = periodYield(startOfTodayMs, null);
 
     // ── Tägliche Yield-Historie (letzte 30 Tage, für Profit-Chart) ───────────────
     const dailyProfits = [];
@@ -598,40 +525,18 @@ export async function runExport() {
         const dayEndMs    = dayStartMs + 86_400_000;
         const dayStr      = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ })
             .format(new Date(dayStartMs + 43_200_000)); // Noon, um DST-Grenzfälle zu vermeiden
-        const nextDayStr  = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ })
-            .format(new Date(dayEndMs  + 43_200_000));
-        const dayHistory  = portfolioHistory.filter(p => p.ts >= dayStartMs && p.ts < dayEndMs);
-        // Heute: snapshot-basierter Wert (calcTodayFromSnapshot).
-        // Historische Tage: Snapshot-Delta bevorzugt (identische Methode → konsistente Zahlen),
-        // Fallback auf calcYield wenn noch kein Folgetag-Snapshot vorliegt.
-        // Cashflowbereinigung über die Tagesgrenzen [dayStartMs, dayEndMs) zentral.
-        const y = i === 0
-            ? todayYield
-            : (calcYieldFromSnapshots(dayStr, nextDayStr, dayStartMs, dayEndMs) ?? calcYield(dayHistory, dayStartMs, dayEndMs));
+        // Jeder Tag ist eine eigene Zeitraum-Abfrage derselben Quelle. Da
+        // earningsOut seit 2026-08-12 additiv rechnet, ergibt die Summe dieser
+        // Tageswerte exakt den Monatswert weiter unten.
+        const y = i === 0 ? todayYield : periodYield(dayStartMs, dayEndMs);
         if (y) dailyProfits.push({ date: dayStr, usdc: y.usdc });
     }
 
-    const yesterdayDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ })
-        .format(new Date(startOfYesterdayMs + 43_200_000));
-
-    // Monatlicher Yield: Summe der tagesweisen Yields aus dailyProfits (snapshot-basiert,
-    // konsistent mit today/yesterday). Besser als calcYield(monthHistory) weil:
-    // - Kapitalflüsse schon je Tag herausgerechnet (kein grosses monthNetFlow nötig)
-    // - Kein portfolio_history-Rauschen über längere Perioden
-    const monthStartStr = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ })
-        .format(new Date(startOfMonthMs));
-    const monthYieldUsdc = parseFloat(
-        dailyProfits
-            .filter(d => d.date >= monthStartStr)
-            .reduce((s, d) => s + d.usdc, 0)
-            .toFixed(6)
-    );
-    const monthYield = monthYieldUsdc > 0 || dailyProfits.some(d => d.date >= monthStartStr)
-        ? {
-            usdc: monthYieldUsdc,
-            pct:  smoothedCurrentTotal > 0 ? parseFloat((monthYieldUsdc / smoothedCurrentTotal * 100).toFixed(4)) : null,
-          }
-        : calcYield(monthHistory, startOfMonthMs, Date.now());
+    // Monatlicher Yield: eine Zeitraum-Abfrage — NICHT die Summe der Tageswerte.
+    // Beide Wege liefern dasselbe Ergebnis (Additivität, siehe oben); die direkte
+    // Abfrage ist die kürzere Kette und bleibt auch dann richtig, wenn der
+    // 30-Tage-Puffer von dailyProfits den Monatsanfang nicht mehr abdeckt.
+    const monthYield = periodYield(startOfMonthMs, null);
 
     // Summe der daily_position_snapshots für heute – dient als saubere Baseline
     // für den 1D-Yield-Chart (statt portfolio_history-Wert vor dem 24h-Fenster).
@@ -639,22 +544,18 @@ export async function runExport() {
         ? parseFloat(dailySnap.reduce((s, p) => s + p.amount_usdc, 0).toFixed(6))
         : null;
 
-    // Snapshot-Delta (Start gestern → Start heute) = exakt dieselbe Methode wie statistics.today.
-    // Fallback auf calcYield wenn kein Snapshot vorhanden (z.B. nach Bot-Neustart ohne Tick).
-    const yesterdayYield = calcYieldFromSnapshots(yesterdayDateStr, todayBerlin, startOfYesterdayMs, startOfTodayMs)
-                           ?? calcYield(yesterdayHistory, startOfYesterdayMs, startOfTodayMs);
+    const yesterdayYield = periodYield(startOfYesterdayMs, startOfTodayMs);
 
     // ✅  PnL-ZENTRALISIERUNG — FORGE/lib/pnl.js (Single Source of Truth) ──────────
-    // Globale FORGE-Regel: PnL/Yield-Cashflowbereinigung läuft ausschließlich über
-    // FORGE/lib/pnl.js. Dieser Bot rechnet KEINE Kapitalflüsse mehr selbst — die
-    // Funktionen calcYield / calcTodayFromSnapshot / calcYieldFromSnapshots holen die
-    // Bereinigung über adjustForCashflows() (flavor 'lendingbot'). Hier verbleibt nur
-    // die Präsentations-Schicht: Median-Glättung der Wert-Anker, Floor ≥ 0,
-    // Sanity-Cap (15 % APY/Tag) und pnl = yield − tx_fees.
+    // Globale FORGE-Regel: PnL/Yield läuft ausschließlich über FORGE/lib/pnl.js.
+    // Seit der Vereinheitlichung 2026-08-12 holt periodYield() JEDE Periodenzahl
+    // (heute, gestern, Monat, jeder Tag der 30-Tage-Reihe) über pnlForPeriod aus
+    // derselben Quelle — identisch zur Übersichtsseite (analysis/02-export-status.js).
+    // Hier verbleibt nur Präsentation: pct-Nenner und pnl = yield − tx_fees.
     //
     // 🔁 Fee-/Zins-Transfers aufs Wallet: Sobald reaktiviert, NUR die earningsOut-
     //    Abfrage im lendingbot-Adapter von FORGE/lib/pnl.js ergänzen (Transfer mit
-    //    eigener, von 'withdraw' unterscheidbarer Markierung buchen). adjustForCashflows()
+    //    eigener, von 'withdraw' unterscheidbarer Markierung buchen). pnlForPeriod
     //    zieht den Ertrag dann automatisch ein — KEINE Änderung an diesem Bot nötig.
     //
     // ── LB#0158: abgeleitete Anzeige-Werte EINMAL berechnen (single source) ───────

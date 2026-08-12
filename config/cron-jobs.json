@@ -16,7 +16,7 @@
     },
     {
       "id": "pool-offers-dryrun",
-      "description": "FORGE.pub Pool-Offer Dry-Run-Gate vor Kapitalfreigabe",
+      "description": "FORGE public Pool-Offer Dry-Run-Gate vor Kapitalfreigabe",
       "schedule": "*/15 * * * *",
       "command": "node bin/pool-offers-dryrun.js",
       "cwd": "bots/liquidity",
@@ -24,7 +24,7 @@
     },
     {
       "id": "pool-offers-sync",
-      "description": "FORGE.pub Offer-Updates für übernommene Pools",
+      "description": "FORGE public Offer-Updates für übernommene Pools",
       "schedule": "37 * * * *",
       "command": "node bin/pool-offers-sync.js",
       "cwd": "bots/liquidity",
@@ -32,7 +32,7 @@
     },
     {
       "id": "premium-pay",
-      "description": "FORGE.pub Premium – Stundenzahlung (FORK-ONLY, Ein/Aus-Schalter)",
+      "description": "FORGE public Premium – Stundenzahlung (FORK-ONLY, Ein/Aus-Schalter)",
       "schedule": "5,15,25,35,45,55 * * * *",
       "command": "node core/premium/premium-pay.js",
       "cwd": ".",

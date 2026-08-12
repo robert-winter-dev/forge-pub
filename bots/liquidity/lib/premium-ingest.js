@@ -1,8 +1,8 @@
 /**
- * FORGE.pub Premium – Fork-seitiger Ingest
+ * FORGE public Premium – Fork-seitiger Ingest
  *
  * Baustein 4 der Premium-Anbindung (siehe datenaustausch.md
- * „PoC-Spezifikation" Punkt 3). Läuft NUR im FORGE.pub-Fork (bzw. hier zu Testzwecken auch
+ * „PoC-Spezifikation" Punkt 3). Läuft NUR im FORGE-public-Fork (bzw. hier zu Testzwecken auch
  * auf dem Master gegen eine isolierte Test-DB, siehe selfTest()) — Gegenstück zu
  * core/premium/publish-blob.js auf dem Master.
  *

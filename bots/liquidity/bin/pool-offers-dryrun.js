@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub Premium – Dry-Run-Gate vor der Kapitalfreigabe (pool-offers.md Schritt 6/6)
+ * FORGE public Premium – Dry-Run-Gate vor der Kapitalfreigabe (pool-offers.md Schritt 6/6)
  *
  * Ein übernommener Pool-Offer ist gesperrt (enabled:false, cleanup.rankingEligible:false,
  * siehe bots/settings/routes/pool-offers.js „Drei getrennte Zustände"). Bevor der Nutzer

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ══════════════════════════════════════════════════════════════════════════════
-// FORGE.pub – Minimaler Selbsttest nach einem Update
+// FORGE public – Minimaler Selbsttest nach einem Update
 // ══════════════════════════════════════════════════════════════════════════════
 // Prüft ausschließlich, was jeder Nutzer unprivilegiert selbst auch per
 // 'systemctl status' sehen könnte — bewusst KEINE Root-Rechte nötig, deshalb

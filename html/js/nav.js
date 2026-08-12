@@ -78,7 +78,7 @@ function buildNavTree() {
             // Port 3201 ist bewusst reines HTTP (kein TLS-Zertifikat gebunden, siehe
             // bots/settings/server.js) – https:// hier würde am TLS-Handshake scheitern.
             ...(lan ? [{ id: 'ssl-cert', label: t('nav.ssl_cert', 'SSL-Zertifikat'), href: `http://${ip}:3201/` }] : []),
-            // War früher forkOnly (Updates nur auf FORGE.pub sinnvoll) – die Seite heißt jetzt
+            // War früher forkOnly (Updates nur auf FORGE public sinnvoll) – die Seite heißt jetzt
             // "Settings" und zeigt auch auf dem Master Sprache/Zeitzone/Update-Status an,
             // ist also für beide Installationsarten sichtbar.
             ...(lan ? [{ id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/updates.html` }] : []),
@@ -522,7 +522,7 @@ export function initNav({ current = '', logout = '' } = {}) {
 
     document.body.appendChild(panel);
 
-    // Installierte FORGE.pub-Artefakt-Version anzeigen (nur auf einer per setup.sh
+    // Installierte FORGE-public-Artefakt-Version anzeigen (nur auf einer per setup.sh
     // installierten Fork-Instanz vorhanden, siehe tools/pub-export/build-artifact.js →
     // html/version.json; auf dem Master gibt es kein Artefakt, fetch bleibt dann still
     // erfolglos und das Feld bleibt leer statt einen Fehler zu zeigen).

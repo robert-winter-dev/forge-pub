@@ -35,10 +35,28 @@ const CLIENT_TIMEOUT_MS = 90_000; // Client-seitiger Timeout (> Queue-Timeout vo
  * Reicht eine signierte Transaktion über die zentrale FIFO-Queue ein
  * und wartet auf Confirmation.
  *
+ * ─── Unbestätigter Ausgang (err.unconfirmed) ─────────────────────────────────
+ *
+ * Bleibt die Bestätigung aus, wirft diese Funktion weiterhin – ABER der geworfene
+ * Fehler trägt dann `err.unconfirmed === true` und `err.signature` (die tatsächlich
+ * gesendete Transaktion). Das ist ausdrücklich KEIN "fehlgeschlagen": die Transaktion
+ * kann Sekunden später noch bestätigt werden, solange ihr Blockhash gültig ist.
+ *
+ * Aufrufer, die daraufhin eine ERSATZ-Transaktion bauen würden (Zahlungen, Swaps,
+ * alles was Kapital bewegt), MÜSSEN diesen Fall abfangen und erst den Status der
+ * vorhandenen Signatur prüfen – sonst wird dieselbe Aktion doppelt ausgeführt.
+ * Vorfall forge-pub1 2026-08-12: bis zu sechs echte Zahlungen für dieselbe Stunde,
+ * weil jeder Timeout blind als "fehlgeschlagen, neu versuchen" gewertet wurde
+ * (siehe core/nexus/tx-queue.js _executeJob und core/premium/premium-pay.js).
+ *
+ * Aufrufer ohne diese Behandlung verhalten sich unverändert wie bisher – die
+ * Zusatzfelder am Fehlerobjekt stören einen reinen `catch (err)` nicht.
+ *
  * @param {Buffer|Uint8Array} serializedTx  Serialisierte, signierte Transaktion
  * @param {{ skipPreflight?: boolean }} options
  * @returns {Promise<string>}  Transaktionssignatur
- * @throws {Error} bei Fehler oder Timeout
+ * @throws {Error} bei Fehler oder Timeout; bei unklarem Ausgang zusätzlich mit
+ *                 `unconfirmed: true` und `signature`
  */
 export async function submitAndConfirm(serializedTx, { skipPreflight = false } = {}) {
     // Buffer/Uint8Array → Base64
@@ -61,14 +79,35 @@ export async function submitAndConfirm(serializedTx, { skipPreflight = false } =
     // ── Schritt 2: Status pollen ─────────────────────────────────────────────
     const deadline = Date.now() + CLIENT_TIMEOUT_MS;
 
+    // Sobald die Queue die Transaktion abgeschickt hat, liefert sie die Signatur schon
+    // im Status 'confirming' mit. Festhalten, damit auch ein Abbruch OHNE sauberes
+    // Endergebnis (Ticket abgelaufen, Client-Timeout) dem Aufrufer noch sagen kann,
+    // WELCHE Transaktion draußen ist – ohne das bliebe ihm nur ein Blindflug.
+    let lastKnownSignature = null;
+
+    /** Fehler mit unklarem – ausdrücklich nicht negativem – Ausgang. */
+    const unconfirmedError = (msg, signature) => {
+        const err = new Error(msg);
+        err.unconfirmed = true;
+        err.signature   = signature;
+        return err;
+    };
+
     while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, POLL_MS));
 
         const statusRes = await fetch(`${PROXY_BASE}/tx/status/${ticketId}`);
 
         if (!statusRes.ok) {
-            // 404 = Ticket abgelaufen → Fehler
+            // 404 = Ticket abgelaufen. Kennen wir bereits eine Signatur, ist der Ausgang
+            // offen (die Tx ist draußen), nicht negativ – sonst ein echter Fehler.
             if (statusRes.status === 404) {
+                if (lastKnownSignature) {
+                    throw unconfirmedError(
+                        `tx-queue: Ticket ${ticketId} abgelaufen, bevor der Ausgang feststand – Transaktion ist gesendet, Status offen`,
+                        lastKnownSignature,
+                    );
+                }
                 throw new Error(`tx-queue: Ticket ${ticketId} nicht gefunden (abgelaufen)`);
             }
             // Anderer Fehler → weiter pollen
@@ -76,11 +115,19 @@ export async function submitAndConfirm(serializedTx, { skipPreflight = false } =
         }
 
         const result = await statusRes.json();
+        if (result.signature) lastKnownSignature = result.signature;
 
         switch (result.status) {
             case 'confirmed':
             case 'finalized':
                 return result.signature;
+
+            case 'timeout':
+                // Gesendet, aber nicht rechtzeitig bestätigt – kann noch landen.
+                throw unconfirmedError(
+                    `tx-queue: Transaktion gesendet, aber nicht bestätigt – ${result.error ?? 'Ausgang unbekannt'}`,
+                    result.signature ?? lastKnownSignature,
+                );
 
             case 'failed':
                 throw new Error(`tx-queue: Transaction failed – ${result.error ?? 'unknown error'}`);
@@ -97,5 +144,11 @@ export async function submitAndConfirm(serializedTx, { skipPreflight = false } =
         }
     }
 
+    if (lastKnownSignature) {
+        throw unconfirmedError(
+            `tx-queue: Client timeout after ${CLIENT_TIMEOUT_MS}ms for ticket ${ticketId} – Transaktion ist gesendet, Status offen`,
+            lastKnownSignature,
+        );
+    }
     throw new Error(`tx-queue: Client timeout after ${CLIENT_TIMEOUT_MS}ms for ticket ${ticketId}`);
 }

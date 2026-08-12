@@ -202,7 +202,7 @@ export async function getUsableSolBalanceFresh(pubkey) {
 /**
  * Gibt den investierbaren USDC-Betrag zurück (Gesamtbalance minus Premium-Reserve).
  * Die Reserve ist für den restlichen Code unsichtbar — analog getUsableSolBalanceFresh.
- * Default-Reserve 0 (config.premiumReserveUsdc) → ohne aktivierte FORGE.pub-Premium-
+ * Default-Reserve 0 (config.premiumReserveUsdc) → ohne aktivierte FORGE-public-Premium-
  * Zahlung identisch zu getUsdcBalanceFresh.
  */
 export async function getUsableUsdcBalanceFresh(pubkey) {

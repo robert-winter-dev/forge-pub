@@ -2,7 +2,7 @@
   "name": "forge-premium",
   "version": "0.9.4",
   "type": "module",
-  "description": "FORGE Premium – Nostr-Identität (Message Center + FORGE.pub-Auslieferung), localhost-API für forge-settings",
+  "description": "FORGE Premium – Nostr-Identität (Message Center + FORGE-public-Auslieferung), localhost-API für forge-settings",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

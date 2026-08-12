@@ -683,7 +683,9 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
     // Gesamtguthaben = Wallet-USDC + Pool-Positionen
     const totalGuthaben = usdcBalance + totalValue;
     try {
-        recordPortfolioSnapshot(totalGuthaben);
+        // totalValue (ohne Wallet) ist die Wertreihe für die PnL-Berechnung —
+        // siehe Migration positions_value in lib/db.js.
+        recordPortfolioSnapshot(totalGuthaben, null, totalValue);
         log(`Guthaben-Snapshot: ${fmt(usdcBalance)} USDC (Wallet) + ${fmt(totalValue)} USDC (Pools) = ${fmt(totalGuthaben)} USDC`);
     } catch (err) {
         logErr(`DB recordPortfolioSnapshot: ${err.message}`);

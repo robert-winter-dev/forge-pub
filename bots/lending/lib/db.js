@@ -184,6 +184,24 @@ function initSchema(db) {
         db.exec(`ALTER TABLE portfolio_history ADD COLUMN sol_price REAL`);
     } catch { /* Spalte existiert bereits – kein Fehler */ }
 
+    // ── Migration: positions_value (Positionswert OHNE Wallet) ──────────────
+    // Hintergrund (2026-08-12): total_value = Wallet + Positionen. Damit ist eine
+    // Anlage von Wallet-USDC in ein Protokoll WERTNEUTRAL — sie wird aber als
+    // transactions type='deposit' gebucht. FORGE/lib/pnl.js zog diese Buchung als
+    // externen Kapitalfluss ab und wies dadurch einen Phantom-Verlust in Höhe
+    // jedes Auto-Deploys aus (identisches Muster wie beim Liquidity Bot, dort am
+    // selben Tag gefixt). Tatsächlich bewegt KEIN Schreibpfad des LendingBots
+    // Kapital nach außen — deposit/withdraw/move/auto-deploy/auto-exit/emergency
+    // verschieben ausschließlich zwischen Bot-Wallet und Protokoll.
+    //
+    // positions_value ist der Wert der Protokoll-Positionen allein. Damit sind
+    // deposit/withdraw wieder echte Zu-/Abflüsse DIESER Wertreihe — dieselbe
+    // Semantik wie beim Liquidity Bot (value = nur Positionen).
+    // Altzeilen füllt bin/backfill-positions-value.js.
+    try {
+        db.exec(`ALTER TABLE portfolio_history ADD COLUMN positions_value REAL`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+
     // ── Migration: msg_key/msg_params (Mehrsprachigkeit Schritt 5) ──────────
     // Die lokalen Notifications gehen über bin/export.js direkt ins Dashboard.
     // Sie tragen seit 2026-08-11 Schlüssel + Daten statt fertigem deutschem Text;
@@ -512,10 +530,19 @@ export function getTotalDepositsWithdraws() {
 
 // ─── Portfolio History ────────────────────────────────────────────────────────
 
-export function recordPortfolioSnapshot(totalValue, solPrice = null) {
+/**
+ * Portfolio-Snapshot schreiben.
+ *
+ * @param totalValue     Wallet-USDC + Protokoll-Positionen (Gesamtguthaben)
+ * @param solPrice       SOL-Preis zum Zeitpunkt (nur für Analyse)
+ * @param positionsValue Wert der Protokoll-Positionen OHNE Wallet — die Wertreihe
+ *                       für die PnL-Berechnung (siehe Migration oben). Muss
+ *                       mitgegeben werden; null nur, wenn er nicht ermittelbar war.
+ */
+export function recordPortfolioSnapshot(totalValue, solPrice = null, positionsValue = null) {
     return getDb()
-        .prepare('INSERT INTO portfolio_history (bot_id, total_value, sol_price, recorded_at) VALUES (?, ?, ?, ?)')
-        .run(config.botId, totalValue, solPrice, Date.now());
+        .prepare('INSERT INTO portfolio_history (bot_id, total_value, sol_price, positions_value, recorded_at) VALUES (?, ?, ?, ?, ?)')
+        .run(config.botId, totalValue, solPrice, positionsValue, Date.now());
 }
 
 /** Löscht portfolio_history-Einträge älter als keepDays Tage. */
@@ -551,6 +578,11 @@ export function getPortfolioHistory(days = 30) {
         `)
         .all(config.botId, cutoff);
 }
+
+// Hinweis: Eine eigene Lesefunktion für portfolio_history.positions_value gibt es
+// hier bewusst nicht. Die Spalte liest ausschließlich FORGE/lib/pnl.js (lendingbot-
+// Adapter) — jede Yield-/PnL-Zahl kommt von dort. getPortfolioHistory() oben bleibt
+// für Anzeige und Chart zuständig und enthält weiterhin das Wallet.
 
 // ─── Transactions ─────────────────────────────────────────────────────────────
 

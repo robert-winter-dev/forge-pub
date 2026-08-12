@@ -176,7 +176,7 @@ function _premiumTabPanelHtml(status) {
             </button>
         </div>
         <p style="margin:0.5rem 0 0;font-size:0.78rem;color:var(--text-muted);">
-            ${tr('sliq.premium_requirements', 'Voraussetzung: die aktuelle Version von FORGE.pub. Bei einer veralteten Version wird der Premium Service automatisch deaktiviert. Wird der Liquidity Bot manuell gestoppt, wird die automatische Zahlung mit deaktiviert (Premium liefert Daten speziell für diesen Bot).')}
+            ${tr('sliq.premium_requirements', 'Voraussetzung: die aktuelle Version von FORGE public. Bei einer veralteten Version wird der Premium Service automatisch deaktiviert. Wird der Liquidity Bot manuell gestoppt, wird die automatische Zahlung mit deaktiviert (Premium liefert Daten speziell für diesen Bot).')}
         </p>
         <div class="modal-feedback" id="premium-modal-feedback"></div>`;
 }
@@ -184,7 +184,7 @@ function _premiumTabPanelHtml(status) {
 function _premiumExplainerHtml() {
     return `
         <p style="margin:0 0 0.6rem;">
-            ${tr('sliq.premium_explain_1', 'Der Premium-Service verbindet diesen Bot mit dem FORGE.pub-Datendienst: automatisch geprüfte neue Pool-Angebote (Adresse, Token, Fee-Tier gegen die Chain verifiziert), laufendes Marktscoring/Scanner-Daten für die Poolbewertung sowie priorisierter Support-Kontakt.')}
+            ${tr('sliq.premium_explain_1', 'Der Premium-Service verbindet diesen Bot mit dem FORGE-public-Datendienst: automatisch geprüfte neue Pool-Angebote (Adresse, Token, Fee-Tier gegen die Chain verifiziert), laufendes Marktscoring/Scanner-Daten für die Poolbewertung sowie priorisierter Support-Kontakt.')}
         </p>
         <p style="margin:0 0 0.6rem;color:var(--text-muted);">
             ${tr('sliq.premium_explain_2', 'Die Kosten werden stündlich automatisch aus dem hier hinterlegten Premium-Wallet beglichen (getrennt vom Bot-Kapital) — solange Guthaben reicht und der Service unten aktiviert ist.')}

@@ -1,5 +1,5 @@
 /**
- * FORGE.pub Premium – Abgleich übernommener Pools mit der laufenden Offer-Lieferung
+ * FORGE public Premium – Abgleich übernommener Pools mit der laufenden Offer-Lieferung
  *
  * Beantwortet die beiden am 2026-07-29 entschiedenen Fragen aus pool-offers.md:
  *

@@ -53,7 +53,7 @@ const TOKEN_2022_PROGRAM = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEp
 const SOL_LOW_THRESHOLD = 0.10;    // SOL – unter diesem Wert → Telegram-Alert
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde – max. 1 Alert pro Wallet
 
-// Premium-Wallet (FORGE.pub, wallet.id === 'premium') hat andere Regeln als die
+// Premium-Wallet (FORGE public, wallet.id === 'premium') hat andere Regeln als die
 // Bot-Wallets (Betreiber-Vorgabe 2026-07-30, siehe interne Doku
 // payment.md „Premium-Wallet-Monitoring"): sie hält kein Bot-Kapital, ist an
 // keinem Smart Contract beteiligt außer dem reinen USDC-Versand der stündlichen

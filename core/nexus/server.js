@@ -938,7 +938,7 @@ app.all('/loopscale/*', async (req, res) => {
     }
 });
 
-// ─── Blob-Fetch Proxy (FORGE.pub Premium-Auslieferung) ───────────────────────
+// ─── Blob-Fetch Proxy (FORGE public Premium-Auslieferung) ───────────────────────
 //
 // GET /blob-fetch?url=<encoded-url>  →  https-GET auf die übergebene URL
 //

@@ -48,7 +48,7 @@ const SETTINGS_DB       = PATHS.settingsDb;
  * Startet Liquidity- und LendingBot-Export + sync.sh im Hintergrund.
  *
  * Existenz-Checks + error-Handler bewusst: alle drei Skripte können in einem
- * reduzierten Deployment fehlen (z.B. FORGE.pub-Fork ohne Lending Bot/ohne
+ * reduzierten Deployment fehlen (z.B. FORGE-public-Fork ohne Lending Bot/ohne
  * bin/sync.sh, das nur den privaten Dashboard-Sync des Betreibers macht) – spawn() liefert
  * dafür ENOENT über ein ASYNCHRONES 'error'-Event, nicht als Exception. Ohne
  * eigenen Handler ist das ein "Unhandled 'error' event", das den kompletten
@@ -396,7 +396,7 @@ router.delete('/liquidity/addresses/:id', (req, res) => {
 });
 
 // ── Token-Registry: datengetrieben aus core/wallet-monitor/config.json ────────────
-// Vorher hartcodiert (FORGE.pub Pool-Offers Blocker 2, 2026-07-27) — jeder neue Pool-Token
+// Vorher hartcodiert (FORGE public Pool-Offers Blocker 2, 2026-07-27) — jeder neue Pool-Token
 // brauchte einen Edit hier + Neustart (Checkliste Schritt 3). Quelle jetzt: dasselbe
 // { symbol, mint, decimals }-Array, das core/wallet-monitor bereits für die Balance-Erfassung
 // nutzt und das die Pool-Checkliste (Schritt 2) bei jedem neuen Pool ohnehin pflegt — kein
@@ -915,7 +915,7 @@ router.post('/refresh-monitor', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Premium-Service-Wallet – /premium/* (nur auf einem FORGE.pub-Fork vorhanden,
+// Premium-Service-Wallet – /premium/* (nur auf einem FORGE-public-Fork vorhanden,
 // siehe lib/premium-wallet.js; Guthaben/Historie kommen aus wallet-monitor.db
 // wallet_id='premium' — install.sh trägt das Wallet dort mit ein, siehe
 // bin/install.sh "Premium-Wallet wird überwacht")

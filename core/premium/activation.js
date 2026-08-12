@@ -1,9 +1,9 @@
 /**
- * FORGE.pub Premium – Aktivierungs-Token `T`
+ * FORGE public Premium – Aktivierungs-Token `T`
  *
  * Baustein 2 der Premium-Anbindung (siehe datenaustausch.md
  * „PoC-Spezifikation" + payment.md „Identitäts-/Memo-Modell"). MASTER-ONLY: nur der Master
- * (IDENTITY_NAME === 'FORGE.Master' in server.js) vergibt Tokens, ein FORGE.pub-Fork ist immer
+ * (IDENTITY_NAME === 'FORGE.Master' in server.js) vergibt Tokens, ein FORGE-public-Fork ist immer
  * nur Kunde. Kein closureExclude nötig — server.js importiert diese Datei bedingt (nur wenn
  * IS_MASTER_IDENTITY), ein Fork ruft den Zweig nie auf, daher unkritisch, falls die Datei
  * trotzdem im Fork-Umfang landet (rein passiver Code ohne Master-Geheimnisse).

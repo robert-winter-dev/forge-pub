@@ -8,7 +8,7 @@
 //
 // Warum eine eigene Datei: Die Schwelle stand vorher in invest-score-config.js,
 // zusammen mit den Score-GEWICHTEN. Damit hätte der einzelne Import in export.js
-// die Gewichte in den öffentlichen FORGE.pub-Fork gezogen (Befund 2026-07-25).
+// die Gewichte in den öffentlichen FORGE-public-Fork gezogen (Befund 2026-07-25).
 // Den Wert zu duplizieren wäre die schlechtere Lösung — Formel-/Wertkopien sind
 // genau das Muster, das FORGE bei PnL und Score vermeidet. Deshalb: neutrale
 // Einzelquelle, die beide Seiten importieren können.

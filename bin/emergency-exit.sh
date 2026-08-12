@@ -4,7 +4,7 @@
 # Ersatz für: node bin/emergency-exit.js <optionen>
 #
 # Reicht alle Argumente 1:1 an bin/emergency-exit.js durch. Der einzige Zweck:
-# auf einer FORGE.pub-Fork-Installation gehören .env/Secrets dem Systemnutzer
+# auf einer FORGE-public-Fork-Installation gehören .env/Secrets dem Systemnutzer
 # 'forge' (0600) — ein manueller Aufruf als der eigene Login-Nutzer (z.B. per
 # SSH) scheitert sonst mit einem irreführenden "Pflichtfeld fehlt in .env:
 # KEYPAIR_PATH", weil dotenv die Datei mangels Leserecht still ignoriert statt

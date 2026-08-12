@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ══════════════════════════════════════════════════════════════════════════════
-// FORGE.pub – Auto-Update-Orchestrator
+// FORGE public – Auto-Update-Orchestrator
 // ══════════════════════════════════════════════════════════════════════════════
 // Läuft täglich per Cron im installierten Fork (/opt/forge/app/bin/update-check.js).
 // Setzt lib/update-verify.js + bin/setup.sh (update, rollback-code) zusammen zum

@@ -1,6 +1,6 @@
 // token-info-store.js v1
 // Lädt die Token-Kurzinfos als reine JSON-Daten statt eines ausgeführten Moduls
-// (FORGE.pub Pool-Offers Blocker 1, 2026-07-27): ein künftiger Premium-Datenkanal darf
+// (FORGE public Pool-Offers Blocker 1, 2026-07-27): ein künftiger Premium-Datenkanal darf
 // niemals Code ausliefern, nur Daten. token-info-data.json bleibt die kuratierte Basis
 // (Recherche-Pflicht siehe dortiger _comment); ein optionales Overlay
 // (data/premium/token-info.json) kann später zusätzliche/aktualisierte Einträge

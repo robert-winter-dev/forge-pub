@@ -1,20 +1,20 @@
-# FORGE.pub
+# FORGE public
 
 > English version: [README.md](README.md)
 
 **Automated DEX Trading.**
 
-FORGE.pub verwaltet Liquiditätspositionen und Lending-Einlagen für dich —
+FORGE public verwaltet Liquiditätspositionen und Lending-Einlagen für dich —
 automatisch, rund um die Uhr. Du musst nicht vor einem Chart sitzen und auf
 jede Preisbewegung selbst reagieren. Dass das Ganze self-hosted auf deiner
 eigenen Maschine läuft, ist dabei Mittel zum Zweck, nicht das Verkaufsargument.
 
-FORGE.pub ist ein reduzierter, öffentlicher Fork von FORGE — der
+FORGE public ist ein reduzierter, öffentlicher Fork von FORGE — der
 Trading-Engine aus dem Roman [Der EXPLOIT](https://uag.de/buch/der-exploit/)
 (warum dieses Projekt unter dem Namen „Robert Winter" veröffentlicht wird,
 erklärt die [AUTHORS](AUTHORS)-Datei).
 
-## Warum FORGE.pub
+## Warum FORGE public
 
 Konzentrierte Liquidität (CLMM, z.B. auf Orca) verdient spürbar höhere
 Gebühren als klassische AMM-Pools — aber nur, solange der Preis innerhalb der
@@ -22,10 +22,10 @@ gewählten Range bleibt. Läuft er hinaus, verdient die Position nichts mehr und
 liegt brach, bis jemand sie von Hand neu zentriert. Wer das ernsthaft
 betreibt, muss entweder ständig auf die Charts schauen — oder gibt sein
 Kapital samt Schlüsseln in das Backend eines Fremden. Genau diese Lücke
-schließt FORGE.pub: Es automatisiert die Arbeit, die sonst deine
+schließt FORGE public: Es automatisiert die Arbeit, die sonst deine
 Aufmerksamkeit verlangt, damit dein Kapital ohne dich weiterarbeitet.
 
-## Was FORGE.pub macht
+## Was FORGE public macht
 
 - **Liquidity Bot** — eröffnet und verwaltet CLMM-Positionen
   (Concentrated Liquidity) auf Orca. Passt die Preis-Range automatisch an,
@@ -45,12 +45,12 @@ Aufmerksamkeit verlangt, damit dein Kapital ohne dich weiterarbeitet.
 - **Self-hosted auf eigener Hardware** — läuft vollständig auf deiner
   eigenen Maschine, ohne Cloud-Abhängigkeit. Ein Mini-PC mit 4 CPU-Kernen,
   4 GB RAM und rund 256 GB Speicher hinter dem eigenen Router reicht völlig.
-  Eine Portfreigabe zur FORGE-Maschine ist nicht nötig: FORGE.pub wird nie
+  Eine Portfreigabe zur FORGE-Maschine ist nicht nötig: FORGE public wird nie
   von außen kontaktiert, alle Verbindungen (RPC, Börsen-APIs) gehen streng
   nur nach draußen — dein Private Key verlässt dein Zuhause also nie.
   Einzige Voraussetzung ist eine funktionierende Internetverbindung.
 
-## Was FORGE.pub nicht ist
+## Was FORGE public nicht ist
 
 - Es ist **kein gehosteter Dienst** — deine Schlüssel, deine Datenbank,
   deine Maschine. Es gibt keine Cloud-Komponente, die zum Betrieb nötig wäre.
@@ -112,7 +112,7 @@ Eine bestehende Installation aktualisieren:
 sudo bin/setup.sh update
 ```
 
-FORGE.pub prüft außerdem automatisch auf neue signierte Releases;
+FORGE public prüft außerdem automatisch auf neue signierte Releases;
 standardmäßig meldet es sie nur und wartet auf deine Bestätigung, bevor
 irgendetwas installiert wird.
 

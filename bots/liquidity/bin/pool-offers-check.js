@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub Premium – Pool-Offers gegen die Chain prüfen (manuelles Test-/Diagnose-CLI)
+ * FORGE public Premium – Pool-Offers gegen die Chain prüfen (manuelles Test-/Diagnose-CLI)
  *
  * Liest data/premium/pool-offers.json (von premium-ingest.js abgelegt, siehe
  * bin/premium-fetch.js) und validiert jeden Eintrag gegen die Chain

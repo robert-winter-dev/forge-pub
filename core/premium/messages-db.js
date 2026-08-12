@@ -1,5 +1,5 @@
 /**
- * FORGE.pub Premium – gemeinsame Nachrichten-DB
+ * FORGE public Premium – gemeinsame Nachrichten-DB
  *
  * Genutzt von core/premium/server.js (Nostr-DMs, category 'support'/'premium')
  * UND core/premium/premium-pay.js (lokale Ereignis-Einträge OHNE Nostr-Versand,

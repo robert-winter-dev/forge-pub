@@ -244,6 +244,27 @@ function checkPremiumHostStatus(hostKey) {
 // "Score-Daten veraltet"-Banner im Liquidity-Bot-Dashboard steuert.
 const INGEST_STALE_MS = 25 * 60 * 1000; // > 2 verpasste 10-Min-Publish-Läufe
 
+// Zeitschwelle, ab der ein ausbleibender Ingest NICHT mehr als harmloses 'warn'
+// durchgeht, sondern als 'error' eskaliert und damit den Telegram-Alert auslöst
+// (siehe isSecondConsecutiveError/sendPersistenceAlert unten).
+//
+// Fund 2026-08-12: Die unten differenzierte warn/error-Trennung ist für die ersten
+// Minuten genau richtig, verdeckte aber einen 6,5h-Ausfall auf forge-pub1 fast
+// vollständig. Ablauf: ein Helius-Ausfall (05:49–06:16) ließ die stündliche Zahlung
+// scheitern; ohne Zahlung liefert der Master bestimmungsgemäß nichts, der Check
+// meldete also 2h45 lang nur 'warn' ("für diese Stunde liegt keine Zahlung vor") und
+// alarmierte nie. Erst als um 08:35 wieder eine Zahlung durchkam und trotzdem nichts
+// ankam, sprang er auf 'error'. Für den Betreiber ist "seit Stunden keine Daten"
+// aber unabhängig vom Grund ein meldepflichtiger Zustand — der Grund gehört in den
+// Text, nicht in die Entscheidung, ob überhaupt gemeldet wird (Festlegung 2026-08-12).
+//
+// Bewusst NUR für den Fall "Zahlung eingeschaltet, kommt aber nicht durch": ein
+// leeres Guthaben oder ein bewusst ausgeschalteter Schalter bleibt dauerhaft 'warn'
+// (siehe autoPayEnabled === false unten). Beides ist beim Endnutzer der Normalfall
+// und war 2026-08-09 ausdrücklich als "darf NIE als Dienstausfall gemeldet werden"
+// festgelegt — daran ändert diese Eskalation nichts.
+const INGEST_ESCALATE_MS = 60 * 60 * 1000; // 1h
+
 // Ausbleibende Daten haben zwei grundverschiedene Ursachen, die vor dem 2026-08-09
 // beide denselben "Dienst antwortet nicht mehr, bitte neu starten"-Alarm auslösten:
 //
@@ -297,8 +318,9 @@ function checkPremiumIngestStatus() {
         if (!row?.last_ingested_at) {
             return { status: 'unknown', latency_ms: null, detail: 'Noch kein Premium-Blob integriert' };
         }
-        const ageMin = Math.round((Date.now() - row.last_ingested_at) / 60000);
-        if (Date.now() - row.last_ingested_at <= INGEST_STALE_MS) {
+        const ageMs  = Date.now() - row.last_ingested_at;
+        const ageMin = Math.round(ageMs / 60000);
+        if (ageMs <= INGEST_STALE_MS) {
             return { status: 'ok', latency_ms: null, detail: `Letzter Ingest erfolgreich (vor ${ageMin} Min)` };
         }
 
@@ -314,6 +336,13 @@ function checkPremiumIngestStatus() {
             return { status: 'warn', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – die automatische Zahlung ist ausgeschaltet, ohne sie liefert der Anbieter keine Premium-Daten. Einschalten unter Liquidity → Premium → Verwalten.` };
         }
         if (!paidThisHour) {
+            // Auto-Pay ist eingeschaltet (sonst hätte der Zweig darüber gegriffen), die
+            // Zahlung kommt aber trotzdem nicht durch. Kurzfristig harmlos (ein einzelner
+            // verpasster Slot holt sich in derselben Stunde selbst wieder ein), ab
+            // INGEST_ESCALATE_MS aber ein echter Störungszustand – siehe Konstante oben.
+            if (autoPayEnabled === true && ageMs > INGEST_ESCALATE_MS) {
+                return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – die automatische Zahlung ist eingeschaltet, kommt seit über ${Math.round(INGEST_ESCALATE_MS / 60000)} Min aber nicht durch, deshalb liefert der Anbieter keine Daten. Wallet-Guthaben (SOL für Gebühren, USDC für die Stundenzahlung) und das Protokoll von premium-pay prüfen.` };
+            }
             return { status: 'warn', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – für die laufende Stunde liegt keine Zahlung vor, deshalb liefert der Anbieter keine Daten. Premium-Guthaben prüfen und ggf. USDC nachfüllen (Liquidity → Premium → Verwalten).` };
         }
         return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min, obwohl die laufende Stunde bezahlt ist – der Zustellweg ist gestört. Log von forge-premium prüfen (Nostr-Empfang).` };
@@ -414,7 +443,7 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
 // automatisch mitüberwacht.
 function checkCronJobs() {
     // PATHS.data statt join(FORGE_ROOT,'data') (Fund 2026-08-09, Nachzügler zum
-    // selben Fix in bin/forge-cron.js): auf dem FORGE.pub-Fork ist FORGE_ROOT der
+    // selben Fix in bin/forge-cron.js): auf dem FORGE-public-Fork ist FORGE_ROOT der
     // APP_DIR-Checkout, der bei jedem Update komplett neu geschrieben wird und dort
     // NIE ein data/-Verzeichnis besitzt – forge-cron.js schreibt cron-state.json
     // längst unter PATHS.data (<base>/local/data). Der alte Pfad lieferte auf dem

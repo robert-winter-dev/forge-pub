@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * FORGE.pub Premium – Offer-Updates für bereits übernommene Pools
+ * FORGE public Premium – Offer-Updates für bereits übernommene Pools
  *
  * Produktentscheidung 2026-07-29 (pool-offers.md): ändert der Master Angaben zu einem
  * Pool, den dieser Fork bereits übernommen hat (Pool-Typ korrigiert, TVL-Schwellen

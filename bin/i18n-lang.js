@@ -6,7 +6,7 @@
 //   node bin/i18n-lang.js de|en      Sprache setzen (+ Frontend-Bundle erneuern)
 //
 // Die Sprache gilt für die GANZE Installation (Backend + Oberfläche), nicht pro
-// Nutzer — FORGE.pub ist Single-Tenant (Core/forge-pub/i18n.md, E3).
+// Nutzer — FORGE public ist Single-Tenant (Core/forge-pub/i18n.md, E3).
 // Gespeichert wird in <DATA_ROOT>/i18n.json, damit die Einstellung ein Update
 // überlebt (im Fork: <base>/local/data/i18n.json).
 //

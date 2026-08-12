@@ -67,7 +67,7 @@ MSG=(
     [DEPLOY_RESTORE_STARTING_SERVICES]="  → Services starten ..."
     [DEPLOY_RESTORE_DONE]="Wiederherstellung abgeschlossen."
     [DEPLOY_DEPLOY_STEP]="Dateien nach %s"
-    [DEPLOY_DEPLOY_NO_PACKAGE_JSON]="Muss aus dem entpackten FORGE.pub-Artefakt laufen (package.json fehlt in %s)."
+    [DEPLOY_DEPLOY_NO_PACKAGE_JSON]="Muss aus dem entpackten FORGE-public-Artefakt laufen (package.json fehlt in %s)."
     [DEPLOY_DEPLOY_SAME_DIR]="install/update muss aus dem frisch entpackten Artefakt laufen, nicht aus %s selbst (würde die laufende Installation löschen). Artefakt neu entpacken und von dort aufrufen."
     [DEPLOY_DEPLOY_COPIED]="Kopiert (%s)."
     [DEPLOY_NPM_STEP]="Abhängigkeiten (npm install, parallel)"
@@ -176,7 +176,7 @@ MSG=(
     # lifecycle.sh
     [LIFECYCLE_ABORTED]="Abgebrochen."
     [LIFECYCLE_UNKNOWN]="unbekannt"
-    [LIFECYCLE_INSTALL_HEADER_TITLE]="FORGE.pub – Setup"
+    [LIFECYCLE_INSTALL_HEADER_TITLE]="FORGE public – Setup"
     [LIFECYCLE_INSTALL_HEADER_SOURCE]="Quelle: %s"
     [LIFECYCLE_INSTALL_HEADER_TARGET]="Ziel:   %s"
     [LIFECYCLE_INSTALL_EXISTS_WARNING]="Es existiert bereits eine Installation unter %s."
@@ -230,7 +230,7 @@ MSG=(
     [LIFECYCLE_REPAIR_DONE]="Reparatur abgeschlossen (Services, Cron, Logrotate, Dateirechte neu angewendet)."
 
     # menu.sh
-    [MENU_TITLE]="FORGE.pub – Setup"
+    [MENU_TITLE]="FORGE public – Setup"
     [MENU_ITEM_INSTALL]="1) Install     – Neuinstallation (bestehender Zustand wird ersetzt)"
     [MENU_ITEM_UPDATE]="2) Update      – Neues Release prüfen und einspielen"
     [MENU_ITEM_UNINSTALL]="3) Uninstall   – Alles entfernen (Backup bleibt erhalten)"
@@ -238,7 +238,7 @@ MSG=(
     [MENU_ITEM_HELP]="5) Help        – Alle Befehle/Optionen anzeigen"
     [MENU_ITEM_EXIT]="6) Exit        – Beenden"
     [MENU_PROMPT]="Auswahl [1-6]:"
-    [MENU_INSTALL_NEEDS_ARTIFACT_1]="Eine Neuinstallation muss aus einem frisch entpackten FORGE.pub-"
+    [MENU_INSTALL_NEEDS_ARTIFACT_1]="Eine Neuinstallation muss aus einem frisch entpackten FORGE-public-"
     [MENU_INSTALL_NEEDS_ARTIFACT_2]="Installationspaket heraus laufen, nicht aus der laufenden Installation."
     [MENU_INSTALL_NEEDS_ARTIFACT_3]="Vorgehen:"
     [MENU_INSTALL_NEEDS_ARTIFACT_STEP1]="Aktuelles Installationspaket besorgen und entpacken"
@@ -252,7 +252,7 @@ MSG=(
     [MENU_INVALID_CHOICE]="Ungültige Auswahl."
 
     # help.sh — write_getting_started
-    [GETTING_STARTED_TITLE]="FORGE.pub – Installation abgeschlossen"
+    [GETTING_STARTED_TITLE]="FORGE public – Installation abgeschlossen"
     [GETTING_STARTED_VERSION]="Version: %s"
     [GETTING_STARTED_ACCESS_HEADER]="Zugang (nur im LAN erreichbar)"
     [GETTING_STARTED_DASHBOARD]="Dashboard:"
@@ -301,7 +301,7 @@ MSG=(
     [GETTING_STARTED_CONTROL_BACKUP]="Backup"
 
     # help.sh — show_help
-    [HELP_TITLE]="FORGE.pub – Setup"
+    [HELP_TITLE]="FORGE public – Setup"
     [HELP_USAGE]="%s <befehl> [optionen]"
     [HELP_COMMANDS_HEADER]="Befehle:"
     [HELP_CMD_INSTALL]="Vollinstallation (Default, wenn nichts angegeben)"

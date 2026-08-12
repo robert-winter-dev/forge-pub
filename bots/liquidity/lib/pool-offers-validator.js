@@ -1,8 +1,8 @@
 /**
- * FORGE.pub Premium – Pool-Offer-Validator (Klasse C, Schritt 4 von 6, siehe
+ * FORGE public Premium – Pool-Offer-Validator (Klasse C, Schritt 4 von 6, siehe
  * pool-offers.md)
  *
- * Läuft NUR im FORGE.pub-Fork (bzw. hier zu Testzwecken auch auf dem Master gegen
+ * Läuft NUR im FORGE-public-Fork (bzw. hier zu Testzwecken auch auf dem Master gegen
  * dessen eigene Pools — der Master hat dieselben On-Chain-Daten). Prüft jedes vom
  * Master gelieferte Pool-Offer gegen die Chain, BEVOR es einem Nutzer zur Übernahme
  * angeboten wird: „Die Lieferung ist eine Behauptung, die Chain ist die Wahrheit."

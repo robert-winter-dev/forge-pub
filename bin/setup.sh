@@ -1,9 +1,9 @@
 #!/bin/bash
 # ═════════════════════════════════════════════════════════════════════════════
-# FORGE.pub – Setup
+# FORGE public – Setup
 # ═════════════════════════════════════════════════════════════════════════════
 # Nachfolger von bin/install.sh. Deckt den gesamten Lebenszyklus einer
-# FORGE.pub-Installation ab, nicht nur die Erstinstallation:
+# FORGE-public-Installation ab, nicht nur die Erstinstallation:
 #
 #   install | uninstall | packages | wallet | nostr | ssl | services | cron
 #   backup  | restore   | update   | status | help

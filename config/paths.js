@@ -43,7 +43,7 @@ const settingsBot  = getBotConfig('settings');
 // Master (Default, ENV nicht gesetzt): data/ und logs/ liegen INNERHALB des
 // Checkouts — historisch gewachsen, bleibt exakt so.
 //
-// FORGE.pub-Fork: der Installer deployt den Code nach /opt/forge/app und setzt
+// FORGE-public-Fork: der Installer deployt den Code nach /opt/forge/app und setzt
 // FORGE_DATA_DIR=/opt/forge/data, FORGE_LOG_DIR=/opt/forge/log,
 // FORGE_SECRETS_DIR=/opt/forge/secrets. Dadurch ersetzt ein Update/Reinstall
 // ausschließlich app/ und kann Zustandsdaten (offene Positionen, TVL-Schutz-

@@ -1,6 +1,6 @@
 # Security Policy
 
-FORGE.pub manages real funds and holds your Solana private keys locally on
+FORGE public manages real funds and holds your Solana private keys locally on
 your own machine. If you find a security issue — especially anything that
 could put a user's keys or funds at risk — please report it responsibly
 instead of opening a public GitHub issue.
@@ -32,8 +32,8 @@ Please include, as far as you can:
 ## What's out of scope
 
 - Issues that require the attacker to already have local shell access to the
-  machine FORGE.pub runs on, or your `local/secrets` directory
-- Findings against third-party services FORGE.pub talks to (Solana RPC
+  machine FORGE public runs on, or your `local/secrets` directory
+- Findings against third-party services FORGE public talks to (Solana RPC
   providers, Jupiter, Orca, lending protocols) — please report those directly
   to the relevant project
 - Missing hardening that doesn't lead to a concrete exploit (e.g. "this could

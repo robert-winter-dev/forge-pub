@@ -166,7 +166,7 @@ function hasProtocolCapital(protocolId) {
  * Startet export.js + sync.sh im Hintergrund – Antwort an Client ist bereits raus.
  *
  * Existenz-Checks + error-Handler bewusst: in einem reduzierten Deployment ohne
- * Lending Bot (z.B. FORGE.pub-Fork, aktuell noch scope-bedingt möglich, siehe
+ * Lending Bot (z.B. FORGE-public-Fork, aktuell noch scope-bedingt möglich, siehe
  * config/pub-allowlist.json Backlog) existiert LB_ROOT nicht – spawn() liefert
  * dafür ENOENT als ASYNCHRONES 'error'-Event, kein Handler dafür crasht den
  * kompletten forge-settings-Prozess (siehe identischer Fund + Fix in wallet.js,

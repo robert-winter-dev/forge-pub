@@ -34,7 +34,7 @@ import { PATHS } from '../config/paths.js';
 
 const ROOT      = join(dirname(fileURLToPath(import.meta.url)), '..');
 // PATHS.data statt join(ROOT, 'data') (Fund 2026-08-09): ROOT ist auf dem
-// FORGE.pub-Fork der APP_DIR-Checkout, der bei jedem Update komplett neu
+// FORGE-public-Fork der APP_DIR-Checkout, der bei jedem Update komplett neu
 // geschrieben wird (rm -rf + rsync, siehe bin/setup-lib/deploy.sh do_deploy()).
 // Lag cron-state.json/cron-locks dort, verlor der Runner bei jedem Update
 // seine gesamte Job-Historie (Fehldiagnose "Job lief noch nie", obwohl er nur

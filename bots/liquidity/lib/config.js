@@ -394,7 +394,7 @@ function loadConfig() {
         keypairPath: requireEnv('KEYPAIR_PATH'),
         rpcUrl:      requireEnv('RPC_URL'),
         solReserve:  optionalPositiveFloat('SOL_RESERVE', 0.10),
-        // USDC-Reserve für FORGE.pub-Premium-Zahlungen (0,10 USDC/h).
+        // USDC-Reserve für FORGE-public-Premium-Zahlungen (0,10 USDC/h).
         // Default 0 = kein Effekt (Master zahlt kein Premium).
         // Cleanup darf diese Reserve nie investieren — sonst wäre Premium-Ausfall wegen
         // Guthabenmangel der Normalzustand statt der Ausnahme (siehe getUsableUsdcBalanceFresh

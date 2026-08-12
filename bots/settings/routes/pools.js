@@ -142,7 +142,7 @@ function loadInvestScores() {
  * Herkunft der Score-Daten aus data.json (siehe bin/export.js, 2026-07-25):
  * 'compute' = lokal gerechnet, 'delivered' = über Premium geliefert, 'none' = kein
  * Score verfügbar. Grundlage für die Sichtbarkeits-Bedingung im Risk-Management-Modal
- * ("Zustand immer sichtbar", FORGE.pub-Entscheidung Commit bf8c723) — ein Nutzer darf
+ * ("Zustand immer sichtbar", FORGE-public-Entscheidung Commit bf8c723) — ein Nutzer darf
  * nie einen Score-Limit-Schalter aktivieren, ohne zu wissen, dass er wirkungslos ist.
  * Default 'compute': bestehende FORGE-Installationen ohne den neuen Provider-Code
  * (vor Commit dcdb053) haben kein scoreSource-Feld in ihrer data.json.
