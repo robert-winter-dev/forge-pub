@@ -21,6 +21,7 @@ import Database          from 'better-sqlite3';
 import { PATHS }         from '../../../config/paths.js';
 import { t } from '../../../lib/i18n.js';
 import { renderReason } from '../../../lib/pool-reason.js';
+import { POOL_SETTINGS_DEFAULTS, diffFromDefaults } from '../../../lib/pool-settings-defaults.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,7 +49,7 @@ function loadTrailingStopStatus() {
     try {
         const db = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
         const positions = db.prepare(
-            `SELECT pool_id, hwm_usd, hwm_at FROM positions WHERE closed_at IS NULL`
+            `SELECT pool_id, hwm_usd, hwm_at, entry_usd, d2_armed_at FROM positions WHERE closed_at IS NULL`
         ).all();
         const latestSnap = db.prepare(
             `SELECT lp_value_usd, recorded_at FROM position_snapshots
@@ -61,6 +62,11 @@ function loadTrailingStopStatus() {
                 hwmAt:      p.hwm_at  ?? null,
                 currentUsd: snap?.lp_value_usd ?? null,
                 snapshotAt: snap?.recorded_at  ?? null,
+                // Zweistufiger Trailing Stop: Das UI muss die tatsächlich geltende Schwelle
+                // anzeigen, nicht immer Stufe 1 — sonst stünde im Modal ein Liquidationswert,
+                // der nicht dem entspricht, bei dem der Bot wirklich aussteigt.
+                entryUsd:   p.entry_usd   ?? null,
+                d2ArmedAt:  p.d2_armed_at ?? null,
             };
         }
         db.close();
@@ -210,73 +216,10 @@ function loadCurrentValues() {
 }
 
 // ── Standard-Einstellungen (leere Konfiguration) ──────────────────────────────
-const DEFAULT_SETTINGS = {
-    autoCompound: {
-        enabled:      true,
-        fraction:     100,   // Reinvest-Anteil in % (10–100, 10er-Schritte)
-        minClaimUsdc: 1,     // Mindestbetrag zum Claimen (0,1–10 USDC; 0,1 nur zum Testen, Default 1)
-        sendTo:       '',    // Empfänger-Adresse (leer = Wallet)
-        swapToUsdc:   false, // Coins vor Transfer in USDC tauschen
-    },
-    // Score Limit: Position schließen wenn InvestScore unter Schwelle fällt.
-    //   minScore    – InvestScore-Schwelle (0–100, Default 30)
-    //   swapToUsdc  – nach Close alle Coins in USDC tauschen
-    //   sendTo      – optional, Empfänger-Adresse (leer = Wallet)
-    scoreLimit: {
-        enabled:       false,
-        minScore:      30,
-        swapToUsdc:    true,
-        sendTo:        '',
-        cooldownHours: 1,      // Sperrfrist für automatisches Cleanup-Reinvest nach Score-Limit-Exit
-    },
-    // Ranking-Exit: Pool schließen wenn er X Stunden durchgehend als "bad" bewertet ist
-    //  (Tab wurde 2026-05-22 aus dem UI entfernt — Funktion wird neu gebaut.
-    //   Sektion bleibt im Schema, damit bestehende DB-Einträge nicht verworfen werden.)
-    ranking: {
-        enabled:          false,
-        badDurationHours: 12,    // 6 | 12 | 24 | 72
-    },
-    // Trailing Stop: Position schließen wenn lp_value_usd vom HWM um thresholdPct fällt.
-    //   thresholdPct      – Drawdown-Schwelle in % (1–90, Default 10)
-    //   autoSwapToUSDC    – nach Close alle Coins in USDC tauschen
-    //   sendTo            – optional, Empfänger-Adresse (leer = Wallet)
-    trailingStop: {
-        enabled:         true,
-        thresholdPct:    10,
-        minimumValueUsd: null,   // Pool-Mindestwert in USDC; null = deaktiviert
-        autoSwapToUSDC:  true,
-        sendTo:          '',
-        cooldownHours:   1,      // Sperrfrist für automatisches Cleanup-Reinvest nach TS-Exit
-    },
-    // Cleanup-Berücksichtigung: nimmt der Pool am Ranking-basierten Cleanup teil?
-    cleanup: {
-        rankingEligible: true,
-    },
-    // TVL-Schutz: zweistufiger Pool-Exit wenn der Pool-TVL unter eine Schwelle fällt.
-    //   Eskalation: L1 (Stufe 1) hat die höhere Schwelle, L2 (Stufe 2) die tiefere.
-    //   Beim Unterschreiten einer Schwelle wird withdrawPct % des Kapitals abgezogen.
-    //   Sind beide Stufen aktiv, muss die Summe der withdrawPct exakt 100 ergeben
-    //   (L1 zieht den ersten Teil, L2 den Rest). L1 ist optional deaktivierbar.
-    //   thresholdUsd === null → noch nie konfiguriert; UI füllt mit den pools.json-
-    //   Schwellen (tvlWarnThreshold/tvlExitThreshold) vor.
-    //   tvlAtActivation wird vom Liquidity-Bot beim ersten Deposit gesetzt (read-only fürs UI).
-    tvlProtection: {
-        level1: {
-            enabled:      false,
-            thresholdUsd: null,
-            withdrawPct:  50,    // 0–100 in 10er-Schritten
-        },
-        level2: {
-            enabled:      true,  // Default: jeder Pool hat L2 aktiv
-            thresholdUsd: null,
-            withdrawPct:  100,   // Default: 100 % abziehen
-        },
-        swapToUsdc:      true,   // global für beide Stufen: in USDC tauschen
-        sendTo:          '',     // global für beide Stufen: Empfänger (leer = Wallet)
-        cooldownHours:   1,
-        tvlAtActivation: null,   // nur vom Bot geschrieben
-    },
-};
+// Quelle: lib/pool-settings-defaults.js — dieselbe Datei nutzt der Liquidity Bot,
+// damit „Default" auf beiden Seiten dasselbe bedeutet (der Bot vergleicht beim
+// Pool-Close dagegen, um vom Default abweichende Einstellungen zu protokollieren).
+const DEFAULT_SETTINGS = POOL_SETTINGS_DEFAULTS;
 
 // Pool-Typen: bewusst dupliziert statt aus bots/liquidity/lib/pool-type-advisor.js importiert
 // (POOL_TYPES) — dieses Modul lädt beim Import u.a. config.js/pnl.js des Liquidity Bots und
@@ -287,7 +230,7 @@ const POOL_TYPES = ['rebalance_free', 'volatil_1', 'volatil_2', 'volatil_3', 'rw
 // Default für den "Pool Typen"-Tab: nur Buchhaltung des zuletzt eingetragenen Bulk-Werts,
 // nicht der tatsächliche (danach ggf. wieder abweichende) Zustand der Einzel-Pools.
 const DEFAULT_POOL_TYPE_SETTINGS = {
-    trailingStop: { thresholdPct: null },
+    trailingStop: { thresholdPct: null, thresholdPct2: null },
     tvlProtection: {
         level1: { thresholdUsd: null },
         level2: { thresholdUsd: null },
@@ -397,6 +340,61 @@ function loadPools() {
     return pools;
 }
 
+/**
+ * Liefert die Parameter eines Pools, die den Default überschreiben.
+ *
+ * Bewusst gegen die ROHEN DB-Werte (nicht gegen das Ergebnis von loadSettings) —
+ * dort ist bereits alles mit den Defaults gemergt, ein Diff wäre danach nutzlos.
+ *
+ * Seit 2026-08-15 überleben Pool-Einstellungen jeden Kapitalabzug (siehe
+ * resetPoolSessionState in bots/liquidity/lib/config.js). Damit ein abweichender
+ * Wert nicht unbemerkt dauerhaft weiterwirkt, weist das UI ihn an der Einstellung
+ * selbst aus — diese Liste ist die Grundlage dafür.
+ *
+ * Was als „Default" gilt, ist dabei gestaffelt — sonst meldete jeder Pool ein halbes
+ * Dutzend Abweichungen und der Hinweis wäre wertlos:
+ *   1. POOL_SETTINGS_DEFAULTS (global)
+ *   2. TVL-Vorbefüllung aus pools.json (tvlWarnThreshold/tvlExitThreshold) — genau das
+ *      trägt die UI beim ersten Öffnen selbst ein
+ *   3. Tab „Pool Typen": dessen Bulk-Werte sind der Standard für alle Pools dieses Typs.
+ *      Ein Pool, der den Wert seines Typs trägt, weicht nicht ab — abweichend ist erst,
+ *      wer davon einzeln abgerückt ist.
+ *
+ * @param {Object} pool  Pool aus loadPools() (für Vorbefüllung und Pool-Typ)
+ * @returns {Array<{path, value, defaultValue}>}
+ */
+function loadNonDefaults(db, botId, pool) {
+    const row = db.prepare(
+        `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
+    ).get(botId, pool.id);
+    if (!row) return [];
+    try {
+        const overrides = {};
+        if (pool.tvlWarnThreshold > 0) overrides['tvlProtection.level1.thresholdUsd'] = pool.tvlWarnThreshold;
+        if (pool.tvlExitThreshold > 0) overrides['tvlProtection.level2.thresholdUsd'] = pool.tvlExitThreshold;
+
+        if (pool.poolType) {
+            const pt = loadPoolTypeSettings(db, botId, pool.poolType);
+            const fromType = {
+                'trailingStop.thresholdPct':          pt.trailingStop?.thresholdPct,
+                'trailingStop.thresholdPct2':         pt.trailingStop?.thresholdPct2,
+                'tvlProtection.level1.thresholdUsd':  pt.tvlProtection?.level1?.thresholdUsd,
+                'tvlProtection.level2.thresholdUsd':  pt.tvlProtection?.level2?.thresholdUsd,
+            };
+            // Nur übernehmen, wenn der Pool-Typ überhaupt gepflegt ist: ein ungepflegter
+            // Typ liefert dieselben lauter-null-Werte wie ein bewusst auf „keine Schwelle"
+            // gesetzter. Ist mindestens ein Wert belegt, gilt die Zeile als gespeichert –
+            // dann zählt auch ein null als Standard (z.B. „Stufe 2 ohne Schwelle").
+            if (Object.values(fromType).some(v => v != null)) {
+                Object.assign(overrides, fromType);
+            }
+        }
+        return diffFromDefaults(JSON.parse(row.settings), overrides);
+    } catch {
+        return [];
+    }
+}
+
 function loadSettings(db, botId, poolId) {
     const row = db.prepare(
         `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
@@ -411,7 +409,6 @@ function loadSettings(db, botId, poolId) {
         return {
             autoCompound: { ...DEFAULT_SETTINGS.autoCompound, ...(saved.autoCompound ?? {}) },
             scoreLimit:   { ...DEFAULT_SETTINGS.scoreLimit,   ...(saved.scoreLimit   ?? {}) },
-            ranking:      { ...DEFAULT_SETTINGS.ranking,      ...(saved.ranking      ?? {}) },
             trailingStop: { ...DEFAULT_SETTINGS.trailingStop, ...(saved.trailingStop ?? {}) },
             cleanup:      { ...DEFAULT_SETTINGS.cleanup,      ...(saved.cleanup      ?? {}) },
             tvlProtection: {
@@ -499,13 +496,54 @@ function validateTvlProtection(merged) {
         throw new Error(t('api.pools.tvl_sum_100'));
 }
 
+// Untergrenze und Nachkommastellen der Drawdown-Schwellen. Muss mit
+// MIN_THRESHOLD_PCT/MAX_THRESHOLD_PCT in bots/liquidity/lib/trailing-stop.js
+// übereinstimmen — der Bot clamped sonst still auf einen anderen Wert, als das UI anzeigt.
+const TS_MIN_PCT      = 0.5;
+const TS_MAX_PCT      = 90;
+const TS_DECIMALS     = 2;
+
+const roundPct = v => Math.round(v * 10 ** TS_DECIMALS) / 10 ** TS_DECIMALS;
+
+/**
+ * Validiert und normalisiert die beiden Drawdown-Stufen des Trailing Stops.
+ * Mutiert `merged` (rundet die Schwellen auf zwei Nachkommastellen).
+ *
+ * Regeln:
+ *   - beide Schwellen liegen zwischen 0,5 und 90 %
+ *   - Stufe 2 ist optional (null = einstufig) und muss strikt enger als Stufe 1 sein
+ *   - Stufe 2 ohne Stufe 1 ergibt keinen Sinn: die Scharfschaltung von Stufe 2 wird an
+ *     Stufe 1 gemessen, ohne sie gäbe es keinen Auslösepunkt
+ */
+function validateTrailingStop(merged) {
+    const inRange = v => Number.isFinite(v) && v >= TS_MIN_PCT && v <= TS_MAX_PCT;
+
+    const p1 = Number(merged.thresholdPct);
+    if (!inRange(p1)) throw new Error(t('api.pools.trailing_drawdown_range'));
+    merged.thresholdPct = roundPct(p1);
+
+    const raw2 = merged.thresholdPct2;
+    if (raw2 == null || raw2 === '') {
+        merged.thresholdPct2 = null;
+        return;
+    }
+
+    const p2 = Number(raw2);
+    if (!inRange(p2)) throw new Error(t('api.pools.trailing_drawdown2_range'));
+    if (roundPct(p2) >= merged.thresholdPct) throw new Error(t('api.pools.trailing_drawdown2_order'));
+    merged.thresholdPct2 = roundPct(p2);
+}
+
 function saveSettings(db, botId, poolId, partial) {
     const current = loadSettings(db, botId, poolId);
     // Nur bekannte Sektionen übernehmen
     if (partial.autoCompound !== undefined) current.autoCompound = { ...current.autoCompound, ...partial.autoCompound };
     if (partial.scoreLimit   !== undefined) current.scoreLimit   = { ...current.scoreLimit,   ...partial.scoreLimit   };
-    if (partial.ranking      !== undefined) current.ranking      = { ...current.ranking,      ...partial.ranking      };
-    if (partial.trailingStop !== undefined) current.trailingStop = { ...current.trailingStop, ...partial.trailingStop };
+    if (partial.trailingStop !== undefined) {
+        const merged = { ...current.trailingStop, ...partial.trailingStop };
+        validateTrailingStop(merged);
+        current.trailingStop = merged;
+    }
     if (partial.cleanup      !== undefined) current.cleanup      = { ...current.cleanup,      ...partial.cleanup      };
     if (partial.tvlProtection !== undefined) {
         const p = partial.tvlProtection;
@@ -629,6 +667,9 @@ router.get('/liquidity', (req, res) => {
                 tvlWarnDefault:     pool.tvlWarnThreshold ?? null,
                 tvlExitDefault:     pool.tvlExitThreshold ?? null,
                 settings,
+                // Vom Default abweichende Parameter — das UI markiert sie, weil sie
+                // seit 2026-08-15 jeden Kapitalabzug überleben.
+                nonDefault:         loadNonDefaults(db, 'liquidity', pool),
                 trailingStopStatus: tsStatus[pool.id]    ?? null,
                 cleanupCooldownUntil,
                 cleanupCooldownReason,
@@ -784,8 +825,24 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
     const thresholdPctRaw = body.trailingStop?.thresholdPct;
     if (thresholdPctRaw !== undefined) {
         const v = Number(thresholdPctRaw);
-        if (!Number.isFinite(v) || v < 1 || v > 90) {
+        if (!Number.isFinite(v) || v < TS_MIN_PCT || v > TS_MAX_PCT) {
             return res.status(400).json({ error: t('api.pools.trailing_drawdown_range') });
+        }
+    }
+    // Stufe 2 im Bulk-Pfad: dieselben Regeln wie beim Einzel-Pool. '' und null bedeuten
+    // ausdrücklich „zweite Stufe aus", nicht „unverändert" — der Bulk-Tab schreibt immer
+    // beide Werte, sonst bliebe bei einzelnen Pools eine alte Stufe 2 stehen.
+    const threshold2Raw = body.trailingStop?.thresholdPct2;
+    if (threshold2Raw !== undefined && threshold2Raw !== null && threshold2Raw !== '') {
+        const v2 = Number(threshold2Raw);
+        if (!Number.isFinite(v2) || v2 < TS_MIN_PCT || v2 > TS_MAX_PCT) {
+            return res.status(400).json({ error: t('api.pools.trailing_drawdown2_range') });
+        }
+        if (thresholdPctRaw === undefined || thresholdPctRaw === null || thresholdPctRaw === '') {
+            return res.status(400).json({ error: t('api.pools.trailing_drawdown2_needs_first') });
+        }
+        if (v2 >= Number(thresholdPctRaw)) {
+            return res.status(400).json({ error: t('api.pools.trailing_drawdown2_order') });
         }
     }
     for (const level of ['level1', 'level2']) {
@@ -821,7 +878,8 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         const db = openDb();
         const newTypeSettings = {
             trailingStop: {
-                thresholdPct: thresholdPctRaw != null && thresholdPctRaw !== '' ? Number(thresholdPctRaw) : null,
+                thresholdPct:  thresholdPctRaw != null && thresholdPctRaw !== '' ? Number(thresholdPctRaw) : null,
+                thresholdPct2: threshold2Raw   != null && threshold2Raw   !== '' ? Number(threshold2Raw)   : null,
             },
             tvlProtection: {
                 level1: { thresholdUsd: Number(body.tvlProtection?.level1?.thresholdUsd) || null },
@@ -841,7 +899,10 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             try {
                 const partial = {};
                 if (thresholdPctRaw !== undefined) {
-                    partial.trailingStop = { thresholdPct: Number(thresholdPctRaw) };
+                    partial.trailingStop = {
+                        thresholdPct:  Number(thresholdPctRaw),
+                        thresholdPct2: (threshold2Raw != null && threshold2Raw !== '') ? Number(threshold2Raw) : null,
+                    };
                 }
                 if (body.tvlProtection !== undefined) {
                     const l1Usd = Number(body.tvlProtection?.level1?.thresholdUsd) || null;
@@ -889,11 +950,12 @@ router.get('/liquidity/:poolId', (req, res) => {
         const pool   = pools.find(p => p.id === req.params.poolId);
         if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
-        const db       = openDb();
-        const settings = loadSettings(db, 'liquidity', pool.id);
+        const db         = openDb();
+        const settings   = loadSettings(db, 'liquidity', pool.id);
+        const nonDefault = loadNonDefaults(db, 'liquidity', pool);
         db.close();
 
-        res.json({ id: pool.id, pair: pool.pair, active: pool.active, settings });
+        res.json({ id: pool.id, pair: pool.pair, active: pool.active, settings, nonDefault });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

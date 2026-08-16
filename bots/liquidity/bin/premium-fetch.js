@@ -13,7 +13,7 @@
  *
  * --dry-run: lädt + entschlüsselt + validiert, schreibt aber NICHTS in die DB (kein
  * ingestBlob()-Aufruf) — sicherer erster Schritt, bevor echte pool_score_history-Zeilen
- * entstehen (Fork-DB: ranking-exit.js liest u.U. sofort).
+ * entstehen (Fork-DB: Konsumenten lesen u.U. sofort).
  */
 
 import { openDatabase } from '../lib/db.js';

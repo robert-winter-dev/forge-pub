@@ -344,7 +344,9 @@ export async function executeScoreLimit(pool, db) {
         updateScoreLimitExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         console.log(`[scoreLimit:${pool.id}] Score Limit vollständig abgeschlossen.`);
         const snap = db.prepare(`SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(pool.id);
-        await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_score', p: { score, min: minScore } }, snap?.lp_value_usd ?? 0).catch(() => {});
+        await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_score', p: { score, min: minScore } }, {
+            lpValueUsd: snap?.lp_value_usd ?? null, coinsA, coinsB, swappedUsdc,
+        }).catch(() => {});
         triggerPoolTypeAdvisorAsync(pool.id);
 
         // ── SOL-Nachsicherung ────────────────────────────────────────────────

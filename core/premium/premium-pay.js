@@ -311,7 +311,13 @@ async function main() {
     // soll aber auch bei ausgeschaltetem Schalter zur Fehlersuche nutzbar bleiben.
     const autoPayEnabled = isAutoPayEnabled();
     if (!autoPayEnabled && !dryRun) {
-        skip('automatische Zahlung ist deaktiviert (Liquidity → Premium → Verwalten → Aktivieren) – Nutzer-Einstellung, kein Fehler.', { json });
+        // "Nutzer-Einstellung" stimmt nur, solange der Nutzer selbst ausgeschaltet hat.
+        // Nach einem Zahlungsfehlschlag hat sich der Schalter selbst abgeschaltet (siehe
+        // unten, setAutoPayEnabled(false)) – das Protokoll behauptete dann stündlich, es
+        // sei so gewollt, und verdeckte die eigentliche Ursache (forge-pub1, 2026-08-13).
+        skip(isPayFailureNotified()
+            ? 'automatische Zahlung wurde nach einem Zahlungsfehlschlag (zu geringes USDC-Guthaben) abgeschaltet – Guthaben nachfüllen, dann Liquidity → Premium → Verwalten → Aktivieren.'
+            : 'automatische Zahlung ist deaktiviert (Liquidity → Premium → Verwalten → Aktivieren) – Nutzer-Einstellung, kein Fehler.', { json });
     }
 
     // System-Pausierung durch blob-health-check.js (>2h keine Daten UND öffentlicher

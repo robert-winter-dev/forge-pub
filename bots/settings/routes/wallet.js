@@ -87,6 +87,92 @@ function triggerExportsAndSync() {
     }
 }
 
+// ── Wallet-Monitor-Refresh (manueller Button + automatisch nach Send) ────────────
+const WALLET_MONITOR_SCRIPT     = PATHS.walletMonitor;
+const WALLET_MONITOR_TIMEOUT_MS = 30_000;
+
+let _walletMonitorRunning = false;
+
+/**
+ * Führt core/wallet-monitor/monitor.js einmal synchron aus (alle konfigurierten
+ * Wallets) und stößt danach die Dashboard-Exports + sync.sh an. Wird von der
+ * Route /refresh-monitor (Klick auf "Aktualisieren") UND automatisch nach
+ * jedem erfolgreichen Send verwendet (siehe scheduleWalletRefreshAfterSend).
+ *
+ * Wirft bei Fehler (Skript fehlt, Timeout, Non-Zero-Exit, bereits laufend).
+ */
+async function runWalletMonitorRefresh() {
+    if (_walletMonitorRunning) {
+        throw new Error(t('api.wallet.monitor_running'));
+    }
+    if (!fs.existsSync(WALLET_MONITOR_SCRIPT)) {
+        throw new Error(t('api.wallet.monitor_not_found', { path: WALLET_MONITOR_SCRIPT }));
+    }
+
+    _walletMonitorRunning = true;
+    try {
+        await new Promise((resolve, reject) => {
+            const child = spawn('node', [WALLET_MONITOR_SCRIPT], {
+                cwd:   path.dirname(WALLET_MONITOR_SCRIPT),
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            let stderr = '';
+            child.stderr.on('data', d => { stderr += d.toString(); });
+            const killTimer = setTimeout(() => {
+                child.kill('SIGTERM');
+                reject(new Error(t('api.common.timeout_ms', { ms: WALLET_MONITOR_TIMEOUT_MS })));
+            }, WALLET_MONITOR_TIMEOUT_MS);
+            child.on('exit', code => {
+                clearTimeout(killTimer);
+                if (code === 0) resolve();
+                else reject(new Error(t('api.wallet.monitor_exit', { code, stderr: stderr.slice(-300) })));
+            });
+            child.on('error', err => {
+                clearTimeout(killTimer);
+                reject(err);
+            });
+        });
+        triggerExportsAndSync();
+    } finally {
+        _walletMonitorRunning = false;
+    }
+}
+
+/**
+ * Stößt nach einem erfolgreichen Send automatisch einen frischen Wallet-Snapshot an —
+ * ohne die HTTP-Antwort zu blockieren (Aufrufer NICHT awaiten, siehe Sende-Routen).
+ *
+ * Hintergrund: Ohne dies blieb wallet-monitor.db (und damit die Wallet-Ansicht) nach
+ * einem Send bis zu 10 Min veraltet (nächster Cronlauf) — dasselbe Problem, das für
+ * Deposit/Withdraw bereits über refreshAfterAction()/refreshWalletAfterAction() in
+ * den jeweiligen Bot-CLIs gelöst ist. Die Sende-Routen hier nutzen aber
+ * `sendRawTransaction` OHNE auf Bestätigung zu warten (anders als die Bot-CLIs) —
+ * ein sofortiger Snapshot-Lauf würde daher fast immer noch den alten Stand lesen.
+ * Deshalb hier zusätzlich explizit auf Confirmation warten + Propagierungspuffer,
+ * bevor monitor.js läuft.
+ *
+ * @param {Connection} connection
+ * @param {string}     txHash
+ */
+function scheduleWalletRefreshAfterSend(connection, txHash) {
+    (async () => {
+        try {
+            await connection.confirmTransaction(txHash, 'confirmed');
+        } catch (err) {
+            console.warn(`[wallet/send] confirmTransaction fehlgeschlagen (Refresh läuft trotzdem): ${err.message}`);
+        }
+        // Helius-Indexer braucht nach der Bestätigung manchmal noch ein paar Sekunden,
+        // bis getParsedTokenAccountsByOwner den neuen Stand zurückgibt (siehe
+        // bots/liquidity/lib/refresh-state.js für dasselbe Phänomen bei Deposit/Withdraw).
+        await new Promise(r => setTimeout(r, 3_000));
+        try {
+            await runWalletMonitorRefresh();
+        } catch (err) {
+            console.warn(`[wallet/send] Automatischer Wallet-Refresh fehlgeschlagen: ${err.message}`);
+        }
+    })();
+}
+
 // ── Adressbuch-Tabelle sicherstellen ──────────────────────────────────────────
 function openSettingsDb() {
     const db = new Database(SETTINGS_DB);
@@ -509,6 +595,7 @@ router.post('/liquidity/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
 
         } else {
@@ -573,6 +660,7 @@ router.post('/liquidity/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
         }
     } catch (err) {
@@ -794,6 +882,7 @@ router.post('/lending/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
 
         } else {
@@ -855,6 +944,7 @@ router.post('/lending/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
         }
     } catch (err) {
@@ -866,51 +956,14 @@ router.post('/lending/send', async (req, res) => {
 // ── POST /refresh-monitor ─────────────────────────────────────────────────────
 // Triggert sofortiges Einlesen aller Wallets via core/wallet-monitor/monitor.js.
 // Bypasst den 10-Min-Cron-Zyklus. Antwortet erst nach Exit (≤ Timeout).
-const WALLET_MONITOR_SCRIPT = PATHS.walletMonitor;
-const WALLET_MONITOR_TIMEOUT_MS = 30_000;
-
-let _walletMonitorRunning = false;
-
 router.post('/refresh-monitor', async (req, res) => {
-    if (_walletMonitorRunning) {
-        return res.status(409).json({ error: t('api.wallet.monitor_running') });
-    }
-    if (!fs.existsSync(WALLET_MONITOR_SCRIPT)) {
-        return res.status(500).json({ error: t('api.wallet.monitor_not_found', { path: WALLET_MONITOR_SCRIPT }) });
-    }
-
-    _walletMonitorRunning = true;
     const started = Date.now();
-
     try {
-        await new Promise((resolve, reject) => {
-            const child = spawn('node', [WALLET_MONITOR_SCRIPT], {
-                cwd:   path.dirname(WALLET_MONITOR_SCRIPT),
-                stdio: ['ignore', 'pipe', 'pipe'],
-            });
-            let stderr = '';
-            child.stderr.on('data', d => { stderr += d.toString(); });
-            const killTimer = setTimeout(() => {
-                child.kill('SIGTERM');
-                reject(new Error(t('api.common.timeout_ms', { ms: WALLET_MONITOR_TIMEOUT_MS })));
-            }, WALLET_MONITOR_TIMEOUT_MS);
-            child.on('exit', code => {
-                clearTimeout(killTimer);
-                if (code === 0) resolve();
-                else reject(new Error(t('api.wallet.monitor_exit', { code, stderr: stderr.slice(-300) })));
-            });
-            child.on('error', err => {
-                clearTimeout(killTimer);
-                reject(err);
-            });
-        });
-
-        triggerExportsAndSync();
+        await runWalletMonitorRefresh();
         res.json({ ok: true, durationMs: Date.now() - started });
     } catch (err) {
-        res.status(500).json({ error: err.message });
-    } finally {
-        _walletMonitorRunning = false;
+        const status = err.message === t('api.wallet.monitor_running') ? 409 : 500;
+        res.status(status).json({ error: err.message });
     }
 });
 
@@ -1099,6 +1152,7 @@ router.post('/premium/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
 
         } else {
@@ -1160,6 +1214,7 @@ router.post('/premium/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+            scheduleWalletRefreshAfterSend(connection, txHash);
             return res.json({ ok: true, txHash, symbol: sym, amount });
         }
     } catch (err) {

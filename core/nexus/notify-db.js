@@ -106,6 +106,9 @@ export function getDb() {
  *        Schlüssel + Daten der Meldung (Mehrsprachigkeit Schritt 5). Fehlen sie,
  *        bleibt es beim gespeicherten Text — Absender ohne i18n-Unterstützung
  *        (z.B. Skripte) funktionieren unverändert weiter.
+ * @param {number} [timestamp=Date.now()] – nur für Backfill/Migration von Alt-
+ *        Ereignissen mit bekanntem, vergangenem Zeitpunkt (z.B. bin/health-share-
+ *        migrate-reports.js). Normale Aufrufer lassen das weg.
  * @returns {number} Inserted ID
  */
 // Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
@@ -114,14 +117,14 @@ export function getDb() {
 // Auslese-Obergrenze zu sein.
 const MAX_NOTIFICATIONS = 100;
 
-export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null, i18n = null) {
+export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null, i18n = null, timestamp = Date.now()) {
     const db   = getDb();
     const stmt = db.prepare(`
         INSERT INTO notifications (timestamp, bot_id, level, category, message, context, sent_telegram, display_name, msg_key, msg_params)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
-        Date.now(),
+        timestamp,
         botId,
         level,
         category,
@@ -162,6 +165,25 @@ export function markNotificationsRead(ids) {
     const db = getDb();
     const placeholders = ids.map(() => '?').join(',');
     db.prepare(`UPDATE notifications SET read = 1 WHERE id IN (${placeholders})`).run(...ids);
+}
+
+/**
+ * Löscht einzelne Notifications (per ID-Liste) endgültig.
+ *
+ * Gegenstück zu markNotificationsRead(): das Message Center (forge-settings) darf
+ * nicht selbst auf nexus.db schreiben, ruft dafür POST /notifications/delete auf.
+ * Die Zeilen sind danach unwiederbringlich weg — anders als bei den Nostr-Kanälen
+ * gibt es hier keine Relay-Kopie, aus der sie zurückkommen könnten (und damit auch
+ * keine Tombstone-Tabelle wie nostr_deleted_events im Premium-Dienst).
+ *
+ * @param {number[]} ids
+ * @returns {number} Anzahl tatsächlich gelöschter Zeilen
+ */
+export function deleteNotifications(ids) {
+    if (!Array.isArray(ids) || ids.length === 0) return 0;
+    const db = getDb();
+    const placeholders = ids.map(() => '?').join(',');
+    return db.prepare(`DELETE FROM notifications WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
 const NOTIFY_TYPES = ['system', 'support', 'premium'];

@@ -28,6 +28,7 @@ import { createUtils, resolveToken, getQuote, TOKEN_MINTS }
     from '../../../lib/emergency-utils.js';
 import { PATHS } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
+import { settle } from './settle-promise.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BOT_DIR   = path.join(__dirname, '..');
@@ -175,8 +176,8 @@ async function simulateLive() {
             const mintPubkey = new PublicKey(pos.nft_mint);
             const posPda     = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, mintPubkey);
             const [whirlpool, position] = await Promise.all([
-                client.getPool(new PublicKey(pos.pool_address), IGNORE_CACHE),
-                client.getPosition(posPda.publicKey, IGNORE_CACHE),
+                settle(client.getPool(new PublicKey(pos.pool_address), IGNORE_CACHE)),
+                settle(client.getPosition(posPda.publicKey, IGNORE_CACHE)),
             ]);
 
             const poolData = whirlpool.getData();

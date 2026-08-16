@@ -7,14 +7,14 @@
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260731e">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/message.css?v=20260809g">
+    <link rel="stylesheet" href="css/message.css?v=20260816a">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
     <script src="/forge/i18n/active.js"></script>
 </head>
 <body>
 
-<header class="header">
+<header class="header mc-header">
     <div class="header-content">
         <div class="header-col header-logo">
             <a href="/forge/" title="Zur Hauptseite" data-i18n-attr="title:liq.to_main">
@@ -29,76 +29,53 @@
             </button>
         </div>
     </div>
+    <!-- Zeile 2: Rubriken-Tabs. Gleiche Optik/Bedienung wie die Reiter im Health
+         Monitor (html/health.php, Klassen .health-tabs-band/.htab) – hier bewusst
+         mit eigenen Klassennamen, weil message.html html/css/health.css nicht
+         einbindet. "Einstellungen" ist absichtlich KEIN Reiter: dort gibt es keine
+         Nachrichtenliste, die Rubrik hängt seit 2026-08-16 als eigener Eintrag im
+         Hamburger-Menü (siehe nav.js) und schaltet die Seite auf ein Vollbreite-Panel. -->
+    <div class="mc-tabs-band">
+        <div class="mc-tabs-inner" id="mcTabs" role="tablist">
+            <button class="mctab active" data-tab="system" role="tab" aria-selected="true">
+                <span data-i18n="nav.message.system">System</span><span class="mctab-count" id="mcTabCountSystem" hidden>0</span>
+            </button>
+            <button class="mctab" data-tab="support" role="tab" aria-selected="false">
+                <span data-i18n="nav.message.support">Support</span><span class="mctab-count" id="mcTabCountSupport" hidden>0</span>
+            </button>
+            <button class="mctab" data-tab="premium" role="tab" aria-selected="false">
+                <span data-i18n="nav.message.premium">Premium</span><span class="mctab-count" id="mcTabCountPremium" hidden>0</span>
+            </button>
+        </div>
+    </div>
 </header>
 
-<main class="main-content mc-layout" id="mcLayout">
+<main class="main-content mc-layout">
 
-    <!-- Einstellungen: einzige verbleibende Nutzerin von mcDetail (volle Breite,
-         siehe .mc-no-list) – System/Premium/Support haben je ein eigenes
-         Vollbreite-Panel weiter unten. -->
-    <div class="mc-detail" id="mcDetail">
-        <div class="mc-detail-body" id="mcDetailBody">
-            <div class="msg-empty" data-i18n="msg.none_selected">Keine Nachricht ausgewählt.</div>
-        </div>
-    </div>
-
-    <!-- System-Nachrichten: eigenständiges Vollbreite-Panel (ersetzt das
-         Einstellungen-Panel nur wenn "System" aktiv ist, siehe selectMenu()
-         in message.js) -->
-    <div class="mc-system-panel" id="mcSystemPanel" hidden>
-        <div class="mcs-toprow">
-            <h2 class="mcs-title" data-i18n="msg.section_system">Rubrik: System</h2>
-            <div class="mcs-toprow-right">
-                <input type="search" class="mcs-search" id="mcsSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
-            </div>
-        </div>
-        <div id="mcsGrid"></div>
-        <div class="mcs-bottomrow">
-            <div class="mcs-pagination" id="mcsPagination"></div>
-            <button class="mcs-page-btn" id="mcsMarkAllBtn"
-                title="Alle geladenen System-Nachrichten als gelesen markieren"
-                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_system_read,aria-label:msg.mark_all_read">&#10003;</button>
-        </div>
-    </div>
-
-    <!-- Premium-Nachrichten: gleiches Vollbreite-Panel wie System, eigene IDs
-         (mcp*) -->
-    <div class="mc-system-panel" id="mcPremiumPanel" hidden>
-        <div class="mcs-toprow">
-            <h2 class="mcs-title" data-i18n="msg.section_premium">Rubrik: Premium</h2>
-            <div class="mcs-toprow-right">
-                <input type="search" class="mcs-search" id="mcpSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
-            </div>
-        </div>
-        <div id="mcpGrid"></div>
-        <div class="mcs-bottomrow">
-            <div class="mcs-pagination" id="mcpPagination"></div>
-            <button class="mcs-page-btn" id="mcpMarkAllBtn"
-                title="Alle geladenen Premium-Nachrichten als gelesen markieren"
-                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_premium_read,aria-label:msg.mark_all_read">&#10003;</button>
-        </div>
-    </div>
-
-    <!-- Support-Nachrichten: gleiches Vollbreite-Panel wie System/Premium –
-         eine Zeile pro Konversation, Klick öffnet Thread + Antwortfeld im Modal.
-         Löschen läuft (erstmal) nur über "Konversation löschen" im Thread-Modal,
-         keine eigene Spalte (2026-08-08: sonst keine gleiche Spaltenbreite über
-         alle drei Rubriken hinweg möglich, siehe .mct-table in message.css). -->
-    <div class="mc-system-panel" id="mcSupportPanel" hidden>
-        <div class="mcs-toprow">
-            <h2 class="mcs-title" data-i18n="msg.section_support">Rubrik: Support</h2>
-            <div class="mcs-toprow-right">
+    <!-- Postfach (System/Support/Premium): Suchzeile über einer Zwei-Spalten-Ansicht
+         – links die scrollbare Nachrichtenliste (lädt beim Herunterscrollen nach,
+         keine Seitenzahlen mehr), rechts die Detailansicht. Ersetzt seit 2026-08-16
+         die vorherigen Volltabellen mit Detail-Modal; Vorbild ist die Verlaufsliste
+         unter "Health Monitor > Daten teilen" (.hshare-history-split). -->
+    <div class="mc-mail" id="mcMail" hidden>
+        <div class="mc-toolbar">
+            <input type="search" class="mcs-search" id="mcSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
+            <div class="mc-toolbar-right">
                 <button class="msg-new-btn" id="msgNewBtn" hidden data-i18n="msg.new_message">Neue Nachricht</button>
-                <input type="search" class="mcs-search" id="mcSupSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
+                <button class="msg-icon-btn" id="mcMarkAllBtn"
+                    title="Alle als gelesen markieren"
+                    aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_read,aria-label:msg.mark_all_read">&#10003;</button>
             </div>
         </div>
-        <div id="mcSupGrid"></div>
-        <div class="mcs-bottomrow">
-            <div class="mcs-pagination" id="mcSupPagination"></div>
-            <button class="mcs-page-btn" id="mcSupMarkAllBtn"
-                title="Alle Konversationen als gelesen markieren"
-                aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_conversations_read,aria-label:msg.mark_all_read">&#10003;</button>
+        <div class="mc-split">
+            <div class="mc-list" id="mcList"></div>
+            <div class="mc-pane" id="mcPane"></div>
         </div>
+    </div>
+
+    <!-- Einstellungen: Vollbreite, kein Split (keine Nachrichtenliste in dieser Rubrik). -->
+    <div class="mc-settings-panel" id="mcSettingsPanel" hidden>
+        <div class="mc-detail-body" id="mcDetailBody"></div>
     </div>
 
 </main>
@@ -107,6 +84,6 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/message.js?v=20260809f"></script>
+<script type="module" src="js/message.js?v=20260816f"></script>
 </body>
 </html>

@@ -23,6 +23,7 @@ import { WhirlpoolContext, IGNORE_CACHE } from '@orca-so/whirlpools-sdk';
 import { Wallet } from '@coral-xyz/anchor';
 import { PublicKey } from '@solana/web3.js';
 import { getConnection, getKeypair } from './wallet.js';
+import { settle } from './settle-promise.js';
 
 const ORCA_V2 = 'http://127.0.0.1:3100/orcav2';
 const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
@@ -48,8 +49,8 @@ export async function fetchOnChainPool(address) {
     const pool = await ctx.fetcher.getPool(pubkey, IGNORE_CACHE);
     if (!pool) throw new Error(`Whirlpool-Account nicht gefunden: ${address}`);
     const [mintA, mintB] = await Promise.all([
-        ctx.fetcher.getMintInfo(pool.tokenMintA, IGNORE_CACHE),
-        ctx.fetcher.getMintInfo(pool.tokenMintB, IGNORE_CACHE),
+        settle(ctx.fetcher.getMintInfo(pool.tokenMintA, IGNORE_CACHE)),
+        settle(ctx.fetcher.getMintInfo(pool.tokenMintB, IGNORE_CACHE)),
     ]);
     if (!mintA || !mintB) throw new Error(`Mint-Account nicht gefunden für ${address}`);
     return {

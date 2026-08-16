@@ -26,6 +26,7 @@ import { getDb, closePosition, updatePosition, getActivePositions,
          createPendingWithdrawal, recordTransaction, recordProtocolStat,
          upsertWalletSnapshot, getWalletSnapshot, addNotification } from '../lib/db.js';
 import * as notify from '../lib/notify.js';
+import { refreshWalletAfterAction } from '../lib/wallet-refresh.js';
 
 // ─── Argument-Parsing ─────────────────────────────────────────────────────────
 
@@ -301,6 +302,11 @@ async function main() {
     } catch (err) {
         jlog(`  ⚠ ${t('cli.lend.db_update_failed', { error: err.message })}`);
     }
+
+    // ── Wallet-Ansicht sofort aktualisieren ───────────────────────────────────
+    // Ohne dies bleibt wallet-monitor.db bis zu 10 Min veraltet (nächster Cronlauf).
+    jlog(`  ${t('cli.lend.step_wallet_refresh')}`);
+    await refreshWalletAfterAction({ walletAddress });
 
     // ── Ungestakte LP-Reste erkennen (nur Loopscale) ──────────────────────────
     // Siehe LoopscaleProtocol.checkLeftoverLp() für Hintergrund. Rein informativ –

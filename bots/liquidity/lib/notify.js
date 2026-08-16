@@ -32,23 +32,15 @@
  * übersetzen ist Aufgabe der jeweiligen Quelle, nicht dieser Fassade.
  */
 
-import { existsSync }    from 'fs';
-import path              from 'path';
 import { describeError } from '../../../lib/error-messages.js';
 import { FORGE_TZ }      from '../../../core/config.js';
 import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
-import { PATHS }         from '../../../config/paths.js';
 import { renderNotification } from '../../../lib/notify-render.js';
 import { getLang, t }    from '../../../lib/i18n.js';
 
 const NEXUS_URL      = 'http://127.0.0.1:3100';
 const BOT_ID         = config.botId;
-// Gesetzt vom Installer (bin/setup-lib/common.sh update_notify_suppress_on)
-// zwischen Bot-Stop und -Neustart eines Updates. startup()/shutdown() prüfen
-// das bei jedem Aufruf frisch (kein Caching) – der Marker kann sich innerhalb
-// des Prozesslebens ändern.
-const UPDATE_SUPPRESS_FLAG = path.join(PATHS.data, 'update-notify-suppress');
 const { displayName: BOT_DISPLAY_NAME, service: SERVICE_NAME } = getBotConfig('liquidity');
 
 /**
@@ -151,16 +143,14 @@ async function send(level, category, msgKey, params = {}, context = null, telegr
 
 // ─── Öffentliche Nachrichten ─────────────────────────────────────────────────
 
-/** Bot-Start */
+/**
+ * Deaktiviert (2026-08-14): reine Routine-Meldung ohne Mehrwert – der
+ * Bediener löst den Neustart i.d.R. selbst aus und weiß es bereits. Ein
+ * Crash-Neustart wird unabhängig davon von forge-check.js über systemd
+ * (crashRestarts) erkannt und als Anomalie gemeldet.
+ */
 export async function startup() {
-    // Während eines Updates sendet do_update() (bin/setup-lib/lifecycle.sh) am
-    // Ende EINE Zusammenfassung statt der Einzelmeldung jedes neu gestarteten
-    // Bots (Fund 2026-08-09: bei mehreren Diensten kamen sonst mehrere fast
-    // gleichzeitige "gestartet"-Meldungen, die nichts zueinander in Bezug
-    // setzten). Ein Crash-Restart außerhalb eines Updates hat den Marker nicht
-    // gesetzt und meldet sich weiterhin wie bisher.
-    if (existsSync(UPDATE_SUPPRESS_FLAG)) return;
-    await send('lifecycle', 'system', 'notify.liq.startup', { _action: ACTION.fyi });
+    return;
 }
 
 /** Neue CLMM-Position wurde geöffnet */
@@ -285,6 +275,19 @@ export async function tvlExitAlert(pool, currentTvl, threshold) {
     const pair = pool.displayPair ?? pool.pair;
     await send('error', 'tvl', 'notify.liq.tvl_exit', {
         pair, current: fmtM(currentTvl), threshold: fmtM(threshold),
+        _action: ACTION.inWallet,
+    }, { pair });
+}
+
+/**
+ * TVL-Voll-Exit abgeschlossen – bisher gab es dafür keine Abschlussmeldung,
+ * nur die Vorab-Warnung (tvlExitAlert). exitInfo siehe exitMetricsParams().
+ */
+export async function tvlExitCompleted(pool, tvl, threshold, exitInfo = {}) {
+    const pair = pool.displayPair ?? pool.pair;
+    await send('warn', 'tvl-done', 'notify.liq.tvl_exit_done', {
+        pair, tvl: tvl.toFixed(2), threshold: threshold.toFixed(0),
+        ...exitMetricsParams(pool, exitInfo),
         _action: ACTION.inWallet,
     }, { pair });
 }
@@ -450,6 +453,36 @@ export async function warn(context, err) {
     }, { context, errorMessage: raw, errorStack: err.stack });
 }
 
+/**
+ * Eine on-chain gelandete, aber nie gebuchte Einzahlung wurde nachgetragen.
+ * Level `warn`, nicht `info`: dass es dazu kam, heißt ein Lauf ist vorher
+ * abgebrochen — das soll sichtbar sein. Zu tun ist trotzdem nichts mehr.
+ */
+export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
+    await send('warn', 'system', 'notify.liq.capital_recovered', {
+        pair: pool.displayPair ?? pool.pair,
+        usd:  usdValue.toFixed(2),
+        tx:   txHash,
+        when: new Date(whenMs).toLocaleString('de-DE'),
+        _action: ACTION.fyi,
+    }, { context: pool.id, txHash, usdValue });
+}
+
+/**
+ * Kapitalbewegung on-chain gefunden, die NICHT gebucht ist und die der
+ * Reconciler bewusst nicht selbst nachträgt (Richtung mehrdeutig, Bewertung
+ * nicht belastbar). ACTION.verify — hier darf nichts automatisch übernommen werden.
+ */
+export async function capitalFlowNeedsReview(pool, { txHash, whenMs, reason }) {
+    await send('warn', 'system', 'notify.liq.capital_unclear', {
+        pair: pool.displayPair ?? pool.pair,
+        tx:   txHash,
+        when: new Date(whenMs).toLocaleString('de-DE'),
+        reason,
+        _action: ACTION.verify,
+    }, { context: pool.id, txHash, reason });
+}
+
 /** Manueller Deposit in eine bestehende oder neue Position */
 export async function depositAdded(pool, depositUsdc, amountA, amountB, txHash, isNew = false) {
     const pair    = pool.displayPair ?? pool.pair;
@@ -491,15 +524,9 @@ export async function minimumValueCleared(pool, oldMinValueUsd, reason = 'withdr
     }, { pair, oldMinValueUsd, reason });
 }
 
-/** Bot wird heruntergefahren */
-export async function shutdown(reason = 'SIGTERM') {
-    if (existsSync(UPDATE_SUPPRESS_FLAG)) return;
-    // SIGTERM = geplanter Stop (Deployment, bin/svc). Alles andere ist ein Abbruch,
-    // bei dem systemd zwar neu startet, ein Blick ins Log aber angebracht ist.
-    const expected = reason === 'SIGTERM' || reason === 'SIGINT';
-    await send('lifecycle', 'system',
-        expected ? 'notify.liq.shutdown_expected' : 'notify.liq.shutdown_unexpected',
-        { reason });
+/** Deaktiviert (2026-08-14) – siehe startup(). */
+export async function shutdown(reason = 'SIGTERM') { // eslint-disable-line no-unused-vars
+    return;
 }
 
 /**
@@ -514,13 +541,46 @@ export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
 }
 
 /**
- * Risk-Management Ausführung abgeschlossen – ersetzt alle szenario-spezifischen
- * Completed-Nachrichten (trailingStopCompleted, scoreLimitCompleted, rankingExitCompleted).
+ * Gemeinsame Exit-Kennzahlen für Risk-Management- und TVL-Abschlussmeldungen:
+ * Pool-Wert bei Schließung, entnommene Coins, Swap-Ergebnis und die daraus
+ * abgeleiteten Exit-Kosten (Pool-Wert minus tatsächlich erhaltenes USDC).
+ *
+ * Fehlende Werte (z.B. kein Snapshot verfügbar) lassen die jeweilige Zeile
+ * automatisch entfallen (Konvention 1, notify-render.js) statt eine falsche
+ * Zahl zu erfinden.
  */
-export async function rmExecuted(pool, scenarioLabel, lpValueUsd) {
+function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc } = {}) {
+    const [symA, symB] = pool.pair.split('/');
+    const hasCoins = coinsA != null && coinsB != null;
+    return {
+        lpValue: lpValueUsd != null ? lpValueUsd.toFixed(2) : undefined,
+        coinsA:  hasCoins ? coinsA.toFixed(6) : undefined,
+        symA,
+        coinsB:  hasCoins ? coinsB.toFixed(6) : undefined,
+        symB,
+        noSwapSuffix: hasCoins ? (swappedUsdc == null ? inline('notify.liq.rm_no_swap') : '') : undefined,
+        swappedLine: (hasCoins && swappedUsdc != null)
+            ? { k: 'notify.liq.rm_swapped', p: {
+                  usdc: swappedUsdc.toFixed(2),
+                  cost: lpValueUsd != null ? (lpValueUsd - swappedUsdc).toFixed(2) : undefined,
+              } }
+            : undefined,
+    };
+}
+
+/**
+ * Risk-Management Ausführung abgeschlossen – ersetzt alle szenario-spezifischen
+ * Completed-Nachrichten (trailingStopCompleted, scoreLimitCompleted).
+ *
+ * @param {object} exitInfo  { lpValueUsd, coinsA, coinsB, swappedUsdc } – alle
+ *   optional, fehlende Werte lassen die zugehörige Zeile entfallen.
+ */
+export async function rmExecuted(pool, scenarioLabel, exitInfo = {}) {
     const pair = pool.displayPair ?? pool.pair;
     await send('warn', 'rm-executed', 'notify.liq.rm_executed', {
         scenario: rmScenario(scenarioLabel),
+        pair,
+        ...exitMetricsParams(pool, exitInfo),
         _action:  ACTION.inWallet,
     }, { pair });
 }
@@ -528,7 +588,7 @@ export async function rmExecuted(pool, scenarioLabel, lpValueUsd) {
 /**
  * Szenario-Bezeichner der Risk-Management-Meldungen.
  *
- * Die Aufrufer (trailing-stop.js, score-limit.js, ranking-exit.js) liefern ihn
+ * Die Aufrufer (trailing-stop.js, score-limit.js) liefern ihn
  * seit Schritt 5 als Katalog-Verweis `{ k, p }` — das Label enthält Zahlen
  * ("Trailing Stop (33%)") und lässt sich deshalb nicht über eine feste Tabelle
  * übersetzen. Ein einfacher String wird unverändert durchgereicht, damit ein
@@ -548,7 +608,7 @@ export async function scoreLimitTriggered(pool, score, minScore) {
 
 /**
  * Gemeinsame Parameter der drei Exit-Abschlussmeldungen (Score-Limit,
- * Ranking-Exit, Trailing Stop) — der Rumpf steht als EIN Katalogeintrag
+ * Trailing Stop) — der Rumpf steht als EIN Katalogeintrag
  * (`notify.liq.exit_done`), die Überschrift kommt vom Aufrufer.
  *
  * Die beiden Varianten "an Adresse gesendet" / "bleibt im Wallet" unterscheiden
@@ -585,32 +645,6 @@ export async function scoreLimitError(pool, step, err) {
     const pair = pool.displayPair ?? pool.pair;
     const { reason, detail, raw } = errorParts(err);
     await send('error', 'score-limit', 'notify.liq.score_limit_error', {
-        step, reason, detail, _action: ACTION.retrying,
-    }, { pair, errorMessage: raw });
-}
-
-/** Ranking-Exit hat Schwelle erreicht – Ausführung beginnt */
-export async function rankingExitTriggered(pool, streakHours, badDurationHours) {
-    const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'ranking-exit', 'notify.liq.ranking_exit_triggered', {
-        hours:      streakHours.toFixed(1),
-        hoursRound: streakHours.toFixed(0),
-    }, { pair });
-}
-
-/** Ranking-Exit vollständig abgeschlossen */
-export async function rankingExitCompleted(pool, { coinsA, coinsB, swappedUsdc, sentTo }) {
-    const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'ranking-exit-done', 'notify.liq.exit_done',
-        exitDoneParams(pool, { k: 'notify.liq.exit_head_ranking' }, { coinsA, coinsB, swappedUsdc, sentTo }),
-        { pair });
-}
-
-/** Ranking-Exit fehlgeschlagen */
-export async function rankingExitError(pool, step, err) {
-    const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, raw } = errorParts(err);
-    await send('error', 'ranking-exit', 'notify.liq.ranking_exit_error', {
         step, reason, detail, _action: ACTION.retrying,
     }, { pair, errorMessage: raw });
 }

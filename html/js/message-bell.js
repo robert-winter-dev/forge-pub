@@ -176,17 +176,17 @@ export function initMessageBell({ requireLan = true, onClick = null } = {}) {
             ? candidates.reduce((a, b) => (a.oldest <= b.oldest ? a : b)).key
             : null;
 
-        // Nav-Badges im Hamburger-Menü (Message Center → System/Support/Premium)
-        // mit demselben Fetch aktuell halten – sonst zeigt nur das Brief-Icon im
-        // Header den korrekten Stand, während die Menü-Zähler auf Seiten ohne
-        // message.js (z.B. index.html) beim ersten Laden leer/versteckt bleiben,
-        // bis der Nutzer einmal ins Message Center klickt (Bug 2026-08-09).
-        setNavBadge('message-system', systemNew);
-        setNavBadge('message-support', supportUnread);
-        setNavBadge('message-premium', premiumUnread);
+        const total = supportUnread + systemNew + premiumUnread;
+        // Nav-Badge im Hamburger-Menü (Message Center → Nachrichten) mit demselben
+        // Fetch aktuell halten – sonst zeigt nur das Brief-Icon im Header den
+        // korrekten Stand, während der Menü-Zähler auf Seiten ohne message.js
+        // (z.B. index.html) beim ersten Laden leer/versteckt bleibt, bis der Nutzer
+        // einmal ins Message Center klickt (Bug 2026-08-09). Seit 2026-08-16 EIN
+        // Eintrag mit der Summe statt drei je Rubrik – aufgeschlüsselt wird an den
+        // Reitern im Message Center selbst (siehe message.js setUnread()).
+        setNavBadge('message-inbox', total);
 
         if (!badge) return;
-        const total = supportUnread + systemNew + premiumUnread;
         badge.textContent = total > 99 ? '99+' : String(total);
         badge.classList.toggle('hidden', !total);
     }

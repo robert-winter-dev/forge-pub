@@ -3,7 +3,6 @@
  *
  * Gemeinsame Swap- und Transfer-Logik für alle Exit-Mechanismen:
  *   • Score Limit      (lib/score-limit.js)
- *   • Ranking-Exit     (lib/ranking-exit.js)
  *   • Trailing Stop    (lib/trailing-stop.js)
  *
  * Hintergrund: Exit-Module hatten zuvor jeweils eigene `stepSwap`/`stepTransfer`-
@@ -28,7 +27,9 @@ import { swapTokens, quoteTokens } from './swap.js';
 import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT, getTxFee } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
 import { insertTransaction } from './db.js';
+import { logChainTx } from './chain-tx-log.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
+import { settle } from './settle-promise.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
 const USDC_DECIMALS  = 6;
@@ -181,12 +182,12 @@ async function probeSlippage(token, totalAmount, logPrefix) {
     if (fullRaw < MIN_SWAP_RAW) return 0; // Dust – Jupiter-Quote unnötig
     try {
         const [small, full] = await Promise.all([
-            quoteTokens({ inputMint: token.mint, outputMint: USDC_MINT,
+            settle(quoteTokens({ inputMint: token.mint, outputMint: USDC_MINT,
                           inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
-                          amount: probeRaw / 10 ** token.decimals }),
-            quoteTokens({ inputMint: token.mint, outputMint: USDC_MINT,
+                          amount: probeRaw / 10 ** token.decimals })),
+            settle(quoteTokens({ inputMint: token.mint, outputMint: USDC_MINT,
                           inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
-                          amount: totalAmount }),
+                          amount: totalAmount })),
         ]);
         const smallRate   = small.outAmountRaw / probeRaw;
         const fullRate    = full.outAmountRaw  / fullRaw;
@@ -282,7 +283,7 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
  * Die Exit-Module riefen früher direkt `adapter.collectFees()` auf und schlossen
  * danach. Das hatte zwei Löcher (2026-07-29, siehe doc/CHANGELOG/2026-07-29.md):
  *
- *   1. Keine SOL-Vorsicherung — Ranking-Exit, Trailing-Stop, TVL-Schutz,
+ *   1. Keine SOL-Vorsicherung — Trailing-Stop, TVL-Schutz,
  *      Retirement und Emergency-Withdraw liefen ohne jede Prüfung in den
  *      Reserve-Guard und brachen ab. Der Ausstieg scheiterte an genau der
  *      Reserve, die ihn ermöglichen sollte.
@@ -334,6 +335,17 @@ export async function prepareExitAndClaimFees(adapter, pool, position, db, { log
 
     try {
         const feeResult = await adapter.collectFees(pool, position.nft_mint);
+        // Dieser Claim bekommt bewusst KEINE eigene transactions-Zeile — sein Betrag
+        // fließt gebündelt in die close_position-Zeile (finalizeClosePosition). Damit
+        // der Abgleich in lib/capital-reconcile.js den Abfluss trotzdem zuordnen kann,
+        // wird die Signatur vermerkt (lib/chain-tx-log.js).
+        logChainTx(db, {
+            txHash:     feeResult.txHash,
+            poolId:     pool.id,
+            positionId: position.id,
+            kind:       'exit_fee_claim',
+            note:       'gebündelt in close_position',
+        });
         return {
             amountA: feeResult.amountA ?? 0,
             amountB: feeResult.amountB ?? 0,
@@ -352,7 +364,8 @@ export async function prepareExitAndClaimFees(adapter, pool, position, db, { log
  * Bündelt den im Withdraw-Step zuvor geclaimten Fee-Anteil (feesA/feesB) mit dem
  * reinen Close-Betrag (closed.amountA/B) zusammen — beide zusammen ergeben, was die
  * Position beim Ausstieg tatsächlich freigibt. Zuvor bauten trailing-stop.js,
- * score-limit.js und ranking-exit.js diesen Block jeweils eigenständig nach und
+ * score-limit.js und der (2026-08-15 ausgebaute) Ranking-Exit diesen Block jeweils
+ * eigenständig nach und
  * schrieben dabei versehentlich nur closed.amountA/B in die DB, wodurch der im
  * selben Schritt geclaimte Fee-Anteil aus der Transaktionshistorie verschwand
  * (sichtbar z.B. wenn die Position beim finalen Resume-Schritt bereits leer war
@@ -392,6 +405,37 @@ export async function finalizeClosePosition(adapter, pool, position, db, { feesA
 }
 
 /**
+ * Begrenzt die zu verkaufende SOL-Menge auf das, was tatsächlich aus der Position kam.
+ *
+ * 🔒 Warum nicht der gesamte nutzbare Wallet-Bestand (Zustand bis 2026-08-13):
+ * `getUsableSolBalanceFresh()` zieht nur `config.solReserve` ab — alles darüber galt als
+ * verkaufbarer Rest. Damit hat jeder Ausstieg aus einem SOL-Pool auch den Puffer
+ * mitverkauft, den die Selbstheilung kurz zuvor extra gekauft hatte. Belegt auf
+ * forge-pub1 2026-08-13:
+ *
+ *   16:09:24  SOL-Self-Heal: 0.0979 → 0.1913 SOL   (USDC → SOL gekauft)
+ *   16:09:25  decreaseLiquidity: tokenEstA = 0.158604 SOL aus der Position
+ *   16:09:27  TVL-Schutz: Swap 0.250656 SOL → USDC (= Position + kompletter Topup)
+ *
+ * Ergebnis: SOL wieder auf der Reserve, Swap-Gebühren und Slippage zweimal bezahlt, und
+ * beim nächsten Zyklus beginnt derselbe Rundlauf von vorn. Das ist exakt die Pathologie,
+ * die `SOL_TOPUP_TARGET` (lib/sol-topup.js) für den Cleanup-Pfad bereits beseitigt hat:
+ * „auffüllen bis X" und „abbauen auf Y" müssen dieselbe Zahl meinen. Der Ausstieg
+ * verkauft deshalb nur noch das Positionskapital; der Wallet-Puffer bleibt dem nächsten
+ * Öffnen erhalten.
+ *
+ * Die Kappung greift bewusst NUR für SOL. Bei allen anderen Tokens ist ein Wallet-Rest
+ * echter Rest (Dust aus früheren Swaps) und soll weiterhin mit abfließen.
+ *
+ * @param {number} usableSol   Wallet-SOL abzüglich Reserve
+ * @param {number} fromPosition SOL, das die Position gerade freigegeben hat
+ * @returns {number} zu swappende Menge (nie negativ)
+ */
+function capSolToPosition(usableSol, fromPosition) {
+    return Math.max(0, Math.min(usableSol, fromPosition));
+}
+
+/**
  * Tauscht alle Coins der Position in USDC um.
  *
  * @param {Object} pool      Pool-Config (braucht tokenA/tokenB, decimalsA/B, volatilePair)
@@ -426,14 +470,14 @@ export async function executeSwapStep(pool, opts) {
 
     // volatilePair (HYPE/SOL, cbBTC/WBTC etc.): beide Tokens swappen
     if (pool.volatilePair) {
-        const fetchBal = async (mint, decimals) => mint === WSOL_MINT
-            ? getUsableSolBalanceFresh(keypair.publicKey)
+        const fetchBal = async (mint, decimals, fromPosition) => mint === WSOL_MINT
+            ? capSolToPosition(await getUsableSolBalanceFresh(keypair.publicKey), fromPosition)
             : getTokenBalanceFresh(keypair.publicKey, mint, decimals);
 
         if (coinsA > 0) {
             // Mit sendTo/forceCoins: nur die aus Pool entnommenen Coins (keine pre-existing
             // Wallet-Bestände). Sonst: gesamter Wallet-Bestand (Cleanup reinvestiert Rest).
-            const swapA = useCoinsOnly ? coinsA : await fetchBal(pool.tokenA, pool.decimalsA);
+            const swapA = useCoinsOnly ? coinsA : await fetchBal(pool.tokenA, pool.decimalsA, coinsA);
             if (swapA > 0) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenA, decimals: pool.decimalsA },
@@ -444,7 +488,7 @@ export async function executeSwapStep(pool, opts) {
         }
         if (coinsB > 0) {
             const [, symB] = pool.pair.split('/');
-            const swapB = useCoinsOnly ? coinsB : await fetchBal(pool.tokenB, pool.decimalsB);
+            const swapB = useCoinsOnly ? coinsB : await fetchBal(pool.tokenB, pool.decimalsB, coinsB);
             if (swapB > 0) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenB, decimals: pool.decimalsB },
@@ -457,7 +501,7 @@ export async function executeSwapStep(pool, opts) {
         // Standard X/USDC: nur tokenA → USDC; tokenB ist bereits USDC
         const swapAmount = useCoinsOnly ? coinsA
             : pool.tokenA === WSOL_MINT
-                ? Math.max(0, await getUsableSolBalanceFresh(keypair.publicKey))
+                ? capSolToPosition(await getUsableSolBalanceFresh(keypair.publicKey), coinsA)
                 : await getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA);
 
         if (swapAmount > 0) {

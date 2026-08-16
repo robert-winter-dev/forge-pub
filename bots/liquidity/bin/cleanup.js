@@ -43,6 +43,7 @@ import { recordFailure, recordSuccess } from '../lib/fail-streak.js';
 import { refreshAfterAction } from '../lib/refresh-state.js';
 import { acquireLock, releaseLock, isSlLocked, isManualLocked, isRebalanceLocked } from '../lib/cleanup-lock.js';
 import { deposit, getTokenUsdPrice, checkClmmRatio } from '../lib/deposit-lib.js';
+import { reconcileCapitalFlows } from '../lib/capital-reconcile.js';
 import { ensureWalletSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
 import {
     getOpenPosition, getDustWatch, startDustWatch, clearDustWatch,
@@ -442,31 +443,6 @@ async function sweepDust(db, keypair, connection) {
 // ─── Settings-Helfer ─────────────────────────────────────────────────────────
 
 /**
- * Aktiviert ranking.enabled=true (24h) für einen Pool in settings.db.
- * Bestehende SL/TP-Settings bleiben unberührt.
- */
-function _enableRankingExitForPool(poolId) {
-    try {
-        const sdb = new Database(SETTINGS_DB);
-        const row = sdb.prepare(
-            `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
-        ).get(config.botId, poolId);
-        const existing = row ? JSON.parse(row.settings) : {};
-        existing.ranking = { enabled: true, badDurationHours: 24 };
-        const json = JSON.stringify(existing);
-        sdb.prepare(`
-            INSERT INTO pool_settings (bot_id, pool_id, settings)
-            VALUES ('liquidity', ?, ?)
-            ON CONFLICT (bot_id, pool_id) DO UPDATE SET settings = excluded.settings
-        `).run(poolId, json);
-        sdb.close();
-        console.log(`[cleanup:ranking] ${t('cli.cl.ranking_exit_on', { pool: poolId })}`);
-    } catch (err) {
-        console.warn(`[cleanup:ranking] ${t('cli.cl.ranking_exit_failed', { error: err.message })}`);
-    }
-}
-
-/**
  * Liest pool_settings aus settings.db und liefert ein Set der Pool-IDs,
  * bei denen `cleanup.rankingEligible === false` gesetzt ist.
  * Wird vom Ranking-Cleanup verwendet, um vom User ausgeschlossene Pools zu überspringen.
@@ -504,7 +480,7 @@ function _loadRankingIneligiblePools() {
  * Cooldown (falls mehrere Exit-Typen für denselben Pool gleichzeitig im Cooldown
  * stehen sollten).
  */
-function _loadCleanupCooldownBlockedPools(db) {
+function _loadCleanupCooldownBlockedPools(db, { quiet = false } = {}) {
     const blocked = new Map();
     for (const poolId of config.pools.all.map(p => p.id)) {
         const candidates = [
@@ -521,9 +497,11 @@ function _loadCleanupCooldownBlockedPools(db) {
             if (!existing || until > existing.until) blocked.set(poolId, { until, reason: c.reason });
         }
     }
-    for (const [poolId, { until, reason }] of blocked) {
-        const remainingMin = Math.ceil((until - Date.now()) / 60_000);
-        console.log(`[cleanup:ranking] ${t('cli.cl.cooldown_excluded', { pool: poolId, reason, min: remainingMin })}`);
+    if (!quiet) {
+        for (const [poolId, { until, reason }] of blocked) {
+            const remainingMin = Math.ceil((until - Date.now()) / 60_000);
+            console.log(`[cleanup:ranking] ${t('cli.cl.cooldown_excluded', { pool: poolId, reason, min: remainingMin })}`);
+        }
     }
     return blocked;
 }
@@ -553,6 +531,46 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
         return;
     }
 
+    // Risk-Management-Cooldown: gilt in JEDEM Invest-Pfad, nicht nur im Ranking-Modus.
+    // runCleanupByRanking() filtert Cooldown-Pools bereits vorab aus (dort ist diese
+    // Prüfung dann wirkungslos), der Modus CLEANUP_MODE='pool:<id>' läuft aber direkt
+    // hier herein und umging den Cooldown bislang vollständig — frisch per Trailing
+    // Stop / TVL-Schutz / Score-Limit befreites Kapital konnte sofort zurück in
+    // denselben Pool fließen. Der konfigurierte Cooldown ist bewusst eine harte
+    // Sperre und keine Empfehlung.
+    // quiet: die vollständige Cooldown-Liste hat der Ranking-Pfad ggf. schon geloggt.
+    const cooldown = _loadCleanupCooldownBlockedPools(db, { quiet: true }).get(targetPoolId);
+    if (cooldown) {
+        const remainingMin = Math.ceil((cooldown.until - Date.now()) / 60_000);
+        console.log(`[cleanup:invest] ${targetPool.pair}: ${cooldown.reason}-Cooldown aktiv (noch ${remainingMin} Min) – kein Invest.`);
+        return;
+    }
+
+    // Range-Guard VOR den Swaps. Die Deposit-Pfade in lib/deposit-lib.js prüfen state.inRange
+    // selbst, aber erst am Anfang der Einzahlung — also nachdem _invest*() das USDC bereits in
+    // beide Pool-Tokens getauscht hat. Der Cleanup kaufte dann Tokens, konnte sie nicht
+    // einzahlen, und die Dust-Phase tauschte sie direkt wieder zurück: ein Hin-und-Rück-Tausch,
+    // der zweimal Spread plus TX-Gebühren kostet und nie etwas bringen kann.
+    // Belegt am 2026-08-13 auf forge-pub1 (SOL/PUMP, 18:05): 14,60 USDC → 5.038 PUMP →
+    // "out-of-range – skip" → 5.040 PUMP → 14,61 USDC.
+    // Eine out-of-range-Position rebalanciert der Bot ohnehin binnen Minuten selbst; der nächste
+    // stündliche Cleanup findet sie dann in Range vor. Warten kostet nichts.
+    const openPosForRange = getOpenPosition(db, targetPoolId);
+    if (openPosForRange) {
+        try {
+            const rangeState = await getAdapter(targetPool).getPositionState(targetPool, openPosForRange.nft_mint);
+            if (!rangeState.inRange) {
+                console.log(`[cleanup:invest] ${targetPool.pair}: Position out-of-range – kein Invest (Swaps übersprungen, nächster Lauf versucht es erneut).`);
+                return;
+            }
+        } catch (err) {
+            // Ohne verlässlichen State würde die Einzahlung unten ohnehin abbrechen — dann aber
+            // erst nach den Swaps. Hier abbrechen ist die günstigere Variante.
+            console.warn(`[cleanup:invest] ${targetPool.pair}: Position-State nicht abrufbar (${err.message}) – kein Invest.`);
+            return;
+        }
+    }
+
     const wasInactive = !targetPool.active;
     console.log(`[cleanup:invest] ${t('cli.cl.target_pool', { pool: targetPool.pair })}${wasInactive ? ` (${t('cli.cl.inactive_reactivate')})` : ''}${skipCap ? ` (${t('cli.cl.no_cap')})` : ''}`);
 
@@ -570,8 +588,13 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                 setPoolActive(targetPoolId, true);
                 console.log(`[cleanup:invest] ${t('cli.liq.pool_activated', { pool: targetPool.pair })}`);
                 ensureScoreLimitEnabled(targetPoolId);
-                const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
-                ensureTvlProtectionDefaults(targetPoolId, t, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
+                // NICHT `t` nennen — das würde die importierte i18n-Funktion t() im selben Block
+                // beschatten und den console.log oben in einen TDZ-Fehler laufen lassen
+                // ("Cannot access 't' before initialization"). Genau das ist am 2026-08-13 bei
+                // SOL/ZEC passiert: der catch unten meldete irreführend "setPoolActive
+                // fehlgeschlagen", übersprungen wurden in Wahrheit die drei Zeilen hier drunter.
+                const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
+                ensureTvlProtectionDefaults(targetPoolId, tvlNow, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
                 ensureTrailingStopMinimumReset(targetPoolId);
             } else {
                 // Keine offene Position, aber USDC im Wallet → Pool aktivieren damit Bot öffnet.
@@ -597,8 +620,9 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                     setPoolActive(targetPoolId, true);
                     console.log(`[cleanup:invest] ${t('cli.cl.reactivated_ready', { pool: targetPool.pair, usdc: walletUsdc.toFixed(2) })}`);
                     ensureScoreLimitEnabled(targetPoolId);
-                    const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
-                    ensureTvlProtectionDefaults(targetPoolId, t, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
+                    // Nicht `t` nennen — siehe Kommentar im if-Zweig oben (i18n-Shadowing).
+                    const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(targetPoolId)?.tvl_usd ?? 0;
+                    ensureTvlProtectionDefaults(targetPoolId, tvlNow, { warn: targetPool.tvlWarnThreshold, exit: targetPool.tvlExitThreshold });
                     ensureTrailingStopMinimumReset(targetPoolId);
                 } else {
                     const floorNote = CLEANUP_MIN_DEPOSIT > 0 ? `, Min-Floor ${CLEANUP_MIN_DEPOSIT}` : '';
@@ -606,7 +630,10 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                 }
             }
         } catch (err) {
-            console.error(`[cleanup:invest] setPoolActive fehlgeschlagen: ${err.message}`);
+            // Der Block umfasst Reaktivierung UND das Nachziehen der Risk-Management-Defaults.
+            // Die Meldung darf deshalb nicht auf setPoolActive zeigen — sie hat am 2026-08-13
+            // die eigentliche Ursache (i18n-Shadowing) über Stunden verdeckt.
+            console.error(`[cleanup:invest] Reaktivierung/Risk-Defaults für ${targetPoolId} fehlgeschlagen: ${err.message}`);
         }
     }
 }
@@ -692,14 +719,6 @@ async function runCleanupByRanking(db, keypair, connection) {
     console.log(`[cleanup:ranking] Opportunity Score ${best.score} >= ${CLEANUP_MIN_SCORE} ✓ – starte Invest.`);
 
     await runCleanupInvestPool(best.id, db, keypair, connection);
-
-    // Nach Reaktivierung: Ranking-Exit automatisch aktivieren
-    if (wasInactive && getOpenPosition(db, best.id)) {
-        _enableRankingExitForPool(best.id);
-        await notify.info?.('cleanup:ranking',
-            `Pool ${targetPool?.pair ?? best.id} reaktiviert (war inaktiv) – Ranking-Exit automatisch aktiviert`
-        );
-    }
 }
 
 /**
@@ -1152,7 +1171,27 @@ const SOL_TOPUP_TRIGGER = INVEST_SOL_COMFORT;
 
 // Lock sicherstellen: auch bei SIGTERM und ungefangenen Exceptions
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { releaseLock(); process.exit(0); });
-process.on('uncaughtException', (err) => { releaseLock(); console.error('[cleanup] uncaughtException:', err.message); process.exit(1); });
+// Ein ungefangener Fehler kann den Lauf MITTEN in einer Kapitalbewegung beenden —
+// die Transaktion ist dann on-chain, die Buchung fehlt (Vorfall 2026-08-15, 131,65 USDC
+// Phantomgewinn). Das darf nicht stumm passieren. Der Abgleich beim nächsten Lauf
+// (lib/capital-reconcile.js) repariert die Buchung; diese Meldung sagt, dass es nötig war.
+// Der Exit-Code MUSS 1 bleiben — der Cron-Wrapper wertet ihn aus. Deshalb sofort
+// process.exitCode setzen und erst danach die Meldung rausschicken: der offene
+// fetch hält den Event-Loop am Leben, bis er durch ist, der Timer ist nur die
+// Notbremse, falls Nexus hängt.
+process.on('uncaughtException', (err) => {
+    releaseLock();
+    console.error('[cleanup] uncaughtException:', err.message);
+    process.exitCode = 1;
+    const done = () => process.exit(1);
+    notify.errorRaw(
+        'Cleanup abgebrochen',
+        `Der Cleanup-Lauf ist unerwartet gestorben: ${err.message}\n` +
+        `Falls dabei gerade Kapital bewegt wurde, trägt der Abgleich beim nächsten Lauf die ` +
+        `fehlende Buchung nach und meldet das gesondert.`,
+    ).then(done, done);
+    setTimeout(done, 5000).unref();
+});
 
 // SL-Flow hat Vorrang: wenn Stop-Loss gerade ausgeführt wird, diesen Lauf überspringen
 if (isSlLocked()) {
@@ -1179,6 +1218,25 @@ acquireLock();
 
 try {
     console.log('[cleanup] Start:', new Date().toISOString());
+
+    // Kapitalflüsse gegen die Chain abgleichen, BEVOR irgendetwas entschieden oder
+    // bewegt wird: eine nicht gebuchte Einzahlung verfälscht capital_usdc und damit
+    // die Kapital-Guards, die weiter unten über Investitionen entscheiden.
+    // Ein Fehler hier darf den Cleanup nicht aufhalten — der Abgleich ist eine
+    // Korrektur, kein Tor.
+    try {
+        const res = await reconcileCapitalFlows(db, {
+            poolsById:  new Map(config.pools.all.map(p => [p.id, p])),
+            connection,
+            log:        msg => console.log(msg),
+        });
+        if (res.booked.length === 0 && res.flagged.length === 0) {
+            console.log(`[reconcile] ${res.checked} Position(en) geprüft – keine Lücke.`);
+        }
+    } catch (err) {
+        console.warn(`[reconcile] Abgleich übersprungen – ${err.message}`);
+    }
+
     const solBalance = await getSolBalance(keypair.publicKey);
     if (solBalance < SOL_MIN_FLOOR) {
         console.log(`[cleanup] SOL-Balance (${solBalance.toFixed(4)}) unter absolutem Minimum (${SOL_MIN_FLOOR} SOL) – Cleanup abgebrochen.`);

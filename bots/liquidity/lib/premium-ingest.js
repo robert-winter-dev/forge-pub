@@ -8,8 +8,8 @@
  *
  * Bisher nur `marketTable` (Klasse-A/B-Ingest folgt additiv, sobald der Master sie
  * publiziert). Schreibt in `pool_score_history` (idempotent) + aktualisiert die mtime von
- * `data/pool-scores.json`, die `lib/ranking-exit.js` als reines Frische-Gate liest (siehe
- * [[master-architektur]] Befund 1 — der Dateiinhalt selbst wird von ranking-exit.js NICHT
+ * `data/pool-scores.json`, deren mtime früher der Ranking-Exit als reines Frische-Gate las
+ * (Feature 2026-08-15 ausgebaut; siehe [[master-architektur]] Befund 1 — der Dateiinhalt selbst wurde dabei NICHT
  * gelesen, nur `statSync(...).mtimeMs`).
  *
  * Versionierungs-Reihenfolge exakt wie in [[blob-schema]] festgelegt: schemaVersion →
@@ -44,6 +44,18 @@ function ensureIngestStateTable(db) {
         );
         INSERT OR IGNORE INTO premium_ingest_state (id, last_sequence) VALUES (1, 0);
     `);
+    // last_covered_hour_id (2026-08-13, Systemdaten-Freigabe): die Abrechnungsstunde,
+    // für die zuletzt tatsächlich Daten vorlagen — abgeleitet aus `generatedAt` des
+    // Blobs, das der Master exakt zusammen mit seiner hourId setzt
+    // (core/premium/publish-blob.js). Bewusst NICHT `last_ingested_at` (Empfangszeit):
+    // bei einer verzögerten Zustellung würde die Deckung sonst eine Stunde zu weit
+    // reichen. Bis hierher ließ sich die Deckung nur aus `premium_pay_log` ableiten —
+    // einer Tabelle, die ausschließlich beim Bezahlen gefüllt wird und bei einem
+    // Teilnehmer der Systemdaten-Freigabe deshalb für immer leer bleibt.
+    const cols = db.prepare(`PRAGMA table_info(premium_ingest_state)`).all().map(c => c.name);
+    if (!cols.includes('last_covered_hour_id')) {
+        db.exec(`ALTER TABLE premium_ingest_state ADD COLUMN last_covered_hour_id INTEGER`);
+    }
 }
 
 /**
@@ -56,9 +68,21 @@ export function getLastSequence(db) {
     return db.prepare(`SELECT last_sequence FROM premium_ingest_state WHERE id = 1`).get().last_sequence;
 }
 
-function setLastSequence(db, sequence) {
-    db.prepare(`UPDATE premium_ingest_state SET last_sequence = ?, last_ingested_at = ? WHERE id = 1`)
-        .run(sequence, Date.now());
+function setLastSequence(db, sequence, coveredHourId = null) {
+    const current = db.prepare(`SELECT last_covered_hour_id AS h FROM premium_ingest_state WHERE id = 1`).get()?.h ?? null;
+    // Bewusst in JS statt als SQL-MAX über COALESCE(...,-1): der Sentinel -1 würde bei
+    // fehlender Stunde eine Deckung BEHAUPTEN, wo keine ist (-1 ist nicht NULL, und
+    // (-1+1)*3600000 = 0 ergäbe „gedeckt bis 1970"). Zwei Regeln, beide fail-safe:
+    // eine später eintreffende ältere Lieferung nimmt eine erreichte Deckung nie
+    // zurück, und eine Lieferung ohne lesbare Stunde lässt den Stand unverändert.
+    const covered = coveredHourId == null ? current
+                  : current == null      ? coveredHourId
+                  : Math.max(current, coveredHourId);
+    db.prepare(`
+        UPDATE premium_ingest_state
+           SET last_sequence = ?, last_ingested_at = ?, last_covered_hour_id = ?
+         WHERE id = 1
+    `).run(sequence, Date.now(), covered);
 }
 
 /**
@@ -160,10 +184,10 @@ export function ingestBlob(db, data, {
             rows++;
         }
 
-        // Klasse B (scoreHistory) — laufender Ranking-Exit-Punkt, additiv/optional wie
+        // Klasse B (scoreHistory) — laufender Score-Punkt, additiv/optional wie
         // scores. Eigener recorded_at pro Zeile (data.scoreHistory[].t), unabhängig vom
         // marketTable-Zeitstempel — beide speisen dieselbe Tabelle mit unterschiedlicher
-        // Taktung, das ist beabsichtigt (dichtere Stichprobe für getBadStreakMs()).
+        // Taktung, das ist beabsichtigt (dichtere Stichprobe der Score-Historie).
         for (const h of data.scoreHistory ?? []) {
             const hRecordedAt = h.t;
             const existing = db.prepare(
@@ -183,7 +207,11 @@ export function ingestBlob(db, data, {
             scoreHistoryRows++;
         }
 
-        setLastSequence(db, data.sequence);
+        // recordedAt ist Date.parse(data.generatedAt) — derselbe Moment, aus dem der
+        // Master seine hourId bildet. Ist generatedAt unlesbar, bleibt die Deckung
+        // unverändert (null → MAX() greift nicht), statt eine falsche zu behaupten.
+        setLastSequence(db, data.sequence,
+            Number.isFinite(recordedAt) ? Math.floor(recordedAt / 3_600_000) : null);
     });
     txn();
 

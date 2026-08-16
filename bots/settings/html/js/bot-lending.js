@@ -11,6 +11,22 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+
+// 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
+// Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
+// Zeilenumbrüche mehrzeiliger Meldungen (z.B. die Liste der Verwendungsstellen).
+function infoModal(message) {
+    const id = 'ab-info';
+    showModal({
+        id,
+        title: tr('common.note', 'Hinweis'),
+        body: `<p style="margin:0;font-size:.88rem;line-height:1.55;white-space:pre-line">${
+            String(message ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        }</p>`,
+        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal(id) }],
+    });
+}
+
 // `t` ist in diesem Modul mehrfach ein lokaler Variablenname (Token/Element) —
 // der Helfer wird deshalb als `tr` importiert (bin/i18n-check.js kennt beide).
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
@@ -1287,9 +1303,24 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
         });
 
         panel.querySelectorAll('.ab-del').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                if (!confirm(tr('sb.delete_address_q', 'Adresse wirklich löschen?'))) return;
+            btn.addEventListener('click', () => {
                 const delId = Number(btn.dataset.id);
+                // confirm() hielt den Code an, showModal() tut das nicht – der Rumpf
+                // liegt deshalb in einer eigenen Funktion, die erst der Klick auslöst.
+                const cid = 'ab-del-confirm';
+                showModal({
+                    id: cid,
+                    title: tr('sb.delete_address_q', 'Adresse wirklich löschen?'),
+                    body: `<p style="margin:0;font-size:.88rem;line-height:1.55">${tr('sb.delete_address_note', 'Der Eintrag wird aus dem Adressbuch entfernt. Bereits gesendete Transaktionen bleiben davon unberührt.')}</p>`,
+                    actions: [
+                        { label: tr('common.delete', 'Löschen'), onClick: () => { closeModal(cid); doDeleteAddress(delId); } },
+                        { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal(cid) },
+                    ],
+                });
+            });
+        });
+
+        async function doDeleteAddress(delId) {
 
                 const delRes = await fetch(`/api/addresses/${delId}`, { method: 'DELETE' });
                 if (!delRes.ok) {
@@ -1298,9 +1329,9 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                         const where = err.usages.map(u =>
                             `• ${u.botId} / ${u.poolId}: ${u.fields.join(', ')}`
                         ).join('\n');
-                        alert(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
+                        infoModal(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
                     } else {
-                        alert(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
+                        infoModal(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
                     }
                     return;
                 }
@@ -1312,8 +1343,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                 const r  = await fetch('/api/addresses');
                 currentAddrs = await r.json();
                 showList();
-            });
-        });
+        }
     }
 
     // ── Senden-Button (Aktionsleiste, neu verdrahtet bei jedem showSend()) ───
@@ -1369,12 +1399,14 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                               + `<a href="${explorerUrl}" target="_blank" rel="noopener" class="tx-link">${tr('sb.view_tx', 'TX&nbsp;ansehen&nbsp;↗')}</a>`;
                 fb.className  = 'modal-feedback ok';
                 if (amountInp) amountInp.value = '';
-                // Nach 3 Sekunden refreshen – Zeit für on-chain settle
+                // Server aktualisiert wallet-monitor.db im Hintergrund automatisch
+                // (TX-Confirm + Propagierungspuffer + Monitor-Lauf, siehe
+                // scheduleWalletRefreshAfterSend in bots/settings/routes/wallet.js) —
+                // 15s geben dem genug Zeit, bevor die Wallet-Karte neu geladen wird.
                 setTimeout(() => {
-                    backdrop.querySelector('#wm-refresh')?.click();
                     const walletEl = _container?.querySelector('.liquiditybot-grid-wallet');
                     if (walletEl) _renderWallet(walletEl);
-                }, 3000);
+                }, 15000);
             } catch (err) {
                 fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message });
                 fb.className   = 'modal-feedback error';

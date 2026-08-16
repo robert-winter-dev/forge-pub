@@ -8,7 +8,7 @@
  *   - Aus process.env.PROFILE (Werte: 'medium' | 'short')
  *   - Default: 'medium' (entspricht dem Vor-Phase-2-Verhalten)
  *
- * Konsumenten (cleanup.js, ranking-exit.js, pool-explorer.js) lesen
+ * Konsumenten (cleanup.js, pool-explorer.js) lesen
  * das aktive Profil über getActiveProfile() bzw. nutzen getScorerConfig().
  *
  * Hot-Reload:
@@ -120,7 +120,7 @@ const SHORT_CONFIG = {
         // Withdraw-Schwellen: shortTermNet ist durch ×2190-Annualisierung
         // stark skaliert; ein „mäßig schlechter" Pool kann leicht bei -50 %
         // APR liegen ohne aktiv ausgestiegen werden zu müssen. Nur Pools mit
-        // klar negativer Bilanz (-500 %) sollen ranking-exit auslösen.
+        // klar negativer Bilanz (-500 %) sollen im Tier "withdraw" landen.
         // Mittelfrist-typisch im Vergleich: dort ist -20 % bereits klares Exit-Signal.
         withdrawIfTotalReturnBelowActive:    -500,
         withdrawIfTotalReturnBelowInactive:  -200,
@@ -184,7 +184,7 @@ const VALID_PROFILES = ['6h', '12h', '24h', '7d'];
 
 // Hot-Reload: PROFILE wird direkt aus .env gelesen statt aus process.env, damit
 // ein Profil-Wechsel via ForgeSettings ohne Bot-Restart wirksam wird.
-// TTL-Cache (5 s) verhindert dass shouldTriggerRankingExit() bei N Pools pro
+// TTL-Cache (5 s) verhindert dass die Tier-Bewertung bei N Pools pro
 // Bot-Zyklus N Filesystem-Reads auslöst — bei 5-Min-Bot-Loop wird die Datei
 // in der Praxis einmal pro Loop gelesen.
 const _ENV_PATH        = resolve(dirname(fileURLToPath(import.meta.url)), '../../.env');
@@ -226,8 +226,8 @@ function _readProfileFromEnv() {
  * Fallback-Kette:
  *   .env-Datei nicht lesbar → process.env.PROFILE → 'medium'
  *
- * Ein Profil-Wechsel mid-flight beeinflusst keine bereits laufenden
- * rk_executions (die nutzen ihren config_snapshot zur Wiederaufnahme).
+ * Ein Profil-Wechsel mid-flight beeinflusst keine bereits laufenden Exit-Ausführungen
+ * (die nutzen ihren config_snapshot zur Wiederaufnahme).
  *
  * Rückgabewert seit 2026-05-21: '6h' | '12h' | '24h' | '7d'
  * (Legacy-Werte 'medium'/'short' werden in _readProfileFromEnv migriert.)

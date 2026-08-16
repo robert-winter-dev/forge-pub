@@ -44,6 +44,7 @@ import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingSto
 import {
     openDatabase, syncPools, getOpenPosition,
     insertPosition, insertTransaction, updatePositionCapital, updatePositionHodl, insertCapitalFlow,
+    rebaseHwmForCapitalFlow,
     insertPositionSnapshot, insertPoolStats, clearPositionSnapshots,
 } from '../lib/db.js';
 // Performance-Segments seit v0.3.47 nicht mehr geschrieben — Baseline = netDeposited.
@@ -1010,6 +1011,11 @@ if (position) {
         successExit();
     }
 
+    // Trailing-Stop-Referenz: gemessenen Positionswert VOR dem Kapitalfluss sichern.
+    const lpValueBeforeDeposit = db.prepare(
+        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
+    ).get(pool.id)?.lp_value_usd ?? 0;
+
     let result;
     try {
         result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
@@ -1072,6 +1078,10 @@ if (position) {
     updatePositionCapital(db, position.id, newCapital);
     updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
 
+    // Trailing-Stop-Referenz nachziehen. Muss VOR dem Sofort-Snapshot unten passieren —
+    // danach steht in position_snapshots der bereits erhöhte (geschätzte) Wert.
+    const hwmRebase = rebaseHwmForCapitalFlow(db, position.id, lpValueBeforeDeposit);
+
     // Sofort-Snapshot: Dashboard zeigt neuen LP-Wert sofort, ohne auf den nächsten Bot-Tick zu warten.
     // Strategie: letzten Snapshot als Basis + deponierte Token-Delta addieren.
     // Fees werden aus prev übernommen — `increaseLiquidity` setzt on-chain `feesOwed` nicht zurück,
@@ -1122,13 +1132,12 @@ if (position) {
         note:     'Manueller Deposit (increaseLiquidity)',
     });
 
-    // HWM zurücksetzen: Kapital hat sich verändert, neuer Referenzwert wird im nächsten Snapshot etabliert
-    db.prepare('UPDATE positions SET hwm_usd = NULL, hwm_at = NULL, hwm_base_adjustment = NULL WHERE pool_id = ? AND closed_at IS NULL').run(pool.id);
-
     console.log(`[deposit] ✓ ${t('cli.ld.success')}`);
     console.log(`[deposit] TX:       ${result.txHash}`);
     console.log(`[deposit] ${t('cli.liq.head_capital_change', { old: oldCapital.toFixed(2), new: newCapital.toFixed(2) })}`);
-    console.log(`[deposit] ${t('cli.liq.hwm_reset')}`);
+    if (hwmRebase.applied) {
+        console.log(`[deposit] ${t('cli.liq.hwm_rebased', { pct: hwmRebase.drawdownPct.toFixed(2) })}`);
+    }
 
     // Auto-Activate: Pool als aktiv markieren (DB ist Single Source of Truth)
     if (setPoolActive(pool.id, true)) {
@@ -1136,8 +1145,8 @@ if (position) {
     }
     ensureScoreLimitEnabled(pool.id);
     {
-        const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
-        ensureTvlProtectionDefaults(pool.id, t, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
+        const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
+        ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
     }
     ensureTrailingStopMinimumReset(pool.id);
 
@@ -1345,8 +1354,8 @@ if (setPoolActive(pool.id, true)) {
 }
 ensureScoreLimitEnabled(pool.id);
 {
-    const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
-    ensureTvlProtectionDefaults(pool.id, t, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
+    const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
+    ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
 }
 ensureTrailingStopMinimumReset(pool.id);
 

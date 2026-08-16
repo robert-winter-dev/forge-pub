@@ -46,14 +46,30 @@
 // FORGE_PUB_BASE_DIR (Env-Override): Basisverzeichnis statt /opt/forge — nur für
 // lokale Tests außerhalb einer echten Installation, niemals in Produktion setzen.
 //
-// FORGE_PUB_UPDATE_TOKEN (Env-Override): GitHub-Token, das an die Releases-API
-// und an Asset-Downloads angehängt wird — NUR damit dieser Pfad auch gegen ein
-// privates forge-pub-Repo testbar ist (Fund 2026-08-05: das Repo kurz auf
-// "public" zu schalten war die Alternative, ist aber echte, sofort auffindbare
-// Öffentlichkeit — keine "geheime URL", GitHub kennt kein Unlisted). Echte
-// Kunden setzen diese Variable nie (das öffentliche stable-Repo braucht keine
-// Auth) — bewusst kein Bestandteil von local/, keine Doku dafür in
-// GETTING-STARTED.txt, kein Setup-Schritt legt sie an.
+// FORGE_PUB_UPDATE_TOKEN (Env-Override) / local/update-token.txt: GitHub-Token,
+// das an die Releases-API und an Asset-Downloads angehängt wird. Zwei Zwecke:
+//   (a) NUR damit dieser Pfad auch gegen ein privates forge-pub-Repo testbar ist
+//       (Fund 2026-08-05: das Repo kurz auf "public" zu schalten war die
+//       Alternative, ist aber echte, sofort auffindbare Öffentlichkeit — keine
+//       "geheime URL", GitHub kennt kein Unlisted).
+//   (b) seit 2026-08-12: hebt das GitHub-Rate-Limit für den Abruf der
+//       Release-Liste von 60/h (unauthentifiziert, PRO QUELL-IP) auf 5000/h an
+//       — nötig für forge-pub1/forge-pub2, die sich dieselbe öffentliche IP
+//       teilen und dadurch ihr Budget gemeinsam verbrauchen (real passiert:
+//       ein paar manuelle Checks + Diagnose haben das 60er-Limit an einem
+//       Nachmittag geleert, `update-check.js` scheiterte reihum mit rohem
+//       "fetch failed"). Datei bevorzugt gegenüber der Env-Var, weil sudoers
+//       Umgebungsvariablen beim `sudo -n`-Aufruf aus bot-control-daemon.js
+//       ohnehin zurücksetzt (env_reset) — ein Datei-Read übersteht das ohne
+//       sudoers-Änderung.
+// 🔒 Echte Kunden setzen weder die Variable noch legen sie diese Datei an (das
+// öffentliche stable-Repo braucht dafür keine Auth) — bewusst kein Bestandteil
+// des Artefakts/`local/`-Defaults, keine Doku dafür in GETTING-STARTED.txt,
+// kein Setup-Schritt legt sie an. Ein globaler, im Fork mitgeshippter Token
+// wäre KEINE Verbesserung für Kunden: alle Installationen würden sich dann ein
+// einziges, geteiltes 5000/h-Kontingent teilen — bei wachsender Nutzerzahl
+// schneller erschöpft als das heutige Pro-IP-Modell. Diese Datei ist deshalb
+// bewusst NUR für unsere beiden Test-VMs gedacht, nie für die Verteilung.
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -150,6 +166,8 @@ const ACTION = {
     checkInstall: 'notify.upd.act_check_install',
     /** Kanal liefert Älteres — einmalig harmlos, wiederholt verdächtig. */
     watchChannel: 'notify.upd.act_watch_channel',
+    /** Update-Quelle wiederholt nicht erreichbar — meist Netzwerk/Rate-Limit. */
+    fetchRetry: 'notify.upd.act_fetch_retry',
 };
 
 /**
@@ -213,6 +231,78 @@ function readPolicy() {
     const policyPath = path.join(LOCAL_DIR, 'update-policy.json');
     if (!existsSync(policyPath)) return { autoApplyPatch: false };
     try { return JSON.parse(readFileSync(policyPath, 'utf8')); } catch { return { autoApplyPatch: false }; }
+}
+
+// Siehe FORGE_PUB_UPDATE_TOKEN im Kopfkommentar — Env-Var hat Vorrang (für
+// lokale/manuelle Testläufe), local/update-token.txt ist der Weg, der auch den
+// per sudo -n env-zurückgesetzten Cron-/Daemon-Aufruf erreicht.
+function readUpdateToken() {
+    if (process.env.FORGE_PUB_UPDATE_TOKEN) return process.env.FORGE_PUB_UPDATE_TOKEN;
+    const tokenPath = path.join(LOCAL_DIR, 'update-token.txt');
+    if (!existsSync(tokenPath)) return undefined;
+    const value = readFileSync(tokenPath, 'utf8').trim();
+    return value || undefined;
+}
+
+// ── Release-Listen-Cache (Rate-Limit-Schutz) ─────────────────────────────────
+// Der GET /releases-Aufruf in fetchRelease() ist der EINZIGE Schritt, der
+// unauthentifiziert gegen das GitHub-Limit (60/h pro Quell-IP) zählt — Asset-
+// Downloads laufen über browser_download_url auf einem anderen Host und sind
+// davon unabhängig (siehe download() unten). Ein kurzer TTL-Cache hier senkt
+// genau die Last, die ein "check" gefolgt von einem "apply" wenige Sekunden
+// später erzeugt (der Normalfall im Web-UI: Nutzer klickt Prüfen, sieht ein
+// Update, klickt Einspielen) sowie mehrfaches manuelles Klicken auf "Prüfen" —
+// beides real am 2026-08-12 beobachtet, als ein erfolgreicher Check-Lauf und
+// der Apply-Lauf zwölf Sekunden später denselben, gerade erst verbrauchten
+// Request-Slot ein zweites Mal brauchten. Der tägliche Cron ist von der TTL
+// nicht betroffen (Zeitabstand deutlich größer).
+const RELEASE_LIST_CACHE_PATH = path.join(LOCAL_DIR, 'data', 'release-list-cache.json');
+const RELEASE_LIST_CACHE_TTL_MS = 10 * 60 * 1000;
+
+function readReleaseListCache(repo, channel) {
+    try {
+        if (!existsSync(RELEASE_LIST_CACHE_PATH)) return null;
+        const cached = JSON.parse(readFileSync(RELEASE_LIST_CACHE_PATH, 'utf8'));
+        if (cached.repo !== repo || cached.channel !== channel) return null;
+        const age = Date.now() - cached.fetchedAt;
+        if (age > RELEASE_LIST_CACHE_TTL_MS) return null;
+        return { releases: cached.releases, ageSeconds: Math.round(age / 1000) };
+    } catch { return null; }
+}
+
+function writeReleaseListCache(repo, channel, releases) {
+    try {
+        mkdirSync(path.dirname(RELEASE_LIST_CACHE_PATH), { recursive: true });
+        writeFileSync(RELEASE_LIST_CACHE_PATH, JSON.stringify({ repo, channel, fetchedAt: Date.now(), releases }, null, 2) + '\n');
+    } catch { /* Cache ist nur Optimierung, kein Blocker */ }
+}
+
+// ── Fehlschlag-Zähler für fetchRelease() (T4 Freeze/Eclipse) ────────────────
+// Ein einzelner Fehlschlag ist erwartbar (Netzwerk-Ausrutscher, kurzzeitig
+// ausgeschöpftes GitHub-Limit) und bleibt bewusst stumm — sonst würde jede
+// kleine Netzwerkstörung eine Meldung auslösen. Erst ab
+// FETCH_FAILURE_NOTIFY_THRESHOLD aufeinanderfolgenden Fehlschlägen (z.B. drei
+// Cron-Tage in Folge ohne jeden Kontakt zur Update-Quelle) meldet sich das
+// System einmalig — vorher war dieser Pfad komplett unsichtbar (siehe
+// Kopfkommentar "T4 (Freeze/Eclipse) ... noch offen").
+const FETCH_FAILURE_PATH = path.join(LOCAL_DIR, 'data', 'update-fetch-failures.json');
+const FETCH_FAILURE_NOTIFY_THRESHOLD = 3;
+
+function recordFetchFailure() {
+    let count = 0;
+    try {
+        if (existsSync(FETCH_FAILURE_PATH)) count = JSON.parse(readFileSync(FETCH_FAILURE_PATH, 'utf8')).count || 0;
+    } catch { /* Zähler beginnt neu, kein Blocker */ }
+    count += 1;
+    try {
+        mkdirSync(path.dirname(FETCH_FAILURE_PATH), { recursive: true });
+        writeFileSync(FETCH_FAILURE_PATH, JSON.stringify({ count, lastFailedAt: Date.now() }, null, 2) + '\n');
+    } catch { /* Zähler ist nur Grundlage für die Alarmschwelle, kein Blocker */ }
+    return count;
+}
+
+function clearFetchFailures() {
+    try { rmSync(FETCH_FAILURE_PATH, { force: true }); } catch { /* nichts zu tun */ }
 }
 
 // Merkt sich instanzweit "es liegt ein geprüftes, noch nicht eingespieltes Update
@@ -316,16 +406,24 @@ async function fetchRelease({ repo, channel, sourceDir }) {
         // Kein echtes GitHub-Release im Testmodus — kein Changelog-Link verfügbar.
         return { manifestBuf, sigBuf, releaseUrl: null, fetchTarball: async (name) => readFileSync(path.join(sourceDir, name)) };
     }
-    // Siehe FORGE_PUB_UPDATE_TOKEN im Kopfkommentar — nur für Tests gegen ein
-    // privates Repo gesetzt, bei echten Kunden immer undefined.
-    const token = process.env.FORGE_PUB_UPDATE_TOKEN;
+    // Siehe FORGE_PUB_UPDATE_TOKEN/readUpdateToken() im Kopfkommentar — bei
+    // echten Kunden immer undefined.
+    const token = readUpdateToken();
     const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
 
-    const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'forge-pub-update-check', ...authHeaders },
-    });
-    if (!res.ok) throw new Error(`GitHub-Releases-API: HTTP ${res.status}`);
-    const releases = await res.json();
+    let releases;
+    const cached = readReleaseListCache(repo, channel);
+    if (cached) {
+        log(t('cli.upd.release_list_cached', { age: cached.ageSeconds }));
+        releases = cached.releases;
+    } else {
+        const res = await fetch(`https://api.github.com/repos/${repo}/releases`, {
+            headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'forge-pub-update-check', ...authHeaders },
+        });
+        if (!res.ok) throw new Error(`GitHub-Releases-API: HTTP ${res.status}`);
+        releases = await res.json();
+        writeReleaseListCache(repo, channel, releases);
+    }
     const wantPrerelease = channel === 'staging';
     const candidate = releases.find((r) => Boolean(r.prerelease) === wantPrerelease);
     if (!candidate) throw new Error(`Kein Release für Channel '${channel}' gefunden.`);
@@ -376,11 +474,19 @@ async function main() {
     try {
         release = await fetchRelease({ repo, channel, sourceDir });
     } catch (err) {
-        // T4 (Freeze/Eclipse): kein Abbruch mit Fehlercode, nur kein Fortschritt.
-        // Eine echte Freeze-Erkennung (Alarm nach zu langer Stille) ist noch offen.
+        // T4 (Freeze/Eclipse): kein Abbruch mit Fehlercode, nur kein Fortschritt
+        // beim einzelnen Fehlschlag. Ab FETCH_FAILURE_NOTIFY_THRESHOLD
+        // aufeinanderfolgenden Fehlschlägen meldet sich das System einmalig
+        // (siehe recordFetchFailure() oben) — vorher schweigt es bewusst.
         log(t('cli.upd.no_release', { error: err.message }));
+        const failCount = recordFetchFailure();
+        if (failCount === FETCH_FAILURE_NOTIFY_THRESHOLD) {
+            await notify('warn', CAT.available, 'notify.upd.fetch_failed_repeated',
+                { attempts: failCount, error: err.message }, ACTION.fetchRetry);
+        }
         return;
     }
+    clearFetchFailures();
 
     if (!existsSync(TRUST_ANCHOR_PATH)) {
         log(`🔴 ${t('cli.upd.no_trust_anchor', { path: TRUST_ANCHOR_PATH })}`);

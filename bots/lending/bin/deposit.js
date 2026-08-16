@@ -26,6 +26,7 @@ import { loadKeypair, signAndSend, assertSufficientSol, getSolBalance, fetchFeeS
 import { getDb, openPosition, addToPosition, getActivePositions,
          recordTransaction, recordProtocolStat,
          upsertWalletSnapshot, getWalletSnapshot } from '../lib/db.js';
+import { refreshWalletAfterAction } from '../lib/wallet-refresh.js';
 
 // ─── Argument-Parsing ─────────────────────────────────────────────────────────
 
@@ -256,6 +257,11 @@ async function main() {
         // DB-Fehler nicht fatal – TX ist bereits bestätigt
         jlog(`  ⚠ ${t('cli.lend.db_update_failed', { error: err.message })}`);
     }
+
+    // ── Wallet-Ansicht sofort aktualisieren ───────────────────────────────────
+    // Ohne dies bleibt wallet-monitor.db bis zu 10 Min veraltet (nächster Cronlauf).
+    jlog(`  ${t('cli.lend.step_wallet_refresh')}`);
+    await refreshWalletAfterAction({ walletAddress });
 
     // ── Ergebnis ──────────────────────────────────────────────────────────────
     if (jsonMode) {

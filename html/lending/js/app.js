@@ -18,9 +18,9 @@
 import { DataManager }    from './data.js?v=20260421f';
 import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
-import { initMessageBell } from '../../js/message-bell.js?v=20260809a';
+import { initMessageBell } from '../../js/message-bell.js?v=20260816a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260811b';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (15 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -558,10 +558,12 @@ const ALL_KNOWN_PROTOCOLS = [
  * Werden als Tooltip-Icon ⓘ im Card-Header angezeigt.
  */
 const PROTOCOL_NOTES = {
+    'loopscale-onre': tr('len.tvl_low_note', 'TVL zu gering. Es kann zu Schwierigkeiten bei Auszahlungen kommen.'),
     jupiter: 'Rewards werden teilweise in JUP-Token ausgezahlt (~1,15\u202f% APR), nicht in USDC. Der USDC-Anteil beträgt ~2,33\u202f% APY.',
 };
 
 const PROTOCOL_NOTE_TITLES = {
+    'loopscale-onre': tr('len.tvl_low_note_title', 'Hinweis zu geringem TVL'),
     jupiter: tr('len.jupiter_note', 'Hinweis zu Jupiter Lend'),
 };
 

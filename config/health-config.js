@@ -11,6 +11,14 @@
  *   'telegram'    – Telegram Bot API getMe (Token aus Nexus .env)
  *   'nostr_relay' – Verbindungsstatus des dauerhaften forge-premium-Relay-Pools
  *                   (lib/nostr-stats.js, abgefragt über core/premium GET /nostr/stats)
+ *   'host_disk'   – Belegung eines Dateisystems (service.path, Default '/') via statfs
+ *   'host_memory' – verfügbarer Arbeitsspeicher aus /proc/meminfo (MemAvailable),
+ *                   Auslagerungsdatei fließt verschärfend ein
+ *   'host_oom'    – Zähler abgeschossener Prozesse aus /proc/vmstat (oom_kill).
+ *                   Kumulativ seit Systemstart, deshalb Differenz zum letzten Lauf
+ *                   (Tabelle host_state) – Vorkommnisse zwischen zwei Prüfungen
+ *                   gehen so nicht verloren. Alarmiert sofort, nicht erst beim
+ *                   zweiten Fehlschlag in Folge (siehe bin/health-check.js)
  *   'premium_host_status' – Ergebnis des letzten Uploads eines Premium-Blob-Ablage-Hosts
  *                   (svc.hostKey, z.B. 'filebase'), gelesen aus data/premium.db
  *                   (lib/blob-storage.js protokolliert das als Nebenprodukt des ohnehin
@@ -30,20 +38,27 @@ import { execSync }       from 'child_process';
 import { PATHS }          from './paths.js';
 import { identityExists } from '../lib/nostr-client.js';
 
-// Ein Bot wird im Health Monitor NUR angezeigt, wenn sein systemd-Service auch
-// wirklich aktiviert ist ('systemctl enable', so wie bin/install.sh es für
-// tatsächlich installierte Dienste tut) – kein separates Config-Flag nötig,
-// der Zustand kommt direkt vom System. Löst zwei Fälle einheitlich: (1) auf dem
-// FORGE-public-Fork gibt es den Lending-Bot-Dienst heute schlicht noch nicht
-// ('not-found') – ohne diesen Filter würde der Health-Check dort dauerhaft einen
-// Fehler für einen nie existierenden Dienst melden; (2) ein künftiger Fork mit
-// optionalem Lending-Bot zeigt ihn nur, wenn der Betreiber ihn beim Install
-// tatsächlich aktiviert hat. Entscheidung 2026-07-31.
-function isBotEnabled(serviceId) {
+// Ein Bot wird im Health Monitor angezeigt, sobald seine systemd-Unit auf dem System
+// existiert – unabhängig davon, ob sie aktiviert ist. Ausgeblendet wird nur, was es
+// gar nicht gibt: auf dem FORGE-public-Fork ist der Lending-Bot-Dienst heute nicht
+// zwingend installiert ('not-found'), ohne diesen Filter meldete der Health-Check
+// dort dauerhaft einen Fehler für einen nie existierenden Dienst.
+//
+// Bis 2026-08-13 filterte diese Funktion stattdessen auf 'systemctl is-enabled ==
+// enabled' und blendete damit auch bewusst deaktivierte Bots komplett aus. Das war
+// falsch: mit der Karte verschwindet auch die letzte Meldung des Dienstes und seine
+// 7-Tage-Historie — niemand kann dann noch nachsehen, in welchem Zustand er stand,
+// als er abgeschaltet wurde. Ein deaktivierter Dienst bekommt seitdem den eigenen
+// Status 'disabled' ("Deaktiviert", siehe checkSystemd in bin/health-check.js), der
+// weder warnt noch alarmiert, die Karte aber sichtbar lässt.
+function isBotInstalled(serviceId) {
     try {
-        return execSync(`systemctl is-enabled ${serviceId}`, { encoding: 'utf8', timeout: 3000 }).trim() === 'enabled';
-    } catch (e) {
-        return (e.stdout ?? '').trim() === 'enabled';
+        const raw = execSync(`systemctl show ${serviceId} -p LoadState`, { encoding: 'utf8', timeout: 3000 });
+        return raw.trim() !== 'LoadState=not-found';
+    } catch {
+        // Kein Urteil möglich (systemctl fehlt, Timeout): Karte lieber zeigen als
+        // lautlos verschlucken – ein überflüssiger Eintrag fällt auf, ein fehlender nicht.
+        return true;
     }
 }
 
@@ -82,6 +97,63 @@ export const LOCAL_SERVER = {
 export const RETENTION_DAYS = 7;
 
 export const chains = [
+    // ── Grundfunktionen des Servers ────────────────────────────────────────────
+    // Eigene Rubrik "Host", bewusst als erste (Festlegung 2026-08-13): läuft der
+    // Server selbst nicht rund, ist jede Aussage der übrigen Rubriken unzuverlässig —
+    // genau das war der Vorfall unten. Keine Einreihung unter "Intern": das hier
+    // sind Messwerte des Hosts, keine Dienste mit einem Online/Offline-Zustand — sie
+    // haben weder eine URL noch etwas, das man neu starten könnte.
+    //
+    // Anlass ist der Vorfall vom 2026-08-13: ein OOM-Zustand auf `business` (Swap
+    // restlos belegt) ließ den Health-Check selbst so lange hängen, dass Jupiter,
+    // Helius und Telegram gleichzeitig als "nicht erreichbar" gemeldet wurden. Der
+    // Monitor sah den Ausfall, konnte ihn aber niemandem zuordnen, weil er die Lage
+    // des eigenen Servers gar nicht kannte — die Fehlersuche lief tagelang gegen die
+    // falschen Anbieter. Für FORGE.pub kommt der zweite Grund dazu: dort läuft die
+    // Installation auf Hardware des Endnutzers (forge-pub2: 2 GB RAM, 15 GB Platte),
+    // wo Knappheit ein realistischer Normalfall ist und nicht erst auffallen sollte,
+    // wenn bereits etwas kaputt ist.
+    //
+    // Alle drei Prüfungen lesen ausschließlich lokal (/proc, statfs) — keine externen
+    // Requests (rate-limit-neutral), keine zusätzliche Abhängigkeit und keine
+    // erweiterten Rechte. Letzteres ist bewusst so gewählt: der `forge`-Benutzer auf
+    // den Pub-Hosts ist NICHT in der Gruppe 'adm' und darf das Kernel-Journal nicht
+    // lesen (geprüft 2026-08-13 auf pub1 und pub2) — eine journalctl-basierte
+    // OOM-Erkennung hätte dort lautlos immer "kein Befund" geliefert.
+    {
+        id:    'host',
+        label: 'Host',
+        services: [
+            {
+                // Beide Speicher-Karten tragen bewusst dasselbe Präfix (Festlegung 2026-08-13):
+                // für den Nutzer ist das EIN Thema ("reicht mein Arbeitsspeicher?"), nur in
+                // zwei Blickwinkeln — der Zustand jetzt und die Vorkommnisse dazwischen.
+                // "Speicher-Engpässe" allein ließ offen, worum es geht, und stand
+                // unverbunden neben der Karte "Arbeitsspeicher".
+                id:          'host-oom',
+                name:        'RAM / Swap – Engpässe',
+                type:        'host_oom',
+                bots:        ['lend', 'liq'],
+                description: 'Zählt Prozesse, die das Betriebssystem wegen Speichermangels abgeschossen hat (OOM-Killer). Jedes Vorkommnis wird sofort gemeldet – anders als die übrigen Prüfungen ist das kein Momentanwert, sondern ein Nachweis: der Zähler bleibt auch dann korrekt, wenn der Engpass zwischen zwei Prüfungen lag und danach längst vorbei war.',
+            },
+            {
+                id:          'host-memory',
+                name:        'RAM / Swap – Auslastung',
+                type:        'host_memory',
+                bots:        ['lend', 'liq'],
+                description: 'Anteil des Arbeitsspeichers, der noch für neue Aufgaben zur Verfügung steht (MemAvailable – schließt Zwischenspeicher ein, der bei Bedarf sofort freigegeben wird). Die Auslagerungsdatei wird mitbewertet: ist sie fast voll, bremst das den ganzen Server aus, lange bevor Programme abstürzen.',
+            },
+            {
+                id:          'host-disk',
+                name:        'Festplatte',
+                type:        'host_disk',
+                path:        '/',
+                bots:        ['lend', 'liq'],
+                description: 'Belegung des Dateisystems, auf dem FORGE, seine Datenbanken und die Protokolle liegen. Läuft es voll, können die Bots ihre Datenbanken nicht mehr schreiben – ein Zustand, aus dem sie sich nicht selbst befreien können.',
+            },
+        ],
+    },
+
     // ── Interne Dienste ────────────────────────────────────────────────────────
     {
         id:    'intern',
@@ -94,20 +166,43 @@ export const chains = [
                 bots:        ['lend', 'liq'],
                 description: 'Zentraler FORGE-Router. Alle externen API-Anfragen der Bots laufen durch den Nexus – er übernimmt Rate-Limiting, RPC-Caching und leitet Benachrichtigungen weiter.',
             },
-            ...(isBotEnabled('forge-lendingbot') ? [{
+            ...(isBotInstalled('forge-lendingbot') ? [{
                 id:          'forge-lendingbot',
                 name:        'LendingBot',
                 type:        'systemd',
                 bots:        ['lend'],
                 description: 'Bot 2 – verleiht USDC auf mehreren Lending-Protokollen (Kamino, Loopscale) und kassiert täglich Zinsen.',
             }] : []),
-            {
+            // Dieselbe isBotInstalled()-Klammer wie beim LendingBot darüber: eine nicht
+            // installierte Unit ist kein Dienst, über den sich etwas aussagen ließe. Der
+            // deaktivierte Bot dagegen bleibt sichtbar und trägt den Status "Deaktiviert".
+            ...(isBotInstalled('forge-liquiditybot') ? [{
                 id:          'forge-liquiditybot',
                 name:        'Liquidity Bot',
                 type:        'systemd',
                 bots:        ['liq'],
                 description: 'Bot 3 – stellt in konzentrierten Liquiditätspools (Orca Whirlpools) Kapital bereit und vereinnahmt Handelsgebühren aus dem DEX-Handel.',
-            },
+            }] : []),
+            // Ergänzt 2026-08-13 (Systemdaten-Freigabe): Settings-Server und Premium liefen bis
+            // hierhin ohne eigenen Health-Check – ihr Speicherverbrauch wäre für die
+            // Refactoring-Messgrundlage (Pro-Prozess-Speicher aller 5 FORGE-Dienste,
+            // config/bots.json) unsichtbar geblieben. isBotInstalled() wie bei den Bots
+            // darüber, damit ein Fork ohne Settings-Server (falls je vorkommend) keine
+            // Fehlkarte bekommt.
+            ...(isBotInstalled('forge-settings') ? [{
+                id:          'forge-settings',
+                name:        'Settings Server',
+                type:        'systemd',
+                bots:        [],
+                description: 'Interner Admin-Server (LAN, Port 3200) – Bot-Steuerung, Konfiguration, Wartungsmodus.',
+            }] : []),
+            ...(isBotInstalled('forge-premium') ? [{
+                id:          'forge-premium',
+                name:        'Premium',
+                type:        'systemd',
+                bots:        [],
+                description: 'Nostr-Identität und Message Center – hält den dauerhaften Relay-Pool offen, liefert (Master) bzw. empfängt (Fork) den Premium-Blob.',
+            }] : []),
             // Nur auf einem FORGE-public-Fork relevant (siehe IS_FORK) – der Master publiziert
             // Premium-Blobs, ingested aber selbst nie welche. Vorfall 2026-08-01: forge-premium
             // verlor auf forge-pub1 lautlos den DM-Empfang (WebSocket blieb laut `ss -tnp`

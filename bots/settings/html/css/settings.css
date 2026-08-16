@@ -965,6 +965,34 @@ body {
     color: var(--warn);
 }
 .btn-pool-disabled:hover { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+
+/* Vom Standard abweichende Pool-Einstellung. Seit 2026-08-15 überlebt jede Einstellung
+   einen Kapitalabzug – der Marker (✱) macht sichtbar, wo ein abweichender Wert dauerhaft
+   weiterwirkt. Das Zeichen trägt die Aussage, die Farbe ist nur Verstärkung. */
+.info-tip-label.pool-nondefault-marker {
+    color: var(--accent);
+    opacity: 1;
+    font-size: 0.8rem;
+}
+.nd-notice {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 0.5rem 0.7rem;
+    margin-bottom: 0.7rem;
+    background: var(--surface-2);
+    font-size: 0.78rem;
+}
+.nd-notice-title {
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+}
+.nd-notice-list {
+    margin: 0 0 0.35rem;
+    padding-left: 1.1rem;
+    line-height: 1.5;
+}
+.nd-notice-hint { color: var(--text-muted); }
 .info-tip::after {
     content: attr(data-tip);
     position: absolute;

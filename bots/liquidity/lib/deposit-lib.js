@@ -9,6 +9,7 @@ import {
     getOpenPosition,
     updatePositionCapital, updatePositionHodl, insertTransaction,
     insertPosition, insertPositionSnapshot, insertCapitalFlow, clearPositionSnapshots,
+    rebaseHwmForCapitalFlow,
 } from './db.js';
 import { writePositionSnapshotFromDelta } from './refresh-state.js';
 import { isRebalancePending } from './cleanup-lock.js';
@@ -32,6 +33,30 @@ const MIN_USDC_AMOUNT      = 1.0;
 const PRESWAP_SLIPPAGE_BPS = 150; // höherer Slippage für Cleanup-Swaps (cbBTC/EURC illiquid)
 
 // ─── Gemeinsame Hilfsfunktionen ───────────────────────────────────────────────
+
+/**
+ * Zuletzt GEMESSENER Positionswert eines Pools (letzter position_snapshots-Eintrag).
+ * Muss vor jedem Kapitalfluss gelesen werden — writePositionSnapshotFromDelta überschreibt
+ * ihn danach mit einem schätzungsbasierten Wert.
+ */
+function _lastMeasuredLpValue(db, poolId) {
+    return db.prepare(
+        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
+    ).get(poolId)?.lp_value_usd ?? 0;
+}
+
+/**
+ * Schreibt den Kapitalfluss in der Trailing-Stop-Referenz nach (Details: rebaseHwmForCapitalFlow
+ * in lib/db.js). Ohne diesen Aufruf übernimmt die monoton steigende HWM beim nächsten Snapshot
+ * einfach den erhöhten Positionswert — der bis dahin aufgelaufene Drawdown-Abstand geht verloren
+ * und der Trailing Stop startet bei jeder Cleanup-Einzahlung faktisch neu.
+ */
+function _rebaseHwmAfterDeposit(db, pool, positionId, lpBefore) {
+    const { drawdownPct, applied } = rebaseHwmForCapitalFlow(db, positionId, lpBefore);
+    if (applied) {
+        console.log(`[deposit-lib] ${pool.pair}: Trailing-Stop-Referenz übertragen (Abstand zum Höchststand: ${drawdownPct.toFixed(2)} %)`);
+    }
+}
 
 /**
  * CLMM sqrt-Preis-Arithmetik: schätzt tokenA-Bedarf für depositB tokenB in der Range.
@@ -201,6 +226,9 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
     const amountB = effectiveUsdc / SLIPPAGE_FACTOR;
     console.log(`[deposit-lib] ${pool.pair}: deposit ~${amountA.toFixed(6)} tokenA + ${effectiveUsdc.toFixed(2)} USDC`);
 
+    // Trailing-Stop-Referenz: gemessenen Positionswert VOR dem Kapitalfluss sichern.
+    const lpBefore = _lastMeasuredLpValue(db, pool.id);
+
     let result;
     try {
         result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
@@ -213,6 +241,7 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
     const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool);
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
     updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
+    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
     const txFee = await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
@@ -342,6 +371,9 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
     const amountB        = Math.min(walletTokenB, targetB, maxSafeAmountB) / SLIPPAGE_FACTOR;
     console.log(`[deposit-lib] ${pool.pair}: deposit ~${walletTokenA.toFixed(2)} USDC + ${amountB.toFixed(6)} ${tokenBSymbol}`);
 
+    // Trailing-Stop-Referenz: gemessenen Positionswert VOR dem Kapitalfluss sichern.
+    const lpBefore = _lastMeasuredLpValue(db, pool.id);
+
     let result;
     try {
         result = await adapter.increaseLiquidity(pool, position.nft_mint, walletTokenA, amountB, DEPOSIT_SLIPPAGE);
@@ -354,6 +386,7 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
     const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool);
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
     updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
+    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
     const txFee = await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
@@ -509,8 +542,8 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     }
     ensureScoreLimitEnabled(pool.id);
     {
-        const t = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
-        ensureTvlProtectionDefaults(pool.id, t, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
+        const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
+        ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
     }
     ensureTrailingStopMinimumReset(pool.id);
 
@@ -570,6 +603,9 @@ export async function depositVolatilePair(pool, keypair, db, adapter, { note = '
 
     console.log(`[deposit-lib] ${pool.pair}: volatilePair deposit ${safeA.toFixed(6)} tokenA + ${safeB.toFixed(6)} tokenB`);
 
+    // Trailing-Stop-Referenz: gemessenen Positionswert VOR dem Kapitalfluss sichern.
+    const lpBefore = _lastMeasuredLpValue(db, pool.id);
+
     let result;
     try {
         result = await adapter.increaseLiquidity(pool, position.nft_mint, safeA, safeB, DEPOSIT_SLIPPAGE);
@@ -585,6 +621,7 @@ export async function depositVolatilePair(pool, keypair, db, adapter, { note = '
     const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool, 0, resolvedQuotePrice);
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
     updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
+    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
     const txFee = await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,

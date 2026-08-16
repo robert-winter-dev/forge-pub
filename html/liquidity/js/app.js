@@ -5,7 +5,7 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260811b';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -14,7 +14,7 @@ import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } fr
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
-import { initMessageBell }                     from '../../js/message-bell.js?v=20260809a';
+import { initMessageBell }                     from '../../js/message-bell.js?v=20260816a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
 import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20260727a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
@@ -406,7 +406,7 @@ let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '24h';
  * kein Fallbeil mehr, sondern folgt dem tatsächlichen Nutzwert der Daten.
  *
  * Kein Kapitalbezug: Diese Funktion steuert ausschließlich die Anzeige. Score-Limit-
- * und Ranking-Exit laufen im Bot und hängen an derselben 2-h-Frische, nie an der
+ * laufen im Bot und hängt an derselben 2-h-Frische, nie an der
  * Zahlungsgrenze.
  */
 function hasPremiumAccess(data) {
@@ -1808,18 +1808,27 @@ function renderNotifs(data) {
         // Bis 2026-07-31 pulsierte hierfür die Krone – zu unruhig, ersetzt durch
         // den Restlaufzeit-Text rechts daneben (siehe premiumCountdownText).
         const coveredUntil  = data?.premiumCoveredUntilMs ?? null;
+        // 🔒 `coverageSource === 'paid'` ist Pflicht (2026-08-13): Bei der
+        // Systemdaten-Freigabe ist Auto-Pay dauerhaft aus UND es liegt eine Deckung
+        // vor — ohne diese Bedingung träfe genau das die Abschalt-Anzeige darunter
+        // und meldete "Der Premium Service ist deaktiviert", während er in
+        // Wirklichkeit läuft und stündlich weiterläuft. Für Zahler ändert die
+        // Bedingung nichts: dort war coveredUntil ohnehin nur bei 'paid' gesetzt.
         const showCountdown = active && data?.scoreSource === 'delivered'
-            && !data?.premiumAutoPayEnabled && coveredUntil != null;
+            && !data?.premiumAutoPayEnabled && coveredUntil != null
+            && data?.premiumCoverageSource === 'paid';
 
         premiumIcon.classList.toggle('active', active);
         if (showCountdown) {
             premiumIcon.dataset.tooltipTitle   = 'Premium';
             premiumIcon.dataset.tooltipContent = tr('liq.premium_disabled', 'Der Premium Service ist deaktiviert.');
         } else {
+            // 2026-08-14: Kein eigener Tooltip-Zustand mehr für coverageSource==='shared'
+            // — ein Freigabe-Teilnehmer sieht denselben Zustand wie ein Zahler.
             premiumIcon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
             premiumIcon.dataset.tooltipContent = active
-                ? 'Premium-Datendienst aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit laufen mit gelieferten Daten.'
-                : tr('liq.score_inactive', 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
+                ? 'Premium-Datendienst aktiv – Opportunity Score und Score-Limit-Exit laufen mit gelieferten Daten.'
+                : tr('liq.score_inactive', 'Score-Bewertung nicht aktiv – Opportunity Score und Score-Limit-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
         }
 
         if (premiumCountdownText) {

@@ -66,6 +66,14 @@ export function openMessagesDb() {
             processed_at  INTEGER NOT NULL
         );
     `);
+    // Dritte Anwendung desselben Musters: Bewerbungen um die Systemdaten-Freigabe
+    // (MASTER-ONLY, siehe handleHealthShareApply() in server.js).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS nostr_processed_health_share_events (
+            event_id      TEXT PRIMARY KEY,
+            processed_at  INTEGER NOT NULL
+        );
+    `);
     // category/thread_id sind bereits auf allen laufenden Instanzen migriert
     // (2026-07-28 bzw. 2026-07-30) – Spalten-Check bleibt trotzdem idempotent
     // stehen, für den Fall einer frischen Installation aus einem alten Backup.
@@ -144,6 +152,20 @@ export function markActivationEventProcessed(db, eventId) {
     if (eventId == null) return true;
     const info = db.prepare(
         `INSERT OR IGNORE INTO nostr_processed_activation_events (event_id, processed_at) VALUES (?, ?)`
+    ).run(eventId, Date.now());
+    return info.changes === 1;
+}
+
+/**
+ * Dasselbe Muster nochmals für `health-share-apply` (MASTER-ONLY). Ohne diesen Dedup
+ * würde jeder Backlog-Replay derselben Bewerbung sie erneut verarbeiten — bei einem
+ * bereits widerrufenen npub hieße das, dass ein Widerruf durch bloßes Warten auf den
+ * nächsten Watchdog-Resubscribe wieder auf der Prüfliste landen könnte.
+ */
+export function markHealthShareEventProcessed(db, eventId) {
+    if (eventId == null) return true;
+    const info = db.prepare(
+        `INSERT OR IGNORE INTO nostr_processed_health_share_events (event_id, processed_at) VALUES (?, ?)`
     ).run(eventId, Date.now());
     return info.changes === 1;
 }

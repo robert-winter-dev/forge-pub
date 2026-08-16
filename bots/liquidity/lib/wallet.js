@@ -22,6 +22,7 @@ import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { readFileSync }     from 'fs';
 import bs58                 from 'bs58';
 import { config }           from './config.js';
+import { settle }           from './settle-promise.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -157,8 +158,8 @@ export async function getAllTokenBalances(walletPubkey) {
     const wallet = typeof walletPubkey === 'string' ? new PublicKey(walletPubkey) : walletPubkey;
     const conn = getConnection();
     const [spl, t22] = await Promise.all([
-        conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_PROGRAM_ID }),
-        conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_2022_PROGRAM_ID }),
+        settle(conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_PROGRAM_ID })),
+        settle(conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_2022_PROGRAM_ID })),
     ]);
     const map = new Map();
     for (const { account } of [...spl.value, ...t22.value]) {

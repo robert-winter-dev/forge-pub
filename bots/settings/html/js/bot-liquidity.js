@@ -11,6 +11,22 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+
+// 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
+// Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
+// Zeilenumbrüche mehrzeiliger Meldungen (z.B. die Liste der Verwendungsstellen).
+function infoModal(message) {
+    const id = 'ab-info';
+    showModal({
+        id,
+        title: tr('common.note', 'Hinweis'),
+        body: `<p style="margin:0;font-size:.88rem;line-height:1.55;white-space:pre-line">${
+            String(message ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        }</p>`,
+        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal(id) }],
+    });
+}
+
 // `t` ist in diesem Modul mehrfach ein lokaler Variablenname (Token/Timestamp) —
 // der Helfer wird deshalb als `tr` importiert (bin/i18n-check.js kennt beide).
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
@@ -1782,9 +1798,24 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
         });
 
         panel.querySelectorAll('.ab-del').forEach(btn => {
-            btn.addEventListener('click', async () => {
-                if (!confirm(tr('sb.delete_address_q', 'Adresse wirklich löschen?'))) return;
+            btn.addEventListener('click', () => {
                 const delId = Number(btn.dataset.id);
+                // confirm() hielt den Code an, showModal() tut das nicht – der Rumpf
+                // liegt deshalb in einer eigenen Funktion, die erst der Klick auslöst.
+                const cid = 'ab-del-confirm';
+                showModal({
+                    id: cid,
+                    title: tr('sb.delete_address_q', 'Adresse wirklich löschen?'),
+                    body: `<p style="margin:0;font-size:.88rem;line-height:1.55">${tr('sb.delete_address_note', 'Der Eintrag wird aus dem Adressbuch entfernt. Bereits gesendete Transaktionen bleiben davon unberührt.')}</p>`,
+                    actions: [
+                        { label: tr('common.delete', 'Löschen'), onClick: () => { closeModal(cid); doDeleteAddress(delId); } },
+                        { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal(cid) },
+                    ],
+                });
+            });
+        });
+
+        async function doDeleteAddress(delId) {
 
                 const delRes = await fetch(`/api/addresses/${delId}`, { method: 'DELETE' });
                 if (!delRes.ok) {
@@ -1793,9 +1824,9 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
                         const where = err.usages.map(u =>
                             `• ${u.botId} / ${u.poolId}: ${u.fields.join(', ')}`
                         ).join('\n');
-                        alert(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
+                        infoModal(tr('sb.address_in_use', 'Diese Adresse wird noch verwendet und kann nicht gelöscht werden:\n\n{list}', { list: where }));
                     } else {
-                        alert(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
+                        infoModal(err.error ?? tr('sb.delete_failed_dot', 'Löschen fehlgeschlagen.'));
                     }
                     return;
                 }
@@ -1807,8 +1838,7 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
                 const r  = await fetch('/api/addresses');
                 currentAddrs = await r.json();
                 showList();
-            });
-        });
+        }
     }
 
     // ── Senden-Button (Aktionsleiste, neu verdrahtet bei jedem showSend()) ───
@@ -1862,6 +1892,14 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
                 fb.textContent = tr('sb.sent_ok', '✓ Gesendet: {amount} {symbol} → {to}', { amount, symbol, to: _selectedSendAddr.name });
                 fb.className   = 'modal-feedback ok';
                 if (amountInp) amountInp.value = '';
+                // Server aktualisiert wallet-monitor.db im Hintergrund automatisch
+                // (TX-Confirm + Propagierungspuffer + Monitor-Lauf, siehe
+                // scheduleWalletRefreshAfterSend in bots/settings/routes/wallet.js) —
+                // 15s geben dem genug Zeit, bevor die Wallet-Karte neu geladen wird.
+                setTimeout(() => {
+                    const walletEl = _container?.querySelector('.liquiditybot-grid-wallet');
+                    if (walletEl) _renderWallet(walletEl);
+                }, 15000);
             } catch (err) {
                 fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message });
                 fb.className   = 'modal-feedback error';
@@ -1910,8 +1948,8 @@ function _updatePremiumIcon(pools) {
     icon.classList.toggle('active', active);
     icon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
     icon.dataset.tooltipContent = active
-        ? tr('sliq.premium_active_tip', 'Premium-Datendienst aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit laufen mit gelieferten Daten.')
-        : tr('sliq.premium_inactive_tip', 'Score-Bewertung nicht aktiv – Opportunity Score, Score-Limit-Exit und Ranking-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
+        ? tr('sliq.premium_active_tip', 'Premium-Datendienst aktiv – Opportunity Score und Score-Limit-Exit laufen mit gelieferten Daten.')
+        : tr('sliq.premium_inactive_tip', 'Score-Bewertung nicht aktiv – Opportunity Score und Score-Limit-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
 }
 
 async function _renderPools(el) {
@@ -2332,6 +2370,7 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                         <span class="info-tip-label"
                             data-tooltip-title="Fee Claim"
                             data-tooltip-content="${tr('sliq.fee_claim_tip', 'Steuert ab welchem Betrag Fees geclaimed werden und was danach damit passiert.\n\nAuto Compounding: Fees sofort wieder in den Pool reinvestieren (ganz oder anteilig).\n\nSenden an: Verbleibende Fees optional an eine Adresse senden – ggf. vorher in USDC tauschen.')}">&#9432;</span>
+                        ${_ndMarker(pool, ['autoCompound'])}
                     </td>
                     <td class="wat-info">
                         <span class="pool-summary">${tr('sliq.fee_claim_summary', 'Regelt den Umgang mit den Fee-Einnahmen.')}</span>
@@ -2346,6 +2385,7 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                         <span class="info-tip-label"
                             data-tooltip-title="${tr('sliq.risk_management', 'Risk-Management')}"
                             data-tooltip-content="${tr('sliq.risk_tip', 'Zwei voneinander unabhängige Schutzmechanismen:||Score Limit: Schließt die Position automatisch, sobald der Opportunity Score des Pools unter eine einstellbare Schwelle fällt.||Trailing Stop (TS): Schließt die Position, wenn der Pool-Wert um einen einstellbaren Prozentsatz unter den bisherigen Höchststand fällt (High-Water-Mark).||Bei beiden Mechanismen kann das entnommene Kapital optional in USDC getauscht und an eine Adresse gesendet werden.')}">&#9432;</span>
+                        ${_ndMarker(pool, ['scoreLimit', 'trailingStop', 'tvlProtection'])}
                     </td>
                     <td class="wat-info">
                         <span class="pool-summary">${_buildSafetySummary(pool)}</span>
@@ -2390,7 +2430,8 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
             ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.no_pool_data_hint', 'Noch keine verlässlichen Pool-Daten – prüfe oben in der Zeile "Status", ob der Liquidity Bot läuft.')}</p>`
             : (!poolEnabled
                 ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_off_hint', '&#128274; Pool deaktiviert – nimmt kein Kapital auf (kein Cleanup-Reinvest), bis er wieder aktiviert wird. Einstellungen können trotzdem gespeichert werden.')}</p>`
-                : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_idle_hint', '&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.')}</p>` : ''))}`;
+                : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_idle_hint', '&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.')}</p>` : ''))}
+        ${_ndSummaryBlock(pool)}`;
 
     if (noData) {
         const input = panel.querySelector('#pool-picker-input');
@@ -2455,7 +2496,15 @@ function _poolTypeRowHtml(r) {
             <td class="wat-info">
                 <div class="input-unit-row">
                     <input type="number" class="modal-input input-short" id="pt-ts-${r.poolType}"
-                        min="1" max="90" step="1" value="${s.trailingStop.thresholdPct ?? ''}">
+                        min="0.5" max="90" step="0.01" value="${s.trailingStop.thresholdPct ?? ''}">
+                    <span class="input-unit">%</span>
+                </div>
+            </td>
+            <td class="wat-info">
+                <div class="input-unit-row">
+                    <input type="number" class="modal-input input-short" id="pt-ts2-${r.poolType}"
+                        min="0.5" max="90" step="0.01" placeholder="${tr('sliq.empty_is_off', 'leer = aus')}"
+                        value="${s.trailingStop.thresholdPct2 ?? ''}">
                     <span class="input-unit">%</span>
                 </div>
             </td>
@@ -2499,7 +2548,8 @@ function _drawPoolTypesTable(container, rows) {
             <thead>
                 <tr>
                     <th>${tr('sliq.pool_type', 'Pool Typ')}</th>
-                    <th>${tr('sliq.ts_drawdown', 'Trailing Stop Drawdown')}</th>
+                    <th>${tr('sliq.ts_drawdown', 'Drawdown 1')}</th>
+                    <th>${tr('sliq.ts_drawdown2', 'Drawdown 2')}</th>
                     <th>${tr('sliq.tvl_threshold_1', 'TVL Schwelle 1')}</th>
                     <th>${tr('sliq.tvl_threshold_2', 'TVL Schwelle 2')}</th>
                     <th>${tr('sliq.enabled_col', 'Aktiviert')}</th>
@@ -2525,8 +2575,20 @@ function _confirmSavePoolType(container, row) {
     const setErr   = msg => { if (fb) { fb.textContent = msg; fb.className = 'modal-feedback error'; } };
 
     const thresholdPct = parseFloat(get(`pt-ts-${poolType}`)?.value ?? '');
-    if (!Number.isFinite(thresholdPct) || thresholdPct < 1 || thresholdPct > 90) {
-        return setErr(tr('sliq.ts_range_err', 'Trailing-Stop-Drawdown muss zwischen 1 und 90 % liegen.'));
+    if (!Number.isFinite(thresholdPct) || thresholdPct < 0.5 || thresholdPct > 90) {
+        return setErr(tr('sliq.ts_range_err', 'Drawdown 1 muss zwischen 0,5 und 90 % liegen.'));
+    }
+    // Drawdown 2 ist optional (leer = aus), muss aber enger sein als Stufe 1.
+    const ts2Raw = get(`pt-ts2-${poolType}`)?.value ?? '';
+    let thresholdPct2 = null;
+    if (String(ts2Raw).trim() !== '') {
+        thresholdPct2 = parseFloat(ts2Raw);
+        if (!Number.isFinite(thresholdPct2) || thresholdPct2 < 0.5 || thresholdPct2 > 90) {
+            return setErr(tr('sliq.ts2_range_err', 'Drawdown 2 muss zwischen 0,5 und 90 % liegen.'));
+        }
+        if (thresholdPct2 >= thresholdPct) {
+            return setErr(tr('sliq.ts2_order_err', 'Drawdown 2 muss kleiner als Drawdown 1 sein — die zweite Stufe sichert enger ab.'));
+        }
     }
     const tvl1Raw = get(`pt-tvl1-${poolType}`)?.value ?? '';
     const tvl2Raw = get(`pt-tvl2-${poolType}`)?.value ?? '';
@@ -2567,7 +2629,7 @@ function _confirmSavePoolType(container, row) {
                             method:  'PUT',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
-                                trailingStop:  { thresholdPct },
+                                trailingStop:  { thresholdPct, thresholdPct2 },
                                 tvlProtection: { level1: { thresholdUsd: tvl1 }, level2: { thresholdUsd: tvl2 } },
                                 enabled,
                             }),
@@ -2655,6 +2717,114 @@ function _toggleEnabled(pool, card) {
 
 // ── Pool-Info-Tooltips ────────────────────────────────────────────────────────
 
+// ── Hinweis auf vom Standard abweichende Einstellungen ────────────────────────
+//
+// Seit 2026-08-15 überlebt jede Pool-Einstellung einen Kapitalabzug (Trailing Stop,
+// TVL-Schutz, Score-Limit, manueller Withdraw) — vorher fiel alles außer trailingStop
+// und tvlProtection beim Exit auf Default zurück. Damit ein abweichender Wert nicht
+// unbemerkt über Monate weiterwirkt, wird jeder davon hier ausgewiesen: als Marker in
+// der Pool-Zeile, als Hinweiszeile im jeweiligen Modal und gesammelt unter der Tabelle.
+// Datenquelle ist `pool.nonDefault` aus GET /api/pools/liquidity (dort berechnet gegen
+// lib/pool-settings-defaults.js, damit UI und Bot dasselbe „Default" meinen).
+
+const NONDEFAULT_LABELS = {
+    'autoCompound.enabled':      () => tr('sliq.nd_ac_enabled',      'Auto Compounding'),
+    'autoCompound.fraction':     () => tr('sliq.nd_ac_fraction',     'Reinvest-Anteil'),
+    'autoCompound.minClaimUsdc': () => tr('sliq.nd_ac_minclaim',     'Claim ab Betrag'),
+    'autoCompound.sendTo':       () => tr('sliq.nd_ac_sendto',       'Fees senden an'),
+    'autoCompound.swapToUsdc':   () => tr('sliq.nd_ac_swap',         'Fees in USDC tauschen'),
+    'scoreLimit.enabled':        () => tr('sliq.nd_sl_enabled',      'Score Limit'),
+    'scoreLimit.minScore':       () => tr('sliq.nd_sl_minscore',     'Score-Schwelle'),
+    'scoreLimit.swapToUsdc':     () => tr('sliq.nd_sl_swap',         'Score Limit: in USDC tauschen'),
+    'scoreLimit.sendTo':         () => tr('sliq.nd_sl_sendto',       'Score Limit: senden an'),
+    'scoreLimit.cooldownHours':  () => tr('sliq.nd_sl_cooldown',     'Score Limit: Cleanup-Sperrfrist'),
+    'trailingStop.enabled':      () => tr('sliq.nd_ts_enabled',      'Trailing Stop'),
+    'trailingStop.thresholdPct': () => tr('sliq.nd_ts_threshold',    'Trailing Stop: Schwelle'),
+    'trailingStop.thresholdPct2':() => tr('sliq.nd_ts_threshold2',   'Trailing Stop: Schwelle Stufe 2'),
+    'trailingStop.autoSwapToUSDC': () => tr('sliq.nd_ts_swap',       'Trailing Stop: in USDC tauschen'),
+    'trailingStop.sendTo':       () => tr('sliq.nd_ts_sendto',       'Trailing Stop: senden an'),
+    'trailingStop.cooldownHours':() => tr('sliq.nd_ts_cooldown',     'Trailing Stop: Cleanup-Sperrfrist'),
+    'cleanup.rankingEligible':   () => tr('sliq.nd_cl_eligible',     'Beim Cleanup berücksichtigen'),
+    'tvlProtection.level1.enabled':      () => tr('sliq.nd_tvl1_enabled',   'TVL-Schutz Stufe 1'),
+    'tvlProtection.level1.thresholdUsd': () => tr('sliq.nd_tvl1_threshold', 'TVL-Schutz Stufe 1: Schwelle'),
+    'tvlProtection.level1.withdrawPct':  () => tr('sliq.nd_tvl1_pct',       'TVL-Schutz Stufe 1: Abzug'),
+    'tvlProtection.level2.enabled':      () => tr('sliq.nd_tvl2_enabled',   'TVL-Schutz Stufe 2'),
+    'tvlProtection.level2.thresholdUsd': () => tr('sliq.nd_tvl2_threshold', 'TVL-Schutz Stufe 2: Schwelle'),
+    'tvlProtection.level2.withdrawPct':  () => tr('sliq.nd_tvl2_pct',       'TVL-Schutz Stufe 2: Abzug'),
+    'tvlProtection.swapToUsdc':          () => tr('sliq.nd_tvl_swap',       'TVL-Schutz: in USDC tauschen'),
+    'tvlProtection.sendTo':              () => tr('sliq.nd_tvl_sendto',     'TVL-Schutz: senden an'),
+    'tvlProtection.cooldownHours':       () => tr('sliq.nd_tvl_cooldown',   'TVL-Schutz: Cleanup-Sperrfrist'),
+};
+
+// Einheit je Pfad-Endung – ohne sie wäre "10 → 2" nicht als Prozent lesbar.
+function _ndFormatValue(path, value) {
+    if (value === true)  return tr('sb.on',  'An');
+    if (value === false) return tr('sb.off', 'Aus');
+    if (value === null || value === undefined || value === '') return tr('sliq.nd_unset', 'nicht gesetzt');
+    if (/sendTo$/.test(path))        return String(value).slice(0, 6) + '…';
+    if (/Pct2?$|withdrawPct$/.test(path)) return `${value} %`;
+    if (/minScore$/.test(path))      return String(value);
+    if (/Usdc?$|thresholdUsd$/.test(path)) return `${Number(value).toLocaleString(NUM_LOCALE)} USDC`;
+    if (/Hours$/.test(path))         return tr('sliq.nd_hours', '{n} h', { n: value });
+    return String(value);
+}
+
+/** Abweichungen eines Pools, optional gefiltert auf bestimmte Sektionen. */
+function _nonDefaults(pool, prefixes = null) {
+    const list = pool?.nonDefault ?? [];
+    if (!prefixes) return list;
+    return list.filter(d => prefixes.some(p => d.path === p || d.path.startsWith(p + '.')));
+}
+
+/** Eine Zeile "Label: Wert (Standard: X)" – für Tooltip und Hinweisblock. */
+function _ndLine(d) {
+    const label = (NONDEFAULT_LABELS[d.path]?.() ?? d.path);
+    return tr('sliq.nd_line', '{label}: {value} (Standard: {default})', {
+        label,
+        value:   _ndFormatValue(d.path, d.value),
+        default: _ndFormatValue(d.path, d.defaultValue),
+    });
+}
+
+/**
+ * Marker fürs Zeilen-Label einer Sektion. Bewusst mit eigenem Zeichen (✱) statt nur
+ * einer Farbe – die Bedeutung muss ohne Farbwahrnehmung erkennbar sein.
+ */
+function _ndMarker(pool, prefixes) {
+    const list = _nonDefaults(pool, prefixes);
+    if (list.length === 0) return '';
+    const body = list.map(d => '• ' + _ndLine(d)).join('\n');
+    return `<span class="info-tip-label pool-nondefault-marker"
+        data-tooltip-title="${tr('sliq.nd_title', 'Abweichend vom Standard ({n})', { n: list.length })}"
+        data-tooltip-content="${_escTip(tr('sliq.nd_marker_tip', 'Diese Einstellungen weichen vom Standard ab und bleiben auch nach einem Kapitalabzug erhalten:\n\n{list}', { list: body }))}">&#10033;</span>`;
+}
+
+/** Hinweiszeile für den Kopf eines Modals (nur die Sektionen dieses Modals). */
+function _ndModalNotice(pool, prefixes) {
+    const list = _nonDefaults(pool, prefixes);
+    if (list.length === 0) return '';
+    const items = list.map(d => `<li>${_esc(_ndLine(d))}</li>`).join('');
+    return `
+        <div class="nd-notice">
+            <div class="nd-notice-title">&#10033; ${tr('sliq.nd_title', 'Abweichend vom Standard ({n})', { n: list.length })}</div>
+            <ul class="nd-notice-list">${items}</ul>
+            <div class="nd-notice-hint">${tr('sliq.nd_persist_hint', 'Diese Werte bleiben erhalten, wenn das Kapital aus dem Pool abgezogen wird — auch bei Trailing Stop, TVL-Schutz oder Score Limit.')}</div>
+        </div>`;
+}
+
+/** Sammelblock unter der Pool-Tabelle: alle Abweichungen des Pools auf einen Blick. */
+function _ndSummaryBlock(pool) {
+    const list = _nonDefaults(pool);
+    if (list.length === 0) return '';
+    const items = list.map(d => `<li>${_esc(_ndLine(d))}</li>`).join('');
+    return `
+        <div class="nd-notice" style="margin-top:0.6rem">
+            <div class="nd-notice-title">&#10033; ${tr('sliq.nd_summary_title', 'Dieser Pool weicht in {n} Einstellungen vom Standard ab', { n: list.length })}</div>
+            <ul class="nd-notice-list">${items}</ul>
+            <div class="nd-notice-hint">${tr('sliq.nd_persist_hint', 'Diese Werte bleiben erhalten, wenn das Kapital aus dem Pool abgezogen wird — auch bei Trailing Stop, TVL-Schutz oder Score Limit.')}</div>
+        </div>`;
+}
+
 function _buildFeeClaimSummary(pool) {
     const s    = pool.settings.autoCompound;
     const min  = s.minClaimUsdc ?? 1;
@@ -2681,7 +2851,11 @@ function _buildRMTip(pool) {
     const ts = pool.settings.trailingStop ?? { enabled: false, thresholdPct: 33 };
     return [
         `Score Limit: ${sl.enabled ? tr('sliq.below_score', 'Unter {score}', { score: sl.minScore ?? 30 }) : tr('sb.off', 'Aus')}`,
-        `Trailing Stop: ${ts.enabled ? '-' + (ts.thresholdPct ?? 33) + ' %' : tr('sb.off', 'Aus')}`,
+        // Bei zwei Stufen beide zeigen — sonst wäre aus der Übersicht nicht erkennbar,
+        // dass nach erreichtem Gewinn eine engere Schwelle gilt.
+        `Trailing Stop: ${ts.enabled
+            ? '-' + (ts.thresholdPct ?? 33) + ' %' + (ts.thresholdPct2 != null && ts.thresholdPct2 !== '' ? ` / -${ts.thresholdPct2} %` : '')
+            : tr('sb.off', 'Aus')}`,
     ].join('\n');
 }
 
@@ -2716,9 +2890,10 @@ function _fmtCost(n) {
 
 // ── Ranking-Modal Tab-Builder ─────────────────────────────────────────────────
 
-function _buildCleanupToggle(eligible) {
+function _buildCleanupToggle(eligible, pool) {
     return `
         <div class="ranking-section">
+            ${pool ? _ndModalNotice(pool, ['cleanup']) : ''}
             <div class="ranking-section-title">${tr('sliq.cleanup_consideration', 'Cleanup-Berücksichtigung')}</div>
             <div class="settings-row" style="border:none;padding:0.35rem 0;">
                 <span class="settings-label" style="flex:1;">
@@ -2816,7 +2991,7 @@ function _buildSimulationSection(econ) {
         </div>`;
 }
 
-function _buildBewertungTab(econ, eligible) {
+function _buildBewertungTab(econ, eligible, pool) {
     if (!econ) return `
         <div class="ranking-section">
             <div class="ranking-section-title">${tr('sliq.score_breakdown_legacy', 'Score-Aufschlüsselung (Legacy)')}</div>
@@ -2824,7 +2999,7 @@ function _buildBewertungTab(econ, eligible) {
                 ${tr('sliq.no_econ_data', 'Noch keine Economic-Scorer-Daten — wird beim nächsten Cron-Lauf aktualisiert.')}
             </div>
         </div>
-        ${_buildCleanupToggle(eligible)}`;
+        ${_buildCleanupToggle(eligible, pool)}`;
 
     const aprLabel = econ.is_active ? 'Realized APR (7d)' : tr('sliq.estimated_apr', 'Geschätzter APR');
     const aprValue = econ.is_active ? econ.realized_apr_pct : econ.estimated_apr_pct;
@@ -2853,7 +3028,7 @@ function _buildBewertungTab(econ, eligible) {
             </div>
         </div>
         ${_buildSimulationSection(econ)}
-        ${_buildCleanupToggle(eligible)}`;
+        ${_buildCleanupToggle(eligible, pool)}`;
 }
 
 function _buildDetailsTab(econ, score) {
@@ -3115,7 +3290,7 @@ function _openRankingModal(pool, score, scores, card) {
                     <button class="rk-tab" data-tab="details">Details</button>
                     <button class="rk-tab" data-tab="markt">${tr('sliq.market_tab', 'Markt')}</button>
                 </div>
-                <div class="rk-panel" data-panel="bewertung">${_buildBewertungTab(econ, eligible)}</div>
+                <div class="rk-panel" data-panel="bewertung">${_buildBewertungTab(econ, eligible, pool)}</div>
                 <div class="rk-panel" data-panel="details" hidden>${_buildDetailsTab(econ, score)}</div>
                 <div class="rk-panel" data-panel="markt" hidden>${_buildMarktTab(score, scores)}</div>
                 <div class="modal-feedback" id="ranking-feedback"></div>
@@ -3155,7 +3330,7 @@ function _openRankingModal(pool, score, scores, card) {
         rankingBox.querySelector('.ranking-headline-net').textContent = freshHeader;
         rankingBox.querySelector('.ranking-headline-row').innerHTML =
             `<span class="ranking-headline-net">${freshHeader}</span>`;
-        rankingBox.querySelector('[data-panel="bewertung"]').innerHTML = _buildBewertungTab(freshEcon, eligible);
+        rankingBox.querySelector('[data-panel="bewertung"]').innerHTML = _buildBewertungTab(freshEcon, eligible, freshPool);
         rankingBox.querySelector('[data-panel="details"]').innerHTML   = _buildDetailsTab(freshEcon, freshScore);
         rankingBox.querySelector('[data-panel="markt"]').innerHTML     = _buildMarktTab(freshScore, freshScores);
         // Aktiven Tab wieder zeigen
@@ -3212,6 +3387,7 @@ function _openFeeClaimModal(pool, addrs, card) {
                 <button class="wm-tab"        data-fc="ac">Auto Compounding</button>
                 <button class="wm-tab"        data-fc="send">${tr('sb.send_to', 'Senden an')}</button>
             </div>
+            ${_ndModalNotice(pool, ['autoCompound'])}
             <div id="fc-cfg-panel" class="fc-settings">
                 <div class="settings-row" style="border:none;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
@@ -3361,9 +3537,9 @@ function _openSLTPModal(pool, addrs, card) {
                 <button class="wm-tab"        data-wm="tvl">TVL</button>
                 <button class="wm-tab"        data-wm="sl">Score Limit</button>
             </div>
-            <div id="sltp-ts"  class="sltp-settings ts-settings">${_buildTrailingStopPanel(pool, addrs)}</div>
-            <div id="sltp-tvl" class="sltp-settings" hidden>${_buildTvlPanel(pool, addrs)}</div>
-            <div id="sltp-sl"  hidden>${_buildScoreLimitPanel(pool, addrs)}</div>`,
+            <div id="sltp-ts"  class="sltp-settings ts-settings">${_ndModalNotice(pool, ['trailingStop'])}${_buildTrailingStopPanel(pool, addrs)}</div>
+            <div id="sltp-tvl" class="sltp-settings" hidden>${_ndModalNotice(pool, ['tvlProtection'])}${_buildTvlPanel(pool, addrs)}</div>
+            <div id="sltp-sl"  hidden>${_ndModalNotice(pool, ['scoreLimit'])}${_buildScoreLimitPanel(pool, addrs)}</div>`,
         actions: [
             saveAction,
             { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
@@ -3414,10 +3590,16 @@ function _openSLTPModal(pool, addrs, card) {
 
     _wireSlPanelListeners(backdrop);
 
-    // Trailing-Stop: Live-Update wenn Drawdown-Schwelle geändert wird
-    backdrop.querySelector('#ts-threshold')?.addEventListener('input', e => {
-        const thr = parseFloat(e.target.value);
-        if (!Number.isFinite(thr) || thr < 1) return;
+    // Trailing-Stop: Live-Update wenn eine der beiden Drawdown-Schwellen geändert wird.
+    // Maßgeblich ist die Stufe, die der Bot aktuell anwendet — bei scharfer Stufe 2 also
+    // Drawdown 2. Sonst würde die Vorschau eine Liquidationsgrenze zeigen, die nicht gilt.
+    const _tsD2Armed = !!pool.trailingStopStatus?.d2ArmedAt;
+    const _tsLivePreview = () => {
+        const raw1 = backdrop.querySelector('#ts-threshold')?.value ?? '';
+        const raw2 = backdrop.querySelector('#ts-threshold2')?.value ?? '';
+        const has2 = String(raw2).trim() !== '';
+        const thr  = parseFloat(_tsD2Armed && has2 ? raw2 : raw1);
+        if (!Number.isFinite(thr) || thr < 0.5) return;
         const sb = backdrop.querySelector('.ts-status-block[data-hwm]');
         if (!sb) return;
         const hwmUsd     = parseFloat(sb.dataset.hwm);
@@ -3450,7 +3632,9 @@ function _openSLTPModal(pool, addrs, card) {
                 ? tr('sliq.buffer', 'Puffer: {usd}&thinsp;USDC&ensp;/&ensp;{pct}&thinsp;%', { usd: fmt(bufferUsd), pct: bufferPct.toFixed(1) })
                 : `${tr('sliq.trigger_exceeded', '⚠ Auslöser überschritten')}`;
         }
-    });
+    };
+    backdrop.querySelector('#ts-threshold')?.addEventListener('input', _tsLivePreview);
+    backdrop.querySelector('#ts-threshold2')?.addEventListener('input', _tsLivePreview);
 
     // Trailing-Stop: Höchststand zurücksetzen
     backdrop.querySelector('#ts-hwm-reset-btn')?.addEventListener('click', async () => {
@@ -3471,7 +3655,12 @@ function _openSLTPModal(pool, addrs, card) {
             const sb = backdrop.querySelector('.ts-status-block[data-hwm]');
             if (sb) {
                 const currentUsd = parseFloat(sb.dataset.current);
-                const thr        = parseFloat(backdrop.querySelector('#ts-threshold')?.value ?? '33');
+                // Auch hier die geltende Stufe verwenden — der Höchststand-Reset ändert
+                // die Referenz, nicht die Schwelle: eine scharfe Stufe 2 bleibt scharf.
+                const _raw2      = backdrop.querySelector('#ts-threshold2')?.value ?? '';
+                const thr        = (_tsD2Armed && String(_raw2).trim() !== '')
+                    ? parseFloat(_raw2)
+                    : parseFloat(backdrop.querySelector('#ts-threshold')?.value ?? '33');
                 const fmt        = v => v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                 if (currentUsd > 0 && Number.isFinite(thr)) {
                     const newTrigger = currentUsd * (1 - thr / 100);
@@ -3547,7 +3736,7 @@ function _openSLTPModal(pool, addrs, card) {
     });
 }
 
-function _buildTrailingStopStatusBlock(pool, threshold) {
+function _buildTrailingStopStatusBlock(pool, threshold, stageInfo = {}) {
     const st = pool.trailingStopStatus;
     if (!st || !(st.hwmUsd > 0) || !(st.currentUsd > 0)) {
         return `
@@ -3575,6 +3764,20 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
     const bufferUsd = st.currentUsd - triggerUsd;
     const bufferPct = bufferUsd / st.hwmUsd * 100;
     const bufferOk  = bufferUsd > 0;
+
+    // Stufen-Hinweis: nur wenn überhaupt eine zweite Stufe konfiguriert ist. Die Bedeutung
+    // steht im Text, nicht nur in der Farbe (Barrierefreiheit).
+    const { d2Armed = false, threshold: thr1 = null, threshold2: thr2 = null } = stageInfo;
+    let stageBadge = '';
+    if (thr2 != null) {
+        stageBadge = d2Armed
+            ? `<div style="margin-top:0.45rem; font-size:0.7rem; color:#86efac;">
+                   ${tr('sliq.ts_stage2_active', '● Stufe 2 aktiv (Gewinnsicherung): Drawdown {pct}&thinsp;% statt {first}&thinsp;%.', { pct: thr2, first: thr1 })}
+               </div>`
+            : `<div style="margin-top:0.45rem; font-size:0.7rem; color:var(--text-muted);">
+                   ${tr('sliq.ts_stage1_active', '○ Stufe 1 aktiv: Drawdown {pct}&thinsp;%. Stufe 2 ({second}&thinsp;%) wird scharf, sobald der Wert den Einstieg um {pct}&thinsp;% übertrifft.', { pct: thr1, second: thr2 })}
+               </div>`;
+    }
 
     // Bar spannt exakt von triggerUsd (links) bis hwmUsd (rechts)
     const barSpan = st.hwmUsd - triggerUsd;
@@ -3620,6 +3823,8 @@ function _buildTrailingStopStatusBlock(pool, threshold) {
                 : `${tr('sliq.trigger_exceeded', '⚠ Auslöser überschritten')}`}
         </div>
 
+        ${stageBadge}
+
         <!-- Reset-Button -->
         <div style="margin-top:0.9rem; text-align:right;">
             <button id="ts-hwm-reset-btn" class="btn btn-sm"
@@ -3638,13 +3843,22 @@ function _fmtUsdExact(v) {
 }
 
 function _buildTrailingStopPanel(pool, addrs = []) {
-    const ts = pool.settings.trailingStop ?? { enabled: true, thresholdPct: 33, minimumValueUsd: null, autoSwapToUSDC: true, sendTo: '', cooldownHours: 1 };
+    const ts = pool.settings.trailingStop ?? { enabled: true, thresholdPct: 33, thresholdPct2: null, minimumValueUsd: null, autoSwapToUSDC: true, sendTo: '', cooldownHours: 1 };
     const on = !!ts.enabled;
     const threshold = Number.isFinite(Number(ts.thresholdPct)) ? Number(ts.thresholdPct) : 33;
+    // null/'' bedeutet „zweite Stufe aus" — nicht auf einen Default fallen, sonst würde
+    // ein enger Stop stillschweigend aktiviert, den der Nutzer nie gesetzt hat.
+    const threshold2 = (ts.thresholdPct2 != null && ts.thresholdPct2 !== '' && Number.isFinite(Number(ts.thresholdPct2)))
+        ? Number(ts.thresholdPct2)
+        : null;
     const cooldownHours = Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : 1;
     const minValueUsd = (ts.minimumValueUsd != null && Number(ts.minimumValueUsd) > 0) ? Math.round(Number(ts.minimumValueUsd)) : 0;
     const currentUsd = pool.currentValue ?? null;
-    const statusBlock = on ? _buildTrailingStopStatusBlock(pool, threshold) : '';
+    // Der Status-Block muss mit der Schwelle rechnen, die der Bot gerade anwendet —
+    // sonst zeigt das Modal einen Liquidationswert an, der nicht dem echten entspricht.
+    const d2Armed     = !!pool.trailingStopStatus?.d2ArmedAt && threshold2 != null;
+    const activeThr   = d2Armed ? threshold2 : threshold;
+    const statusBlock = on ? _buildTrailingStopStatusBlock(pool, activeThr, { d2Armed, threshold, threshold2 }) : '';
     return `
         <div class="settings-row" style="border:none;">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
@@ -3675,14 +3889,29 @@ function _buildTrailingStopPanel(pool, addrs = []) {
         </div>
         <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                ${tr('sliq.drawdown_threshold', 'Drawdown-Schwelle')}
+                ${tr('sliq.drawdown_threshold', 'Drawdown 1')}
                 <span class="info-tip-label"
-                    data-tooltip-title="${tr('sliq.drawdown_threshold', 'Drawdown-Schwelle')}"
-                    data-tooltip-content="${tr('sliq.drawdown_tip', 'Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool“ reinvestiert sie automatisch.')}">&#9432;</span>
+                    data-tooltip-title="${tr('sliq.drawdown_threshold', 'Drawdown 1')}"
+                    data-tooltip-content="${tr('sliq.drawdown_tip', 'Gilt ab dem Einstieg. Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Bewusst weit gewählt: direkt nach dem Einstieg soll normale Schwankung nicht sofort zum Ausstieg führen.||Ohne Send-Adresse bleiben die Coins im Wallet und der nächste Cleanup-Lauf im Modus „Bester Pool“ reinvestiert sie automatisch.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short" id="ts-threshold"
-                    type="number" min="1" max="90" step="1" value="${threshold}"
+                    type="number" min="0.5" max="90" step="0.01" value="${threshold}"
+                    ${on ? '' : 'disabled'}>
+                <span class="input-unit">%</span>
+            </div>
+        </div>
+        <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
+            <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
+                ${tr('sliq.drawdown2_threshold', 'Drawdown 2')}
+                <span class="info-tip-label"
+                    data-tooltip-title="${tr('sliq.drawdown2_threshold', 'Drawdown 2')}"
+                    data-tooltip-content="${tr('sliq.drawdown2_tip', 'Optionale zweite, engere Stufe zur Gewinnsicherung. Leer lassen = aus.||Sie wird scharf, sobald der Pool-Wert den Einstieg um Drawdown 1 übertroffen hat. Ab da gilt sie statt Drawdown 1 — gemessen wie zuvor vom Höchststand.||Beispiel (Drawdown 1 = 2 %, Drawdown 2 = 1 %): Steigt der Wert um 3 %, wird Stufe 2 scharf; der Ausstieg liegt dann bei 1 % unter dem Höchststand, also mit 2 % Gewinn.||Muss kleiner als Drawdown 1 sein. Einmal scharf, bleibt sie es bis zum Schließen der Position.')}">&#9432;</span>
+            </span>
+            <div class="input-unit-row">
+                <input class="modal-input input-short" id="ts-threshold2"
+                    type="number" min="0.5" max="90" step="0.01" value="${threshold2 ?? ''}"
+                    placeholder="${tr('sliq.off_short', 'aus')}"
                     ${on ? '' : 'disabled'}>
                 <span class="input-unit">%</span>
             </div>
@@ -3728,15 +3957,31 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
     const fb = document.getElementById('ts-feedback');
     const enabled        = document.getElementById('ts-enabled')?.checked ?? false;
     const thresholdRaw   = document.getElementById('ts-threshold')?.value ?? '33';
+    const threshold2Raw  = document.getElementById('ts-threshold2')?.value ?? '';
     const minValueRaw    = document.getElementById('ts-min-value')?.value ?? '';
     const autoSwapToUSDC = document.getElementById('ts-swap')?.checked ?? false;
     const sendTo         = document.getElementById('ts-sendto')?.value ?? '';
     const cooldownRaw    = document.getElementById('ts-cooldown')?.value ?? '1';
 
     const threshold = parseFloat(thresholdRaw);
-    if (!Number.isFinite(threshold) || threshold < 1 || threshold > 90) {
-        if (fb) { fb.textContent = tr('sliq.drawdown_range_err', 'Drawdown-Schwelle muss zwischen 1 und 90 % liegen.'); fb.className = 'modal-feedback error'; }
+    if (!Number.isFinite(threshold) || threshold < 0.5 || threshold > 90) {
+        if (fb) { fb.textContent = tr('sliq.drawdown_range_err', 'Drawdown 1 muss zwischen 0,5 und 90 % liegen.'); fb.className = 'modal-feedback error'; }
         return;
+    }
+
+    // Drawdown 2: leer = zweite Stufe aus. Sonst enger als Stufe 1, sonst würde die
+    // Scharfschaltung den Schutz lockern statt ihn zu verschärfen.
+    let threshold2 = null;
+    if (String(threshold2Raw).trim() !== '') {
+        threshold2 = parseFloat(threshold2Raw);
+        if (!Number.isFinite(threshold2) || threshold2 < 0.5 || threshold2 > 90) {
+            if (fb) { fb.textContent = tr('sliq.drawdown2_range_err', 'Drawdown 2 muss zwischen 0,5 und 90 % liegen.'); fb.className = 'modal-feedback error'; }
+            return;
+        }
+        if (threshold2 >= threshold) {
+            if (fb) { fb.textContent = tr('sliq.drawdown2_order_err', 'Drawdown 2 muss kleiner als Drawdown 1 sein — die zweite Stufe sichert enger ab.'); fb.className = 'modal-feedback error'; }
+            return;
+        }
     }
 
     // Pool Mindestwert: 0 = deaktiviert; sonst ganzzahlig > 0 und < aktueller Pool-Wert
@@ -3765,7 +4010,7 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trailingStop: { enabled, thresholdPct: threshold, minimumValueUsd, autoSwapToUSDC, sendTo, cooldownHours } }),
+            body: JSON.stringify({ trailingStop: { enabled, thresholdPct: threshold, thresholdPct2: threshold2, minimumValueUsd, autoSwapToUSDC, sendTo, cooldownHours } }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         if (fb) { fb.textContent = tr('sliq.saved_no_dot', '✓ Gespeichert'); fb.className = 'modal-feedback success'; }
@@ -4042,7 +4287,7 @@ function _pctOptions(selected) {
 function _buildTvlLevel(n, lvl, defaultThreshold) {
     const on        = !!lvl.enabled;
     const threshold = lvl.thresholdUsd != null ? lvl.thresholdUsd : (defaultThreshold ?? '');
-    const pct       = Number.isFinite(Number(lvl.withdrawPct)) ? Number(lvl.withdrawPct) : (n === 1 ? 50 : 100);
+    const pct       = Number.isFinite(Number(lvl.withdrawPct)) ? Number(lvl.withdrawPct) : 100;
     const dep       = `tvl${n}-dependent`;
     return `
         <div class="settings-row" style="border:none;">
@@ -4051,8 +4296,8 @@ function _buildTvlLevel(n, lvl, defaultThreshold) {
                 <span class="info-tip-label"
                     data-tooltip-title="TVL-Schutz Stufe ${n}"
                     data-tooltip-content="${n === 1
-                        ? tr('sliq.tvl_stage1_tip', 'Erste Eskalationsstufe (höhere Schwelle). Fällt der Pool-TVL unter diesen Wert, wird der eingestellte Anteil abgezogen.||Optional – kann deaktiviert werden. Dann reagiert nur Stufe 2.')
-                        : tr('sliq.tvl_stage2_tip', 'Zweite Eskalationsstufe (tiefere Schwelle). Default je Pool aktiv: 100 % abziehen und in USDC tauschen.||Die Schwelle muss kleiner als bei Stufe 1 sein.')}">&#9432;</span>
+                        ? tr('sliq.tvl_stage1_tip', 'Die Stufe, über die der Schutz normalerweise läuft: Fällt der Pool-TVL unter diesen Wert, wird der eingestellte Anteil abgezogen — voreingestellt 100 % und Tausch in USDC.||Die Schwelle muss größer sein als die von Stufe 2.')
+                        : tr('sliq.tvl_stage2_tip', 'Optionale zweite Stufe für einen gestaffelten Ausstieg (tiefere Schwelle). Standardmäßig aus — dann reagiert nur Stufe 1.||Sind beide Stufen aktiv, muss die Schwelle hier kleiner sein als bei Stufe 1 und beide Anteile zusammen 100 % ergeben.')}">&#9432;</span>
             </span>
             <label class="toggle-switch">
                 <input type="checkbox" id="tvl${n}-enabled" ${on ? 'checked' : ''}>
@@ -4087,8 +4332,8 @@ function _buildTvlLevel(n, lvl, defaultThreshold) {
 
 function _buildTvlPanel(pool, addrs = []) {
     const tp = pool.settings.tvlProtection ?? {};
-    const l1 = tp.level1 ?? { enabled: false, thresholdUsd: null, withdrawPct: 50  };
-    const l2 = tp.level2 ?? { enabled: true,  thresholdUsd: null, withdrawPct: 100 };
+    const l1 = tp.level1 ?? { enabled: true,  thresholdUsd: null, withdrawPct: 100 };
+    const l2 = tp.level2 ?? { enabled: false, thresholdUsd: null, withdrawPct: 100 };
     const cooldownHours = Number.isFinite(Number(tp.cooldownHours)) ? Number(tp.cooldownHours) : 1;
 
     const currentTvl = pool.currentTvl != null
@@ -4113,8 +4358,12 @@ function _buildTvlPanel(pool, addrs = []) {
             </span>
             <span style="text-align:right;">${currentTvl} ${activationTvl}</span>
         </div>
-        ${_buildTvlLevel(1, l1, pool.tvlWarnDefault)}
-        ${_buildTvlLevel(2, l2, pool.tvlExitDefault)}
+        ${/* Stufe 1 ist seit 2026-08-15 die Voll-Exit-Stufe → mit der Exit-Schwelle
+              vorbefüllen, nicht mit der höheren Warn-Schwelle. Stufe 2 bekommt bewusst
+              keinen Vorschlag: derselbe Wert wie Stufe 1 verstieße sofort gegen die
+              Eskalationsregel (L1 > L2), und ein tieferer Wert wäre frei erfunden. */''}
+        ${_buildTvlLevel(1, l1, pool.tvlExitDefault)}
+        ${_buildTvlLevel(2, l2, null)}
         <div class="settings-row" style="border-top:1px solid var(--border, #2a2a3a);">
             <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
                 ${tr('sliq.swap_usdc', 'Swap → USDC')}
@@ -4744,7 +4993,7 @@ async function _openPoolDepositModal(pool) {
         _fetchWalletBalanceFresh(),
         fetch('/api/config/liquiditybot').catch(() => null),
     ]);
-    if (!state) { alert(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
+    if (!state) { infoModal(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
     const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'ranking';
 
     const tokenALabel = state.tokenALabel;
@@ -5151,8 +5400,8 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
         _fetchPoolState(pool.id),
         fetch('/api/config/liquiditybot').catch(() => null),
     ]);
-    if (!state) { alert(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
-    if (!state.position) { alert(tr('sliq.no_open_position', 'Keine offene Position – Auszahlung nicht möglich.')); return; }
+    if (!state) { infoModal(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
+    if (!state.position) { infoModal(tr('sliq.no_open_position', 'Keine offene Position – Auszahlung nicht möglich.')); return; }
     const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'ranking';
 
     const tokenALabel = state.tokenALabel;

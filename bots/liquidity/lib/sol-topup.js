@@ -85,6 +85,14 @@ export async function ensureWalletSol(db, keypair, connection, { minSol, targetS
         minSol,
         targetSol,
         candidates,
+        // 🔒 Der Logger MUSS durchgereicht werden: ensureSolBalance() erklärt genau hier,
+        // warum ein Topup nichts bewirkt hat ("kein Preis verfügbar", "unter Mindest-Swap
+        // … übersprungen", "Ziel nicht erreicht"). Fehlt er, greift dort der Default-No-Op
+        // und im Journal ist nur noch der Erfolgsfall sichtbar — dann sieht ein
+        // ausbleibender Topup exakt so aus wie eine tote Selbstheilung (Vorfall
+        // forge-pub1 2026-08-13: 15 h scheinbar wirkungslos, tatsächlich schlicht 0 USDC
+        // im Wallet; die Diagnosezeile dazu wurde verschluckt).
+        log,
         getSolBalance: () => getSolBalanceFresh(keypair.publicKey),
         getTokenBalance: (mint, decimals) =>
             getTokenBalanceFresh(keypair.publicKey, new PublicKey(mint), decimals),

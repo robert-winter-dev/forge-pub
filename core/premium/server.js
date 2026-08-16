@@ -24,6 +24,7 @@
  *                                   humanisiert (summary/detail statt Roh-JSON)
  *   GET  /premium/unread-count   → { unread: N }
  *   POST /premium/:id/read       → markiert eine einzelne Premium-Nachricht gelesen
+ *   DELETE /premium/:id          → löscht eine einzelne Premium-Nachricht (lokale Kopie)
  *   GET  /support/stream        → Server-Sent Events: Live-Push neuer Nachrichten
  *                                  (Events: support-message, premium-message)
  *
@@ -46,14 +47,16 @@ import { issueActivationToken, getLastIssuedAt } from './activation.js';
 import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
 import { loadMinVersionConfig, signMinVersion, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
 import { startConnectionMonitor, getConnectionStats } from '../../lib/nostr-stats.js';
-import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed, markActivationEventProcessed, pruneMessagesToLimit } from './messages-db.js';
+// npub-Lock der Systemdaten-Freigabe: siehe resetLockReason() weiter unten.
+import { isShareApproved } from '../../lib/health-share-state.js';
+import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed, markActivationEventProcessed, markHealthShareEventProcessed, pruneMessagesToLimit } from './messages-db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: envFile('premium') });
 import {
     loadIdentity, identityExists, loadRelays, loadContacts, fetchProfileNames, createPool,
     createIdentity, setIdentityAlias,
-    sendDirectMessage, subscribeDirectMessages, publishDmRelayList, publishProfile,
+    sendDirectMessage, subscribeDirectMessages, publishDmRelayList, publishProfile, bewertePublishErgebnis,
 } from '../../lib/nostr-client.js';
 
 const PORT = parseInt(process.env.PORT || '3110');
@@ -167,6 +170,28 @@ function classifyPremiumCommand(text) {
         // Versions-Gate (2026-08-06): Fork meldet bei jedem premium-pay.js-Lauf seine
         // Softwareversion, Master antwortet nur, wenn sie unter der Mindestversion liegt.
         'premium-version-check', 'premium-version-too-old',
+        // Systemdaten-Freigabe: 'health-share-apply' ist ein VERALTETES Kommando, das
+        // kein Fork mehr sendet – bleibt hier nur stehen, damit alte, bereits
+        // gespeicherte Nachrichten beim Zurückblättern noch humanisiert statt roh
+        // angezeigt werden. 'health-share-activated' ist der aktuelle Weg: eine
+        // schlichte Identifikations-DM. Muss hier stehen, damit sie als
+        // Kommando erkannt wird — sonst landete sie mit category='support' im Chat-Thread
+        // und würde dort roh als JSON angezeigt statt humanisiert (derselbe Fund wie
+        // 2026-07-31). Landet trotzdem nie sichtbar in "Premium": subscribeDirectMessages()
+        // zweigt für sie VOR dem generischen Insert ab (siehe dort) und trägt den
+        // Absender stattdessen in die Teilnehmerliste ein (health-share-allowlist.js).
+        'health-share-apply', 'health-share-activated',
+        // Master → Fork: Freischaltung bestätigt bzw. widerrufen. Steuert allein die
+        // Premium-Anzeige und den npub-Lock auf dem Fork — das Senden selbst hängt seit
+        // dem Kurswechsel 2026-08-14 nur noch am Haken, nicht mehr an dieser Bestätigung
+        // (siehe maySendReports() in lib/health-share-state.js).
+        'health-share-approved', 'health-share-revoked',
+        // Fork → Master: der stündliche Report.
+        'health-share-report',
+        // Master → Fork: Zugang ruht mangels Daten bzw. läuft wieder. Beides rein
+        // informativ — der Fork ändert daraufhin NICHTS an seinem Zustand und sendet
+        // weiter. Genau das ist die Voraussetzung dafür, dass er von selbst zurückkommt.
+        'health-share-lapsed', 'health-share-resumed',
     ]);
     if (parsed && typeof parsed === 'object' && KNOWN_COMMANDS.has(parsed.cmd)) return parsed;
     return null;
@@ -221,6 +246,27 @@ function humanizePremiumMessage(direction, cmd) {
     switch (cmd.cmd) {
         case 'premium-activate':
             return sd(direction === 'in' ? 'activate_in' : 'activate_out');
+        case 'health-share-apply':
+            return sd(direction === 'in' ? 'health_share_apply_in' : 'health_share_apply_out');
+        // 2026-08-14: Für 'in' kommt der Klartext jetzt vom Absender mit (siehe
+        // master-notify-text.js) statt aus einem lokalen Katalog-Eintrag — der lief
+        // sonst über lib/i18n/de.json in den Fork-Export, obwohl nur der Master ihn
+        // je verschickt. Fallback nur für ältere, bereits gespeicherte Nachrichten
+        // ohne diese Felder — bewusst ohne jede Erklärung des Mechanismus dahinter.
+        case 'health-share-approved':
+            return direction === 'in'
+                ? { summary: cmd.summary ?? 'Systemdaten-Freigabe freigeschaltet', detail: cmd.detail ?? 'Deine Systemdaten-Freigabe ist freigeschaltet.' }
+                : sd('health_share_approved_out');
+        case 'health-share-revoked':
+            return direction === 'in'
+                ? { summary: cmd.summary ?? 'Systemdaten-Freigabe widerrufen', detail: cmd.detail ?? 'Deine Systemdaten-Freigabe wurde widerrufen.' }
+                : sd('health_share_revoked_out');
+        case 'health-share-report':
+            return sd(direction === 'in' ? 'health_share_report_in' : 'health_share_report_out');
+        case 'health-share-lapsed':
+            return sd(direction === 'in' ? 'health_share_lapsed_in' : 'health_share_lapsed_out');
+        case 'health-share-resumed':
+            return sd(direction === 'in' ? 'health_share_resumed_in' : 'health_share_resumed_out');
         case 'premium-token':
             return sd(direction === 'in' ? 'token_in' : 'token_out');
         case 'premium-blob': {
@@ -382,7 +428,10 @@ function startNostrService() {
     // keine private DM zustellen. Replaceable Event, daher unkritisch bei jedem Boot.
     Promise.allSettled(publishDmRelayList(pool, relays, identity))
         .then(results => {
-            const okCount = results.filter(r => r.status === 'fulfilled').length;
+            // bewertePublishErgebnis() statt `status === 'fulfilled'`: nostr-tools resolved
+            // bei Verbindungsfehlern mit einem "connection failure"-String, wodurch die
+            // Quote bisher nicht erreichte Relays mitzählte (siehe lib/nostr-client.js).
+            const okCount = results.filter(r => bewertePublishErgebnis(r).ok).length;
             console.log(`📡  DM-Relay-Liste (kind 10050) veröffentlicht: ${okCount}/${relays.length} Relays bestätigt`);
         });
 
@@ -394,7 +443,7 @@ function startNostrService() {
     const displayName = identity.alias || identity.name;
     Promise.allSettled(publishProfile(pool, relays, identity, { name: displayName }))
         .then(results => {
-            const okCount = results.filter(r => r.status === 'fulfilled').length;
+            const okCount = results.filter(r => bewertePublishErgebnis(r).ok).length;
             console.log(`👤  Profil (kind 0, "${displayName}") veröffentlicht: ${okCount}/${relays.length} Relays bestätigt`);
         });
 
@@ -453,6 +502,44 @@ function startNostrService() {
             return;
         }
 
+        // Stündlicher Systemdaten-Report (2026-08-13, Redesign): landet NICHT mehr
+        // generisch als humanisierte Zeile in der Rubrik "Premium" (dort stand nur
+        // "Systemdaten-Report erhalten", nie der tatsächliche Inhalt) – stattdessen
+        // meldet handleHealthShareReport() den vollen, für Menschen lesbaren Report
+        // als System-Notification (Absender "Monitoring Daten") direkt beim Nexus.
+        // Muss VOR dem generischen Insert unten abzweigen, sonst landet zusätzlich
+        // noch die alte Kurzzeile in "Premium".
+        if (cmd?.cmd === 'health-share-report' && IS_MASTER_IDENTITY) {
+            handleHealthShareReport(rumor).catch(err => {
+                console.error(`[premium] Systemdaten-Report fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
+            });
+            return;
+        }
+
+        // Aktivierung der Systemdaten-Freigabe (2026-08-13, Redesign): landet NICHT in
+        // "Premium" (dort stünde nur eine Kurzzeile ohne Handlungsmöglichkeit) – stattdessen
+        // trägt handleHealthShareActivated() den Absender in die Teilnehmerliste ein, die
+        // im Tab "Health Monitor > Share" sichtbar ist und von dort aus freigeschaltet wird.
+        if (cmd?.cmd === 'health-share-activated' && IS_MASTER_IDENTITY) {
+            handleHealthShareActivated(rumor).catch(err => {
+                console.error(`[premium] Aktivierung Systemdaten-Freigabe fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
+            });
+            return;
+        }
+
+        // Stündliche Versions-Meldung (2026-08-16): landet NICHT mehr in "Premium" –
+        // Sie wurde dort als reines Rauschen ohne Mehrwert eingestuft ("Ein Fork
+        // hat seine Softwareversion gemeldet (…)"). handleVersionCheck() prüft weiterhin
+        // im Hintergrund den Mindestversions-Kill-Switch, erzeugt aber keine sichtbare
+        // Zeile mehr. Muss VOR dem generischen Insert unten abzweigen, sonst landet
+        // zusätzlich noch die alte Kurzzeile in "Premium".
+        if (cmd?.cmd === 'premium-version-check' && IS_MASTER_IDENTITY) {
+            handleVersionCheck(rumor).catch(err => {
+                console.error(`[premium] Versions-Meldung fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
+            });
+            return;
+        }
+
         const db = openMessagesDb();
         try {
             const timestamp = (rumor.created_at ?? Math.floor(Date.now() / 1000)) * 1000;
@@ -506,9 +593,6 @@ function startNostrService() {
                     handlePremiumCommand(rumor).catch(err => {
                         console.error(`[premium] Aktivierungs-Befehl fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
                     });
-                    handleVersionCheck(rumor).catch(err => {
-                        console.error(`[premium] Versions-Meldung fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
-                    });
                 } else {
                     // FORGE-public-Fork-Seite: premium-blob-sealed wird bereits weiter oben
                     // (vor dem DB-Insert) an handleBlobDelivery() durchgereicht – hier nur
@@ -517,6 +601,9 @@ function startNostrService() {
                     // und ein evtl. "Version zu alt"-Hinweis vom Master.
                     handlePricingDelivery(rumor).catch(err => {
                         console.error(`[premium] Preislisten-Verarbeitung fehlgeschlagen: ${err.message}`);
+                    });
+                    handleHealthShareDecision(rumor).catch(err => {
+                        console.error(`[premium] Freischalt-Entscheidung fehlgeschlagen: ${err.message}`);
                     });
                     handleVersionTooOld(rumor).catch(err => {
                         console.error(`[premium] Versions-Hinweis-Verarbeitung fehlgeschlagen: ${err.message}`);
@@ -535,6 +622,194 @@ function startNostrService() {
      * Aktuell nur "premium-activate" (Punkt 2 der Premium-Anbindung); der Zahlungs-Watcher
      * (Punkt 3, noch ungebaut) liest lookupActivationToken() beim Memo-Abgleich.
      */
+    /**
+     * Aktivierung der Systemdaten-Freigabe (MASTER-ONLY). Legt den Absender NUR in der
+     * Teilnehmerliste ab — freigeschaltet wird ausschließlich durch einen menschlichen
+     * Klick im Tab "Health Monitor > Share" (Auswahl "Premium User").
+     *
+     * Die Nachricht ist reine Identifikation, kein Datenbeweis — der eigentliche Beleg,
+     * dass Daten fließen, kommt über die stündlichen Reports
+     * (`handleHealthShareReport()`), die unabhängig von der Freischaltung eintreffen.
+     *
+     * 🔒 **Der npub kommt aus `rumor.pubkey`, nie aus dem Nachrichtentext.** Der
+     * Absender ist über NIP-17/NIP-44 kryptografisch beglaubigt, der Inhalt dagegen
+     * frei erfindbar. Ein Feld wie `cmd.npub` zu verwenden, wäre ein Confused Deputy:
+     * jeder könnte sich im Namen eines fremden npubs aktivieren — oder, schlimmer, eine
+     * bereits freigeschaltete Bindung auf eine eigene Wallet umbiegen.
+     *
+     * Die Aktivierung selbst ist bewusst KEINE Sicherheitshürde: sie läuft über denselben
+     * Kanal wie alles andere und ist genauso fälschbar. Der Schutz entsteht allein
+     * daraus, dass ein Mensch freischaltet — und dass er jederzeit widerrufen kann.
+     */
+    async function handleHealthShareActivated(rumor) {
+        let cmd;
+        try {
+            cmd = JSON.parse(rumor.content ?? '');
+        } catch {
+            return; // normaler Chat-Text
+        }
+        if (cmd?.cmd !== 'health-share-activated' || typeof rumor.pubkey !== 'string') return;
+
+        // Backlog-Replay-Schutz über die Rumor-ID, nie über einen Zeitstempel: NIP-17
+        // randomisiert `created_at` der äußeren Hülle absichtlich. Ohne diesen Dedup
+        // könnte ein bereits widerrufener npub allein durch den nächsten
+        // Watchdog-Resubscribe wieder auf der Prüfliste landen.
+        const dedupDb = openMessagesDb();
+        let isNew;
+        try {
+            isNew = markHealthShareEventProcessed(dedupDb, rumor.id ?? null);
+        } finally {
+            dedupDb.close();
+        }
+        if (!isNew) return;
+
+        // Anti-Chatter-Bremse, keine Zugangskontrolle (dieselbe Einordnung wie beim
+        // Aktivierungs-Cooldown oben): eine Aktivierung ist kostenlos und offen, die
+        // eigentliche Grenze ist der menschliche Klick. Das Limit verhindert nur, dass
+        // ein hektischer oder bösartiger Client (z.B. schnelles Toggle-Flattern) die
+        // Prüfliste mit DMs zumüllt.
+        const ACTIVATE_COOLDOWN_MS = 5 * 60 * 1000;
+        const { listParticipants, recordActivation } = await import('./health-share-allowlist.js');
+        const existing = listParticipants().find(p => p.pubkeyHex === rumor.pubkey);
+        if (existing?.appliedAt != null && Date.now() - existing.appliedAt < ACTIVATE_COOLDOWN_MS) {
+            console.warn(`[premium] Aktivierung von ${rumor.pubkey.slice(0, 12)}… ignoriert (Rate-Limit).`);
+            return;
+        }
+
+        const result = recordActivation({
+            pubkeyHex:   rumor.pubkey,   // 🔒 signierter Absender, nicht cmd.*
+            payerWallet: typeof cmd.wallet === 'string' ? cmd.wallet : null,
+            displayName: typeof cmd.alias === 'string' ? cmd.alias : null,
+        });
+
+        if (!result.ok) {
+            console.warn(`[premium] Aktivierung von ${rumor.pubkey.slice(0, 12)}… abgelehnt: ${result.reason}`);
+            return;
+        }
+
+        // 🔒 Wer bereits freigeschaltet (oder nur ruhend) ist, bekommt die Bestätigung
+        // ERNEUT — sonst entsteht eine Sackgasse: Der Fork setzt seinen Freischalt-Zustand
+        // zurück, sobald der Nutzer den Haken entfernt. Beim erneuten Einschalten aktiviert
+        // er sich neu, der Master sieht "kennt ihn schon" und schwieg bisher — der Fork
+        // bekam sein `approved_at` nie zurück und hätte nie wieder gesendet.
+        // Idempotent und harmlos: Die Nachricht sagt genau das, was zutrifft.
+        if (result.status === 'approved' || result.status === 'lapsed') {
+            try {
+                const { buildHealthShareDecisionText } = await import('./master-notify-text.js');
+                const { summary, detail } = buildHealthShareDecisionText('approved');
+                await nostrService.sendSupportMessage(rumor.pubkey, JSON.stringify({ cmd: 'health-share-approved', summary, detail }));
+                console.log(`[premium] ${rumor.pubkey.slice(0, 12)}… ist bereits freigeschaltet – Bestätigung erneut zugestellt.`);
+            } catch (err) {
+                console.warn(`[premium] erneute Bestätigung nicht zugestellt: ${err.message}`);
+            }
+            return;
+        }
+        console.log(`[premium] Aktivierung Systemdaten-Freigabe von ${rumor.pubkey.slice(0, 12)}… → ${result.created ? 'neu aufgenommen' : 'aktualisiert'}. `
+            + `Sichtbar im Health Monitor unter "Share".`);
+    }
+
+    /**
+     * FORK-Seite: Der Master bestätigt oder widerruft die Freischaltung. Steuert die
+     * Premium-Anzeige und den npub-Lock auf dem Fork (siehe `resetLockReason()` unten).
+     *
+     * 🔒 Absender MUSS der fest hinterlegte Master-Kontakt sein. Ohne diese Prüfung
+     * könnte ein beliebiger Nostr-Account eine „Freischaltung" vortäuschen und den Fork
+     * damit zum Senden seiner Systemdaten an einen Fremden bewegen — die Zustellung ist
+     * gegen so etwas versiegelt, das SENDEN wäre es nicht. Gleiches Muster wie
+     * handleBlobDelivery() (Schicht 1 dort).
+     */
+    async function handleHealthShareDecision(rumor) {
+        let cmd;
+        try {
+            cmd = JSON.parse(rumor.content ?? '');
+        } catch { return; }
+        if (cmd?.cmd !== 'health-share-approved' && cmd?.cmd !== 'health-share-revoked') return;
+
+        const masterContact = loadContacts().find(c => c.id === 'forge-master');
+        if (!masterContact || rumor.pubkey !== masterContact.pubkeyHex) {
+            console.warn(`[premium] Freischalt-Entscheidung von unbekanntem Absender verworfen (${rumor.pubkey}).`);
+            return;
+        }
+
+        const { setApproved } = await import('../../lib/health-share-state.js');
+        const approved = cmd.cmd === 'health-share-approved';
+        setApproved(approved);
+        console.log(`[premium] Systemdaten-Freigabe vom Master ${approved ? 'freigeschaltet' : 'widerrufen'}.`);
+    }
+
+    /**
+     * Stündlicher Report eines FREIGESCHALTETEN Teilnehmers (MASTER-ONLY).
+     * Ein Report erkauft genau eine Stunde — die Bewertung dazu liegt in
+     * `isEligibleForHour()`, hier wird nur abgelegt.
+     *
+     * 🔒 npub wieder aus `rumor.pubkey`. `recordReport()` lehnt alles ab, was nicht
+     * freigeschaltet ist — ein Report eines Unbekannten wird also nicht gespeichert,
+     * auch nicht „vorsorglich".
+     */
+    async function handleHealthShareReport(rumor) {
+        let cmd;
+        try {
+            cmd = JSON.parse(rumor.content ?? '');
+        } catch { return; }
+        if (cmd?.cmd !== 'health-share-report' || typeof rumor.pubkey !== 'string') return;
+
+        // Dedup: der Fork sendet bei ausbleibender Bestätigung bis zu 3× (Senden kostet
+        // nichts, anders als eine Doppelzahlung). Ohne Dedup landete derselbe Report
+        // mehrfach im Log — die Sendeversuche sind ausdrücklich unter dieser Bedingung
+        // zugelassen worden.
+        const dedupDb = openMessagesDb();
+        let isNew;
+        try {
+            isNew = markHealthShareEventProcessed(dedupDb, rumor.id ?? null);
+        } finally {
+            dedupDb.close();
+        }
+        if (!isNew) return;
+
+        const { recordReport } = await import('./health-share-allowlist.js');
+        const report = cmd.report ?? {};
+        const res = recordReport({
+            eventId:     rumor.id,
+            pubkeyHex:   rumor.pubkey,          // 🔒 signierter Absender
+            windowFrom:  Date.parse(report.windowFrom) || null,
+            windowTo:    Date.parse(report.windowTo) || null,
+            version:     typeof report.version === 'string' ? report.version.slice(0, 24) : null,
+            versionCode: Number.isInteger(report.versionCode) ? report.versionCode : null,
+            os:          typeof report.os === 'string' ? report.os.slice(0, 64) : null,
+            bytes:       (rumor.content ?? '').length,
+            services:    Array.isArray(report.services) ? report.services : [],
+            processes:   Array.isArray(report.processes) ? report.processes : [],
+        });
+        if (!res.recorded && !res.duplicate) {
+            console.warn(`[premium] Report von ${rumor.pubkey.slice(0, 12)}… nicht gezählt: ${res.reason}`);
+            return;
+        }
+
+        // 2026-08-13→2026-08-14: Der volle Report-Text stand hier eine Weile als
+        // System-Notification im Message Center ("Monitoring Daten"). Mit dem
+        // Kurswechsel (Opt-in-Telemetrie statt Daten-gegen-Premium, potenziell viele
+        // Absender) wäre das Postfach damit zunehmend von stündlichen Routine-Reports
+        // verdrängt worden. Der Master sieht den Absender seither nur im Journal und
+        // aggregiert im Tab "Health Monitor > Share" (Sendevolumen je npub); der
+        // Nachrichtentext selbst bleibt Sache der jeweiligen Fork-Installation (siehe
+        // deren eigener Verlauf, recordSentReport() in lib/health-share-state.js).
+        // Seit 2026-08-15 (Konzept Report-Inhalte, Ticket CORE#0298-Folge) hält
+        // recordReport() den strukturierten Inhalt trotzdem fest — normalisiert in
+        // health_share_service_facts/health_share_process_facts, nicht als Text.
+        console.log(`[premium] Report von ${rumor.pubkey.slice(0, 12)}… entgegengenommen (${report.services?.length ?? 0} Dienste, ${report.processes?.length ?? 0} Prozesse).`);
+
+        // Der Zugang lief wieder an — dem Nutzer Bescheid geben, weil er zuvor die
+        // "Premium ruht"-Nachricht bekommen hat und sonst im Unklaren bliebe.
+        if (res.reactivated) {
+            console.log(`[premium] Systemdaten-Freigabe von ${rumor.pubkey.slice(0, 12)}… wieder aktiv (neue Daten eingetroffen).`);
+            try {
+                await nostrService.sendSupportMessage(rumor.pubkey, JSON.stringify({ cmd: 'health-share-resumed' }));
+            } catch (err) {
+                console.warn(`[premium] "wieder aktiv"-Nachricht nicht zugestellt: ${err.message}`);
+            }
+        }
+    }
+
     async function handlePremiumCommand(rumor) {
         let cmd;
         try {
@@ -926,17 +1201,47 @@ const nostrService = startNostrService();
 const app = express();
 app.use(express.json());
 
+/**
+ * Warum der Nostr-Zugang gerade nicht gewechselt werden darf — `null`, wenn er es darf.
+ *
+ * Zwei grundverschiedene Gründe, die deshalb unterscheidbar bleiben müssen: der eine ist
+ * dauerhaft und betrifft nur den Betreiber, der andere ist selbst auflösbar (Haken
+ * entfernen). Ein bloßes `true` zwänge die Oberfläche zu raten, welchen Rat sie gibt.
+ *
+ * 🔒 Der Freigabe-Grund greift erst ab der FREISCHALTUNG, nicht schon ab dem Haken.
+ * Zu schützen ist allein die Zusage: Sie hängt am npub, und ein Wechsel würde sie
+ * verlieren. Wer nur Daten teilt, verliert beim Wechsel nichts — eine Sperre dafür
+ * wäre unbegründet.
+ */
+function resetLockReason() {
+    if (IS_MASTER_IDENTITY) return 'master';
+    try {
+        // Erst hier lesen, damit der Master die Fork-Tabelle nie anlegt.
+        if (isShareApproved()) return 'health-share';
+    } catch { /* settings.db nicht lesbar – dann eben keine Sperre aus diesem Grund */ }
+    return null;
+}
+
 app.get('/identity', (_req, res) => {
     if (!identityExists(IDENTITY_NAME)) {
         return res.status(404).json({ error: t('msg.support.identity_missing_setup', { name: IDENTITY_NAME }) });
     }
     const id = loadIdentity(IDENTITY_NAME);
+    const lockReason = resetLockReason();
     res.json({
         name: id.name,
         alias: id.alias ?? null,
         npub: id.npub,
         pubkeyHex: id.pubkeyHex,
-        resetLocked: IS_MASTER_IDENTITY,
+        resetLocked: lockReason !== null,
+        resetLockReason: lockReason,
+        // Explizites Flag statt eines Rückschlusses aus resetLockReason === 'master'
+        // (2026-08-16): Der Sperrgrund ist ein anderer Sachverhalt und kann sich
+        // ändern, ohne dass sich die Identitätsart ändert. Das Message Center
+        // entscheidet daran, ob beim Verfassen eine freie npub-Eingabe erscheint —
+        // der Master schreibt an beliebige Nutzer, eine FORGE-public-Installation
+        // ausschließlich an den Master (siehe openCompose() in message.js).
+        isMaster: IS_MASTER_IDENTITY,
     });
 });
 
@@ -997,10 +1302,16 @@ app.post('/identity/alias', async (req, res) => {
  * wechsel, kein Erreichbarkeitsproblem).
  */
 app.post('/identity/regenerate', (req, res) => {
-    if (IS_MASTER_IDENTITY) {
+    // 🔒 Serverseitig, nicht nur als deaktivierter Knopf: die Oberfläche ist nur die
+    // Anzeige der Sperre, nicht die Sperre selbst.
+    const lockReason = resetLockReason();
+    if (lockReason === 'master') {
         return res.status(403).json({
             error: t('msg.support.master_no_reset'),
         });
+    }
+    if (lockReason === 'health-share') {
+        return res.status(403).json({ error: t('msg.support.health_share_no_reset') });
     }
     if (req.body?.confirm !== true) {
         return res.status(400).json({
@@ -1100,6 +1411,13 @@ app.get('/support/unread-count', (_req, res) => {
 
 // ?threadId= wählt das Anliegen aus; fehlt der Parameter (oder ist leer), gilt
 // das der "alte" Sammel-Thread ohne Markierung (thread_id IS NULL).
+// Reiner Lesezugriff – markiert NICHTS als gelesen (Vorgabe 2026-08-16). Bis dahin
+// quittierte schon der Abruf selbst, wodurch auch ein Hintergrund-Refresh (SSE-Push
+// oder 30-Sekunden-Poll bei geöffnetem Verlauf) eine gerade erst eingetroffene
+// Nachricht als gelesen buchte – der Zähler an der Rubrik sprang dann nie an.
+// Gelesen wird ausschließlich über POST .../read, ausgelöst durch genau zwei
+// Nutzeraktionen: Klick auf eine Konversation in der Liste oder auf den
+// "alle als gelesen"-Haken.
 app.get('/support/thread/:peer', async (req, res) => {
     const peerPubkeyHex = resolvePubkeyHex(req.params.peer);
     if (!peerPubkeyHex) return res.status(400).json({ error: t('msg.support.invalid_pubkey') });
@@ -1115,10 +1433,6 @@ app.get('/support/thread/:peer', async (req, res) => {
             ORDER BY timestamp ASC
             LIMIT 500
         `).all(peerPubkeyHex, threadId);
-        db.prepare(`
-            UPDATE nostr_support_messages SET read = 1
-            WHERE peer_pubkey = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND direction = 'in' AND read = 0 AND category = 'support'
-        `).run(peerPubkeyHex, threadId);
     } finally {
         db.close();
     }
@@ -1130,6 +1444,28 @@ app.get('/support/thread/:peer', async (req, res) => {
         peerName: names[peerPubkeyHex] ?? null,
         threadId,
     });
+});
+
+// Quittiert ein Anliegen als gelesen. Bewusst ein eigener Schreib-Endpoint statt
+// eines Seiteneffekts im GET oben: nur eine Nutzeraktion darf den Zähler
+// zurücksetzen, nicht das bloße Nachladen des Verlaufs im Hintergrund.
+// Gezählt wird pro Thread (siehe GET /support/threads), deshalb markiert dies
+// alle eingehenden Nachrichten des Anliegens auf einmal.
+app.post('/support/thread/:peer/read', (req, res) => {
+    const peerPubkeyHex = resolvePubkeyHex(req.params.peer);
+    if (!peerPubkeyHex) return res.status(400).json({ error: t('msg.support.invalid_pubkey') });
+    const threadId = typeof req.query.threadId === 'string' && req.query.threadId ? req.query.threadId : null;
+
+    const db = openMessagesDb();
+    try {
+        const info = db.prepare(`
+            UPDATE nostr_support_messages SET read = 1
+            WHERE peer_pubkey = ? AND COALESCE(thread_id,'') = COALESCE(?,'') AND direction = 'in' AND read = 0 AND category = 'support'
+        `).run(peerPubkeyHex, threadId);
+        res.json({ ok: true, marked: info.changes });
+    } finally {
+        db.close();
+    }
 });
 
 // Löscht ein einzelnes Anliegen (nicht alle Konversationen mit dieser
@@ -1238,6 +1574,38 @@ app.post('/premium/:id/read', (req, res) => {
     }
 });
 
+// Löscht eine einzelne Premium-Nachricht (Message Center, 2026-08-14 – vorher war
+// Löschen nur für ganze Support-Konversationen möglich). Lokal only, wie
+// /support/thread/:peer: auf den Relays verbreitete Events bleiben dort bestehen.
+//
+// Der Tombstone in nostr_deleted_events ist hier PFLICHT und kein Beiwerk: ohne ihn
+// liefert ein Relay-Reconnect (since-Gap-Fill) oder ein Neustart dieselbe DM erneut
+// aus, und der Dedup über UNIQUE event_id greift nicht mehr, weil die Zeile weg ist
+// — exakt das Symptom "gelöschte Nachricht taucht Stunden später wieder auf"
+// (2026-07-30). Lokal protokollierte Ereignisse (z.B. ausgeführte Zahlungen) haben
+// kein event_id; markEventsDeleted() bekommt dann eine leere Liste.
+app.delete('/premium/:id', (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: t('msg.support.invalid_id') });
+
+    const db = openMessagesDb();
+    let changes;
+    try {
+        const eventIds = db.prepare(
+            `SELECT event_id FROM nostr_support_messages
+             WHERE id = ? AND category = 'premium' AND event_id IS NOT NULL`
+        ).all(id).map(r => r.event_id);
+        markEventsDeleted(db, eventIds);
+
+        changes = db.prepare(
+            `DELETE FROM nostr_support_messages WHERE id = ? AND category = 'premium'`
+        ).run(id).changes;
+    } finally {
+        db.close();
+    }
+    res.json({ ok: true, deletedMessages: changes });
+});
+
 app.get('/support/stream', (req, res) => {
     res.set({
         'Content-Type':      'text/event-stream',
@@ -1289,11 +1657,213 @@ app.post('/support/send', async (req, res) => {
 
     try {
         await nostrService.sendSupportMessage(peerPubkeyHex, text, threadId);
-        res.json({ ok: true, threadId });
+        // peerPubkey (hex) mitgeben: der Absender darf die Gegenstelle als npub
+        // übergeben haben (freie Eingabe auf dem Master), braucht danach aber die
+        // Hex-Form, um den frisch angelegten Verlauf zu öffnen.
+        res.json({ ok: true, threadId, peerPubkey: peerPubkeyHex });
     } catch (err) {
         res.status(502).json({ error: `Senden fehlgeschlagen: ${err.message}` });
     }
 });
+
+/**
+ * Systemdaten-Freigabe: schickt GENAU EINE Identifikations-DM an den Master
+ * ("Health Monitor: Daten teilen aktiviert.").
+ *
+ * Bewusst NICHT über sendSupportMessage(): die legt lokal eine Zeile in "Premium" ab, für
+ * dieses rein technische Identifikations-Signal gibt es dort nichts zu zeigen (anders
+ * als beim Stundenreport, siehe /health-share/send) — sendDirectMessage() verschickt
+ * nur die DM.
+ *
+ * 🔒 Schaltet NICHTS frei — das bleibt ausschließlich ein menschlicher Klick auf dem
+ * Master (Tab "Health Monitor > Share"). Der Fork sendet ab jetzt trotzdem schon seine
+ * stündlichen Reports (siehe bin/health-share-send.js), sobald `enabled` gesetzt ist;
+ * ob daraus Premium wird, entscheidet allein die Freischaltung dort.
+ *
+ * 🔒 Die Premium-Wallet-Pubkey liegt bei, weil die Zustellung gegen genau diesen
+ * Schlüssel versiegelt wird (lib/premium-payer-binding.js) und ein Nicht-Zahler keine
+ * Zahlung hinterlässt, aus der der Master sie lesen könnte.
+ */
+app.post('/health-share/activate', async (_req, res) => {
+    const { isForkInstance } = await import('../../lib/premium-identity-context.js');
+    if (!isForkInstance()) return res.status(403).json({ error: 'Nur auf einer FORGE-public-Installation verfügbar.' });
+    if (!nostrService) return res.status(503).json({ error: t('msg.support.nostr_not_ready') });
+
+    const masterContact = loadContacts().find(c => c.id === 'forge-master');
+    if (!masterContact?.pubkeyHex) {
+        return res.status(503).json({ error: 'FORGE-Master-Kontakt ist nicht konfiguriert.' });
+    }
+
+    const { getPremiumPublicKey, walletExists } = await import('../../lib/premium-wallet.js');
+    if (!walletExists()) {
+        return res.status(422).json({ error: 'Kein Premium-Wallet vorhanden – ohne es kann der Master die Daten nicht versiegelt zustellen.' });
+    }
+    const wallet = getPremiumPublicKey();
+    if (!wallet) return res.status(422).json({ error: 'Premium-Wallet-Adresse nicht lesbar.' });
+
+    try {
+        const alias = nostrService.identity.alias || nostrService.identity.name || null;
+        const pubs = sendDirectMessage(
+            nostrService.pool, nostrService.relays, nostrService.identity,
+            masterContact.pubkeyHex,
+            JSON.stringify({ cmd: 'health-share-activated', wallet, alias }),
+        );
+        await Promise.any(pubs);
+
+        const { recordApplicationSent } = await import('../../lib/health-share-state.js');
+        recordApplicationSent();
+        res.json({ ok: true, sentAt: Date.now() });
+    } catch (err) {
+        res.status(502).json({ error: `Aktivierung konnte nicht gesendet werden: ${err.message}` });
+    }
+});
+
+/**
+ * FORK-ONLY: verschickt einen fertigen Stundenreport an den Master.
+ *
+ * Der Report wird bewusst NICHT hier gebaut, sondern von bin/health-share-send.js
+ * übergeben: dort sitzt auch die Freischalt-Prüfung und die Wiederhol-Logik. Dieser
+ * Endpunkt ist reiner Transport — er hält nur den Relay-Pool, den ein kurzlebiges
+ * Cron-Skript nicht sinnvoll selbst aufbauen kann.
+ *
+ * 🔒 Zweite, unabhängige Freischalt-Prüfung: Dieser Endpunkt ist über forge-settings
+ * erreichbar, und „der Aufrufer hat schon geprüft" ist keine Zusicherung, auf die sich
+ * ein Sendepfad für Systemdaten verlassen darf.
+ */
+app.post('/health-share/send', async (req, res) => {
+    const { isForkInstance } = await import('../../lib/premium-identity-context.js');
+    if (!isForkInstance()) return res.status(403).json({ error: 'Nur auf einer FORGE-public-Installation verfügbar.' });
+    if (!nostrService) return res.status(503).json({ error: t('msg.support.nostr_not_ready') });
+
+    const { maySendReports } = await import('../../lib/health-share-state.js');
+    if (!maySendReports()) return res.status(403).json({ error: 'Nicht freigeschaltet – es wird nichts gesendet.' });
+
+    const report = req.body?.report;
+    if (!report || typeof report !== 'object') return res.status(400).json({ error: 'kein Report übergeben' });
+
+    const masterContact = loadContacts().find(c => c.id === 'forge-master');
+    if (!masterContact?.pubkeyHex) return res.status(503).json({ error: 'FORGE-Master-Kontakt ist nicht konfiguriert.' });
+
+    try {
+        // Bewusst NICHT nostrService.sendSupportMessage(): die legt lokal eine
+        // generische Zeile in der Rubrik "Premium" ab ("Systemdaten-Report gesendet",
+        // ohne Inhalt) – genau das versprach die Freigabe-Seite ("Daten teilen") nie
+        // einzuhalten. sendDirectMessage() verschickt nur die DM an den Master, die
+        // lokale Sichtbarkeit übernimmt die System-Notification unten (Festlegung
+        // 2026-08-13, siehe auch handleHealthShareReport() für die Master-Seite).
+        const pubs = sendDirectMessage(
+            nostrService.pool, nostrService.relays, nostrService.identity,
+            masterContact.pubkeyHex,
+            JSON.stringify({ cmd: 'health-share-report', report }),
+        );
+        await Promise.any(pubs);
+
+        // Lokale Sichtbarkeit (Kurswechsel 2026-08-14): nicht mehr über das Message
+        // Center, sondern über den eigenen Verlauf im Health Monitor > „Daten teilen"
+        // (recordSentReport(), siehe dortige Anzeige). Ein stündlicher Report ist
+        // Telemetrie, kein Ereignis für den gemeinsamen Posteingang.
+        try {
+            const { formatHealthReportText } = await import('../../lib/health-report.js');
+            const { recordSentReport } = await import('../../lib/health-share-state.js');
+            recordSentReport(formatHealthReportText(report));
+        } catch (err) {
+            console.warn(`[premium] Report gesendet, aber lokal nicht im Verlauf gespeichert: ${err.message}`);
+        }
+
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(502).json({ error: err.message });
+    }
+});
+
+/**
+ * MASTER-ONLY: teilt einem Teilnehmer die Freischaltungs-Entscheidung mit. Aufgerufen
+ * von bots/settings/routes/health-share.js NACH einer erfolgreichen Freischaltung oder
+ * einem Widerruf.
+ *
+ * Ohne diese Nachricht wüsste der Fork nicht, dass die Freischaltung sich geändert hat
+ * — `approved_at` bliebe lokal auf dem alten Stand, Premium-Anzeige und npub-Lock
+ * liefen der tatsächlichen Master-Entscheidung hinterher.
+ *
+ * Best-effort — schlägt der Versand fehl, bleibt die Entscheidung in der Allowlist
+ * trotzdem bestehen. Die Alternative (Entscheidung zurückrollen, weil ein Relay
+ * gerade klemmt) wäre schlechter: ein Widerruf muss greifen, auch wenn der Betroffene
+ * die Nachricht nicht erhält.
+ */
+app.post('/health-share/notify', async (req, res) => {
+    if (!IS_MASTER_IDENTITY) return res.status(403).json({ error: 'Nur auf dem FORGE Master verfügbar.' });
+    if (!nostrService) return res.status(503).json({ error: t('msg.support.nostr_not_ready') });
+
+    const pubkeyHex = String(req.body?.pubkey ?? '');
+    const decision  = String(req.body?.decision ?? '');
+    if (!/^[0-9a-f]{64}$/.test(pubkeyHex)) return res.status(400).json({ error: 'ungültiger Pubkey' });
+    if (decision !== 'approved' && decision !== 'revoked') return res.status(400).json({ error: 'ungültige Entscheidung' });
+
+    try {
+        // Klartext kommt aus master-notify-text.js (bewusst NICHT im Fork-Export, siehe
+        // dortiger Kopfkommentar) und wird als Teil der Nutzlast mitgeschickt — der Fork
+        // zeigt beim Empfang nur an, was ankam, statt es aus einem eigenen Katalog zu
+        // rekonstruieren (siehe humanizePremiumMessage() unten).
+        const { buildHealthShareDecisionText } = await import('./master-notify-text.js');
+        const { summary, detail } = buildHealthShareDecisionText(decision);
+        await nostrService.sendSupportMessage(pubkeyHex, JSON.stringify({ cmd: `health-share-${decision}`, summary, detail }));
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(502).json({ error: err.message });
+    }
+});
+
+/**
+ * MASTER-ONLY: löst Nostr-Pubkeys in Profil-Nicks auf (kind-0-Lookup, gleicher
+ * gecachte Weg wie bei Support-Threads, siehe resolveProfileNames() oben).
+ *
+ * 2026-08-14 (Meldung „der Nick fehlt"): Die Admin-Übersicht
+ * (bots/settings/routes/health-share.js) zeigte bisher `health_share_participants
+ * .display_name` — ein einmaliger Schnappschuss aus der Aktivierungsnachricht
+ * (`identity.alias`). Das Feld ist bei den meisten Installationen NULL, weil
+ * `identity.alias` nur gesetzt ist, wenn der Betreiber im Fork explizit einen
+ * FORGE-Anzeigenamen konfiguriert hat — ein ganz anderes Feld als das Nostr-Profil
+ * (kind 0), das jeder Client publiziert, den der Nutzer tatsächlich nutzt. Live
+ * auflösen liefert denselben Nick, der auch im Support-Thread ("Mit") steht, statt
+ * eines FORGE-internen Zusatzfelds, das kaum je gesetzt ist.
+ */
+app.get('/health-share/profile-names', async (req, res) => {
+    if (!IS_MASTER_IDENTITY) return res.status(403).json({ error: 'Nur auf dem FORGE Master verfügbar.' });
+    const pubkeys = String(req.query.pubkeys ?? '').split(',').map(s => s.trim()).filter(s => /^[0-9a-f]{64}$/.test(s));
+    if (!pubkeys.length) return res.json({ names: {} });
+    const names = await resolveProfileNames(pubkeys);
+    res.json({ names });
+});
+
+/**
+ * MASTER-ONLY: prüft minütlich, wessen Zugang mangels Systemdaten ruht, und schickt genau
+ * EINE Nachricht darüber (Festlegung 2026-08-13: 60 Min Takt + 5 Min Nachfrist).
+ *
+ * Bewusst hier statt im Store: Ein Lesezugriff auf die Allowlist darf keine Nachrichten
+ * verschicken. Der Store markiert den Zustand, dieser Lauf benachrichtigt — die
+ * Doppel-Meldung verhindert `lapse_notified_at` in derselben Transaktion.
+ *
+ * Minütlich statt stündlich, damit die 5-Minuten-Nachfrist auch wirklich eine von 5
+ * Minuten ist und nicht bis zu einer Stunde beträgt.
+ */
+if (IS_MASTER_IDENTITY) {
+    setInterval(async () => {
+        if (!nostrService) return;
+        try {
+            const { takePendingLapseNotifications } = await import('./health-share-allowlist.js');
+            for (const pubkeyHex of takePendingLapseNotifications()) {
+                try {
+                    await nostrService.sendSupportMessage(pubkeyHex, JSON.stringify({ cmd: 'health-share-lapsed' }));
+                    console.log(`[premium] Systemdaten-Freigabe von ${pubkeyHex.slice(0, 12)}… ruht – Nutzer benachrichtigt.`);
+                } catch (err) {
+                    console.warn(`[premium] "Zugang ruht"-Nachricht nicht zugestellt: ${err.message}`);
+                }
+            }
+        } catch (err) {
+            console.warn(`[premium] Prüflauf Systemdaten-Freigabe fehlgeschlagen: ${err.message}`);
+        }
+    }, 60_000).unref?.();
+}
 
 // Ausschließlich localhost – kein LAN-Zugriff, forge-settings proxied.
 app.listen(PORT, '127.0.0.1', () => {

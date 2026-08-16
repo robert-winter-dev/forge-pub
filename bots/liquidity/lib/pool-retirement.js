@@ -9,7 +9,7 @@
  * OB überhaupt ausgelöst wird, entscheidet ausschließlich lib/pool-offer-sync.js
  * (Herkunft, Frische, Vollständigkeit, Bestätigungsfenster — dort ausführlich
  * begründet). Diese Datei führt nur aus, und zwar nach demselben Muster wie die
- * übrigen Exit-Mechanismen (lib/ranking-exit.js, lib/tvl-protection.js):
+ * übrigen Exit-Mechanismen (lib/tvl-protection.js, lib/trailing-stop.js):
  *
  *   State-Machine (persistiert in retire_executions):
  *     preparing → withdrawn → swapped → complete
@@ -202,7 +202,7 @@ export async function executeRetirementExit(pool, db, signal) {
         const { coinsA, coinsB } = await stepWithdraw(pool, db, execId);
         const swappedUsdc = await stepSwap(pool, db, execId, coinsA, coinsB);
 
-        // BEWUSST KEIN capital_flows-Eintrag (anders als ranking-exit/tvl-protection,
+        // BEWUSST KEIN capital_flows-Eintrag (anders als tvl-protection,
         // die den Erlös an eine sendTo-Adresse schicken können): hier verlässt kein
         // Kapital das System, der USDC-Erlös liegt weiter in derselben Wallet. Ein
         // negativer „Abfluss" wäre ein Phantom-Wert, der später in Auswertungen

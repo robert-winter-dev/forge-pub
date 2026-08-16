@@ -5,8 +5,8 @@
     const { EarningsToast }     = await import('./earnings-toast.js?v=20260720a');
     const { renderNotifItem }   = await import('./notifications.js');
     const { NotifHub }          = await import('./notif-hub.js?v=20260720a');
-    const { initMessageBell }   = await import('./message-bell.js?v=20260809a');
-    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260811b');
+    const { initMessageBell }   = await import('./message-bell.js?v=20260816a');
+    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260816a');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
     // Zahlen-/Datumsformate folgen der Sprache (siehe js/i18n.js). t() wird hier

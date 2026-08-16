@@ -1,44 +1,64 @@
 /**
- * FORGE Message Center – genau ein Vollbreite-Panel, keine eigene Navigation mehr
+ * FORGE Message Center – Postfach mit Rubriken-Reitern und Zwei-Spalten-Ansicht
  *
- * Menüpunkte: System (read-only Spiegel der Notifications aus nexus.db), Premium
+ * Rubriken: System (read-only Spiegel der Notifications aus nexus.db), Premium
  * (humanisierte Premium-Protokoll-Nachrichten, kein JSON-Rohtext), Support
- * (Nostr-DM-Inbox), Einstellungen (Sound/Popups + Nostr-Identität).
+ * (Nostr-DM-Inbox, einzige Rubrik in der man selbst schreiben kann) sowie
+ * Einstellungen (Sound/Popups + Nostr-Identität).
  *
- * Die Umschaltung zwischen den vier Rubriken lief bis 2026-08-08 über ein
- * eigenes Spalten-Menü links; das ist entfallen – Navigation läuft seitdem
- * nur noch über das Hamburger-Menü (Gruppe "Message Center" in nav.js), das
- * per #system/#support/#premium/#einstellungen auf message.html verlinkt. Ein
- * hashchange-Listener (unten) fängt Klicks ab, während die Seite schon offen
- * ist – ohne den würde nur die URL sich ändern, aber nichts sichtbar passieren.
+ * Umbau 2026-08-16 – drei Änderungen gegenüber der Vorversion:
+ *   1. Zwischen System/Support/Premium wird über Reiter direkt unter dem Header
+ *      umgeschaltet (Vorbild: Health Monitor), nicht mehr über das Hamburger-Menü.
+ *      Die Deep-Links message.html#system|#support|#premium bleiben gültig – sie
+ *      wählen jetzt den passenden Reiter (message-bell.js und der Brief-Link im
+ *      Health Monitor hängen daran).
+ *   2. Nachrichten werden NICHT mehr in einem Modal gelesen: links die scrollbare
+ *      Liste, rechts die Detailansicht (siehe .mc-split in message.css). Dasselbe
+ *      gilt fürs Schreiben – Antwort und neue Nachricht stehen ebenfalls rechts.
+ *      Modals bleiben nur für Rückfragen (Löschen, Weiterleiten, Account-Reset, QR).
+ *   3. Keine Seitenzahlen mehr: die Liste lädt beim Herunterscrollen nach
+ *      (loadMore(), Fenstergröße PAGE_SIZE). System holt die Fenster serverseitig
+ *      (?limit=&offset=, siehe routes/messages.js), Premium/Support bekommen ohnehin
+ *      die vollständige Liste (max. 100 je Rubrik) und blenden clientseitig nach.
  *
- * System/Premium/Support teilen sich seit 2026-07-30 dieselbe Grundstruktur:
- * Titel links / Suche rechts in der Toprow (Support zusätzlich mit "Neue
- * Nachricht" ganz rechts), darunter eine Tabelle mit identischer Spaltenbreite
- * in allen drei Rubriken (Thema/Absender/Datum – seit 2026-08-08 statt der
- * vorherigen festen Boxen, siehe mctTableHtml()), Pagination + "alle
- * gelesen"-Haken unten. Löschen (nur Support) läuft über "Konversation
- * löschen" im Thread-Modal, keine eigene Tabellenspalte (siehe supportRowHtml()
- * -Kommentar). Einstellungen ist die einzige verbleibende Nutzerin der alten
- * Detail-Spalte (#mcDetail) – die frühere Kurzform-Liste (#mcList) wurde
- * komplett entfernt, seitdem keine der vier Ansichten sie mehr braucht.
+ * Einstellungen ist bewusst kein Reiter – dort gibt es keine Nachrichtenliste, für
+ * die eine Zwei-Spalten-Ansicht Sinn ergäbe. Die Rubrik hängt als eigener Eintrag
+ * im Hamburger-Menü (nav.js) und schaltet die Seite auf ein Vollbreite-Panel.
  */
 
-import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260811b';
+import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260816a';
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast } from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal } from '/forge/js/modal.js?v=20260731a';
 import {
     initMessageBell, isNotifyEnabled, loadNotifySettings, setNotifyEnabled, getOldestUnreadCategory,
-} from '/forge/js/message-bell.js?v=20260809a';
+} from '/forge/js/message-bell.js?v=20260816a';
 
-// Deep-Link aus dem Hamburger-Menü: #system | #support | #premium | #einstellungen
-const VALID_MENUS = ['system', 'support', 'premium', 'einstellungen'];
-const hashMenu = location.hash.slice(1);
+// Rubriken mit Nachrichtenliste (= Reiter) und die reine Einstellungen-Ansicht.
+const TABS        = ['system', 'support', 'premium'];
+const VALID_MENUS = [...TABS, 'einstellungen'];
+const hashMenu    = location.hash.slice(1);
 const initialMenu = VALID_MENUS.includes(hashMenu) ? hashMenu : 'system';
 
-initNav({ current: `message-${initialMenu}` });
-initFooter({ botName: tr('nav.message_center', 'Message Center') });
+// Wie viele Einträge ein Nachlade-Schritt umfasst. Mehr als eine Bildschirmhöhe,
+// damit beim Scrollen nicht ständig nachgeladen wird; deutlich unter dem
+// 100er-Deckel, den notify-db.js/messages-db.js je Rubrik ohnehin durchsetzen.
+const PAGE_SIZE = 25;
+
+// Deep-Link mit vorausgewähltem Gesprächspartner (z.B. Brief-Icon im Tab
+// "Health Monitor > Daten teilen" auf message.html?peer=<pubkeyHex>#support) – öffnet
+// den Verlauf direkt, statt den Nutzer erst in der Liste suchen zu lassen. Nur ein
+// 64-stelliger Hex-Pubkey wird akzeptiert, alles andere wird stillschweigend
+// ignoriert (kein Fehlerpfad nötig für einen internen, selbst erzeugten Link).
+const peerParam   = new URLSearchParams(location.search).get('peer');
+const initialPeer = peerParam && /^[0-9a-f]{64}$/.test(peerParam) ? peerParam : null;
+
+initNav({ current: initialMenu === 'einstellungen' ? 'message-einstellungen' : 'message-inbox' });
+// Bewusst ohne botName: die zweite Footer-Zeile ist für "<Name>: <Version>" gedacht
+// und wird per id="footerVersion" nachgefüllt (siehe initFooter() in nav.js). Das
+// Message Center hat keine eigene Version zu zeigen – übrig blieb ein nacktes
+// "Message Center:" ohne Wert dahinter (2026-08-16).
+initFooter();
 
 // ── Helfer ───────────────────────────────────────────────────────────────────
 function fmtDateTime(ts) {
@@ -47,10 +67,9 @@ function fmtDateTime(ts) {
     });
     return tr('time.hour_label', '{time} Uhr', { time: text });
 }
-// Lange Form für die Absender-Zeile in der Detailansicht: vierstelliges Jahr, kein
-// Komma ("30.07.2026 13:10 Uhr", Vorgabe 2026-07-30). Bewusst NICHT in den
-// Listen-/Box-Köpfen verwendet – dort ist die Spalte schmal (white-space: nowrap)
-// und die Kurzform genügt, weil der Kontext daneben steht.
+// Lange Form für die Kopfzeilen der Detailansicht: vierstelliges Jahr, kein Komma
+// ("30.07.2026 13:10 Uhr", Vorgabe 2026-07-30). Bewusst NICHT in der Liste – dort ist
+// die Spalte schmal und die Kurzform genügt, weil der Kontext daneben steht.
 function fmtDateTimeLong(ts) {
     const d = new Date(ts);
     const text = d.toLocaleDateString(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -69,41 +88,55 @@ function shortPeer(npub) {
     return npub && npub.length > 20 ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : (npub ?? '');
 }
 // TX-Signaturen (~88 Zeichen) sind deutlich länger als die Solana-Adressen (~44), neben
-// denen sie stehen (z.B. Premium-Zahlungs-Detail "An"/"TX") - kürzen auf ungefähr
+// denen sie stehen (z.B. Premium-Zahlungs-Detail "An"/"TX") – kürzen auf ungefähr
 // dieselbe Anzeigelänge, statt wie shortPeer() auf die kürzere Pubkey-Konvention.
 function truncateToAddressLength(s, keepEachSide = 20) {
     return s && s.length > keepEachSide * 2 + 1 ? `${s.slice(0, keepEachSide)}…${s.slice(-keepEachSide)}` : (s ?? '');
 }
-/**
- * Nur der Nick, ohne Pubkey (Support-Übersichtsliste, Vorgabe vom 2026-08-08).
- * Der Anzeigename ist reiner Freitext im Nostr-Profil (kind 0) – keine eindeutige
- * Kennung, zwei Accounts könnten sich identisch nennen (siehe Support-Chat vom
- * 2026-07-23: "FORGE" als Beispiel). Das ist hier bewusst in Kauf genommen –
- * die eindeutige npub bleibt im Thread-Modal (peerLabelWithNpub() unten)
- * weiterhin sichtbar, dort wo tatsächlich mit der Gegenstelle interagiert wird.
- */
-function nickOrNone(peerName) {
-    return peerName ? esc(peerName) : 'no nick';
-}
-
-/** Kopiert eine volle npub in die Zwischenablage – Klick-Ziel ist .msg-npub-copy
- *  (siehe peerLabelWithNpub() und der globale Klick-Handler am Dateiende). */
+/** Kopiert eine volle npub in die Zwischenablage – Klick-Ziel ist .msg-npub-copy. */
 async function copyNpub(npub) {
     if (!npub) return;
     try {
         await navigator.clipboard.writeText(npub);
-        showToast('npub in die Zwischenablage kopiert', 'success');
+        showToast(tr('msg.npub_copied', 'npub in die Zwischenablage kopiert'), 'success');
     } catch {
         showToast(tr('msg.copy_failed', 'Kopieren fehlgeschlagen'), 'error');
     }
 }
 
+/** Verzögert fn um delay ms nach dem letzten Aufruf – für Live-Suche beim Tippen. */
+function debounce(fn, delay = 250) {
+    let timer;
+    return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay); };
+}
+
+// ── Absender / Empfänger ─────────────────────────────────────────────────────
 /**
- * Absender-/Empfänger-Anzeige im Support-Thread-Modal ("Von"/"Mit"): Nick (falls
- * vorhanden) + gekürzte npub in Klammern, klickbar – kopiert beim Klick die volle
- * npub (siehe copyNpub()). Anders als nickOrNone() (Listenansicht) bleibt die npub
- * hier sichtbar, weil man an dieser Stelle tatsächlich mit der Gegenstelle
- * kommuniziert und sie eindeutig verifizieren können muss.
+ * Beteiligte einer Nachricht – FORGE-weit nach EINER Regel (Vorgabe 2026-08-16):
+ *
+ *   Nostr-Nachricht  → auf beiden Seiten der Nick (Anzeigename), nie eine npub.
+ *                      Eingehend: Nick der Gegenstelle → eigener Nick.
+ *                      Ausgehend: eigener Nick → Nick der Gegenstelle.
+ *   Interne Meldung  → Absender immer "FORGE Public" (diese Instanz hat sie
+ *                      erzeugt), Empfänger immer der Nick des Nutzers.
+ *   Ausnahme System  → Absender ist NICHT "FORGE Public", sondern der Name des
+ *                      betroffenen Bots (`n.botName`) — siehe openSystemMessage().
+ *                      Grund: bei System-Meldungen ist der Urheber (Liquidity Bot/
+ *                      Lending Bot/FORGE-Kern) die relevante Information, nicht die
+ *                      Instanz-Identität.
+ *
+ * Die npub steht nur noch gekürzt in der geöffneten Nachricht (peerLabelWithNpub),
+ * nie in der Liste – für den Nutzer ist sie dort keine brauchbare Information,
+ * er erkennt seine Gegenstelle am Namen.
+ */
+function myNick()   { return currentAlias || tr('msg.forge_public_user', 'FORGE Public User'); }
+function peerNick(name) { return name || tr('msg.forge_master', 'FORGE Master'); }
+function forgePublic()  { return tr('msg.forge_public', 'FORGE Public'); }
+
+/**
+ * "Von"/"An"-Zeilen der Detailansicht. Bei Nostr-Nachrichten steht die gekürzte
+ * npub der Gegenstelle in Klammern hinter dem Nick, klickbar zum Kopieren – hier
+ * kommuniziert der Nutzer tatsächlich mit ihr und muss sie verifizieren können.
  */
 function peerLabelWithNpub(npub, peerName) {
     const short = npub
@@ -112,48 +145,70 @@ function peerLabelWithNpub(npub, peerName) {
     return peerName ? `${esc(peerName)} ${short}` : (short || tr('msg.loading', 'Lade…'));
 }
 
+/** Baut den Von/An-Block der Detailansicht. Werte sind bereits fertiges HTML. */
+function metaHtml(rows) {
+    return `<div class="mc-meta">${rows.map(([label, value]) => `
+        <div class="mc-meta-row"><span class="mc-meta-label">${esc(label)}</span><span>${value}</span></div>`).join('')}</div>`;
+}
+
 // ── Zustand ──────────────────────────────────────────────────────────────────
 let activeMenu   = null;   // 'system' | 'support' | 'premium' | 'einstellungen'
-let activePeer   = null;   // Support: Gegenstelle des gerade offenen Thread-Modals
-let systemCache  = [];     // aktuelle Seite (max. 10 Einträge)
-let systemPage    = 1;
+let activeKey    = null;   // Schlüssel des rechts geöffneten Eintrags (siehe listItems())
+let activePeer   = null;   // Support: Gegenstelle des offenen Verlaufs
+let activeThreadId = null; // Support: Anliegen (thread_id) des offenen Verlaufs, null = alter Sammel-Thread
+let composeOpen  = false;  // rechts steht das Verfassen-Formular statt einer Nachricht
+let currentNpub  = null;
+let currentAlias = null;
+// true nur auf dem FORGE Master (Identität "FORGE.Master", siehe /identity). Steuert
+// allein, ob beim Verfassen eine freie npub-Eingabe erscheint – siehe openCompose().
+let isMasterIdentity = false;
+
+// System: serverseitiges Fenster, wird beim Scrollen verlängert.
+let systemItems   = [];
+let systemHasMore = false;
 let systemSearchQuery = '';
-let systemTotalPages  = 1;
+// Premium/Support: vollständige Liste im Cache (max. 100), clientseitig eingeblendet.
 let premiumCache = [];
+let premiumShown = PAGE_SIZE;
+let premiumSearchQuery = '';
+let supportThreads = [];
+let supportShown = PAGE_SIZE;
+let supportSearchQuery = '';
 
-/** Verzögert fn um delay ms nach dem letzten Aufruf – für Live-Suche beim Tippen. */
-function debounce(fn, delay = 250) {
-    let timer;
-    return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay); };
-}
-
+const elList     = document.getElementById('mcList');
+const elPane     = document.getElementById('mcPane');
+const elMail     = document.getElementById('mcMail');
+const elSettings = document.getElementById('mcSettingsPanel');
 const elDetailBody = document.getElementById('mcDetailBody');
+const elSearch   = document.getElementById('mcSearchInput');
 
-// ── Ungelesen-Zähler je Rubrik (Badge an "System"/"Support"/"Premium" im
-// Hamburger-Menü, seit 2026-08-08 – vorher am jetzt entfallenen Spalten-Menü). ──
+// ── Ungelesen-Zähler ─────────────────────────────────────────────────────────
 // System-Lesestatus liegt seit 2026-08-03 server-seitig im read-Flag (nexus.db,
 // siehe notify-db.js) statt im localStorage – unreadCount kommt fertig aus
-// /api/messages/system, "gelesen markieren" geht über POST .../system/mark-read.
-// Damit sind Brief-Icon (message-bell.js) und Nav-Badge hier automatisch
-// synchron, auch über mehrere Geräte hinweg (vorher lief das pro Browser auseinander).
+// /api/messages/system. Damit sind Brief-Icon, Reiter-Zähler und Nav-Badge
+// automatisch synchron, auch über mehrere Geräte hinweg.
+const unreadCounts = { system: 0, support: 0, premium: 0 };
 
-/** key: 'system' | 'support' | 'premium' – entspricht dem Nav-Item-ID-Suffix "message-<key>". */
-function setBadge(key, n) {
-    setNavBadge(`message-${key}`, n);
-}
+const TAB_COUNT_EL = {
+    system:  document.getElementById('mcTabCountSystem'),
+    support: document.getElementById('mcTabCountSupport'),
+    premium: document.getElementById('mcTabCountPremium'),
+};
 
-// Ein deaktiviertes Notification-Toggle (Einstellungen) unterdrückt NUR den
-// Zähler – die Nachrichten bleiben beim Öffnen des jeweiligen Menüpunkts normal
-// sichtbar, siehe renderSystemPanel()/renderPremiumPanel()/renderSupportPanel().
-function updateSystemBadge(unreadCount) {
-    setBadge('system', isNotifyEnabled('system') ? unreadCount : 0);
-}
-
-/** Vollständige, ungefilterte ID-Liste (unabhängig von einer evtl. aktiven Suche
- *  im System-Tab) – Grundlage für "alle als gelesen". */
-async function fetchAllSystemIds() {
-    const data = await fetchSystemMessages(1, '');
-    return data.allIds ?? [];
+/**
+ * Zähler am Reiter setzen und die Summe an den Hamburger-Eintrag "Nachrichten"
+ * durchreichen (dort steht seit 2026-08-16 nur noch EIN Eintrag statt drei).
+ * Ein abgeschaltetes Benachrichtigungs-Toggle unterdrückt NUR den Zähler – die
+ * Nachrichten selbst bleiben in ihrer Rubrik normal sichtbar.
+ */
+function setUnread(key, n) {
+    unreadCounts[key] = isNotifyEnabled(key) ? (n ?? 0) : 0;
+    const el = TAB_COUNT_EL[key];
+    if (el) {
+        el.textContent = String(unreadCounts[key]);
+        el.hidden = unreadCounts[key] === 0;
+    }
+    setNavBadge('message-inbox', unreadCounts.system + unreadCounts.support + unreadCounts.premium);
 }
 
 async function markSystemRead(ids) {
@@ -164,127 +219,319 @@ async function markSystemRead(ids) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ids }),
         });
-    } catch { /* Nexus nicht erreichbar – Badge bleibt beim nächsten Refresh korrekt */ }
-}
-
-/** Badge unabhängig vom aktiven Tab aktuell halten (ungefiltert). */
-async function refreshSystemBadgeOnly() {
-    try {
-        const data = await fetchSystemMessages(1, '');
-        updateSystemBadge(data.unreadCount ?? 0);
-    } catch { setBadge('system', 0); }
+    } catch { /* Nexus nicht erreichbar – Zähler stimmt beim nächsten Refresh wieder */ }
 }
 
 async function refreshBadges() {
     await loadNotifySettings();
-    await refreshSystemBadgeOnly();
+    try {
+        // limit=1: es geht hier nur um unreadCount, nicht um die Zeilen selbst.
+        const r = await fetch('/api/messages/system?limit=1');
+        const { unreadCount } = await r.json();
+        setUnread('system', unreadCount ?? 0);
+    } catch { setUnread('system', 0); }
     try {
         const r = await fetch('/api/messages/support/unread-count');
         const { unread } = await r.json();
-        setBadge('support', isNotifyEnabled('support') ? unread : 0);
-    } catch { setBadge('support', 0); }
+        setUnread('support', unread ?? 0);
+    } catch { setUnread('support', 0); }
     try {
         const r = await fetch('/api/messages/premium/unread-count');
         const { unread } = await r.json();
-        setBadge('premium', isNotifyEnabled('premium') ? unread : 0);
-    } catch { setBadge('premium', 0); }
+        setUnread('premium', unread ?? 0);
+    } catch { setUnread('premium', 0); }
     // Brief-Icon im Header nutzt sonst seinen eigenen 30s-Poll – ohne diesen
     // Aufruf bliebe die Zahl dort nach "alle als gelesen" bis zu 30s zu hoch.
     await refreshBellBadge();
 }
 
-// ── Menü-Umschaltung ─────────────────────────────────────────────────────────
-function selectMenu(name) {
+// ── Rubriken-Umschaltung ─────────────────────────────────────────────────────
+function selectMenu(name, { keepSelection = false } = {}) {
+    const changed = activeMenu !== name;
     activeMenu = name;
-    activePeer = null;
+    if (!keepSelection && changed) {
+        activeKey = null; activePeer = null; activeThreadId = null; composeOpen = false;
+    }
     history.replaceState(null, '', `#${name}`);
-    // Panel wird bei message.html nur einmal beim Laden gebaut (initNav()), current
-    // ändert sich danach aber bei jedem Tab-Wechsel – ohne das bliebe im Hamburger-
-    // Menü immer die Rubrik markiert, die beim Öffnen der Seite aktiv war (Bug 2026-08-08).
-    setNavCurrent(`message-${name}`);
+    setNavCurrent(name === 'einstellungen' ? 'message-einstellungen' : 'message-inbox');
+
+    const isSettings = name === 'einstellungen';
+    elMail.hidden     = isSettings;
+    elSettings.hidden = !isSettings;
+
+    document.querySelectorAll('.mctab').forEach(btn => {
+        const on = btn.dataset.tab === name;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-selected', String(on));
+    });
+
+    if (isSettings) { renderSettingsPanel(); return; }
+
     document.getElementById('msgNewBtn').hidden = name !== 'support';
-
-    const isSystem  = name === 'system';
-    const isPremium = name === 'premium';
-    const isSupport = name === 'support';
-    document.getElementById('mcDetail').classList.toggle('mc-hidden-by-panel', isSystem || isPremium || isSupport);
-    document.getElementById('mcSystemPanel').hidden  = !isSystem;
-    document.getElementById('mcPremiumPanel').hidden = !isPremium;
-    document.getElementById('mcSupportPanel').hidden = !isSupport;
-
-    if (isSystem)       { renderSystemPanel(); }
-    else if (isPremium) { renderPremiumPanel(); }
-    else if (isSupport) { renderSupportPanel(); }
-    else if (name === 'einstellungen') { renderSettingsPanel(); }
+    if (changed) {
+        // Suche ist bewusst je Rubrik eigenständig – ein Suchbegriff aus der
+        // Systemliste ergibt im Support-Postfach selten Sinn.
+        elSearch.value = { system: systemSearchQuery, support: supportSearchQuery, premium: premiumSearchQuery }[name] ?? '';
+        elList.scrollTop = 0;
+        renderPanePlaceholder();
+    }
+    reloadActiveList({ reset: changed });
 }
 
-// Rubriken-Umschaltung läuft seit 2026-08-08 nur noch über das Hamburger-Menü
-// (Gruppe "Message Center" in nav.js, Links auf message.html#<rubrik>). Ist die
-// Seite schon offen, navigiert der Browser innerhalb desselben Dokuments und
-// feuert "hashchange" statt neu zu laden - genau das fängt dieser Listener ab
-// (selectMenu() selbst nutzt replaceState, das löst kein hashchange aus, also
-// keine Doppel-Ausführung beim internen State-Sync).
+document.querySelectorAll('.mctab').forEach(btn => {
+    btn.addEventListener('click', () => selectMenu(btn.dataset.tab));
+});
+
+// Deep-Links aus dem Hamburger-Menü / message-bell.js navigieren innerhalb
+// desselben Dokuments und feuern "hashchange" statt neu zu laden – genau das
+// fängt dieser Listener ab. selectMenu() selbst nutzt replaceState, das löst kein
+// hashchange aus, also keine Doppel-Ausführung beim internen State-Sync.
 window.addEventListener('hashchange', () => {
     const name = location.hash.slice(1);
     if (VALID_MENUS.includes(name) && name !== activeMenu) selectMenu(name);
 });
 
-// Brief-Icon (immer LAN auf Port 3200): Klick springt in die Rubrik mit der
-// ältesten ungelesenen Nachricht (system/support/premium – siehe message-bell.js);
-// ohne ungelesene Nachricht bleibt der aktuell offene Menüpunkt einfach stehen.
-// Rückgabewert = Badge-Refresh-Funktion, wird von refreshBadges() genutzt, damit
-// das Brief-Icon sofort mitzieht statt auf seinen eigenen 30s-Poll zu warten.
+// Brief-Icon: Klick springt in die Rubrik mit der ältesten ungelesenen Nachricht
+// (siehe message-bell.js); ohne ungelesene Nachricht bleibt die aktuelle stehen.
+// Rückgabewert = Badge-Refresh-Funktion, genutzt von refreshBadges().
 const refreshBellBadge = initMessageBell({
     requireLan: false,
-    onClick: () => selectMenu(getOldestUnreadCategory() ?? activeMenu ?? 'system'),
+    onClick: () => selectMenu(getOldestUnreadCategory() ?? (activeMenu === 'einstellungen' ? 'system' : activeMenu) ?? 'system'),
 });
 
-// ── Menü: System (Vollbreite-Panel, siehe #mcSystemPanel) ───────────────────
-async function fetchSystemMessages(page, q) {
+// ── Liste (linke Spalte) ─────────────────────────────────────────────────────
+/**
+ * Baut die Listeneinträge der aktiven Rubrik. Ein Eintrag ist zweizeilig
+ * (Absender + Zeitpunkt oben, Betreff darunter) – die vierspaltige Tabelle von
+ * früher passt nicht in eine 420px-Spalte. Der Empfänger steht deshalb nicht mehr
+ * in der Liste, sondern in der Detailansicht rechts, wo Platz dafür ist.
+ */
+function listItems() {
+    if (activeMenu === 'system') {
+        return systemItems.map(n => ({
+            key:     `s${n.id}`,
+            unread:  !n.read,
+            from:    n.botName || n.botId || forgePublic(),
+            time:    n.timestamp,
+            level:   n.level === 'lifecycle' ? '' : (LEVEL_LABEL[n.level] ?? n.level),
+            // Pool-Bezug steht seit 2026-08-08 im Betreff statt beim Absender. Bei
+            // Pool-Meldungen ersetzt "Pool <Pair>:" das Level – welcher Pool betroffen
+            // ist, wiegt hier schwerer als die Art der Meldung.
+            subject: n.pool ? `Pool ${n.pool}: ${stripEmoji(stripNotifyHeader(n.message))}`
+                            : stripEmoji(stripNotifyHeader(n.message)),
+            poolPrefix: !!n.pool,
+        }));
+    }
+    if (activeMenu === 'premium') {
+        return filteredPremium().slice(0, premiumShown).map(m => ({
+            key:     `p${m.id}`,
+            unread:  m.direction === 'in' && !m.read,
+            // Eingehende DMs kommen per Nostr → Nick der Gegenstelle. Alles andere
+            // hat diese Instanz selbst erzeugt (ausgehende DM: eigener Nick;
+            // lokales Ereignis ohne Gegenstelle, z.B. eine ausgeführte Zahlung:
+            // "FORGE Public").
+            from:    m.peerPubkey ? (m.direction === 'in' ? peerNick(m.peerName) : myNick()) : forgePublic(),
+            time:    m.timestamp,
+            level:   '',
+            subject: stripEmoji(m.summary),
+        }));
+    }
+    return filteredSupport().slice(0, supportShown).map(t => ({
+        key:     `t${encodeThreadKey(t.peerPubkey, t.threadId)}`,
+        unread:  t.unreadCount > 0,
+        from:    peerNick(t.peerName),
+        time:    t.lastTimestamp,
+        level:   '',
+        subject: stripEmoji(stripQuoteMarkers(t.lastText)),
+    }));
+}
+
+function hasMore() {
+    if (activeMenu === 'system')  return systemHasMore;
+    if (activeMenu === 'premium') return premiumShown < filteredPremium().length;
+    return supportShown < filteredSupport().length;
+}
+
+const EMPTY_TEXT = {
+    system:  () => tr('msg.no_system_notifications', 'Keine System-Benachrichtigungen.'),
+    premium: () => tr('msg.no_premium_messages', 'Noch keine Premium-Nachrichten.'),
+    support: () => tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.'),
+};
+
+function renderList() {
+    const items = listItems();
+    const scrollTop = elList.scrollTop;
+
+    if (!items.length) {
+        elList.innerHTML = `<div class="msg-empty">${esc(EMPTY_TEXT[activeMenu]())}</div>`;
+        return;
+    }
+
+    elList.innerHTML = items.map(it => `
+        <button type="button" class="mcli${it.unread ? ' unread' : ''}${it.key === activeKey ? ' selected' : ''}" data-key="${esc(it.key)}">
+            <span class="mcli-top">
+                <span class="mcli-from">${esc(it.from)}</span>
+                <span class="mcli-time">${fmtDateTime(it.time)}</span>
+            </span>
+            <span class="mcli-subject">${it.level ? `<span class="mct-level">${esc(it.level)}</span>` : ''}${esc(it.subject)}</span>
+        </button>`).join('')
+        // Ohne diese Fußzeile wäre nach dem Wegfall der Seitenzahlen nicht
+        // erkennbar, ob die Liste zu Ende ist oder noch etwas nachkommt.
+        + `<div class="mc-list-foot">${hasMore()
+            ? esc(tr('msg.scroll_for_more', 'Weiter scrollen für ältere Nachrichten…'))
+            : esc(tr('msg.end_of_list', 'Ende der Liste'))}</div>`;
+
+    elList.querySelectorAll('.mcli').forEach(btn => {
+        btn.addEventListener('click', () => openKey(btn.dataset.key));
+    });
+    elList.scrollTop = scrollTop;
+    // Ist die Liste kürzer als ihr Container, feuert nie ein scroll-Event – dann
+    // muss der nächste Block sofort nachgeladen werden, sonst bliebe die Liste
+    // trotz vorhandener Nachrichten kurz.
+    if (hasMore() && elList.scrollHeight <= elList.clientHeight + 4) loadMore();
+}
+
+let loadingMore = false;
+async function loadMore() {
+    if (loadingMore || !hasMore()) return;
+    loadingMore = true;
     try {
-        const params = new URLSearchParams({ page: String(page) });
-        if (q) params.set('q', q);
+        if (activeMenu === 'system') {
+            const data = await fetchSystem({ offset: systemItems.length, limit: PAGE_SIZE });
+            systemItems   = systemItems.concat(data.notifications ?? []);
+            systemHasMore = !!data.hasMore;
+        } else if (activeMenu === 'premium') {
+            premiumShown += PAGE_SIZE;
+        } else {
+            supportShown += PAGE_SIZE;
+        }
+        renderList();
+    } finally {
+        loadingMore = false;
+    }
+}
+
+elList.addEventListener('scroll', () => {
+    if (elList.scrollTop + elList.clientHeight >= elList.scrollHeight - 120) loadMore();
+});
+
+/**
+ * Lädt die aktive Rubrik neu. reset=true beginnt wieder beim ersten Fenster
+ * (Rubrikwechsel, neue Suche); ohne reset bleibt die bereits nachgeladene Menge
+ * erhalten – sonst würde der 30-Sekunden-Refresh die Liste jedes Mal auf das
+ * erste Fenster zurückwerfen, während der Nutzer weiter unten liest.
+ */
+async function reloadActiveList({ reset = false } = {}) {
+    await loadNotifySettings();
+    if (activeMenu === 'system') {
+        if (reset) systemItems = [];
+        const limit = Math.max(PAGE_SIZE, systemItems.length);
+        const data  = await fetchSystem({ offset: 0, limit });
+        systemItems   = data.notifications ?? [];
+        systemHasMore = !!data.hasMore;
+        // Bei aktiver Suche zählt der Server nur die Treffer – als Rubrik-Zähler wäre
+        // das falsch (er soll alle ungelesenen zeigen, nicht die im Filter). Dann
+        // übernimmt refreshBadges() den ungefilterten Wert.
+        if (!systemSearchQuery) setUnread('system', data.unreadCount ?? 0);
+    } else if (activeMenu === 'premium') {
+        if (reset) premiumShown = PAGE_SIZE;
+        premiumCache = await fetchPremium();
+        setUnread('premium', premiumCache.filter(m => m.direction === 'in' && !m.read).length);
+    } else if (activeMenu === 'support') {
+        if (reset) supportShown = PAGE_SIZE;
+        supportThreads = await fetchThreads();
+    }
+    renderList();
+}
+
+elSearch.addEventListener('input', debounce((e) => {
+    const q = e.target.value.trim();
+    if (activeMenu === 'system')       { systemSearchQuery = q; }
+    else if (activeMenu === 'premium') { premiumSearchQuery = q; }
+    else                               { supportSearchQuery = q; }
+    elList.scrollTop = 0;
+    reloadActiveList({ reset: true });
+}));
+
+// ── Datenquellen ─────────────────────────────────────────────────────────────
+async function fetchSystem({ offset = 0, limit = PAGE_SIZE } = {}) {
+    try {
+        const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+        if (systemSearchQuery) params.set('q', systemSearchQuery);
         const r = await fetch(`/api/messages/system?${params}`);
         return await r.json();
     } catch {
-        return { notifications: [], page: 1, perPage: 10, totalCount: 0, totalPages: 1, allIds: [], unreadCount: 0 };
+        return { notifications: [], hasMore: false, allIds: [], unreadCount: 0 };
     }
 }
 
-async function renderSystemPanel() {
-    await loadNotifySettings();
-    const data = await fetchSystemMessages(systemPage, systemSearchQuery);
-    systemCache      = data.notifications ?? [];
-    systemTotalPages = Math.min(10, data.totalPages ?? 1);
-    if (systemPage > systemTotalPages) systemPage = systemTotalPages;
-
-    updateSystemBadge(data.unreadCount ?? 0);
-
-    const grid = document.getElementById('mcsGrid');
-    if (!systemCache.length) {
-        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_system_notifications', 'Keine System-Benachrichtigungen.') + '</div>';
-    } else {
-        grid.innerHTML = mctTableHtml(systemCache.map(n => systemRowHtml(n)).join(''));
-        grid.querySelectorAll('.mct-row').forEach(row => {
-            row.addEventListener('click', () => openSystemMessageModal(Number(row.dataset.id)));
-        });
-    }
-
-    renderSystemPagination();
+/** Vollständige, ungefilterte ID-Liste – Grundlage für "alle als gelesen". */
+async function fetchAllSystemIds() {
+    try {
+        const r = await fetch('/api/messages/system?limit=1');
+        const { allIds } = await r.json();
+        return allIds ?? [];
+    } catch { return []; }
 }
 
-// Der Nachrichtentext selbst trägt seit dem notify.js-Zentralfix (2026-07-30)
-// eine eigene "📅 Datum · Bot"-Kopfzeile (wichtig für Telegram/Roh-Log) – hier in
-// der Box-Übersicht UND im Detail-Modal aber redundant, weil Datum/Bot bereits
-// über eigene UI-Felder (Box-Kopf bzw. Meta-Zeile) angezeigt werden. Nur für
-// die Anzeige entfernt, der gespeicherte/rohe Text bleibt unverändert.
+async function fetchPremium() {
+    try {
+        const r = await fetch('/api/messages/premium');
+        const { messages } = await r.json();
+        return messages ?? [];
+    } catch { return []; }
+}
+
+async function fetchThreads() {
+    try {
+        const r = await fetch('/api/messages/support/threads');
+        const { threads } = await r.json();
+        return threads ?? [];
+    } catch { return []; }
+}
+
+// Kein Such-Parameter auf /api/messages/premium bzw. /support/threads (beide
+// liefern ohnehin nur eine überschaubare Menge) – Suche läuft clientseitig auf
+// der vollständig geladenen Liste.
+function filteredPremium() {
+    if (!premiumSearchQuery) return premiumCache;
+    const q = premiumSearchQuery.toLowerCase();
+    return premiumCache.filter(m =>
+        (m.summary ?? '').toLowerCase().includes(q) ||
+        (m.detail ?? '').toLowerCase().includes(q) ||
+        (m.peerName ?? '').toLowerCase().includes(q)
+    );
+}
+function filteredSupport() {
+    if (!supportSearchQuery) return supportThreads;
+    const q = supportSearchQuery.toLowerCase();
+    return supportThreads.filter(t =>
+        (t.peerName ?? '').toLowerCase().includes(q) ||
+        (t.lastText ?? '').toLowerCase().includes(q)
+    );
+}
+
+// Ein Support-Anliegen wird über peerPubkey + threadId identifiziert (nicht nur
+// peerPubkey – ein Nutzer kann mehrere getrennte Anliegen mit demselben FORGE
+// Master haben, siehe thread_id-Migration im Premium-Dienst).
+function encodeThreadKey(peerPubkey, threadId) { return `${peerPubkey}::${threadId ?? ''}`; }
+function decodeThreadKey(key) {
+    const i = key.indexOf('::');
+    return { peerPubkey: key.slice(0, i), threadId: key.slice(i + 2) || null };
+}
+
+// ── Textaufbereitung ─────────────────────────────────────────────────────────
+// Der Nachrichtentext trägt seit dem notify.js-Zentralfix (2026-07-30) eine eigene
+// "📅 Datum · Bot"-Kopfzeile (wichtig für Telegram/Roh-Log) – hier aber redundant,
+// weil Datum und Bot bereits als eigene UI-Felder dastehen. Nur für die Anzeige
+// entfernt, der gespeicherte Text bleibt unverändert.
 function stripNotifyHeader(text) {
     return String(text ?? '').replace(/^📅[^\n]*\n/, '');
 }
 
-// Emoji/Icons aus Telegram-Formatierung (🔴⚠️💰🚨 usw.) sind im Message Center nur
-// Bildrauschen ohne Zusatzinfo (Level steht separat als Text-Badge/Meta-Zeile) –
-// nur für die Anzeige entfernt, gilt für System/Premium/Support gleichermaßen.
+// Emoji/Icons aus der Telegram-Formatierung (🔴⚠️💰🚨 usw.) sind im Message Center
+// nur Bildrauschen ohne Zusatzinfo (die Art steht separat als Text-Badge) – nur
+// für die Anzeige entfernt, gilt für System/Premium/Support gleichermaßen.
 function stripEmoji(text) {
     return String(text ?? '')
         .replace(/[\u{1F1E6}-\u{1F1FF}\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}]/gu, '')
@@ -301,512 +548,193 @@ const LEVEL_LABEL = {
     lifecycle: tr('set.status',      'Status'),
 };
 
-/**
- * Kopfzeile + Zeilen-HTML zu einer Tabelle zusammensetzen (System/Premium/
- * Support, seit 2026-08-08 – ersetzt die vorherigen festen Boxen, siehe
- * .mct-table-Kommentar in message.css). Eine einzige Spaltenaufteilung für
- * alle drei Rubriken (Pflicht laut Feedback: Thema/Absender/Datum müssen
- * überall exakt gleich breit sein).
- */
-function mctTableHtml(rowsHtml) {
-    return `<div class="mct-table">
-        <div class="mct-header"><span>${tr('msg.topic', 'Thema')}</span><span>${tr('msg.sender', 'Absender')}</span><span>${tr('msg.date', 'Datum')}</span></div>
-        ${rowsHtml}
-    </div>`;
+// ── Detailansicht (rechte Spalte) ────────────────────────────────────────────
+function renderPanePlaceholder() {
+    activeKey = null;
+    elPane.innerHTML = `<p class="mc-pane-placeholder">${esc(tr('msg.select_message', 'Wähle links eine Nachricht aus, um sie zu lesen.'))}</p>`;
 }
 
-function systemRowHtml(n) {
-    const unread = !n.read;
-    const preview = stripEmoji(stripNotifyHeader(n.message));
-    // "Status" (lifecycle) im Betreff weggelassen (2026-08-01): Fehler/Warnung/Info
-    // bleiben stehen (Farbschwäche-Anforderung), da lifecycle-Meldungen weder Fehler
-    // noch Warnung sind, ist die Auszeichnung dort auch am wenigsten wichtig.
-    const levelLabel = n.level === 'lifecycle' ? '' : (LEVEL_LABEL[n.level] ?? n.level);
-    // Pool-Bezug steht seit 2026-08-08 im Thema statt im Absender (Feedback: "BotName
-    // · Pool" im Absender sah unruhig aus). Bei Pool-Meldungen ersetzt "Pool <Pair>:"
-    // den Level-Badge – welcher Pool betroffen ist, wiegt hier schwerer als die Art.
-    const subject = n.pool
-        ? `Pool ${esc(n.pool)}: ${esc(preview)}`
-        : `${levelLabel ? `<span class="mct-level">${esc(levelLabel)}</span>` : ''}${esc(preview)}`;
-    return `
-        <div class="mct-row${unread ? ' unread' : ''}" data-id="${esc(n.id)}">
-            <span class="mct-subject">${subject}</span>
-            <span class="mct-sender">${esc(n.botName || n.botId)}</span>
-            <span class="mct-time">${fmtDateTime(n.timestamp)}</span>
-        </div>`;
+/** Markiert den geöffneten Eintrag in der Liste, ohne sie neu zu bauen. */
+function markSelected(key) {
+    activeKey = key;
+    elList.querySelectorAll('.mcli').forEach(el => el.classList.toggle('selected', el.dataset.key === key));
+}
+
+function openKey(key) {
+    composeOpen = false;
+    markSelected(key);
+    if (key.startsWith('s')) return openSystemMessage(Number(key.slice(1)));
+    if (key.startsWith('p')) return openPremiumMessage(Number(key.slice(1)));
+    const { peerPubkey, threadId } = decodeThreadKey(key.slice(1));
+    // Klick in der Liste ist eine der beiden Aktionen, die "gelesen" auslösen dürfen
+    // (die andere ist der Haken) – deshalb hier markRead, aber in keinem der
+    // Hintergrund-Pfade, die denselben Verlauf nachladen.
+    return openSupportThread(peerPubkey, threadId, { markRead: true });
 }
 
 /**
- * Einheitliches Meldungs-Layout (Vorgabe 2026-07-30, Kachel-Kopfzeile kompaktiert
- * 2026-08-01, gilt für alle Kanäle):
- *   Detail-Modal: Titelzeile = Art der Meldung ("Fehler" / "Warnung" / "Info" / "Status"),
- *                 Zeile 2 = Name des betroffenen Bots · Datum + Uhrzeit, darunter der Text.
- *   Übersichtskachel: Bot, Art und Uhrzeit stehen in EINER Kopfzeile (statt Art in
- *                 eigener Zeile), spart eine Zeile Höhe pro Kachel bei gleicher Info.
+ * Einheitliches Meldungs-Layout (Vorgabe 2026-07-30, gilt für alle Kanäle):
+ * Titelzeile = Art der Meldung ("Fehler"/"Warnung"/"Info"/"Status"), darunter
+ * Von/An sowie Datum + Uhrzeit, dann der Text.
  *
- * Vorher stand alles drei in einer gemischten Meta-Zeile und der Absender war die
- * rohe botId ("wallet-monitor") — für einen Nicht-Techniker weder Art noch Urheber
- * der Meldung erkennbar. `botName` kommt fertig aufgelöst vom Server (siehe
- * routes/messages.js resolveBotName), inkl. Fallback für Alt-Zeilen ohne
- * gespeicherten Anzeigenamen.
+ * "Von" ist seit 2026-08-16 (Betreiber-Vorgabe) NICHT mehr pauschal "FORGE Public"
+ * wie bei den anderen beiden Rubriken, sondern der Name des betroffenen Bots
+ * ("Liquidity Bot"/"Lending Bot"/"FORGE" für alles Kern-Nahe) — der Nutzer soll auf
+ * den ersten Blick sehen, wer die Meldung erzeugt hat, nicht nur dass sie von dieser
+ * Instanz kommt. `botName` kommt dafür fertig aufgelöst vom Server (routes/messages.js
+ * resolveBotName()), vorher war der Absender die rohe botId ("wallet-monitor") –
+ * für einen Nicht-Techniker weder Art noch Urheber der Meldung erkennbar.
  */
-function messageDetailBody({ level, botName, botId, pool, timestamp, message }) {
-    const bot = botName || botId || 'System';
-    return `
-        <div class="mc-detail-card level-${esc(level)}">
-            <div class="mc-detail-sender">
-                <span class="mc-detail-bot">${esc(bot)}${pool ? ` <span class="mc-detail-pool">· ${esc(pool)}</span>` : ''}</span>
-                <span class="mc-detail-when">${fmtDateTimeLong(timestamp)}</span>
-            </div>
-            <div class="mc-detail-text">${esc(stripEmoji(stripNotifyHeader(message)))}</div>
-        </div>`;
-}
-
-function openSystemMessageModal(id) {
-    const n = systemCache.find(x => x.id === id);
+function openSystemMessage(id) {
+    const n = systemItems.find(x => x.id === id);
     if (!n) return;
     if (!n.read) {
         n.read = true;
-        // refreshBadges() statt nur refreshSystemBadgeOnly() – sonst zieht beim Öffnen
-        // einer einzelnen System-Nachricht zwar der Menü-Zähler mit, aber die Zahl am
-        // Brief-Icon rechts oben bleibt bis zum nächsten 30s-Poll auf dem alten Stand
-        // stehen (Bug, gemeldet 2026-08-08: "alle als gelesen" zog schon immer beide
-        // nach, einzelne Nachrichten nur den Menü-Zähler).
+        elList.querySelector(`.mcli[data-key="s${id}"]`)?.classList.remove('unread');
+        // refreshBadges() statt nur des System-Zählers – sonst zieht beim Öffnen
+        // einer einzelnen Nachricht zwar der Reiter mit, die Zahl am Brief-Icon
+        // rechts oben bliebe aber bis zum nächsten 30s-Poll zu hoch.
         markSystemRead([id]).then(refreshBadges);
-        document.querySelector(`.mct-row[data-id="${id}"]`)?.classList.remove('unread');
     }
-    const detailModal = showModal({
-        id:    'msg-system-detail',
-        title: esc(LEVEL_LABEL[n.level] ?? n.level),
-        body:  messageDetailBody(n),
-        // Weiterleiten bewusst NICHT als gleichrangiger Footer-Button, sondern als
-        // eigenständiges Icon links im Footer (footerNote-Slot, siehe modal.js) – soll
-        // sich von "Schließen" abheben ("etwas Besonderes"), da hier später ggf. eine
-        // Premium-Freischaltung ansetzt. Tooltip per natives title-Attribut (gleiche
-        // Konvention wie #msgCopyBtn/#msgQrBtn weiter unten in dieser Datei).
-        footerNote: `<button type="button" class="msg-icon-btn msg-icon-btn-accent" id="msgForwardBtn"
-            title="${tr('msg.forward_to_support', 'Diese Nachricht an den FORGE Support weiterleiten')}" aria-label="${tr('msg.forward', 'Weiterleiten')}">↪</button>`,
-        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('msg-system-detail') }],
-    });
-    detailModal.querySelector('#msgForwardBtn').addEventListener('click', () => {
-        closeModal('msg-system-detail');
-        confirmForwardSystemMessage(n);
-    });
-}
-
-// Zwischenschritt vor dem Weiterleiten (Feedback 2026-08-09): ein Klick auf das
-// Icon soll nicht überraschend direkt in eine neue Support-Nachricht springen –
-// erst eine bewusste Rückfrage, dann (nur nach "Weiter") der eigentliche Wechsel.
-function confirmForwardSystemMessage(n) {
-    const cid = 'msg-forward-confirm';
-    showModal({
-        id:    cid,
-        title: tr('msg.forward_q', 'Nachricht weiterleiten?'),
-        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.forward_question', 'Hast Du eine Frage zu dieser Meldung und möchtest sie an den Support weiterleiten?') + '</p>',
-        actions: [
-            { label: 'Weiter', onClick: () => { closeModal(cid); forwardSystemMessage(n); } },
-            { label: 'Abbrechen', onClick: () => closeModal(cid) },
-        ],
-    });
-}
-
-// Weiterleiten an FORGE Master (Feature 2026-08-09): Statt die Meldung mühsam
-// per Copy&Paste in eine neue Support-Nachricht zu übertragen, übernimmt dies
-// den kompletten Meldungsinhalt (Art/Bot/Zeitpunkt/Text) als Zitat. Das Zitat
-// steht als eigener, nicht editierbarer Block im Compose-Modal (siehe
-// openNewMessageModal) – der Nutzer tippt nur seinen Kommentar dazu, Zitat und
-// Kommentar werden erst beim Senden mit FORWARD_DIVIDER zusammengefügt (Feedback
-// 2026-08-09: vorher lag alles in einer gemeinsamen Textarea, weder klar
-// getrennt noch vor versehentlichem Verändern des Zitats geschützt).
-// Versand bleibt bewusst manuell (kein Auto-Send).
-function forwardSystemMessage(n) {
     const bot = n.botName || n.botId || 'System';
-    const quoteText = [
-        `Betreff: ${LEVEL_LABEL[n.level] ?? n.level}${n.pool ? ` · ${n.pool}` : ''}`,
-        `Von: ${bot}`,
-        `Zeitpunkt: ${fmtDateTimeLong(n.timestamp)}`,
-        '',
-        stripEmoji(stripNotifyHeader(n.message)),
-    ].join('\n');
-    selectMenu('support');
-    openNewMessageModal(quoteText);
-}
-
-function renderSystemPagination() {
-    const wrap = document.getElementById('mcsPagination');
-    if (!wrap) return;
-    if (systemTotalPages <= 1) { wrap.innerHTML = ''; return; }
-    wrap.innerHTML = Array.from({ length: systemTotalPages }, (_, i) => i + 1)
-        .map(p => `<button class="mcs-page-btn${p === systemPage ? ' active' : ''}" data-page="${p}">${p}</button>`)
-        .join('');
-    wrap.querySelectorAll('.mcs-page-btn').forEach(btn => {
-        btn.addEventListener('click', () => { systemPage = Number(btn.dataset.page); renderSystemPanel(); });
-    });
-}
-
-document.getElementById('mcsMarkAllBtn')?.addEventListener('click', async () => {
-    // Immer die VOLLSTÄNDIGE, ungefilterte ID-Liste holen – nicht die (bei aktiver
-    // Suche auf die Treffer beschränkte) aktuelle Seiten-Response. Sonst markiert
-    // "alle als gelesen" bei aktiver Suche nur die paar Treffer (Bug 2026-07-30).
-    const ids = await fetchAllSystemIds();
-    await markSystemRead(ids);
-    renderSystemPanel();
-    refreshBadges();
-});
-document.getElementById('mcsSearchInput')?.addEventListener('input', debounce((e) => {
-    systemSearchQuery = e.target.value.trim();
-    systemPage = 1;
-    renderSystemPanel();
-}));
-
-// ── Menü: Premium (Vollbreite-Panel, gleiche Darstellung wie System) ────────
-let premiumPage        = 1;
-let premiumSearchQuery = '';
-let premiumTotalPages  = 1;
-
-async function fetchPremiumMessages() {
-    try {
-        const r = await fetch('/api/messages/premium');
-        const { messages } = await r.json();
-        return messages ?? [];
-    } catch {
-        return [];
-    }
-}
-
-function filteredPremiumCache() {
-    if (!premiumSearchQuery) return premiumCache;
-    const q = premiumSearchQuery.toLowerCase();
-    return premiumCache.filter(m =>
-        (m.summary ?? '').toLowerCase().includes(q) ||
-        (m.detail ?? '').toLowerCase().includes(q) ||
-        (m.peerName ?? '').toLowerCase().includes(q)
-    );
-}
-
-// Kein Pagination-/Such-Parameter auf /api/messages/premium (Premium-Dienst
-// liefert ohnehin nur eine überschaubare Menge) – Blättern/Suchen läuft
-// deshalb rein clientseitig auf der vollständig geladenen Liste.
-async function renderPremiumPanel() {
-    premiumCache = await fetchPremiumMessages();
-    const filtered = filteredPremiumCache();
-    premiumTotalPages = Math.min(10, Math.max(1, Math.ceil(filtered.length / 10)));
-    if (premiumPage > premiumTotalPages) premiumPage = premiumTotalPages;
-    const pageItems = filtered.slice((premiumPage - 1) * 10, premiumPage * 10);
-
-    const premiumUnread = premiumCache.filter(m => m.direction === 'in' && !m.read).length;
-    setBadge('premium', isNotifyEnabled('premium') ? premiumUnread : 0);
-
-    const grid = document.getElementById('mcpGrid');
-    if (!pageItems.length) {
-        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_premium_messages', 'Noch keine Premium-Nachrichten.') + '</div>';
-    } else {
-        grid.innerHTML = mctTableHtml(pageItems.map(m => premiumRowHtml(m)).join(''));
-        grid.querySelectorAll('.mct-row').forEach(row => {
-            row.addEventListener('click', () => openPremiumMessageModal(Number(row.dataset.id)));
-        });
-    }
-
-    renderPremiumPagination();
-}
-
-// Lokale Ereignisse ohne Gegenstelle (z.B. eine ausgeführte Zahlung, siehe
-// premium-pay.js recordPremiumMessage()) haben peerPubkey=null – "FORGE Master"
-// wäre hier irreführend (es kam keine DM vom Master), "Diese Instanz" passt zum
-// bestehenden Label für abgehende Nachrichten im Detail-Modal.
-function premiumRowHtml(m) {
-    const unread = m.direction === 'in' && !m.read;
-    const sender = m.peerName
-        ? esc(m.peerName)
-        : (m.peerPubkey ? esc(shortPeer(m.peerPubkey)) : (m.direction === 'out' ? tr('msg.this_instance', 'Diese Instanz') : tr('msg.forge_master', 'FORGE Master')));
-    return `
-        <div class="mct-row${unread ? ' unread' : ''}" data-id="${esc(m.id)}">
-            <span class="mct-subject">${esc(stripEmoji(m.summary))}</span>
-            <span class="mct-sender">${sender}</span>
-            <span class="mct-time">${fmtDateTime(m.timestamp)}</span>
-        </div>`;
-}
-
-// Eigene Detail-Ansicht für automatische Zahlungen (m.payment gesetzt, siehe
-// core/premium/server.js humanizePremiumMessage() Fall 'premium-payment'):
-// strukturierte Zeilen statt Fließtext, damit die TX als klickbarer Block-
-// Explorer-Link dargestellt werden kann. Empfängeradresse bewusst ungekürzt
-// (passt ohne Umbruch), die deutlich längere TX-Signatur wird auf etwa
-// Adresslänge gekürzt statt als 88-stellige Roh-Signatur ausgeschrieben.
-function premiumPaymentDetailBody(m, sender) {
-    const p = m.payment;
-    return `
-        <div class="mc-detail-card level-info">
-            <div class="mc-detail-sender">
-                <span class="mc-detail-bot">${esc(sender)}</span>
-                <span class="mc-detail-when">${fmtDateTimeLong(m.timestamp)}</span>
+    elPane.innerHTML = `
+        <div class="mc-pane-head">
+            <h2 class="mc-pane-title">${esc(LEVEL_LABEL[n.level] ?? n.level)}${n.pool ? ` · ${esc(n.pool)}` : ''}</h2>
+            <div class="mc-pane-actions">
+                <button type="button" class="msg-icon-btn msg-icon-btn-accent" id="msgForwardBtn"
+                    title="${tr('msg.forward_to_support', 'Diese Nachricht an den FORGE Support weiterleiten')}" aria-label="${tr('msg.forward', 'Weiterleiten')}">↪</button>
+                <button type="button" class="msg-icon-btn" id="msgDeleteBtn"
+                    title="${tr('msg.delete', 'Löschen')}" aria-label="${tr('msg.delete', 'Löschen')}">🗑</button>
             </div>
-            <div class="msg-thread-modal-header" style="margin-top:0.6rem;">
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.amount', 'Betrag')}</span>
-                    <span>${esc(p.amountUsdc)} USDC</span>
-                </div>
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.period', 'Zeitraum')}</span>
-                    <span>${esc(p.hourRange)}</span>
-                </div>
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.to', 'An')}</span>
-                    <span class="msg-peer-pubkey">${esc(p.toWallet)}</span>
-                </div>
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label msg-thread-modal-label--wide">${tr('msg.tx', 'TX')}</span>
-                    <span><a href="https://solscan.io/tx/${esc(p.signature)}" target="_blank" rel="noopener" style="color:inherit;">${esc(truncateToAddressLength(p.signature))} ↗</a></span>
-                </div>
-            </div>
+        </div>
+        <div class="mc-pane-body">
+            ${metaHtml([
+                [tr('msg.from', 'Von'), esc(bot)],
+                [tr('msg.to',   'An'),  esc(myNick())],
+                [tr('msg.date', 'Datum'), esc(fmtDateTimeLong(n.timestamp))],
+            ])}
+            <div class="mc-detail-text">${esc(stripEmoji(stripNotifyHeader(n.message)))}</div>
         </div>`;
+
+    elPane.querySelector('#msgForwardBtn').addEventListener('click', () => confirmForwardSystemMessage(n));
+    elPane.querySelector('#msgDeleteBtn').addEventListener('click', () => confirmDeleteMessage({
+        url: `/api/messages/system/${encodeURIComponent(id)}`,
+        afterDelete: () => reloadActiveList({ reset: true }),
+    }));
 }
 
-async function openPremiumMessageModal(id) {
+/**
+ * Eigene Darstellung für automatische Zahlungen (m.payment gesetzt, siehe
+ * core/premium/server.js humanizePremiumMessage() Fall 'premium-payment'):
+ * strukturierte Zeilen statt Fließtext, damit die TX als klickbarer
+ * Block-Explorer-Link dargestellt werden kann. Empfängeradresse bewusst ungekürzt
+ * (passt ohne Umbruch), die deutlich längere TX-Signatur auf etwa Adresslänge gekürzt.
+ */
+function premiumPaymentHtml(p) {
+    return `
+        <div class="msg-pay-row"><span class="msg-pay-label">${tr('msg.amount', 'Betrag')}</span><span>${esc(p.amountUsdc)} USDC</span></div>
+        <div class="msg-pay-row"><span class="msg-pay-label">${tr('msg.period', 'Zeitraum')}</span><span>${esc(p.hourRange)}</span></div>
+        <div class="msg-pay-row"><span class="msg-pay-label">${tr('msg.to', 'An')}</span><span class="msg-peer-pubkey">${esc(p.toWallet)}</span></div>
+        <div class="msg-pay-row"><span class="msg-pay-label">${tr('msg.tx', 'TX')}</span><span><a href="https://solscan.io/tx/${esc(p.signature)}" target="_blank" rel="noopener" style="color:inherit;">${esc(truncateToAddressLength(p.signature))} ↗</a></span></div>`;
+}
+
+async function openPremiumMessage(id) {
     const m = premiumCache.find(x => x.id === id);
     if (!m) return;
-    // Gleiches Layout wie System-Meldungen (Titel = Art, Zeile 2 = Absender · Zeit).
-    // "Art" ist hier die Richtung: eine eingehende DM vom Datendienst vs. ein
-    // lokal protokolliertes Ereignis dieser Instanz — ein Level gibt es nicht.
-    // Lokale Ereignisse ohne Gegenstelle (z.B. eine ausgeführte Zahlung) bekommen
-    // bewusst kein "von/an X", es kam/ging keine DM.
-    const sender = m.peerPubkey
-        ? (m.direction === 'in'
-            ? (m.peerName ? `${m.peerName} (${shortPeer(m.peerPubkey)})` : shortPeer(m.peerPubkey))
-            : tr('msg.this_instance', 'Diese Instanz'))
-        : tr('msg.this_instance', 'Diese Instanz');
-    showModal({
-        id:    'msg-premium-detail',
-        title: m.payment
-            ? tr('msg.auto_premium_pay', 'Automatische Premium Zahlung')
-            : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')),
-        body:  m.payment
-            ? premiumPaymentDetailBody(m, sender)
-            : messageDetailBody({
-                level:     'info',
-                botName:   sender,
-                timestamp: m.timestamp,
-                message:   m.detail,
-            }),
-        actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('msg-premium-detail') }],
-    });
+    // Nostr-DM → Nick auf beiden Seiten; lokales Ereignis ohne Gegenstelle → es
+    // kam und ging keine DM, Absender ist diese Instanz selbst.
+    const [from, to] = m.peerPubkey
+        ? (m.direction === 'in' ? [peerNick(m.peerName), myNick()] : [myNick(), peerNick(m.peerName)])
+        : [forgePublic(), myNick()];
+    // npub nur bei echten DMs anzeigen – und nur die der Gegenstelle, die eigene
+    // steht unter Einstellungen.
+    const fromHtml = m.peerPubkey && m.direction === 'in' ? peerLabelWithNpub(m.peerNpub, from) : esc(from);
+    const toHtml   = m.peerPubkey && m.direction === 'out' ? peerLabelWithNpub(m.peerNpub, to) : esc(to);
+
+    elPane.innerHTML = `
+        <div class="mc-pane-head">
+            <h2 class="mc-pane-title">${esc(m.payment
+                ? tr('msg.auto_premium_pay', 'Automatische Premium Zahlung')
+                : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')))}</h2>
+            <div class="mc-pane-actions">
+                <button type="button" class="msg-icon-btn" id="msgDeleteBtn"
+                    title="${tr('msg.delete', 'Löschen')}" aria-label="${tr('msg.delete', 'Löschen')}">🗑</button>
+            </div>
+        </div>
+        <div class="mc-pane-body">
+            ${metaHtml([
+                [tr('msg.from', 'Von'), fromHtml],
+                [tr('msg.to',   'An'),  toHtml],
+                [tr('msg.date', 'Datum'), esc(fmtDateTimeLong(m.timestamp))],
+            ])}
+            ${m.payment ? premiumPaymentHtml(m.payment) : `<div class="mc-detail-text">${esc(stripEmoji(m.detail))}</div>`}
+        </div>`;
+
+    elPane.querySelector('#msgDeleteBtn').addEventListener('click', () => confirmDeleteMessage({
+        url: `/api/messages/premium/${encodeURIComponent(id)}`,
+        afterDelete: () => reloadActiveList({ reset: true }),
+    }));
 
     if (m.direction === 'in' && !m.read) {
         m.read = true;
-        document.querySelector(`.mct-row[data-id="${id}"]`)?.classList.remove('unread');
-        const premiumUnread = premiumCache.filter(x => x.direction === 'in' && !x.read).length;
-        setBadge('premium', isNotifyEnabled('premium') ? premiumUnread : 0);
+        elList.querySelector(`.mcli[data-key="p${id}"]`)?.classList.remove('unread');
+        setUnread('premium', premiumCache.filter(x => x.direction === 'in' && !x.read).length);
         try {
             await fetch(`/api/messages/premium/${id}/read`, { method: 'POST' });
-        } catch { /* Netzwerkfehler – Badge korrigiert sich beim nächsten Poll */ }
+        } catch { /* Netzwerkfehler – Zähler korrigiert sich beim nächsten Poll */ }
     }
 }
 
-function renderPremiumPagination() {
-    const wrap = document.getElementById('mcpPagination');
-    if (!wrap) return;
-    if (premiumTotalPages <= 1) { wrap.innerHTML = ''; return; }
-    wrap.innerHTML = Array.from({ length: premiumTotalPages }, (_, i) => i + 1)
-        .map(p => `<button class="mcs-page-btn${p === premiumPage ? ' active' : ''}" data-page="${p}">${p}</button>`)
-        .join('');
-    wrap.querySelectorAll('.mcs-page-btn').forEach(btn => {
-        btn.addEventListener('click', () => { premiumPage = Number(btn.dataset.page); renderPremiumPanel(); });
-    });
-}
-
-document.getElementById('mcpMarkAllBtn')?.addEventListener('click', async () => {
-    const unreadIds = premiumCache.filter(m => m.direction === 'in' && !m.read).map(m => m.id);
-    for (const id of unreadIds) {
-        const m = premiumCache.find(x => x.id === id);
-        if (m) m.read = true;
-        try { await fetch(`/api/messages/premium/${id}/read`, { method: 'POST' }); } catch { /* Badge korrigiert sich beim nächsten Poll */ }
-    }
-    renderPremiumPanel();
-    refreshBadges();
-});
-document.getElementById('mcpSearchInput')?.addEventListener('input', debounce((e) => {
-    premiumSearchQuery = e.target.value.trim();
-    premiumPage = 1;
-    renderPremiumPanel();
-}));
-
-// ── Menü: Support (Vollbreite-Panel, gleiche Darstellung wie System/Premium) ─
-// Eine Box pro Konversation; Klick öffnet den Verlauf + Antwortfeld im (größeren)
-// Modal, Kopfzeile darin zeigt die eigene FORGE-Nostr-Identität wie das
-// "Von"-Feld einer E-Mail (Antworten laufen unter dieser Identität).
-let supportThreads     = [];
-let supportPage        = 1;
-let supportSearchQuery = '';
-let supportTotalPages  = 1;
-let activeThreadId     = null;  // Support: Anliegen (thread_id) des offenen Modals, null = alter Sammel-Thread
-
-// Boxen/Modal identifizieren ein Anliegen über peerPubkey + threadId (nicht nur
-// peerPubkey – ein Nutzer kann mehrere getrennte Anliegen mit demselben FORGE
-// Master haben, siehe thread_id-Migration im Premium-Dienst). Kodiert als
-// "<peerPubkey>::<threadId>" für data-id-Attribute.
-function encodeThreadKey(peerPubkey, threadId) { return `${peerPubkey}::${threadId ?? ''}`; }
-function decodeThreadKey(key) {
-    const i = key.indexOf('::');
-    return { peerPubkey: key.slice(0, i), threadId: key.slice(i + 2) || null };
-}
-
-async function fetchThreads() {
-    try {
-        const r = await fetch('/api/messages/support/threads');
-        const { threads } = await r.json();
-        return threads ?? [];
-    } catch {
-        return [];
-    }
-}
-
-function filteredSupportThreads() {
-    if (!supportSearchQuery) return supportThreads;
-    const q = supportSearchQuery.toLowerCase();
-    return supportThreads.filter(t =>
-        (t.peerName ?? '').toLowerCase().includes(q) ||
-        (t.lastText ?? '').toLowerCase().includes(q)
-    );
-}
-
-async function renderSupportPanel() {
-    supportThreads = await fetchThreads();
-    const filtered = filteredSupportThreads();
-    supportTotalPages = Math.min(10, Math.max(1, Math.ceil(filtered.length / 10)));
-    if (supportPage > supportTotalPages) supportPage = supportTotalPages;
-    const pageItems = filtered.slice((supportPage - 1) * 10, supportPage * 10);
-
-    const grid = document.getElementById('mcSupGrid');
-    if (!pageItems.length) {
-        grid.innerHTML = '<div class="msg-empty">' + tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.') + '</div>';
-    } else {
-        grid.innerHTML = mctTableHtml(pageItems.map(t => supportRowHtml(t)).join(''));
-        grid.querySelectorAll('.mct-row').forEach(row => {
-            const { peerPubkey, threadId } = decodeThreadKey(row.dataset.id);
-            row.addEventListener('click', () => openSupportThreadModal(peerPubkey, threadId));
-        });
-    }
-    renderSupportPagination();
-}
-
-// Kein Papierkorb in der Zeile (erstmal entfernt, 2026-08-08): sonst keine
-// gleiche Spaltenbreite über alle drei Rubriken hinweg möglich. Löschen läuft
-// weiterhin über "Konversation löschen" im Thread-Modal (deleteSupportThread()).
-function supportRowHtml(t) {
-    const key = esc(encodeThreadKey(t.peerPubkey, t.threadId));
-    return `
-        <div class="mct-row${t.unreadCount > 0 ? ' unread' : ''}" data-id="${key}">
-            <span class="mct-subject">${esc(stripEmoji(stripQuoteMarkers(t.lastText)))}</span>
-            <span class="mct-sender">${nickOrNone(t.peerName)}</span>
-            <span class="mct-time">${fmtDateTime(t.lastTimestamp)}</span>
-        </div>`;
-}
-
-function renderSupportPagination() {
-    const wrap = document.getElementById('mcSupPagination');
-    if (!wrap) return;
-    if (supportTotalPages <= 1) { wrap.innerHTML = ''; return; }
-    wrap.innerHTML = Array.from({ length: supportTotalPages }, (_, i) => i + 1)
-        .map(p => `<button class="mcs-page-btn${p === supportPage ? ' active' : ''}" data-page="${p}">${p}</button>`)
-        .join('');
-    wrap.querySelectorAll('.mcs-page-btn').forEach(btn => {
-        btn.addEventListener('click', () => { supportPage = Number(btn.dataset.page); renderSupportPanel(); });
-    });
-}
-
-function supportThreadUrl(peerPubkey, threadId) {
-    const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : '';
-    return `/api/messages/support/thread/${peerPubkey}${qs}`;
-}
-
-document.getElementById('mcSupMarkAllBtn')?.addEventListener('click', async () => {
-    // Kein Bulk-Endpoint – ein Anliegen gilt serverseitig als gelesen, sobald sein
-    // Verlauf geladen wird (gleiches Prinzip wie ein Klick auf die Box). Beschränkt
-    // auf die aktuelle Suche, wie in der UI sichtbar (gleiche Logik wie bei System).
-    const unread = filteredSupportThreads().filter(t => t.unreadCount > 0);
-    for (const t of unread) {
-        try { await fetch(supportThreadUrl(t.peerPubkey, t.threadId)); } catch { /* Badge korrigiert sich beim nächsten Poll */ }
-    }
-    await renderSupportPanel();
-    refreshBadges();
-});
-document.getElementById('mcSupSearchInput')?.addEventListener('input', debounce((e) => {
-    supportSearchQuery = e.target.value.trim();
-    supportPage = 1;
-    renderSupportPanel();
-}));
-
-async function openSupportThreadModal(peerPubkeyHex, threadId) {
+/**
+ * Support-Verlauf rechts: Kopf mit der eigenen Identität ("Von", unter der
+ * geantwortet wird) und der Gegenstelle ("An") wie bei einer E-Mail, darunter der
+ * Verlauf und das Antwortfeld. Löschen betrifft beim Support bewusst die ganze
+ * Konversation, nicht einzelne Nachrichten (Vorgabe 2026-08-14).
+ *
+ * markRead nur bei einer echten Nutzeraktion setzen (Klick auf die Konversation) –
+ * nicht beim Öffnen nach dem Senden und in keinem Hintergrund-Refresh.
+ */
+async function openSupportThread(peerPubkeyHex, threadId, { markRead = false } = {}) {
     activePeer     = peerPubkeyHex;
     activeThreadId = threadId;
-    const mid = 'msg-support-thread';
-    const meLabel = peerLabelWithNpub(currentNpub, currentAlias);
-
-    showModal({
-        id:    mid,
-        title: '',
-        body: `
-            <div class="msg-thread-modal-header">
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label">${tr('msg.from', 'Von')}</span>
-                    <span>${meLabel}</span>
-                </div>
-                <div class="msg-thread-modal-row">
-                    <span class="msg-thread-modal-label">${tr('msg.with', 'Mit')}</span>
-                    <span id="msgThreadPeer">${tr('msg.loading', 'Lade…')}</span>
-                </div>
+    elPane.innerHTML = `
+        <div class="mc-pane-head">
+            <h2 class="mc-pane-title">${esc(tr('msg.conversation', 'Konversation'))}</h2>
+            <div class="mc-pane-actions">
+                <button type="button" class="msg-icon-btn" id="msgDeleteThreadBtn"
+                    title="${tr('msg.delete_conv', 'Konversation löschen')}" aria-label="${tr('msg.delete_conv', 'Konversation löschen')}">🗑</button>
             </div>
+        </div>
+        <div class="mc-pane-body">
+            ${metaHtml([
+                [tr('msg.from', 'Von'), peerLabelWithNpub(currentNpub, currentAlias)],
+                // "An" statt des früheren "Mit" (2026-08-16): im Verlauf gehen zwar
+                // Nachrichten in beide Richtungen, die Zeile beschreibt aber das Ziel
+                // der nächsten Antwort – und genau die tippt man direkt darunter.
+                // Gleiche Beschriftung wie bei System/Premium, statt zweier Begriffe
+                // für dieselbe Sache.
+                [tr('msg.to', 'An'), `<span id="msgThreadPeer">${tr('msg.loading', 'Lade…')}</span>`],
+            ])}
             <div class="msg-thread" id="msgThread"><div class="msg-empty">${tr('msg.loading', 'Lade…')}</div></div>
             <form class="msg-compose" id="msgComposeForm">
                 <textarea id="msgComposeInput" rows="3" placeholder="${tr('msg.reply_ph', 'Antworten…')}" maxlength="1000"></textarea>
-                <button type="submit">${tr('msg.send', 'Senden')}</button>
+                <div class="msg-compose-actions"><button type="submit">${tr('msg.send', 'Senden')}</button></div>
             </form>
-            <div class="msg-status" id="msgStatus"></div>`,
-        actions: [
-            { label: tr('msg.delete_conv', 'Konversation löschen'), onClick: () => deleteSupportThread(peerPubkeyHex, threadId, mid) },
-            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
-        ],
-        onClose: () => { activePeer = null; activeThreadId = null; },
-    });
+            <div class="msg-status" id="msgStatus"></div>
+        </div>`;
 
-    document.getElementById('msgComposeForm').addEventListener('submit', onComposeSubmit);
+    elPane.querySelector('#msgDeleteThreadBtn').addEventListener('click', () => deleteSupportThread(peerPubkeyHex, threadId));
+    elPane.querySelector('#msgComposeForm').addEventListener('submit', onComposeSubmit);
+    if (markRead) await markSupportThreadRead(peerPubkeyHex, threadId);
     await loadThreadMessages();
 }
 
-// Löscht nur die lokale Kopie (eigene DB) – auf Nostr-Relays bereits verbreitete
-// Events bleiben dort bestehen, das lässt sich clientseitig nicht zurückholen.
-// Bestätigung über ein eigenes Modal statt window.confirm() (bewusst keine
-// nativen Browser-Dialoge) – stapelt sich einfach über das offene Thread-Modal.
-// closeThreadModalId ist optional: aus dem Thread-Modal heraus wird dessen ID
-// mitgegeben (muss beim Löschen mitschließen), vom Papierkorb-Icon in der
-// Tabellenzeile (seit 2026-08-08) direkt ohne offenes Modal aufgerufen –
-// closeModal(undefined) ist dann ein sicheres No-op (siehe modal.js).
-async function deleteSupportThread(peerPubkeyHex, threadId, closeThreadModalId = null) {
-    const confirmMid = 'msg-support-delete-confirm';
-    showModal({
-        id:    confirmMid,
-        title: tr('msg.delete_conv_q', 'Konversation löschen?'),
-        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.delete_conv_note', 'Diese Konversation wird unwiderruflich gelöscht.') + '</p>',
-        actions: [
-            {
-                label: tr('msg.delete', 'Löschen'), onClick: async () => {
-                    try {
-                        const r = await fetch(supportThreadUrl(peerPubkeyHex, threadId), { method: 'DELETE' });
-                        const data = await r.json().catch(() => ({}));
-                        if (!r.ok) { showToast(data.error ?? tr('msg.delete_failed', 'Löschen fehlgeschlagen'), 'error'); return; }
-                        closeModal(confirmMid);
-                        closeModal(closeThreadModalId);
-                        showToast(tr('msg.conv_deleted', 'Konversation gelöscht'), 'success');
-                        await renderSupportPanel();
-                        refreshBadges();
-                    } catch {
-                        showToast(tr('msg.delete_failed_net', 'Löschen fehlgeschlagen (Netzwerk)'), 'error');
-                    }
-                },
-            },
-            { label: 'Abbrechen', onClick: () => closeModal(confirmMid) },
-        ],
-    });
+/** Quittiert ein Anliegen serverseitig als gelesen (siehe POST .../read). */
+async function markSupportThreadRead(peerPubkeyHex, threadId) {
+    try {
+        const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : '';
+        await fetch(`/api/messages/support/thread/${peerPubkeyHex}/read${qs}`, { method: 'POST' });
+    } catch { /* Netzwerkfehler – bleibt ungelesen, der Zähler stimmt beim nächsten Poll wieder */ }
 }
 
 async function loadThreadMessages() {
@@ -817,9 +745,9 @@ async function loadThreadMessages() {
         const r = await fetch(supportThreadUrl(activePeer, activeThreadId));
         const { messages, peerName, peerNpub } = await r.json();
         const peerEl = document.getElementById('msgThreadPeer');
-        if (peerEl) peerEl.innerHTML = peerLabelWithNpub(peerNpub, peerName);
+        if (peerEl) peerEl.innerHTML = peerLabelWithNpub(peerNpub, peerNick(peerName));
         if (!messages.length) {
-            thread.innerHTML = '<div class="msg-empty">' + tr('msg.no_messages', 'Noch keine Nachrichten.') + '</div>';
+            thread.innerHTML = `<div class="msg-empty">${tr('msg.no_messages', 'Noch keine Nachrichten.')}</div>`;
             return;
         }
         thread.innerHTML = messages.map(m => `
@@ -829,22 +757,32 @@ async function loadThreadMessages() {
             </div>
         `).join('');
         thread.scrollTop = thread.scrollHeight;
-        renderSupportPanel(); // Badge/Preview nach "gelesen" aktualisieren
-        refreshBadges();      // Menü-Badge korrekt nachziehen (nur dieses Anliegen wurde gelesen)
+        // Liste nachziehen (letzte Nachricht/Zeitpunkt je Konversation). Der Abruf
+        // oben quittiert seit 2026-08-16 NICHTS mehr – kommt hier also eine neue
+        // Nachricht in den offenen Verlauf, bleibt sie ungelesen und der Zähler an
+        // der Rubrik zeigt sie weiter an, bis der Nutzer sie anklickt oder den Haken
+        // drückt.
+        await reloadActiveList();
+        refreshBadges();
     } catch {
-        thread.innerHTML = '<div class="msg-empty">' + tr('msg.history_load_failed', '⚠️ Verlauf konnte nicht geladen werden.') + '</div>';
+        thread.innerHTML = `<div class="msg-empty">${tr('msg.history_load_failed', '⚠️ Verlauf konnte nicht geladen werden.')}</div>`;
     }
+}
+
+function supportThreadUrl(peerPubkey, threadId) {
+    const qs = threadId ? `?threadId=${encodeURIComponent(threadId)}` : '';
+    return `/api/messages/support/thread/${peerPubkey}${qs}`;
 }
 
 async function onComposeSubmit(e) {
     e.preventDefault();
     if (!activePeer) return;
-    const input = document.getElementById('msgComposeInput');
+    const input  = document.getElementById('msgComposeInput');
     const status = document.getElementById('msgStatus');
-    const text = input.value.trim();
+    const text   = input.value.trim();
     if (!text) return;
 
-    status.textContent = 'Sende…';
+    status.textContent = tr('msg.sending', 'Sende…');
     try {
         const r = await fetch('/api/messages/support/send', {
             method: 'POST',
@@ -860,65 +798,196 @@ async function onComposeSubmit(e) {
         status.textContent = '';
         await loadThreadMessages();
     } catch {
-        status.textContent = '⚠️ Senden fehlgeschlagen (Netzwerk)';
+        status.textContent = `⚠️ ${tr('msg.send_failed_net', 'Senden fehlgeschlagen (Netzwerk)')}`;
     }
 }
 
-// ── Identität ────────────────────────────────────────────────────────────────
-// Alias/npub/Copy/QR werden nur noch unter "Einstellungen" angezeigt (siehe
-// renderSettingsPanel/loadSettingsIdentity) – currentAlias/currentNpub bleiben
-// modulweiter Zustand, weil das Support-Thread-Modal sie für die "Von"-Zeile
-// braucht (eigene FORGE-Nostr-Identität, unter der geantwortet wird).
-let currentNpub  = null;
-let currentAlias = null;
-
-// ── Neue Nachricht (Compose-Modal) ───────────────────────────────────────────
+// ── Neue Nachricht verfassen (ebenfalls rechts, kein Modal) ──────────────────
 async function fetchContacts() {
     try {
         const r = await fetch('/api/messages/contacts');
         if (!r.ok) return [];
         const data = await r.json();
         return Array.isArray(data.contacts) ? data.contacts : [];
+    } catch { return []; }
+}
+
+// Auf einer FORGE-public-Installation ist der Empfänger fest der FORGE Master (die
+// Rubrik heißt "Support") – keine freie npub-Eingabe, damit niemand versehentlich
+// (oder durch Social Engineering über eine gefälschte npub) mit der falschen
+// Gegenstelle statt dem echten Support kommuniziert. Auf dem FORGE Master gilt das
+// Gegenteil: er beantwortet Anfragen beliebiger Nutzer und muss deren npub eintragen
+// können (Vorgabe 2026-08-16) – deshalb dort ein Eingabefeld statt des festen
+// Kontakts. Jede neue Nachricht startet in beiden Fällen ein frisches Anliegen
+// (newThread:true), statt in einem wachsenden Sammel-Verlauf zu landen.
+document.getElementById('msgNewBtn').addEventListener('click', () => openCompose());
+
+/**
+ * quoteText: Zitat einer weiterzuleitenden System-Meldung (siehe
+ * forwardSystemMessage) – steht als eigener, NICHT editierbarer Block über der
+ * Textarea, nicht mit ihr vermischt (Feedback 2026-08-09: vorher lagen Zitat und
+ * Kommentar in einem gemeinsamen, frei bearbeitbaren Feld ohne erkennbare
+ * Trennung). null/leer beim normalen "Neue Nachricht"-Button.
+ */
+async function openCompose(quoteText = null) {
+    composeOpen = true;
+    activeKey = null;
+    elList.querySelectorAll('.mcli').forEach(el => el.classList.remove('selected'));
+
+    const contacts = await fetchContacts();
+    const master   = contacts.find(c => c.id === 'forge-master');
+    // Master: freies Eingabefeld. Sonst die feste Gegenstelle mit Nick, npub nur
+    // gekürzt daneben (Vorgabe 2026-08-16).
+    const toHtml = isMasterIdentity
+        ? `<input type="text" id="msgNewPeer" class="mcs-search" style="min-width:min(100%,26rem)"
+               placeholder="${tr('msg.recipient_npub_ph', 'npub1… oder 64-stelliger Hex-Pubkey')}" autocomplete="off" spellcheck="false">`
+        : (master
+            ? peerLabelWithNpub(master.npub, peerNick(master.label))
+            : esc(tr('msg.master_contact_unavailable_warn', '⚠️ FORGE-Master-Kontakt nicht verfügbar')));
+
+    elPane.innerHTML = `
+        <div class="mc-pane-head">
+            <h2 class="mc-pane-title">${esc(tr('msg.new_message', 'Neue Nachricht'))}</h2>
+        </div>
+        <div class="mc-pane-body">
+            ${metaHtml([
+                [tr('msg.from', 'Von'), peerLabelWithNpub(currentNpub, currentAlias)],
+                [tr('msg.to',   'An'),  toHtml],
+            ])}
+            ${quoteText ? `
+            <div class="msg-modal-field">
+                <label>${tr('msg.forwarded_readonly', 'Weitergeleitete Meldung (nicht bearbeitbar)')}</label>
+                <div class="msg-quote-block msg-quote-block-compose">${esc(quoteText).replace(/\n/g, '<br>')}</div>
+            </div>` : ''}
+            <form class="msg-compose" id="msgNewForm">
+                <label for="msgNewText" style="font-size:0.78rem;color:var(--text-muted)">${quoteText
+                    ? tr('msg.your_question', 'Deine Frage/Anmerkung dazu')
+                    : tr('msg.message_de', 'Nachricht')}</label>
+                <textarea id="msgNewText" rows="8" maxlength="1000" placeholder="${quoteText
+                    ? tr('msg.what_to_know', 'Was möchtest Du dazu wissen…')
+                    : tr('msg.message_ph', 'Nachricht…')}"></textarea>
+                <div class="msg-compose-actions">
+                    <button type="button" class="msg-btn-secondary" id="msgNewCancel">${tr('common.cancel', 'Abbrechen')}</button>
+                    <button type="submit">${tr('msg.send', 'Senden')}</button>
+                </div>
+            </form>
+            <div class="msg-status" id="msgNewStatus"></div>
+        </div>`;
+
+    elPane.querySelector('#msgNewCancel').addEventListener('click', () => { composeOpen = false; renderPanePlaceholder(); });
+    elPane.querySelector('#msgNewForm').addEventListener('submit', (e) => { e.preventDefault(); sendNewMessage(master, quoteText); });
+    // Auf dem Master zuerst in die Empfängerzeile, sonst direkt in den Text – dort
+    // steht der Empfänger ohnehin fest.
+    elPane.querySelector(isMasterIdentity ? '#msgNewPeer' : '#msgNewText').focus();
+}
+
+/** npub1…/Hex vorab prüfen, damit eine Zahlendreher-Eingabe nicht erst am Relay auffällt. */
+const PUBKEY_RE = /^(npub1[02-9ac-hj-np-z]{58}|[0-9a-fA-F]{64})$/;
+
+async function sendNewMessage(master, quoteText = null) {
+    const textInput = document.getElementById('msgNewText');
+    const status    = document.getElementById('msgNewStatus');
+    const comment   = textInput.value.trim();
+
+    // Auf dem Master kommt der Empfänger aus der Eingabe, sonst aus dem Adressbuch.
+    const peerInput = document.getElementById('msgNewPeer');
+    const peer      = isMasterIdentity ? (peerInput?.value.trim() ?? '') : master?.npub;
+    if (isMasterIdentity) {
+        if (!peer) { status.textContent = tr('msg.enter_recipient', 'Bitte einen Empfänger (npub) eingeben.'); peerInput?.focus(); return; }
+        if (!PUBKEY_RE.test(peer)) { status.textContent = tr('msg.invalid_recipient', 'Kein gültiger Nostr-Schlüssel – erwartet wird npub1… oder ein 64-stelliger Hex-Pubkey.'); peerInput?.focus(); return; }
+    } else if (!master) {
+        status.textContent = tr('msg.master_contact_unavailable', 'FORGE-Master-Kontakt nicht verfügbar.');
+        return;
+    }
+    if (!comment) {
+        status.textContent = quoteText
+            ? tr('msg.enter_question', 'Bitte eine Frage/Anmerkung zur weitergeleiteten Meldung eingeben.')
+            : tr('msg.enter_message', 'Bitte eine Nachricht eingeben.');
+        return;
+    }
+    const text = quoteText ? `${QUOTE_OPEN}\n${quoteText}\n${QUOTE_CLOSE}\n\n${comment}` : comment;
+
+    status.textContent = tr('msg.sending', 'Sende…');
+    try {
+        const r = await fetch('/api/messages/support/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, peerPubkey: peer, newThread: true }),
+        });
+        const data = await r.json();
+        if (!r.ok) {
+            status.textContent = `⚠️ ${data.error ?? tr('msg.send_failed', 'Senden fehlgeschlagen')}`;
+            return;
+        }
+        composeOpen = false;
+        showToast(tr('msg.sent', 'Nachricht gesendet'), 'success');
+        await reloadActiveList({ reset: true });
+        // Hex-Pubkey kommt vom Server zurück – bei freier Eingabe kann `peer` eine
+        // npub sein, der Verlauf wird aber über die Hex-Form adressiert.
+        const peerHex = data.peerPubkey ?? master?.pubkeyHex;
+        markSelected(`t${encodeThreadKey(peerHex, data.threadId ?? null)}`);
+        openSupportThread(peerHex, data.threadId ?? null);
     } catch {
-        return [];
+        status.textContent = `⚠️ ${tr('msg.send_failed_net', 'Senden fehlgeschlagen (Netzwerk)')}`;
     }
 }
 
-// Empfänger ist fest auf den FORGE Master beschränkt (Menüpunkt heißt "Support")
-// – keine freie npub-Eingabe mehr, damit niemand versehentlich (oder durch
-// Social Engineering über eine gefälschte npub) mit der falschen Gegenstelle
-// statt dem echten Support kommuniziert. Jede neue Nachricht startet außerdem
-// ein frisches Anliegen (newThread:true), statt in einen wachsenden Sammel-
-// Verlauf zu landen – siehe thread_id-Konzept oben.
-document.getElementById('msgNewBtn').addEventListener('click', () => openNewMessageModal());
+// ── Weiterleiten an den Support ──────────────────────────────────────────────
+// Zwischenschritt vor dem Weiterleiten (Feedback 2026-08-09): ein Klick auf das
+// Icon soll nicht überraschend direkt in eine neue Support-Nachricht springen –
+// erst eine bewusste Rückfrage, dann (nur nach "Weiter") der eigentliche Wechsel.
+function confirmForwardSystemMessage(n) {
+    const cid = 'msg-forward-confirm';
+    showModal({
+        id:    cid,
+        title: tr('msg.forward_q', 'Nachricht weiterleiten?'),
+        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.forward_question', 'Hast Du eine Frage zu dieser Meldung und möchtest sie an den Support weiterleiten?') + '</p>',
+        actions: [
+            { label: tr('common.next', 'Weiter'), onClick: () => { closeModal(cid); forwardSystemMessage(n); } },
+            { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal(cid) },
+        ],
+    });
+}
+
+// Statt die Meldung mühsam per Copy&Paste in eine neue Support-Nachricht zu
+// übertragen, übernimmt dies den kompletten Inhalt (Art/Bot/Zeitpunkt/Text) als
+// Zitat. Zitat und Kommentar werden erst beim Senden mit den QUOTE-Markern
+// zusammengefügt. Versand bleibt bewusst manuell (kein Auto-Send).
+function forwardSystemMessage(n) {
+    const bot = n.botName || n.botId || 'System';
+    const quoteText = [
+        `${tr('msg.subject', 'Betreff')}: ${LEVEL_LABEL[n.level] ?? n.level}${n.pool ? ` · ${n.pool}` : ''}`,
+        `${tr('msg.from', 'Von')}: ${bot}`,
+        `${tr('msg.timestamp', 'Zeitpunkt')}: ${fmtDateTimeLong(n.timestamp)}`,
+        '',
+        stripEmoji(stripNotifyHeader(n.message)),
+    ].join('\n');
+    selectMenu('support');
+    openCompose(quoteText);
+}
 
 // Weitergeleitetes Zitat wird im tatsächlich versendeten Text mit diesen Markern
 // umschlossen (Feedback 2026-08-09: eine reine Text-Trennlinie zwischen Zitat und
-// Kommentar reichte der Empfängerseite nicht – beides wirkte im Thread trotzdem
-// wie ein einziger, schwer lesbarer Block). renderMessageBody() weiter unten
-// erkennt diese Marker beim Rendern (auf BEIDEN Seiten – Absender-Vorschau direkt
-// nach dem Senden UND FORGE Master, die dasselbe loadThreadMessages() nutzen) und
-// stellt den Inhalt dazwischen als eigenen, optisch hervorgehobenen Block dar
-// (gleiche Optik wie der nicht editierbare Zitat-Block im Compose-Modal). Bewusst
-// einfache Text-Marker statt echtem HTML: bleiben auch für einen fremden
-// Nostr-Client der Gegenstelle als Klartext lesbar, falls der doch mal ohne
-// unser Rendering auskommt.
+// Kommentar reichte der Empfängerseite nicht – beides wirkte im Verlauf trotzdem
+// wie ein einziger, schwer lesbarer Block). renderMessageBody() erkennt sie beim
+// Rendern auf BEIDEN Seiten und stellt den Inhalt dazwischen als eigenen,
+// hervorgehobenen Block dar. Bewusst einfache Text-Marker statt echtem HTML:
+// bleiben auch für einen fremden Nostr-Client der Gegenstelle als Klartext lesbar.
 const QUOTE_OPEN  = '<quote>';
 const QUOTE_CLOSE = '</quote>';
 
-// Für Vorschau-Texte (Support-Übersichtstabelle, siehe supportRowHtml) – dort
-// wird nur ein einzeiliger Ausschnitt gezeigt, kein eigener Zitat-Block wie im
-// Thread. Die Marker selbst sind reine Render-Hilfe und sollen dort nicht als
-// Rohtext auftauchen (Fund 2026-08-09, Screenshot: "<quote> Betreff: …").
+// Für Vorschau-Texte in der Liste – dort wird nur ein einzeiliger Ausschnitt
+// gezeigt, kein eigener Zitat-Block wie im Verlauf. Die Marker sind reine
+// Render-Hilfe und sollen dort nicht als Rohtext auftauchen.
 function stripQuoteMarkers(text) {
     return String(text ?? '')
         .replace(new RegExp(`${QUOTE_OPEN}\\n?`, 'g'), '')
         .replace(new RegExp(`\\n?${QUOTE_CLOSE}`, 'g'), '');
 }
 
-// Zerlegt eine Thread-Nachricht in einen optionalen Zitat-Block + den Rest und
-// baut daraus sicheres HTML (escaped) – zentral genutzt von loadThreadMessages(),
-// damit Absender- und Empfänger-Ansicht identisch aussehen.
+// Zerlegt eine Nachricht in einen optionalen Zitat-Block + den Rest und baut
+// daraus sicheres HTML (escaped) – zentral genutzt von loadThreadMessages(),
+// damit Absender- und Empfängeransicht identisch aussehen.
 function renderMessageBody(rawText) {
     const m = new RegExp(`^${QUOTE_OPEN}\\n([\\s\\S]*?)\\n${QUOTE_CLOSE}\\n*([\\s\\S]*)$`).exec(rawText ?? '');
     if (!m) return `<div class="msg-own-comment">${esc(stripEmoji(rawText))}</div>`;
@@ -930,77 +999,97 @@ function renderMessageBody(rawText) {
         ${commentHtml ? `<div class="msg-own-comment">${commentHtml}</div>` : ''}`;
 }
 
-// quoteText: Zitat einer weiterzuleitenden System-Meldung (siehe
-// forwardSystemMessage) – wird als eigener, NICHT editierbarer Block über der
-// Textarea angezeigt, nicht mehr mit ihr vermischt (Feedback 2026-08-09: vorher
-// lagen Zitat und Kommentar in einem gemeinsamen, frei bearbeitbaren Feld ohne
-// erkennbare Trennung). null/leer beim normalen "Neue Nachricht"-Button.
-async function openNewMessageModal(quoteText = null) {
-    const contacts = await fetchContacts();
-    const master = contacts.find(c => c.id === 'forge-master');
-
+// ── Löschen ──────────────────────────────────────────────────────────────────
+/**
+ * Löschen einer einzelnen Nachricht mit Rückfrage (System/Premium). Bestätigung
+ * über ein eigenes Modal statt window.confirm() (keine nativen Browser-Dialoge).
+ *
+ * Serverseitig unterscheiden sich die Kanäle deutlich (System → Nexus, der als
+ * einziger Prozess auf nexus.db schreibt; Premium → Premium-Dienst inkl. Tombstone
+ * gegen wiederauftauchende Relay-Kopien), deshalb bekommt diese Funktion nur die
+ * fertige URL statt selbst zu unterscheiden.
+ */
+function confirmDeleteMessage({ url, afterDelete }) {
+    const confirmMid = 'msg-delete-confirm';
     showModal({
-        id: 'msg-new',
-        title: tr('msg.new_message', 'Neue Nachricht'),
-        body: `
-            <div class="msg-modal-field">
-                <label>${tr('msg.to', 'An')}</label>
-                <div class="mcs-infotext">${master
-                    ? `${esc(master.label)} <span class="msg-peer-pubkey">(${esc(shortPeer(master.npub))})</span>`
-                    : tr('msg.master_contact_unavailable_warn', '⚠️ FORGE-Master-Kontakt nicht verfügbar')}</div>
-            </div>
-            ${quoteText ? `
-            <div class="msg-modal-field">
-                <label>${tr('msg.forwarded_readonly', 'Weitergeleitete Meldung (nicht bearbeitbar)')}</label>
-                <div class="msg-quote-block msg-quote-block-compose">${esc(quoteText).replace(/\n/g, '<br>')}</div>
-            </div>` : ''}
-            <div class="msg-modal-field">
-                <label for="msgNewText">${quoteText ? tr('msg.your_question', 'Deine Frage/Anmerkung dazu') : 'Nachricht'}</label>
-                <textarea id="msgNewText" rows="6" maxlength="1000" placeholder="${quoteText ? tr('msg.what_to_know', 'Was möchtest Du dazu wissen…') : 'Nachricht…'}"></textarea>
-            </div>
-            <div class="msg-status" id="msgNewStatus"></div>`,
+        id:    confirmMid,
+        title: tr('msg.delete_msg_q', 'Nachricht löschen?'),
+        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.delete_msg_note', 'Diese Nachricht wird unwiderruflich gelöscht.') + '</p>',
         actions: [
-            { label: tr('msg.send', 'Senden'), onClick: () => sendNewMessage(master, quoteText) },
-            { label: 'Abbrechen', onClick: () => closeModal('msg-new') },
+            {
+                label: tr('msg.delete', 'Löschen'), onClick: async () => {
+                    try {
+                        const r = await fetch(url, { method: 'DELETE' });
+                        const data = await r.json().catch(() => ({}));
+                        if (!r.ok) { showToast(data.error ?? tr('msg.delete_failed', 'Löschen fehlgeschlagen'), 'error'); return; }
+                        closeModal(confirmMid);
+                        showToast(tr('msg.msg_deleted', 'Nachricht gelöscht'), 'success');
+                        renderPanePlaceholder();
+                        await afterDelete();
+                        refreshBadges();
+                    } catch {
+                        showToast(tr('msg.delete_failed_net', 'Löschen fehlgeschlagen (Netzwerk)'), 'error');
+                    }
+                },
+            },
+            { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal(confirmMid) },
         ],
     });
 }
 
-async function sendNewMessage(master, quoteText = null) {
-    const textInput = document.getElementById('msgNewText');
-    const status    = document.getElementById('msgNewStatus');
-    const comment   = textInput.value.trim();
-
-    if (!master) { status.textContent = tr('msg.master_contact_unavailable', 'FORGE-Master-Kontakt nicht verfügbar.'); return; }
-    if (!comment) {
-        status.textContent = quoteText
-            ? tr('msg.enter_question', 'Bitte eine Frage/Anmerkung zur weitergeleiteten Meldung eingeben.')
-            : tr('msg.enter_message', 'Bitte eine Nachricht eingeben.');
-        return;
-    }
-    const text = quoteText ? `${QUOTE_OPEN}\n${quoteText}\n${QUOTE_CLOSE}\n\n${comment}` : comment;
-
-    status.textContent = 'Sende…';
-    try {
-        const r = await fetch('/api/messages/support/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, peerPubkey: master.npub, newThread: true }),
-        });
-        const data = await r.json();
-        if (!r.ok) {
-            status.textContent = `⚠️ ${data.error ?? tr('msg.send_failed', 'Senden fehlgeschlagen')}`;
-            return;
-        }
-        closeModal('msg-new');
-        showToast(tr('msg.sent', 'Nachricht gesendet'), 'success');
-        openSupportThreadModal(master.pubkeyHex, data.threadId ?? null);
-    } catch {
-        status.textContent = '⚠️ Senden fehlgeschlagen (Netzwerk)';
-    }
+// Löscht nur die lokale Kopie (eigene DB) – auf Nostr-Relays bereits verbreitete
+// Events bleiben dort bestehen, das lässt sich clientseitig nicht zurückholen.
+async function deleteSupportThread(peerPubkeyHex, threadId) {
+    const confirmMid = 'msg-support-delete-confirm';
+    showModal({
+        id:    confirmMid,
+        title: tr('msg.delete_conv_q', 'Konversation löschen?'),
+        body:  '<p style="margin:0;font-size:0.88rem;line-height:1.5">' + tr('msg.delete_conv_note', 'Diese Konversation wird unwiderruflich gelöscht.') + '</p>',
+        actions: [
+            {
+                label: tr('msg.delete', 'Löschen'), onClick: async () => {
+                    try {
+                        const r = await fetch(supportThreadUrl(peerPubkeyHex, threadId), { method: 'DELETE' });
+                        const data = await r.json().catch(() => ({}));
+                        if (!r.ok) { showToast(data.error ?? tr('msg.delete_failed', 'Löschen fehlgeschlagen'), 'error'); return; }
+                        closeModal(confirmMid);
+                        showToast(tr('msg.conv_deleted', 'Konversation gelöscht'), 'success');
+                        activePeer = null; activeThreadId = null;
+                        renderPanePlaceholder();
+                        await reloadActiveList({ reset: true });
+                        refreshBadges();
+                    } catch {
+                        showToast(tr('msg.delete_failed_net', 'Löschen fehlgeschlagen (Netzwerk)'), 'error');
+                    }
+                },
+            },
+            { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal(confirmMid) },
+        ],
+    });
 }
 
-// ── Menü: Einstellungen (eigenes Verhalten: sofort volles Panel, kein Zwischenschritt) ──
+// ── "Alle als gelesen" ───────────────────────────────────────────────────────
+document.getElementById('mcMarkAllBtn').addEventListener('click', async () => {
+    if (activeMenu === 'system') {
+        // fetchAllSystemIds() fragt bewusst OHNE Suchbegriff ab – sonst markiert
+        // "alle als gelesen" bei aktiver Suche nur die paar Treffer (Bug 2026-07-30).
+        await markSystemRead(await fetchAllSystemIds());
+    } else if (activeMenu === 'premium') {
+        for (const m of premiumCache.filter(x => x.direction === 'in' && !x.read)) {
+            m.read = true;
+            try { await fetch(`/api/messages/premium/${m.id}/read`, { method: 'POST' }); } catch { /* Zähler korrigiert sich beim nächsten Poll */ }
+        }
+    } else {
+        // Kein Bulk-Endpoint – jedes offene Anliegen einzeln quittieren.
+        for (const t of supportThreads.filter(x => x.unreadCount > 0)) {
+            await markSupportThreadRead(t.peerPubkey, t.threadId);
+        }
+    }
+    await reloadActiveList();
+    refreshBadges();
+});
+
+// ── Einstellungen (Vollbreite-Panel, kein Reiter) ────────────────────────────
 async function renderSettingsPanel() {
     elDetailBody.innerHTML = `
         <div class="msg-settings">
@@ -1026,21 +1115,21 @@ async function renderSettingsPanel() {
             <label class="msg-setting-row">
                 <span>
                     <span class="msg-setting-label">${tr('msg.system_messages', 'System-Nachrichten')}</span>
-                    <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen System-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben im System-Tab trotzdem sichtbar.</span>
+                    <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen System-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik System trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifySystem">
             </label>
             <label class="msg-setting-row">
                 <span>
                     <span class="msg-setting-label">${tr('msg.support_messages', 'Support-Nachrichten')}</span>
-                    <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen Antworten. Ausgeschaltet: keine Zähler/Hinweise, die Konversationen bleiben im Support-Tab trotzdem sichtbar.</span>
+                    <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen Antworten. Ausgeschaltet: keine Zähler/Hinweise, die Konversationen bleiben in der Rubrik Support trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifySupport">
             </label>
             <label class="msg-setting-row">
                 <span>
                     <span class="msg-setting-label">${tr('msg.premium_messages', 'Premium-Nachrichten')}</span>
-                    <span class="msg-setting-hint">Zähler oben (Menü + Brief-Icon) bei neuen Premium-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben im Premium-Tab trotzdem sichtbar.</span>
+                    <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen Premium-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Premium trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifyPremium">
             </label>
@@ -1084,7 +1173,7 @@ async function renderSettingsPanel() {
     setPopups.checked = localStorage.getItem(MUTE_KEY) !== 'true';
     setPopups.addEventListener('change', () => localStorage.setItem(MUTE_KEY, String(!setPopups.checked)));
 
-    // Betrifft ausschließlich Zähler/Badges (Menü + Brief-Icon) – die Nachrichten
+    // Betrifft ausschließlich Zähler/Badges (Reiter + Brief-Icon) – die Nachrichten
     // selbst bleiben immer sichtbar, siehe isNotifyEnabled() in message-bell.js.
     const NOTIFY_CHECKBOX_IDS = { system: 'setNotifySystem', support: 'setNotifySupport', premium: 'setNotifyPremium' };
     await loadNotifySettings();
@@ -1118,37 +1207,40 @@ async function loadSettingsIdentity() {
         const id = await r.json();
         currentNpub  = id.npub;
         currentAlias = id.alias || id.name;
+        isMasterIdentity = id.isMaster === true;
         if (aliasInput && id.alias) aliasInput.value = id.alias;
         if (idTextEl) {
             idTextEl.innerHTML = `<b>${esc(currentAlias)}</b> · npub: <code>${shortPeer(id.npub)}</code>`;
             document.getElementById('msgCopyBtn').hidden = false;
             document.getElementById('msgQrBtn').hidden = false;
         }
-        // FORGE Master: npub muss stabil bleiben, damit ihn Gegenstellen (u.a. FORGE-public-
-        // Forks) weiterhin finden – Reset serverseitig gesperrt (siehe /identity/regenerate),
-        // hier zusätzlich in der UI sichtbar machen statt nur den Klick scheitern zu lassen.
+        // FORGE Master: npub muss stabil bleiben, damit ihn Gegenstellen (u.a.
+        // FORGE-public-Forks) weiterhin finden – Reset serverseitig gesperrt, hier
+        // zusätzlich in der UI sichtbar machen statt nur den Klick scheitern zu lassen.
         if (id.resetLocked) {
             regenBtn.disabled = true;
-            regenBtn.title = tr('msg.blocked_master', 'Auf dem FORGE Master gesperrt');
-            regenHint.textContent =
-                tr('msg.blocked_master_note', 'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE-public-Forks) ') +
-                tr('msg.would_need_npub', 'müssten die neue npub erst wieder finden. Der Anzeigename kann trotzdem ') +
-                tr('msg.can_be_changed', 'geändert werden.');
+            // Zwei grundverschiedene Sperrgründe: der eine ist dauerhaft und betrifft nur
+            // den Betreiber, der andere ist vom Nutzer selbst auflösbar. Ein gemeinsamer
+            // Text müsste beides gleichzeitig behaupten – und würde einem Fork-Nutzer
+            // erklären, er sei "der FORGE Master".
+            if (id.resetLockReason === 'health-share') {
+                regenBtn.title = tr('msg.blocked_share', 'Gesperrt, solange ein Premium-Zugang über die Datenfreigabe besteht');
+                regenHint.textContent = tr('msg.blocked_share_note',
+                    'Gesperrt, solange über die Datenfreigabe ein Premium-Zugang besteht: Die Zusage hängt an genau diesem Nostr-Zugang und ginge bei einem Wechsel verloren. Der Anzeigename kann jederzeit geändert werden.');
+            } else {
+                regenBtn.title = tr('msg.blocked_master', 'Auf dem FORGE Master gesperrt');
+                regenHint.textContent =
+                    tr('msg.blocked_master_note', 'Auf dem FORGE Master gesperrt: andere Nostr-Clients (u.a. FORGE-public-Forks) ') +
+                    tr('msg.would_need_npub', 'müssten die neue npub erst wieder finden. Der Anzeigename kann trotzdem ') +
+                    tr('msg.can_be_changed', 'geändert werden.');
+            }
         }
     } catch {
         if (idTextEl) idTextEl.textContent = '⚠️ Nostr-Service nicht erreichbar';
-        // Identität sonst nicht verfügbar – Panel bleibt trotzdem bedienbar (nur ohne Vorbefüllung).
+        // Identität sonst nicht verfügbar – Panel bleibt trotzdem bedienbar.
     }
 
-    document.getElementById('msgCopyBtn')?.addEventListener('click', async () => {
-        if (!currentNpub) return;
-        try {
-            await navigator.clipboard.writeText(currentNpub);
-            showToast('npub kopiert', 'success');
-        } catch {
-            showToast(tr('msg.copy_failed', 'Kopieren fehlgeschlagen'), 'error');
-        }
-    });
+    document.getElementById('msgCopyBtn')?.addEventListener('click', () => copyNpub(currentNpub));
 
     document.getElementById('msgQrBtn')?.addEventListener('click', () => {
         if (!currentNpub) return;
@@ -1171,7 +1263,7 @@ async function onSaveAlias() {
     const input = document.getElementById('setAlias');
     const status = document.getElementById('msgAccountStatus');
     const alias = input.value.trim();
-    status.textContent = 'Speichere…';
+    status.textContent = tr('msg.saving', 'Speichere…');
     try {
         const r = await fetch('/api/messages/identity/alias', {
             method: 'POST',
@@ -1185,9 +1277,12 @@ async function onSaveAlias() {
         }
         input.value = data.alias;
         status.textContent = '';
-        showToast(`Anzeigename gesetzt: ${data.alias}`, 'success');
+        // currentAlias mitziehen – er steht als Empfänger in jeder geöffneten
+        // Nachricht; ohne das zeigte die Ansicht bis zum nächsten Poll den alten Nick.
+        currentAlias = data.alias;
+        showToast(`${tr('msg.display_name_set', 'Anzeigename gesetzt')}: ${data.alias}`, 'success');
     } catch {
-        status.textContent = '⚠️ Speichern fehlgeschlagen (Netzwerk)';
+        status.textContent = `⚠️ ${tr('msg.save_failed_net', 'Speichern fehlgeschlagen (Netzwerk)')}`;
     }
 }
 
@@ -1216,7 +1311,7 @@ function onRegenerateClick() {
             <div class="msg-status" id="msgRegenStatus"></div>`,
         actions: [
             { label: tr('msg.yes_reset', 'Ja, zurücksetzen'), onClick: regenerateAccount },
-            { label: 'Abbrechen', onClick: () => closeModal('msg-regen') },
+            { label: tr('common.cancel', 'Abbrechen'), onClick: () => closeModal('msg-regen') },
         ],
     });
 }
@@ -1237,7 +1332,7 @@ async function regenerateAccount() {
             return;
         }
         closeModal('msg-regen');
-        showToast(`Neuer Nostr-Account aktiv. ${data.deletedMessages} Nachricht(en) gelöscht.`, 'success');
+        showToast(`${tr('msg.new_account_active', 'Neuer Nostr-Account aktiv.')} ${data.deletedMessages} ${tr('msg.messages_deleted', 'Nachricht(en) gelöscht.')}`, 'success');
         loadSettingsIdentity();
     } catch {
         status.textContent = tr('msg.reset_failed_net', '⚠️ Zurücksetzen fehlgeschlagen (Netzwerk)');
@@ -1247,7 +1342,7 @@ async function regenerateAccount() {
 // ── Live-Push (Server-Sent Events) ──────────────────────────────────────────
 // Der Server bekommt neue Nachrichten bereits live über die Nostr-Subscription –
 // per SSE landen sie ohne Neuladen/Polling direkt in der offenen Liste bzw. im
-// offenen Thread. EventSource verbindet sich bei Abbruch automatisch neu.
+// offenen Verlauf. EventSource verbindet sich bei Abbruch automatisch neu.
 function connectMessageStream() {
     const es = new EventSource('/api/messages/support/stream');
     es.addEventListener('support-message', (ev) => {
@@ -1255,39 +1350,65 @@ function connectMessageStream() {
         if (activeMenu !== 'support') return;
         const payload = JSON.parse(ev.data);
         if (activePeer && activePeer === payload.peerPubkey) loadThreadMessages();
-        else renderSupportPanel();
+        else reloadActiveList();
     });
     es.addEventListener('premium-message', () => {
         refreshBadges();
-        if (activeMenu === 'premium') renderPremiumPanel();
+        if (activeMenu === 'premium') reloadActiveList();
     });
 }
 
 // ── Init + Fallback-Polling ──────────────────────────────────────────────────
-// Grobes Sicherheitsnetz, falls die SSE-Verbindung mal steht (z.B. Netzwerk-Hänger).
-selectMenu(initialMenu);
-connectMessageStream();
-refreshBadges();
-
-// currentAlias/currentNpub früh laden – das Support-Thread-Modal zeigt sie in
-// der "Von"-Zeile, auch wenn "Einstellungen" in dieser Session noch nie
-// geöffnet wurde (dort werden sie sonst erst bei renderSettingsPanel() gesetzt).
-fetch('/api/messages/identity').then(r => r.ok ? r.json() : null).then(id => {
+// currentAlias/currentNpub/isMasterIdentity VOR dem ersten Render laden
+// (localhost-Call, siehe routes/messages.js): der Nick steht als Empfänger in jeder
+// geöffneten Nachricht und als Absender im Support-Verlauf, isMasterIdentity
+// entscheidet über die npub-Eingabe beim Verfassen. Fehlschlag ist kein
+// Abbruchgrund – myNick() fällt dann auf den Default zurück und das Verfassen
+// bleibt auf den festen Support-Kontakt beschränkt, also auf die engere Variante.
+await fetch('/api/messages/identity').then(r => r.ok ? r.json() : null).then(id => {
     if (!id) return;
     currentNpub  = id.npub;
     currentAlias = id.alias || id.name;
+    isMasterIdentity = id.isMaster === true;
 }).catch(() => {});
 
-setInterval(() => {
-    if (activeMenu === 'support') { if (activePeer) loadThreadMessages(); else renderSupportPanel(); }
-    else if (activeMenu === 'system')  renderSystemPanel();
-    else if (activeMenu === 'premium') renderPremiumPanel();
-    refreshBadges();
-}, 30_000);
+selectMenu(initialMenu);
+if (initialMenu === 'support' && initialPeer) {
+    markSelected(`t${encodeThreadKey(initialPeer, null)}`);
+    // Deep-Link (Brief-Icon im Health Monitor) zählt als bewusstes Öffnen genau
+    // dieser Konversation – gleiche Wirkung wie ein Klick in der Liste.
+    openSupportThread(initialPeer, null, { markRead: true });
+}
+connectMessageStream();
+refreshBadges();
 
-// Delegierter Klick-Handler für alle .msg-npub-copy-Spans (siehe peerLabelWithNpub()) –
-// delegiert statt einzeln pro Modal-Render verdrahtet, weil showModal() das Markup bei
-// jedem Öffnen/Reload (z.B. loadThreadMessages()) komplett neu baut.
+/**
+ * Liste, offenen Verlauf und die Zähler an den Reitern auffrischen. Auswahl und
+ * Scrollposition bleiben erhalten (siehe renderList()), das Verfassen-Formular wird
+ * nicht angetastet – sonst wäre ein halb getippter Text weg.
+ */
+function refreshActiveView() {
+    if (activeMenu === 'einstellungen') return;
+    if (activeMenu === 'support' && activePeer && !composeOpen) loadThreadMessages();
+    else reloadActiveList();
+    refreshBadges();
+}
+
+// Grobes Sicherheitsnetz, falls die SSE-Verbindung mal steht (z.B. Netzwerk-Hänger).
+// Trägt außerdem die System-Meldungen nach: die kommen aus der Nexus-DB und haben
+// bewusst keinen Push-Kanal (SSE liefert nur Support/Premium aus dem Premium-Dienst,
+// Begründung siehe message-bell.js – eine Dauerverbindung je Dashboard-Tab wäre für
+// ein Ungelesen-Badge unverhältnismäßig).
+setInterval(refreshActiveView, 30_000);
+
+// Sofort auffrischen, sobald der Tab wieder sichtbar wird – genau der Moment, in dem
+// der Nutzer hinschaut. Ohne das hinkten die Reiter-Zähler beim Zurückwechseln bis zu
+// 30s hinterher, während das Briefsymbol daneben schon aktuell war: message-bell.js
+// hat diesen Handler seit jeher, message.js fehlte er (Fund 2026-08-16).
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshActiveView(); });
+
+// Delegierter Klick-Handler für alle .msg-npub-copy-Spans – delegiert statt
+// einzeln verdrahtet, weil die Detailansicht bei jedem Öffnen neu gebaut wird.
 document.addEventListener('click', (e) => {
     const el = e.target.closest('.msg-npub-copy');
     if (el?.dataset.npub) copyNpub(el.dataset.npub);

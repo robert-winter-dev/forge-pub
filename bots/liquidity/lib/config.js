@@ -13,6 +13,7 @@ import Database      from 'better-sqlite3';
 import { applyPoolDynamics } from './db.js';
 import { PATHS, envFile } from '../../../config/paths.js';
 import { reasonPayload, renderReason } from '../../../lib/pool-reason.js';
+import { stripSessionFields, diffFromDefaults } from '../../../lib/pool-settings-defaults.js';
 
 const __dirname     = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB   = PATHS.settingsDb;
@@ -123,30 +124,37 @@ export function loadPools() {
 }
 
 /**
- * Setzt Pool-Settings beim Pool-Close/Reaktivieren zurück – ABER die
- * Risiko-Sektionen `tvlProtection` und `trailingStop` bleiben erhalten
- * (im Gegensatz zu allen anderen Sektionen, die bewusst auf
- * ForgeSettings-Defaults zurückfallen sollen).
+ * Räumt beim Pool-Close/Reaktivieren den **Session-Zustand** eines Pools ab.
+ * Alle Nutzer-Einstellungen bleiben unverändert erhalten.
  *
- * Grund: beides sind dauerhafte, pool-spezifische Risiko-Konfigurationen
- * (z.B. niedrigere TVL-Schwellen für strukturell TVL-arme RWA-Pools, oder eine
- * über den Tab „Pool Typen" gesetzte Drawdown-Schwelle) – kein Session-Zustand.
- * Ein kompletter Reset würde bei jedem Exit die gerade gesetzte Schwelle löschen;
- * die nächste Reaktivierung liefe dann mit Default-Werten weiter:
- *   - tvlProtection: pools.json-Fallback (oft viel zu hoch) → sofortiger erneuter
- *     Exit-Loop. Bug live beobachtet 2026-07-30: SPCX/USDC auf forge-pub1,
- *     wiederholter Deposit→NOTFALL-EXIT-Zyklus trotz manuell gesetzter 50K-Schwelle.
- *   - trailingStop: der Bot liest pool_settings roh, eine fehlende Sektion hieß
- *     bis 2026-08-01 „Trailing Stop komplett aus", während ForgeSettings weiterhin
- *     die Defaults (aktiv, 10 %) anzeigte. Live beobachtet 2026-08-01: PUMP/SOL
- *     lief nach Reaktivierung ohne jeden Stop, obwohl im Tab „Pool Typen" 2 %
- *     hinterlegt waren. Zweite, unabhängige Absicherung dagegen: der
- *     Default-Fallback in lib/trailing-stop.js (loadTsConfig).
+ * 🔒 Regel seit 2026-08-15 (vorher umgekehrt, siehe unten):
+ * Was der Nutzer in ForgeSettings eingestellt hat, ist Konfiguration und überlebt
+ * jeden Kapitalabzug — Trailing Stop, TVL-Schutz, Score-Limit,
+ * manueller Withdraw. Entfernt wird ausschließlich, was an das konkrete Engagement
+ * gebunden ist: `POOL_SESSION_FIELDS` in lib/pool-settings-defaults.js (dort auch
+ * die Begründung je Feld).
+ *
+ * Zuvor galt eine Whitelist: nur `tvlProtection` und `trailingStop` überlebten,
+ * alles andere fiel auf die ForgeSettings-Defaults zurück. Das hat bei jedem Exit
+ * stillschweigend Nutzerentscheidungen verworfen — Reinvest-Anteil und Mindest-
+ * Claim-Betrag (autoCompound), die Score-Schwelle (scoreLimit) und vor allem
+ * `cleanup.rankingEligible`: ein bewusst vom Cleanup ausgenommener Pool stand
+ * nach dem nächsten Exit wieder in der Reinvest-Auswahl.
+ *
+ * Die beiden Vorfälle, die zur alten Whitelist geführt hatten, bleiben abgedeckt —
+ * die neue Regel ist echt schwächer, sie hält mehr statt weniger:
+ *   - tvlProtection: manuell gesetzte Schwellen bleiben (2026-07-30, SPCX/USDC auf
+ *     forge-pub1: Deposit→NOTFALL-EXIT-Zyklus, weil die Schwelle auf den viel zu
+ *     hohen pools.json-Fallback zurückfiel).
+ *   - trailingStop: die Sektion bleibt vorhanden (2026-08-01, PUMP/SOL: eine
+ *     fehlende Sektion las der Bot als „Trailing Stop komplett aus", während
+ *     ForgeSettings die Defaults anzeigte). Zweite, unabhängige Absicherung
+ *     dagegen: der Default-Fallback in lib/trailing-stop.js (loadTsConfig).
  *
  * @param {string} poolId
  * @param {string} logPrefix  Log-Präfix des Aufrufers (z.B. "[config]" oder "[bot:xyz]")
  */
-export function resetPoolSettingsPreservingRisk(poolId, logPrefix = '[config]') {
+export function resetPoolSessionState(poolId, logPrefix = '[config]') {
     try {
         const sdb = new Database(SETTINGS_DB, { fileMustExist: false });
         sdb.exec(`CREATE TABLE IF NOT EXISTS pool_settings (
@@ -158,43 +166,37 @@ export function resetPoolSettingsPreservingRisk(poolId, logPrefix = '[config]') 
         const row = sdb.prepare(
             `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
         ).get(config.botId, poolId);
+        if (!row) { sdb.close(); return; }
 
-        let tvlProtection = null;
-        let trailingStop  = null;
-        if (row) {
-            try {
-                const parsed  = JSON.parse(row.settings);
-                tvlProtection = parsed?.tvlProtection ?? null;
-                trailingStop  = parsed?.trailingStop  ?? null;
-            } catch { /* ignore */ }
+        let parsed;
+        try {
+            parsed = JSON.parse(row.settings);
+        } catch {
+            sdb.close();
+            console.warn(`${logPrefix} Pool-Settings für ${poolId} nicht lesbar – unverändert gelassen`);
+            return;
         }
 
-        // Einmalige Reset-Anforderungen sind Session-Zustand, keine Konfiguration:
-        // sie dürfen einen Pool-Close nicht überleben (sonst würde der erste
-        // Snapshot nach Reaktivierung den frischen HWM sofort wieder überschreiben).
-        if (trailingStop) {
-            trailingStop = { ...trailingStop };
-            delete trailingStop.resetRequestedAt;
-            delete trailingStop.resetTargetUsd;
-        }
-
-        const kept = {};
-        if (tvlProtection) kept.tvlProtection = tvlProtection;
-        if (trailingStop)  kept.trailingStop  = trailingStop;
-
-        if (Object.keys(kept).length > 0) {
-            sdb.prepare(`
-                INSERT INTO pool_settings (bot_id, pool_id, settings) VALUES (?, ?, ?)
-                ON CONFLICT(bot_id, pool_id) DO UPDATE SET settings = excluded.settings
-            `).run(config.botId, poolId, JSON.stringify(kept));
-            console.log(`${logPrefix} Pool-Settings für ${poolId} zurückgesetzt – Risiko-Konfiguration bleibt erhalten (${Object.keys(kept).join(' + ')}; Defaults für alles andere bei Reaktivierung).`);
-        } else {
-            sdb.prepare(`DELETE FROM pool_settings WHERE bot_id = ? AND pool_id = ?`).run(config.botId, poolId);
-            console.log(`${logPrefix} Pool-Settings für ${poolId} gelöscht (Defaults gelten bei Reaktivierung).`);
+        const { settings: cleaned, removed } = stripSessionFields(parsed);
+        if (removed.length > 0) {
+            sdb.prepare(`UPDATE pool_settings SET settings = ? WHERE bot_id = ? AND pool_id = ?`)
+                .run(JSON.stringify(cleaned), config.botId, poolId);
         }
         sdb.close();
+
+        // Hinweis ins Log: welcher Zustand fiel weg, welche Einstellungen wirken
+        // nach der Reaktivierung abweichend vom Default weiter.
+        const kept = diffFromDefaults(cleaned);
+        const keptTxt = kept.length > 0
+            ? kept.map(d => `${d.path}=${JSON.stringify(d.value)} (Default ${JSON.stringify(d.defaultValue)})`).join(', ')
+            : 'keine (alles auf Default)';
+        console.log(
+            `${logPrefix} Pool-Settings ${poolId}: Session-Zustand zurückgesetzt` +
+            `${removed.length > 0 ? ` (${removed.join(', ')})` : ' (nichts zurückzusetzen)'}` +
+            ` – vom Default abweichend und weiterhin aktiv: ${keptTxt}`
+        );
     } catch (err) {
-        console.warn(`${logPrefix} Pool-Settings zurücksetzen für ${poolId} fehlgeschlagen: ${err.message}`);
+        console.warn(`${logPrefix} Session-Zustand zurücksetzen für ${poolId} fehlgeschlagen: ${err.message}`);
     }
 }
 
@@ -218,15 +220,14 @@ export function setPoolActive(poolId, active) {
     }
     if (!changed) return false;
 
-    // Pool-Settings zurücksetzen wenn Pool deaktiviert wird (tvlProtection und
-    // trailingStop bleiben erhalten, siehe resetPoolSettingsPreservingRisk – alles
-    // andere fällt auf ForgeSettings-Defaults zurück).
+    // Beim Deaktivieren nur den Session-Zustand abräumen — alle Nutzer-Einstellungen
+    // bleiben erhalten (siehe resetPoolSessionState).
     if (active === false) {
-        resetPoolSettingsPreservingRisk(poolId, '[config]');
+        resetPoolSessionState(poolId, '[config]');
     }
 
     // Liquidierter Pool darf nicht weiter als fester Cleanup-Pin ("invest in") dienen.
-    // Egal warum der Pool deaktiviert wird (Score-Limit, Ranking-Exit, TVL-Schutz,
+    // Egal warum der Pool deaktiviert wird (Score-Limit, TVL-Schutz,
     // Trailing-Stop, manueller Withdraw): ist genau dieser Pool als
     // CLEANUP_MODE=pool:<id> konfiguriert, zurück auf 'ranking' ("bester Pool")
     // schalten – sonst reinvestiert der nächste Cleanup-Lauf blind und ohne

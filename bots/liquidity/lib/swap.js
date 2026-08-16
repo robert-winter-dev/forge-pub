@@ -9,6 +9,7 @@
 
 import { VersionedTransaction } from '@solana/web3.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
+import { rpcLimiter } from './rate-limiter.js';
 
 const QUOTE_API = 'http://127.0.0.1:3100/jup/swap/v1/quote';
 const SWAP_API  = 'http://127.0.0.1:3100/jup/swap/v1/swap';
@@ -32,8 +33,15 @@ function headers(apiKey) {
  * Retry: Simulation-Fehler, "invalid instruction data", Timeout, 5xx, Blockheight-Expired.
  * Kein Retry: 4xx-Quote-Fehler (kein Route gefunden), explizite Slippage-Überschreitung.
  */
-function isRetryableSwapError(err) {
+// Exportiert, damit der Doppel-Swap-Schutz direkt prüfbar ist, ohne dafür einen
+// echten Swap auszulösen. Nicht zum Aufruf von außen gedacht.
+export function isRetryableSwapError(err) {
     const msg = err?.message ?? String(err);
+    // Ein zweiter Sendeversuch würde denselben Tausch ein zweites Mal ausführen.
+    // Wird von _doSwapOnce gesetzt, wenn nach einem Confirm-Timeout NICHT sicher
+    // geklärt werden konnte, ob die erste Transaktion on-chain gelandet ist.
+    // Muss vor allen anderen Regeln stehen — 'timeout' weiter unten würde sonst greifen.
+    if (err?.doubleSpendRisk) return false;
     if (msg.includes('Jupiter Quote API: HTTP 4')) return false;
     if (msg.includes('Slippage tolerance exceeded')) return false;
     if (msg.includes('invalid instruction data'))   return true;
@@ -57,6 +65,55 @@ export function isWhirlpoolMintOrderError(err) {
 }
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// ─── Landing-Check nach Confirm-Timeout ──────────────────────────────────────
+// Wie lange nach einem Timeout noch auf das Landen gewartet wird. Eine Solana-TX
+// kann nur solange bestätigt werden, wie ihr Blockhash gültig ist (150 Slots,
+// ~60–80 s ab Abholung). Die tx-queue hat davon bereits ~60 s verbraucht, der
+// Client-Timeout liegt bei 90 s. Wer danach 45 s nichts findet, findet nichts mehr.
+const LANDING_POLL_MS      = 5_000;
+const LANDING_TIMEOUT_MS   = 45_000;
+
+/**
+ * Klärt nach einem unbestätigten Ausgang, ob die Transaktion on-chain gelandet ist.
+ *
+ * Hintergrund: `submitAndConfirm()` wirft bei Timeout mit `err.unconfirmed === true`
+ * und `err.signature` — ausdrücklich KEIN "fehlgeschlagen" (siehe Kopf von
+ * core/tx-queue-client.js). Wer daraufhin blind neu sendet, tauscht doppelt.
+ * Genau das ist am 2026-08-15 im Cleanup-Lauf um 08:05 passiert: der erste
+ * USDC→SOL-Swap lief zweimal, der anschließende Cross-Swap verbrauchte mehr SOL
+ * als der Wallet-Bestand plus dem einen gebuchten Swap hergab.
+ *
+ * @returns {Promise<'landed'|'failed'|'gone'|'unknown'>}
+ *   landed  – bestätigt und fehlerfrei → der Tausch hat stattgefunden
+ *   failed  – bestätigt, aber mit On-Chain-Fehler → nichts getauscht, Retry sicher
+ *   gone    – innerhalb des Blockhash-Fensters nicht aufgetaucht → Retry sicher
+ *   unknown – Status nicht ermittelbar (RPC down) → Retry NICHT sicher
+ */
+export async function resolveUnconfirmedSwap(connection, signature) {
+    if (!connection || !signature) return 'unknown';
+    const deadline = Date.now() + LANDING_TIMEOUT_MS;
+    let rpcReachable = false;
+
+    while (Date.now() < deadline) {
+        try {
+            await rpcLimiter.wait();
+            const { value } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+            rpcReachable = true;
+            const status = value?.[0];
+            if (status) {
+                if (status.err) return 'failed';
+                if (status.confirmationStatus) return 'landed';
+            }
+        } catch (e) {
+            console.warn(`[swap] Landing-Check: Status nicht lesbar (${e.message})`);
+        }
+        await sleep(LANDING_POLL_MS);
+    }
+    // Nur "gone" behaupten, wenn wir den Status überhaupt lesen konnten — sonst
+    // war die Abwesenheit kein Befund, sondern ein blinder Fleck.
+    return rpcReachable ? 'gone' : 'unknown';
+}
 
 /**
  * Holt eine Jupiter-Quote ohne Swap auszuführen.
@@ -117,7 +174,7 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
         try {
             return await _doSwapOnce({
                 inputMint, outputMint, inputDecimals, outputDecimals,
-                amount, wallet, apiKey, slippageBps, excludeDexes,
+                amount, wallet, connection, apiKey, slippageBps, excludeDexes,
             });
         } catch (err) {
             lastErr = err;
@@ -139,7 +196,7 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
 }
 
 async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimals,
-                              amount, wallet, apiKey, slippageBps, excludeDexes = null }) {
+                              amount, wallet, connection, apiKey, slippageBps, excludeDexes = null }) {
     const inAmount = Math.round(amount * 10 ** inputDecimals);
 
     // 1. Quote holen — jeder Retry-Versuch holt frisches Quote (Routes invalidieren schnell)
@@ -191,7 +248,34 @@ async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimal
     const tx    = VersionedTransaction.deserialize(txBuf);
     tx.sign([wallet]);
 
-    const sig = await submitAndConfirm(tx.serialize());
+    // Unbestätigter Ausgang ist KEIN Fehlschlag: erst on-chain nachsehen, dann
+    // entscheiden. Ohne diese Klärung würde der Retry in swapTokens denselben
+    // Tausch ein zweites Mal ausführen (siehe resolveUnconfirmedSwap).
+    let sig;
+    try {
+        sig = await submitAndConfirm(tx.serialize());
+    } catch (err) {
+        if (!err?.unconfirmed || !err?.signature) throw err;
+
+        console.warn(`[swap] Confirm-Timeout — prüfe on-chain ob ${err.signature.slice(0, 12)}… gelandet ist…`);
+        const outcome = await resolveUnconfirmedSwap(connection, err.signature);
+
+        if (outcome === 'landed') {
+            console.warn(`[swap] TX ist trotz Timeout gelandet (${err.signature}) – werte als Erfolg, KEIN zweiter Swap.`);
+            sig = err.signature;
+        } else if (outcome === 'failed' || outcome === 'gone') {
+            console.warn(`[swap] TX ist nicht wirksam geworden (${outcome}) – Retry ist gefahrlos.`);
+            throw err;
+        } else {
+            // Ausgang offen: ein Retry könnte doppelt tauschen. Lieber hier abbrechen
+            // und den Aufrufer scheitern lassen — der Cleanup holt es eine Stunde
+            // später nach, ein Doppel-Swap wäre dagegen sofort verlorenes Geld.
+            err.doubleSpendRisk = true;
+            err.message = `${err.message} — Ausgang on-chain nicht klärbar, kein Retry (Doppel-Swap-Gefahr). Signatur: ${err.signature}`;
+            throw err;
+        }
+    }
+
     const amountOut = parseFloat(quote.outAmount) / 10 ** outputDecimals;
     return { amountOut, txSignature: sig };
 }

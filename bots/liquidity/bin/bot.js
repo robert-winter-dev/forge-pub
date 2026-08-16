@@ -20,13 +20,14 @@
  *   - Zielkapital wird aus der letzten DB-Position gelesen (capital_usdc); Fallback: Wallet-Balance
  */
 
-import { config, loadPools, updatePoolRangeOverride, getCleanupMaxDepositFromEnv, getCleanupMinDepositFromEnv, isPoolEnabled, setPoolActive, setPoolEnabled, resetPoolSettingsPreservingRisk } from '../lib/config.js';
+import { config, loadPools, updatePoolRangeOverride, getCleanupMaxDepositFromEnv, getCleanupMinDepositFromEnv, isPoolEnabled, setPoolActive, setPoolEnabled, resetPoolSessionState } from '../lib/config.js';
 import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition,
          insertPoolStats, getPoolStats, insertFeeHistory, insertRebalanceHistory,
          getMinutesSinceLastRebalance,
          insertTransaction, insertNotification, insertVolumeCandles,
          prunePortfolioHistory, prunePositionSnapshots, pruneRebalanceHistory,
          updatePositionCapital, updatePositionHodl, setPositionHwmBaseAdjustment,
+         carryEntryToRebalancedPosition,
          insertCapitalFlow, clearPositionSnapshots,
          insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
@@ -39,7 +40,6 @@ import { isCleanupRunning, isManualLocked, acquireRebalanceLock, releaseRebalanc
 import { ensureWalletSol, ensureInvestCapableSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
 import { shouldTriggerScoreLimit, checkScoreLimitWarning, executeScoreLimit, resumePendingScoreLimitExecutions } from '../lib/score-limit.js';
 import { executeSwapStep, executeTransferStep } from '../lib/exit-finalizer.js';
-import { shouldTriggerRankingExit, checkRankingExitWarning, executeRankingExit, resumePendingRkExecutions } from '../lib/ranking-exit.js';
 import { shouldTriggerTs, executeTs, resumePendingTsExecutions, updateHwm, processHwmResetIfRequested, readMinimumValue, clearMinimumValue } from '../lib/trailing-stop.js';
 import { shouldTriggerTvlProtection, executeTvlProtection, resumePendingTvlExecutions } from '../lib/tvl-protection.js';
 import { processPoolRetirements, resumePendingRetireExecutions } from '../lib/pool-retirement.js';
@@ -68,6 +68,7 @@ import { resolve, dirname, join } from 'path';
 import { fileURLToPath }   from 'url';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { refreshPythPrices } from '../lib/pyth-prices.js';
+import { settle } from '../lib/settle-promise.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
 
@@ -151,11 +152,12 @@ async function _trailingStopCheck(pool) {
     }
 }
 
-// Setzt Pool-Settings beim Öffnen einer neuen Position zurück (nach Pool-Close).
-// tvlProtection und trailingStop bleiben erhalten, alles andere fällt auf
-// ForgeSettings-Defaults zurück – siehe resetPoolSettingsPreservingRisk() in lib/config.js.
+// Räumt beim Öffnen einer neuen Position den Session-Zustand des Pools ab
+// (Absicherung für den Fall, dass der Close ihn nicht abgeräumt hat – z.B. Crash
+// zwischen Close und Reaktivierung). Nutzer-Einstellungen bleiben unverändert,
+// siehe resetPoolSessionState() in lib/config.js.
 function _resetPoolSettings(poolId) {
-    resetPoolSettingsPreservingRisk(poolId, `[bot:${poolId}]`);
+    resetPoolSessionState(poolId, `[bot:${poolId}]`);
 }
 
 // Stellt sicher dass beim Rebalancing Auto-Compounding auf 100 % gesetzt ist.
@@ -541,12 +543,6 @@ async function startup() {
         console.error(`[bot] Score-Limit-Resume fehlgeschlagen (nicht kritisch): ${err.message}`);
     }
 
-    // Unvollständige Ranking-Exit-Ausführungen aus letztem Crash fortsetzen
-    try {
-        await resumePendingRkExecutions(db);
-    } catch (err) {
-        console.error(`[bot] Ranking-Exit-Resume fehlgeschlagen (nicht kritisch): ${err.message}`);
-    }
 
     // Unvollständige Trailing-Stop-Ausführungen aus letztem Crash fortsetzen
     try {
@@ -885,10 +881,10 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
 
     // Frische Balances lesen (wichtig: nach eventuell vorherigem Position-Close)
     const [tokenABal, tokenBBal] = await Promise.all([
-        pool.tokenA === SOL_MINT
+        settle(pool.tokenA === SOL_MINT
             ? getUsableSolBalanceFresh(keypair.publicKey)
-            : getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA),
-        getTokenBalanceFresh(keypair.publicKey, pool.tokenB, pool.decimalsB),
+            : getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA)),
+        settle(getTokenBalanceFresh(keypair.publicKey, pool.tokenB, pool.decimalsB)),
     ]);
 
     // Topf-A-Erhalt: nur Wallet-Bestand ÜBER der Baseline darf umgeschichtet werden.
@@ -1971,10 +1967,10 @@ async function _openNewPosition(pool, adapter) {
     ).get(pool.id);
     const checkTargetUsdc = lastPosForCheck?.capital_usdc ?? pool.capitalUSDC ?? 1000;
     const [preCheckABal, preCheckBBal] = await Promise.all([
-        pool.tokenA === SOL_MINT
+        settle(pool.tokenA === SOL_MINT
             ? getUsableSolBalanceFresh(getKeypair().publicKey)
-            : getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA),
-        getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB),
+            : getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA)),
+        settle(getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB)),
     ]);
     const walletUsdValue  = _calcUsdValue(pool, db, currentPrice, preCheckABal, preCheckBBal);
     // Schwelle: relative 30-%-Schranke UND – falls konfiguriert – der absolute
@@ -2413,6 +2409,14 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
     ).get(pool.id);
     const preValue = preSnap?.lp_value_usd ?? null;
 
+    // Zweistufiger Trailing Stop: Einstiegsreferenz und Scharfschaltung der zweiten Stufe
+    // gehören der Position, nicht dem Pool — ein Rebalancing legt aber eine neue Position an.
+    // Ohne Übertrag fiele der Stop nach jedem Rebalancing auf die weite Stufe 1 zurück,
+    // obwohl die Position im Gewinn steht. Bei regelmäßigem Rebalancing käme Stufe 2
+    // dann praktisch nie zum Tragen.
+    const preEntry   = position.entry_usd ?? null;
+    const preD2Armed = position.d2_armed_at ?? null;
+
     let closeTxHash;
     let closeAmountA, closeAmountB;
     let closeFee = 0;
@@ -2782,6 +2786,10 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         : -residualUsdc;
     setPositionHwmBaseAdjustment(db, newPosId, hwmBaseAdj);
     console.log(`[bot:${pool.id}] HWM-Adjustment gespeichert: preHwm=${(preHwm ?? 0).toFixed(2)}, preValue=${(preValue ?? 0).toFixed(2)}, totalDeployed=${totalDeployed.toFixed(2)}, residual=${residualUsdc.toFixed(2)}, adj=${hwmBaseAdj >= 0 ? '+' : ''}${hwmBaseAdj.toFixed(2)} USDC → wird beim ersten Snapshot angewendet`);
+
+    // 7c. Zweistufiger Trailing Stop: Einstiegsreferenz + Stufe-2-Scharfschaltung mitnehmen.
+    carryEntryToRebalancedPosition(db, newPosId, preValue, preEntry, preD2Armed);
+    console.log(`[bot:${pool.id}] Trailing-Stop-Stufe übertragen: entry=${preEntry != null ? preEntry.toFixed(2) : 'n/a'} USDC, Stufe 2 ${preD2Armed ? 'scharf (bleibt scharf)' : 'noch nicht scharf'}`);
 
     // 7. Rebalancing-Ereignis dokumentieren (nach Reconcile, damit lp_value_after bekannt ist).
     insertRebalanceHistory(db, {
@@ -3432,11 +3440,6 @@ async function mainLoop() {
                 console.error(`[bot] Score-Limit-Resume (periodisch) fehlgeschlagen: ${err.message}`);
             }
             try {
-                await resumePendingRkExecutions(db);
-            } catch (err) {
-                console.error(`[bot] Ranking-Exit-Resume (periodisch) fehlgeschlagen: ${err.message}`);
-            }
-            try {
                 await resumePendingTsExecutions(db);
             } catch (err) {
                 console.error(`[bot] Trailing-Stop-Resume (periodisch) fehlgeschlagen: ${err.message}`);
@@ -3537,7 +3540,7 @@ async function mainLoop() {
             if (!running) break;
 
             // TVL-Schutz-Check: höchste Priorität (TVL-Einbruch ist das gravierendste
-            // Signal). Läuft vor Score-Limit / Ranking-Exit / Trailing-Stop.
+            // Signal). Läuft vor Score-Limit / Trailing-Stop.
             // Bei L2 (Voll-Exit) wird der Pool deaktiviert → continue.
             // Bei L1 (Teil-Abzug) bleibt der Pool aktiv → KEIN continue, normales
             // Processing läuft weiter (Position besteht noch).
@@ -3578,24 +3581,8 @@ async function mainLoop() {
                 continue;
             }
 
-            // Ranking-Exit-Check: nach Score-Limit-Check, vor normalem Pool-Processing
-            try {
-                if (shouldTriggerRankingExit(pool, db)) {
-                    console.log(`[bot:${pool.id}] Ranking-Exit-Trigger erkannt – starte Exit`);
-                    await executeRankingExit(pool, db);
-                    // Pool wurde deaktiviert – Dashboard sofort aktualisieren, dann überspringen.
-                    await refreshAfterAction(db, { log: msg => console.log(`[bot:${pool.id}] ${msg}`) });
-                    lastExport.ts = Date.now();
-                    continue;
-                }
-                // Counter ist jetzt aktuell → Vorwarnung prüfen (feuert bei count = 1)
-                await checkRankingExitWarning(pool, db).catch(() => {});
-            } catch (err) {
-                console.error(`[bot:${pool.id}] Ranking-Exit fehlgeschlagen: ${err.message}`);
-                continue;
-            }
 
-            // Trailing-Stop-Check (1/2): nach Ranking-Exit, vor normalem Pool-Processing.
+            // Trailing-Stop-Check (1/2): nach Score-Limit, vor normalem Pool-Processing.
             // Bewertet den Snapshot des vorigen Zyklus — fängt einen Trigger ab, bevor
             // Kosten für Claim/Rebalance in einen Pool fließen, der ohnehin verlassen wird.
             if (await _trailingStopCheck(pool)) continue;

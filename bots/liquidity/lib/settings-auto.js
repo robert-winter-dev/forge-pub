@@ -21,14 +21,24 @@ const DEFAULT_SCORE_LIMIT = {
     sendTo:     '',
 };
 
-// TVL-Schutz-Default: jeder Pool startet mit aktiver Stufe 2 (100 % Exit + Swap→USDC).
-// Schwellen werden mit den pools.json-Werten (tvlWarn/Exit) vorbefüllt, falls vorhanden.
+// TVL-Schutz-Default: jeder Pool startet mit aktiver Stufe 1 (100 % Exit + Swap→USDC),
+// Stufe 2 bleibt aus. Angeglichen 2026-08-15 an die gelebte Konfiguration aller Pools —
+// vorher lief der Voll-Exit hier über Stufe 2 und ein neuer Pool startete gegenläufig
+// zum Bestand. Die Schwelle für Stufe 1 wird mit dem **Exit**-Wert aus pools.json
+// vorbefüllt (nicht mit dem höheren Warn-Wert), damit die Umstellung den Voll-Exit
+// nicht früher auslöst als zuvor.
 const DEFAULT_TVL_PROTECTION = {
-    level1: { enabled: false, thresholdUsd: null, withdrawPct: 50  },
-    level2: { enabled: true,  thresholdUsd: null, withdrawPct: 100 },
+    level1: { enabled: true,  thresholdUsd: null, withdrawPct: 100 },
+    level2: { enabled: false, thresholdUsd: null, withdrawPct: 100 },
     swapToUsdc:      true,   // global für beide Stufen
     sendTo:          '',     // global für beide Stufen
-    cooldownHours:   1,
+    // Cleanup-Cooldown: hält AUSSCHLIESSLICH den Cleanup (bin/cleanup.js) davon ab,
+    // einen gerade verlassenen Pool wieder zu befüllen. Der TVL-Schutz selbst läuft
+    // unabhängig davon weiter — er darf nie durch diesen Wert ausgesperrt werden.
+    // 12 h (vorher 1 h): Mit 1 h durchlief SOL/ZEC am 2026-08-13 binnen sechs Stunden
+    // zweimal den Zyklus „Pool reaktiviert → Kapital rein → TVL-Schutz zieht ab →
+    // Exit", jedes Mal mit Transaktionskosten.
+    cooldownHours:   12,
     tvlAtActivation: null,
 };
 
@@ -79,11 +89,19 @@ export function ensureTrailingStopMinimumReset(poolId) {
 }
 
 /**
- * Aktiviert das InvestScore Limit für einen Pool, wenn es noch nicht aktiv ist.
+ * Richtet das InvestScore Limit ein, wenn ein Pool noch gar keine Score-Limit-
+ * Einstellung hat. Wird beim Deposit (Pool-Aktivierung) aufgerufen.
  *
- * Wird beim ersten Deposit (Pool-Aktivierung) aufgerufen.
- * Bestehende, bereits aktivierte Einstellungen werden nicht überschrieben —
- * nur wenn `scoreLimit.enabled === false` (Default) wird auf `true` gesetzt.
+ * 🔒 Ein vorhandenes `scoreLimit.enabled === false` wird seit 2026-08-15 respektiert
+ * (vorher: bei jeder Aktivierung zurück auf `true`). Grund: Seit Pool-Einstellungen
+ * den Kapitalabzug überleben (resetPoolSessionState in lib/config.js), ist ein
+ * gespeichertes „aus" eine Nutzerentscheidung und keine Altlast mehr — sie stillschweigend
+ * zu überschreiben wäre genau das Muster, das mit dem Umbau abgeschafft wurde.
+ * Sichtbar bleibt es trotzdem: der Default steht auf `true`, ein „aus" erscheint damit
+ * im Abweichungs-Hinweis in ForgeSettings.
+ *
+ * Ein Pool ohne jede Score-Limit-Sektion ist dagegen ein Neuzugang — der bekommt den
+ * Schutz eingeschaltet.
  */
 export function ensureScoreLimitEnabled(poolId) {
     try {
@@ -103,14 +121,13 @@ export function ensureScoreLimitEnabled(poolId) {
 
         const current = row ? JSON.parse(row.settings) : {};
 
-        // Nicht überschreiben wenn bereits aktiv
-        if (current.scoreLimit?.enabled === true) {
+        // Sektion vorhanden → der Zustand ist eine Nutzerentscheidung, egal ob an oder aus.
+        if (current.scoreLimit && typeof current.scoreLimit === 'object') {
             db.close();
             return;
         }
 
-        current.scoreLimit = { ...DEFAULT_SCORE_LIMIT, ...(current.scoreLimit ?? {}) };
-        current.scoreLimit.enabled = true;
+        current.scoreLimit = { ...DEFAULT_SCORE_LIMIT, enabled: true };
 
         db.prepare(`
             INSERT INTO pool_settings (bot_id, pool_id, settings) VALUES ('liquidity', ?, ?)
@@ -164,9 +181,12 @@ export function ensureTvlProtectionDefaults(poolId, currentTvl, defaults = {}) {
             level2: { ...DEFAULT_TVL_PROTECTION.level2, ...(existing.level2 ?? {}) },
         };
 
-        // Schwellen vorbefüllen (nur wenn noch nicht gesetzt)
-        if (tp.level1.thresholdUsd == null && defaults.warn > 0) tp.level1.thresholdUsd = defaults.warn;
-        if (tp.level2.thresholdUsd == null && defaults.exit > 0) tp.level2.thresholdUsd = defaults.exit;
+        // Schwelle vorbefüllen (nur wenn noch nicht gesetzt). Bewusst der Exit-Wert für
+        // Stufe 1: seit der Umstellung 2026-08-15 ist Stufe 1 die Voll-Exit-Stufe, und ein
+        // Voll-Exit muss beim Ernstfall-Wert greifen, nicht schon bei der Warnschwelle.
+        // Stufe 2 bleibt ohne Schwelle — sie ist standardmäßig aus; ein sinnvoller Wert
+        // dafür liegt unterhalb von Stufe 1 und ist aus pools.json nicht ableitbar.
+        if (tp.level1.thresholdUsd == null && defaults.exit > 0) tp.level1.thresholdUsd = defaults.exit;
 
         // TVL bei Aktivierung festschreiben (bei jeder Aktivierung neu)
         if (Number(currentTvl) > 0) tp.tvlAtActivation = Number(currentTvl);

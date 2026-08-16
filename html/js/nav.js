@@ -21,8 +21,10 @@
  *
  * LAN-Erkennung: Wird die Seite über eine private IP aufgerufen
  * (192.168.x.x / 10.x.x.x / 172.16-31.x.x), erscheinen zusätzlich die
- * Bot-Settings-Links, die komplette Message-Center-Gruppe sowie
- * SSL-Zertifikat/Settings unter System.
+ * Bot-Settings-Links, die komplette Message-Center-Gruppe sowie die
+ * komplette System-Gruppe. Über den öffentlichen Webserver bleiben damit
+ * nur Overview + die beiden Bot-Dashboards übrig (seit 2026-08-13, vorher
+ * stand der Health Monitor auch dort).
  *
  * Sprache: alle Beschriftungen laufen über t() (html/js/i18n.js). Der deutsche
  * Text steht dabei als zweites Argument direkt am Aufruf — er ist zugleich
@@ -60,30 +62,37 @@ function buildNavTree() {
     };
 
     // Message Center ist komplett LAN-only (läuft auf bots/settings, Port 3200).
-    // System/Support/Premium reservieren einen Badge-Slot (hasBadge) für die
-    // Ungelesen-Zähler, die früher im jetzt entfallenen Spalten-Menü von
-    // message.html standen – message.js aktualisiert sie live per setNavBadge().
+    // Seit 2026-08-16 nur noch zwei Einträge statt vier: zwischen den Rubriken
+    // System/Support/Premium wird auf der Seite selbst über Reiter umgeschaltet
+    // (siehe message.js), deshalb reicht hier ein Einstieg ins Postfach. Der
+    // Badge-Slot (hasBadge) trägt die Summe der ungelesenen Nachrichten über alle
+    // drei Rubriken – die Aufschlüsselung steht an den Reitern. Einstellungen hat
+    // keine Nachrichtenliste und damit auch keinen Reiter, bleibt also ein eigener
+    // Menüpunkt.
     const messageCenter = lan ? {
         id: 'message', label: t('nav.message_center', 'Message Center'), group: true, items: [
-            { id: 'message-system',       label: t('nav.message.system',  'System'),  href: `https://${ip}:3200/message.html#system`,   hasBadge: true },
-            { id: 'message-support',      label: t('nav.message.support', 'Support'), href: `https://${ip}:3200/message.html#support`,  hasBadge: true },
-            { id: 'message-premium',      label: t('nav.message.premium', 'Premium'), href: `https://${ip}:3200/message.html#premium`,  hasBadge: true },
+            { id: 'message-inbox',         label: t('nav.message.inbox', 'Nachrichten'), href: `https://${ip}:3200/message.html`, hasBadge: true },
             { id: 'message-einstellungen', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/message.html#einstellungen` },
         ],
     } : null;
 
-    const system = {
+    // Komplett LAN-only (seit 2026-08-13): SSL-Zertifikat und Settings waren es
+    // ohnehin, und der Health Monitor ist es seitdem auch – er wird nicht mehr zum
+    // öffentlichen Webserver übertragen (bin/sync.sh) und läuft nur noch auf
+    // forge-settings. Ohne LAN-Zugriff bliebe also eine Gruppe mit einem toten Link
+    // übrig; deshalb entfällt sie dort ganz.
+    const system = lan ? {
         id: 'system', label: t('nav.system', 'System'), group: true, items: [
             { id: 'health', label: t('nav.health', 'Health Monitor'), href: '/forge/health.html' },
             // Port 3201 ist bewusst reines HTTP (kein TLS-Zertifikat gebunden, siehe
             // bots/settings/server.js) – https:// hier würde am TLS-Handshake scheitern.
-            ...(lan ? [{ id: 'ssl-cert', label: t('nav.ssl_cert', 'SSL-Zertifikat'), href: `http://${ip}:3201/` }] : []),
+            { id: 'ssl-cert', label: t('nav.ssl_cert', 'SSL-Zertifikat'), href: `http://${ip}:3201/` },
             // War früher forkOnly (Updates nur auf FORGE public sinnvoll) – die Seite heißt jetzt
             // "Settings" und zeigt auch auf dem Master Sprache/Zeitzone/Update-Status an,
             // ist also für beide Installationsarten sichtbar.
-            ...(lan ? [{ id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/updates.html` }] : []),
+            { id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/updates.html` },
         ],
-    };
+    } : null;
 
     return [overview, liquidity, lending, messageCenter, system].filter(Boolean);
 }
@@ -366,7 +375,7 @@ a.nav-item:hover { color: var(--text, #f1f5f9); }
  * initNav() noch nicht lief oder das Panel gerade geschlossen ist – der Slot
  * existiert dann einfach noch nicht im DOM, der Aufrufer muss das nicht prüfen.
  *
- * @param {string} id  Item-ID ohne "nav-badge-"-Präfix, z.B. 'message-system'.
+ * @param {string} id  Item-ID ohne "nav-badge-"-Präfix, z.B. 'message-inbox'.
  * @param {number} n   Ungelesen-Anzahl; 0/falsy versteckt den Badge wieder.
  */
 export function setNavBadge(id, n) {
@@ -379,11 +388,11 @@ export function setNavBadge(id, n) {
 /**
  * Verschiebt die "Du bist hier"-Markierung auf ein anderes Item, ohne das
  * Panel neu zu bauen – für Seiten mit In-Page-Navigation ohne Reload (z.B.
- * message.html, das per hashchange zwischen System/Support/Premium/
- * Einstellungen wechselt, aber initNav() nur einmal beim Laden aufruft).
+ * message.html, das zwischen Postfach und Einstellungen wechselt, aber
+ * initNav() nur einmal beim Laden aufruft).
  * Kein Fehler, wenn das Panel gerade nicht existiert/geschlossen ist.
  *
- * @param {string} id  Item- oder Gruppen-ID, z.B. 'message-support'.
+ * @param {string} id  Item- oder Gruppen-ID, z.B. 'message-inbox'.
  */
 export function setNavCurrent(id) {
     document.querySelectorAll('.nav-panel [data-nav-id]').forEach(el => {

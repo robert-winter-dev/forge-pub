@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FORGE - public: Health Monitor</title>
+    <title data-i18n="health.page_title">FORGE - public: Health Monitor</title>
     <link rel="icon" type="image/png" href="img/forge-logo.png">
     <link rel="stylesheet" href="css/forge.css?v=20260731a">
     <link rel="stylesheet" href="css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/health.css?v=20260720a">
+    <link rel="stylesheet" href="css/health.css?v=20260814e">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
     <script src="i18n/active.js"></script>
@@ -20,14 +20,14 @@
         <div class="header-logo">
             <img src="img/forge-logo.png" alt="FORGE Logo">
             <h1>Health <span class="title-word-monitor">Monitor</span></h1>
-            <button class="health-legend-btn" id="healthLegendBtn" title="Legende anzeigen">ⓘ</button>
+            <button class="health-legend-btn" id="healthLegendBtn" title="Legende anzeigen" data-i18n-attr="title:health.legend_show">ⓘ</button>
         </div>
         <div class="header-right">
             <div class="status-indicator" id="statusIndicator">
                 <span class="status-text">
-                    <span class="last-update offline" id="lastUpdate">Kein Signal</span>
+                    <span class="last-update offline" id="lastUpdate" data-i18n="health.no_signal">Kein Signal</span>
                 </span>
-                <button class="notif-bell" id="notifBell" title="Benachrichtigungen">
+                <button class="notif-bell" id="notifBell" title="Benachrichtigungen" data-i18n-attr="title:health.notifications">
                     <span class="notif-envelope" id="notifEnvelope">&#9993;</span><span class="notif-badge hidden" id="notifBadge">0</span>
                 </button>
             </div>
@@ -36,42 +36,160 @@
     <!-- Zeile 2: Chain-Tabs -->
     <div class="health-tabs-band">
         <div class="health-tabs-inner" id="healthTabs" role="tablist">
-            <button class="htab active" data-tab="intern"    role="tab" aria-selected="true">Intern</button>
-            <button class="htab"        data-tab="solana"    role="tab" aria-selected="false">Solana</button>
-            <button class="htab"        data-tab="nostr"     role="tab" aria-selected="false">Nostr</button>
+            <button class="htab active" data-tab="host"      role="tab" aria-selected="true" data-i18n="health.tab_host">Host</button>
+            <button class="htab"        data-tab="intern"    role="tab" aria-selected="false" data-i18n="health.tab_intern">Intern</button>
+            <button class="htab"        data-tab="solana"    role="tab" aria-selected="false" data-i18n="health.tab_solana">Solana</button>
+            <button class="htab"        data-tab="nostr"     role="tab" aria-selected="false" data-i18n="health.tab_nostr">Nostr</button>
+            <!-- FORK-ONLY, deshalb `hidden` bis /api/health-share/opt-in antwortet (siehe
+                 health.js renderShare()). Ohne das stand der Reiter auch auf dem Master und
+                 auf jeder statischen Kopie — dort aber leer, weil die Sektion darin verborgen
+                 bleibt (Fund 2026-08-13). Gegenstück ist der Master-Reiter am Ende der Leiste. -->
+            <button class="htab hidden" data-tab="teilen"    role="tab" aria-selected="false" id="shareOptInTab" data-i18n="health.tab_share">Daten teilen</button>
+            <!-- MASTER-ONLY, deshalb `hidden` bis /api/health-share/manage antwortet (siehe
+                 health.js loadShareAdmin()). Trägt dieselbe Beschriftung wie der Fork-Reiter
+                 "teilen" darüber — ein Konflikt entsteht nie, weil pro Installation immer nur
+                 EINER der beiden sichtbar wird: der Master hat keinen Opt-in-Schalter, der
+                 Fork keine Teilnehmerverwaltung. -->
+            <button class="htab hidden" data-tab="share"     role="tab" aria-selected="false" id="shareAdminTab" data-i18n="health.tab_share">Daten teilen</button>
         </div>
     </div>
 </header>
 
 <main>
 
+    <!-- Tab: Host – Grundfunktionen des Servers, auf dem FORGE läuft. Bewusst der
+         erste Reiter: läuft der Server selbst nicht rund, ist jede Aussage der
+         übrigen Rubriken unzuverlässig. -->
+    <div class="htab-content active" id="tab-host" role="tabpanel">
+        <div class="services-grid" id="services-host">
+            <div class="svc-loading" data-i18n="health.loading_metrics">Lade Messwerte…</div>
+        </div>
+    </div>
+
     <!-- Tab: Intern -->
-    <div class="htab-content active" id="tab-intern" role="tabpanel">
+    <div class="htab-content" id="tab-intern" role="tabpanel">
         <div class="services-grid" id="services-intern">
-            <div class="svc-loading">Lade Dienste…</div>
+            <div class="svc-loading" data-i18n="health.loading_services">Lade Dienste…</div>
         </div>
     </div>
 
     <!-- Tab: Solana -->
     <div class="htab-content" id="tab-solana" role="tabpanel">
         <div class="services-grid" id="services-solana">
-            <div class="svc-loading">Lade Dienste…</div>
+            <div class="svc-loading" data-i18n="health.loading_services">Lade Dienste…</div>
         </div>
     </div>
 
     <!-- Tab: Nostr -->
     <div class="htab-content" id="tab-nostr" role="tabpanel">
         <div class="services-grid" id="services-nostr">
-            <div class="svc-loading">Lade Dienste…</div>
+            <div class="svc-loading" data-i18n="health.loading_services">Lade Dienste…</div>
         </div>
     </div>
 
+    <!-- Tab: Daten teilen. Bleibt verborgen, bis /api/health-share/opt-in antwortet —
+         auf einer statisch ausgelieferten Kopie ohne Backend und auf dem FORGE Master
+         gibt es diese Funktion nicht, dort darf auch kein toter Schalter stehen. -->
+    <div class="htab-content" id="tab-teilen" role="tabpanel">
+        <section class="hshare hidden" id="healthShare">
+            <div class="hshare-head">
+                <label class="hshare-toggle">
+                    <input type="checkbox" id="hshareCheck">
+                    <span data-i18n="health.share_toggle">Monitoring-Daten freigeben</span>
+                </label>
+                <span class="hshare-state" id="hshareState"></span>
+            </div>
+            <!-- Grid-Collapse-Trick (grid-template-rows 1fr → 0fr) statt max-height: die
+                 Boxen haben je nach Sprache/Fensterbreite unterschiedliche Höhe – ein fester
+                 max-height-Wert bräuchte eine Annahme über die Höhe, die bei jeder Textänderung
+                 bricht. Klappt beim Öffnen des Verlaufs zu (siehe health.js), auf Notebooks
+                 muss man dann nicht erst an den Boxen vorbeischrollen. -->
+            <div class="hshare-boxes-wrap" id="hshareBoxesWrap">
+                <div class="hshare-boxes-inner">
+                    <div class="hshare-boxes">
+                        <div class="hshare-box">
+                            <p class="hshare-text" data-i18n-html="health.share_intro">
+                                Hilf mit bei der Entwicklung und Verbesserung von FORGE public: Wenn Du
+                                zustimmst, überträgt Deine Installation die hier im Bereich Monitoring
+                                gezeigten Daten stündlich per Nostr an den FORGE Master. Es werden
+                                ausschließlich Daten übertragen, die keinerlei Rückschlüsse auf Dich zulassen.
+                            </p>
+                            <p class="hshare-text" data-i18n="health.share_list_intro">Übertragen werden:</p>
+                            <ul class="hshare-list">
+                                <li data-i18n="health.share_list_1">Status und Antwortzeiten je Dienst</li>
+                                <li data-i18n="health.share_list_2">Speicherverbrauch, Laufzeit und Neustarts je FORGE-Prozess</li>
+                                <li data-i18n="health.share_list_3">die laufende Version</li>
+                            </ul>
+                        </div>
+                        <div class="hshare-box">
+                            <p class="hshare-text" data-i18n-html="health.share_not">
+                                <strong>Nicht</strong> übertragen werden Wallet-Adressen, Guthaben, Pools,
+                                Positionen, Gewinne, Hostname oder IP-Adressen – und kein Freitext.
+                            </p>
+                            <p class="hshare-text" data-i18n-html="health.share_transparency">
+                                Unten – oder mit jedem anderen Nostr-Client – kannst Du jederzeit
+                                nachvollziehen, welche Daten tatsächlich übertragen wurden.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <p class="hshare-error hidden" id="hshareError"></p>
+            <!-- Verlauf gesendeter Reports: nur sichtbar, solange der Haken gesetzt ist
+                 (Kurswechsel 2026-08-14, löst die frühere Anzeige im Message Center ab).
+                 Lädt erst beim Öffnen – ein stündlicher Report ist kein Ereignis, das
+                 im Hintergrund abgefragt werden muss. -->
+            <details class="hshare-history hidden" id="hshareHistory">
+                <summary data-i18n="health.share_history_summary">Gesendete Daten der letzten 7 Tage</summary>
+                <!-- Master-Detail statt Modal (2026-08-14, zweite Nachbesserung): Liste
+                     links (fest, eigener Scrollbalken), Volltext rechts (füllt den Rest,
+                     eigener Scrollbalken) – ein Klick füllt die rechte Seite, kein Dialog
+                     nötig. Nur für die interne, LAN-only Seite gedacht, bewusst ohne
+                     Stapel-Fallback für schmale Fenster. -->
+                <div class="hshare-history-split">
+                    <ul class="hshare-history-list" id="hshareHistoryList"></ul>
+                    <div class="hshare-history-detail" id="hshareHistoryDetail">
+                        <p class="hshare-history-detail-placeholder" data-i18n="health.share_history_detail_placeholder">
+                            Für mehr Details klicke eine Nachricht an.
+                        </p>
+                    </div>
+                </div>
+            </details>
+        </section>
+    </div>
+
+
+    <!-- Tab: Daten teilen (MASTER-ONLY, letzter Reiter). Bleibt verborgen, bis
+         /api/health-share/manage antwortet (404 auf jeder anderen Installation) — der
+         Tab-Button oben trägt dieselbe hidden-Klasse und wird von health.js nur bei
+         Erfolg entfernt. Verwaltet, wer die Freigabe aktiviert hat, und schaltet Premium
+         manuell frei bzw. entzieht es. -->
+    <div class="htab-content" id="tab-share" role="tabpanel">
+        <input type="search" class="share-search" id="shareSearch"
+               data-i18n-attr="placeholder:health.share_admin_search_placeholder"
+               placeholder="Nach Nick suchen…">
+        <table class="share-table" id="shareTable">
+            <thead>
+                <tr>
+                    <th class="share-sortable" data-sort="name" data-i18n="health.share_admin_col_user">Nutzer</th>
+                    <th class="share-sortable" data-sort="first" data-i18n="health.share_admin_col_first">Erster Report</th>
+                    <th class="share-sortable" data-sort="last" data-i18n="health.share_admin_col_last">Letzter Report</th>
+                    <th data-i18n="health.share_admin_col_data">Letzte 7 Tage</th>
+                    <th data-i18n="health.share_admin_col_action">Aktion</th>
+                </tr>
+            </thead>
+            <tbody id="shareTableBody">
+                <tr><td colspan="5" class="share-empty" data-i18n="health.share_admin_loading">Lade…</td></tr>
+            </tbody>
+        </table>
+        <div class="share-pagination hidden" id="sharePagination"></div>
+    </div>
 
     <!-- Tab: Base (Platzhalter) -->
     <div class="htab-content" id="tab-base" role="tabpanel">
         <div class="placeholder-hint">
             <span class="placeholder-icon">🔗</span>
-            <p>Base-Integration ist in Planung.<br>Dienste erscheinen hier sobald Base aktiv ist.</p>
+            <p data-i18n-html="health.base_planned">Base-Integration ist in Planung.<br>Dienste erscheinen hier sobald Base aktiv ist.</p>
         </div>
     </div>
 
@@ -83,7 +201,7 @@
         <div class="svc-modal-header">
             <span class="svc-modal-dot" id="svcModalDot"></span>
             <span class="svc-modal-title" id="svcModalTitle"></span>
-            <button class="svc-modal-close" id="svcModalClose" aria-label="Schließen">✕</button>
+            <button class="svc-modal-close" id="svcModalClose" aria-label="Schließen" data-i18n-attr="aria-label:health.close">✕</button>
         </div>
         <div class="svc-modal-body" id="svcModalBody"></div>
     </div>
@@ -99,33 +217,35 @@
 <div class="health-legend-overlay hidden" id="healthLegendOverlay">
     <div class="health-legend-box">
         <div class="health-legend-header">
-            <span>Legende – History-Balken</span>
+            <span data-i18n="health.legend_title">Legende – History-Balken</span>
             <button class="health-legend-close" id="healthLegendClose">✕</button>
         </div>
         <div class="health-legend-body">
-            <div class="health-legend-row"><span class="hleg-block ok"></span><span><strong>Online</strong> – Service antwortet normal</span></div>
-            <div class="health-legend-row"><span class="hleg-block warn"></span><span><strong>Degraded</strong> – Service antwortet, aber langsam oder mit Fehlern</span></div>
-            <div class="health-legend-row"><span class="hleg-block error"></span><span><strong>Offline</strong> – Service nicht erreichbar</span></div>
-            <div class="health-legend-row"><span class="hleg-block unknown"></span><span><strong>Unbekannt</strong> – Check lief, Status nicht bestimmbar</span></div>
-            <div class="health-legend-row"><span class="hleg-block nodata"></span><span><strong>Keine Daten</strong> – In dieser Stunde wurde kein Check aufgezeichnet</span></div>
-            <p class="health-legend-note">Jeder Balken zeigt 168 Stunden (7 Tage).<br>Links = älteste Einträge, rechts = aktuell.</p>
+            <div class="health-legend-row"><span class="hleg-block ok"></span><span data-i18n-html="health.legend_ok"><strong>Online</strong> – Service antwortet normal</span></div>
+            <div class="health-legend-row"><span class="hleg-block warn"></span><span data-i18n-html="health.legend_warn"><strong>Degraded</strong> – Service antwortet, aber langsam oder mit Fehlern</span></div>
+            <div class="health-legend-row"><span class="hleg-block error"></span><span data-i18n-html="health.legend_error"><strong>Offline</strong> – Service nicht erreichbar</span></div>
+            <div class="health-legend-row"><span class="hleg-block unknown"></span><span data-i18n-html="health.legend_unknown"><strong>Unbekannt</strong> – Check lief, Status nicht bestimmbar</span></div>
+            <div class="health-legend-row"><span class="hleg-block disabled"></span><span data-i18n-html="health.legend_disabled"><strong>Deaktiviert</strong> – Dienst bewusst abgeschaltet, kein Fehler</span></div>
+            <div class="health-legend-row"><span class="hleg-block nodata"></span><span data-i18n-html="health.legend_nodata"><strong>Keine Daten</strong> – In dieser Stunde wurde kein Check aufgezeichnet</span></div>
+            <p class="health-legend-note" data-i18n-html="health.legend_note_bars">Jeder Balken zeigt 168 Stunden (7 Tage).<br>Links = älteste Einträge, rechts = aktuell.</p>
+            <p class="health-legend-note" data-i18n-html="health.legend_note_host">Unter <strong>Host</strong> heißen dieselben vier Zustände <strong>Normal</strong>, <strong>Knapp</strong>, <strong>Kritisch</strong> und <strong>Unbekannt</strong> – dort geht es nicht um Erreichbarkeit, sondern um Messwerte des Servers.</p>
         </div>
     </div>
 </div>
 
 <div class="notif-panel hidden" id="notifPanel">
     <div class="notif-panel-header">
-        <span class="notif-panel-title">Benachrichtigungen</span>
+        <span class="notif-panel-title" data-i18n="health.notifications">Benachrichtigungen</span>
         <button class="notif-panel-close" id="notifPanelClose">✕</button>
     </div>
     <div class="notif-panel-body" id="notifPanelBody">
-        <div class="notif-empty">Keine Benachrichtigungen</div>
+        <div class="notif-empty" data-i18n="health.no_notifications">Keine Benachrichtigungen</div>
     </div>
 </div>
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/health.js?v=20260807c"></script>
+<script type="module" src="js/health.js?v=20260814f"></script>
 
 </body>
 </html>

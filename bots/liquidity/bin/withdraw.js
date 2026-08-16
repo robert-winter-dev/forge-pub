@@ -40,7 +40,7 @@ import { config, setPoolActive } from '../lib/config.js';
 import {
     openDatabase, syncPools, getOpenPosition,
     insertTransaction, updatePositionCapital, updatePositionHodl, insertCapitalFlow,
-    closePosition,
+    closePosition, rebaseHwmForCapitalFlow,
 } from '../lib/db.js';
 // Performance-Segments seit v0.3.47 nicht mehr geschrieben — Baseline = netDeposited.
 import { getAdapter }        from '../lib/pool-adapter/index.js';
@@ -535,11 +535,16 @@ if (isFull) {
     }
 }
 
-// HWM zurücksetzen bei Teilentnahme: Kapital hat sich verändert, neuer Referenzwert
-// wird im nächsten Bot-Snapshot etabliert. Bei Vollentnahme entfällt dies (Position closed).
+// Trailing-Stop-Referenz bei Teilentnahme nachziehen: Der Abstand zum Höchststand bleibt
+// erhalten, den neuen absoluten Referenzwert etabliert der nächste Bot-Snapshot.
+// Bei Vollentnahme entfällt dies (Position closed).
+// posValueEstimate stammt aus dem letzten Snapshot VOR der Entnahme — genau der gemessene
+// Wert, den rebaseHwmForCapitalFlow() braucht (der Delta-Snapshot oben ist schätzungsbasiert).
 if (!isFull) {
-    db.prepare('UPDATE positions SET hwm_usd = NULL, hwm_at = NULL, hwm_base_adjustment = NULL WHERE pool_id = ? AND closed_at IS NULL').run(pool.id);
-    console.log(`[withdraw] ${t('cli.liq.hwm_reset')}`);
+    const hwmRebase = rebaseHwmForCapitalFlow(db, position.id, posValueEstimate);
+    if (hwmRebase.applied) {
+        console.log(`[withdraw] ${t('cli.liq.hwm_rebased', { pct: hwmRebase.drawdownPct.toFixed(2) })}`);
+    }
 }
 
 // Pool Mindestwert deaktivieren: Nach einer Auszahlung ist der konfigurierte Wert

@@ -39,6 +39,14 @@
       "enabled": true
     },
     {
+      "id": "health-share-send",
+      "description": "FORGE public Systemdaten-Freigabe – stündlicher Report (FORK-ONLY, nur nach Freischaltung)",
+      "schedule": "3 * * * *",
+      "command": "node bin/health-share-send.js",
+      "cwd": ".",
+      "enabled": true
+    },
+    {
       "id": "lmb3-cleanup",
       "description": "LMB3 Cleanup-Job (inkl. SOL-Topup)",
       "schedule": "5 * * * *",

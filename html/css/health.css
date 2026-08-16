@@ -39,6 +39,12 @@ header {
     gap: 7px;
     margin-bottom: -1px;
 }
+/* Muss NACH `.htab { display: flex }` stehen: gleiche Spezifität, es gewinnt die
+   spätere Regel. Es gibt im Projekt bewusst keine globale `.hidden`-Klasse — jede
+   Komponente definiert sie selbst (vgl. .hshare.hidden, .notif-panel.hidden). Ohne
+   diese Zeile blieben die installationsabhängigen Reiter ("Daten teilen" für Fork
+   bzw. Master) trotz gesetzter Klasse sichtbar (Fund 2026-08-13). */
+.htab.hidden { display: none; }
 .htab:hover:not(:disabled) {
     color: var(--text);
     background: rgba(255, 255, 255, 0.04);
@@ -117,6 +123,10 @@ header {
 .status-dot.warn    { background: var(--warn);    box-shadow: 0 0 5px rgba(245, 158, 11, 0.55); }
 .status-dot.error   { background: var(--danger);  box-shadow: 0 0 5px rgba(239, 68, 68, 0.55); animation: pulse-error 1.8s ease-in-out infinite; }
 .status-dot.unknown { background: var(--border); }
+/* Hohler Punkt statt einer weiteren Graustufe: "deaktiviert" unterscheidet sich damit
+   auch in der FORM von "unbekannt", nicht nur im Farbton – bei einer Farbsehschwäche
+   sind zwei ähnliche Grautöne sonst nicht auseinanderzuhalten. */
+.status-dot.disabled { background: transparent; border: 2px solid var(--text-muted); box-sizing: border-box; }
 
 @keyframes pulse-error {
     0%, 100% { opacity: 1; }
@@ -172,6 +182,8 @@ header {
 .svc-status-label.warn    { background: rgba(245, 158, 11, 0.14);  color: var(--warn); }
 .svc-status-label.error   { background: rgba(239, 68, 68, 0.14);   color: var(--danger); }
 .svc-status-label.unknown { background: rgba(148, 163, 184, 0.1);  color: var(--text-muted); }
+/* Gestrichelter Rahmen: dieselbe Unterscheidung über die Form wie beim Status-Punkt. */
+.svc-status-label.disabled { background: transparent; color: var(--text-muted); border: 1px dashed var(--text-muted); }
 
 /* ── Bot-Tags ─────────────────────────────────────────────────────────────────── */
 .svc-bots {
@@ -223,6 +235,11 @@ header {
 .service-card.errors-only .hist-block.nodata {
     opacity: 0.04;
 }
+/* Wie ok/nodata: eine abgeschaltete Stunde ist kein Fehler und soll den Blick im
+   Fehler-Filter nicht auf sich ziehen. */
+.service-card.errors-only .hist-block.disabled {
+    opacity: 0.07;
+}
 
 /* ── Uptime-Warn-Icon ────────────────────────────────────────────────────── */
 .uptime-err-toggle {
@@ -258,6 +275,12 @@ header {
 .hist-block.error   { background: var(--danger); }
 .hist-block.unknown { background: rgba(59, 130, 246, 0.55); }   /* Blau – Check lief, Status unklar */
 .hist-block.nodata  { background: #3d4f63; }                     /* Grau – kein Messwert vorhanden */
+/* Schraffur statt Vollton – "abgeschaltet" ist auch in der Leiste auf einen Blick von
+   "kein Messwert" (Grau) und "Status unklar" (Blau) zu unterscheiden, ohne dass die
+   Farbe allein die Bedeutung tragen muss. */
+.hist-block.disabled {
+    background: repeating-linear-gradient(135deg, #3d4f63 0 3px, rgba(148, 163, 184, 0.45) 3px 6px);
+}
 
 .history-labels {
     display: flex;
@@ -276,6 +299,13 @@ header {
     min-height: 1em;
 }
 
+/* ── Prozess-Zeile (Speicher/Uptime/Neustarts) ─────────────────────────────── */
+.svc-process-row {
+    font-size: 0.71rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
 /* ── JS-Tooltip ──────────────────────────────────────────────────────────────── */
 .svc-js-tooltip {
     position: fixed;
@@ -287,7 +317,10 @@ header {
     font-size: 0.78rem;
     color: var(--text-muted);
     line-height: 1.55;
-    max-width: 300px;
+    /* Der Status-Tooltip setzt die allgemeine Bedeutung und den konkreten Messwert
+       durch eine Leerzeile ab – ohne pre-line liefe beides zu einem Block zusammen. */
+    white-space: pre-line;
+    max-width: 340px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
     pointer-events: none;
     transition: opacity 0.12s;
@@ -345,6 +378,7 @@ header {
 .svc-modal-dot.warn    { background: var(--warn); }
 .svc-modal-dot.error   { background: var(--danger); animation: pulse-error 1.8s ease-in-out infinite; }
 .svc-modal-dot.unknown { background: var(--border); }
+.svc-modal-dot.disabled { background: transparent; border: 2px solid var(--text-muted); box-sizing: border-box; }
 
 .svc-modal-title {
     flex: 1;
@@ -541,6 +575,9 @@ header {
 .hleg-block.error   { background: var(--danger); }
 .hleg-block.unknown { background: rgba(59, 130, 246, 0.55); }
 .hleg-block.nodata  { background: #3d4f63; }
+.hleg-block.disabled {
+    background: repeating-linear-gradient(135deg, #3d4f63 0 3px, rgba(148, 163, 184, 0.45) 3px 6px);
+}
 
 .health-legend-note {
     margin-top: 6px;
@@ -561,4 +598,409 @@ header {
     .svc-modal-backdrop { padding: 12px; }
     .modal-stats-grid { grid-template-columns: 1fr; }
     .title-word-monitor { display: none; }
+}
+
+/* ── Systemdaten-Freigabe ────────────────────────────────────────────────────
+   Verborgen bis die API antwortet (siehe js/health.js): auf dem öffentlichen
+   Dashboard ohne Backend und auf dem Master darf hier kein toter Schalter stehen. */
+.hshare.hidden { display: none; }
+.hshare {
+    /* Kein eigenes margin-top: .htab-content ist display:contents, der Abschnitt ist
+       damit direktes Flex-Kind von <main> und bekommt dessen gap (20px) bereits. */
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+}
+.hshare-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.hshare-toggle {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+.hshare-toggle input { cursor: pointer; }
+/* Der Zustand steht immer als Wort da – die Farbe verstärkt ihn nur. */
+.hshare-state { font-size: 0.78rem; color: var(--text-muted); }
+.hshare-state.ok   { color: var(--success); }
+.hshare-state.warn { color: var(--warn); }
+.hshare-text {
+    margin: 0 0 8px;
+    font-size: 0.79rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+    max-width: 78ch;
+}
+.hshare-list {
+    margin: 0 0 8px;
+    padding-left: 1.3em;
+    font-size: 0.79rem;
+    line-height: 1.6;
+    color: var(--text-muted);
+    max-width: 78ch;
+}
+/* Grid-Collapse-Trick: animiert auf eine dynamische (nicht fest bekannte) Höhe, im
+   Gegensatz zu max-height ohne Sprungstelle, wenn sich der Boxen-Inhalt je nach
+   Sprache/Fensterbreite ändert. .hshare-boxes-inner trägt overflow:hidden, damit
+   während der Animation nichts über die schrumpfende Zeile hinausragt. */
+.hshare-boxes-wrap {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.25s ease;
+}
+.hshare-boxes-wrap.collapsed {
+    grid-template-rows: 0fr;
+}
+.hshare-boxes-inner { overflow: hidden; min-height: 0; }
+.hshare-boxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+}
+.hshare-box {
+    flex: 1 1 300px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+}
+.hshare-box .hshare-text:last-child { margin-bottom: 0; }
+.hshare-error {
+    margin: 8px 0 0;
+    font-size: 0.79rem;
+    color: var(--danger);
+}
+.hshare-error.hidden { display: none; }
+
+.hshare-history.hidden { display: none; }
+.hshare-history {
+    margin-top: 14px;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+}
+.hshare-history summary {
+    cursor: pointer;
+    font-size: 0.79rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+/* Master-Detail statt Modal (2026-08-14, zweite Nachbesserung): Liste links mit
+   fester Breite, Detailbereich rechts füllt den Rest – beide mit eigenem
+   Scrollbalken, gleiche max-height, damit sie nebeneinander bündig abschließen.
+   Nur für die interne LAN-only Seite gedacht, bewusst ohne Stapel-Fallback für
+   schmale Fenster. */
+.hshare-history-split {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-top: 10px;
+}
+.hshare-history-list {
+    flex: 0 0 380px;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 340px; /* zeigt ca. 8 Zeilen (2026-08-14, Nachbesserung); ALLE
+                           Reports der letzten 7 Tage werden weiter geladen, nur
+                           die Box-Höhe ist begrenzt – Rest per Scrollbalken */
+    overflow-y: auto;
+}
+/* Ein Eintrag ist EIN Text am Stück ("Systemreport · {when}, FORGE public Version:
+   {version}"), links ausgerichtet, kürzt mit Ellipsis statt umzubrechen. Klick füllt
+   die Detailbox rechts (siehe html/js/health.js) statt einen Dialog zu öffnen. */
+.hshare-history-entry {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.hshare-history-entry:hover { background: var(--surface); }
+/* Zeigt, welcher Eintrag gerade rechts angezeigt wird — ohne das wäre bei einer
+   einzeiligen, gekürzten Liste nicht erkennbar, welche Auswahl aktiv ist. */
+.hshare-history-entry.selected {
+    background: var(--surface);
+    border-color: var(--accent);
+}
+.hshare-history-label {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.79rem;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.hshare-history-arrow {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+}
+.hshare-history-detail {
+    flex: 1;
+    min-width: 0;
+    max-height: 340px; /* zeigt ca. 8 Zeilen (2026-08-14, Nachbesserung); ALLE
+                           Reports der letzten 7 Tage werden weiter geladen, nur
+                           die Box-Höhe ist begrenzt – Rest per Scrollbalken */
+    overflow-y: auto;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-2);
+}
+.hshare-history-detail-placeholder {
+    margin: 0;
+    font-size: 0.79rem;
+    color: var(--text-muted);
+}
+.hshare-history-detail-head {
+    margin-bottom: 8px;
+    font-size: 0.79rem;
+    font-weight: 600;
+    color: var(--text);
+}
+.hshare-history-text {
+    margin: 0;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.79rem;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.hshare-history-empty {
+    font-size: 0.79rem;
+    color: var(--text-muted);
+}
+
+/* ── Forge Modal (gemeinsam via js/modal.js) ──────────────────────────────────
+   health.php band diese Regeln bisher nirgends ein – js/modal.js wird hier aber
+   schon länger verwendet (Bestätigung "Freigabe beenden?"). Ohne Styling rendert
+   der Browser das Backdrop ohne Positionierung, das Modal landet dadurch als
+   kleine, unpositionierte Box am Fensterrand statt zentriert über der Seite
+   (Fund 2026-08-14, aufgefallen erst mit dem neuen, inhaltsreicheren
+   Report-Detail-Modal). Regeln 1:1 aus bots/settings/html/css/settings.css
+   übernommen – zwei getrennte Apps (unterschiedliche Verzeichnisbäume, kein
+   gemeinsamer CSS-Import), deshalb Duplikat statt Verweis. */
+.forge-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.75);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+.forge-modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 480px; /* 2026-08-14: die +33%-Breite von zwischenzeitlich 640px war
+                          nur für den Report-Volltext im Modal nötig – der zeigt sich
+                          jetzt im Master-Detail-Bereich, nicht mehr hier. Auf dieser
+                          Seite bleibt nur noch die "Freigabe beenden?"-Bestätigung als
+                          Modal übrig, dafür ist der settings.css-Standard richtig. */
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.forge-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.forge-modal-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+.forge-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0.2rem 0.4rem;
+    border-radius: 5px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+}
+.forge-modal-close:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+.forge-modal-body {
+    padding: 1.25rem;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 0.875rem;
+    line-height: 1.6;
+}
+.forge-modal-footer {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 1rem 1.25rem;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+}
+.forge-modal-footer-note {
+    margin-right: auto;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+/* js/modal.js rendert jede Aktion als <button class="btn btn-secondary">, aber
+   .btn-secondary ist projektweit nirgends definiert (totes Klassenzitat) – nur die
+   Basisklasse .btn zählt. Fehlte bisher hier komplett (Fund 2026-08-14, „merkwürdiges
+   Layout" der Löschen/Abbrechen-Buttons): ohne sie rendert der Browser die Footer-
+   Buttons unstyled statt im FORGE-Look. 1:1 aus bots/settings/html/css/settings.css
+   übernommen wie die übrigen .forge-modal-*-Regeln – kein gemeinsamer CSS-Import
+   zwischen den beiden Apps. */
+.btn {
+    font-size: 0.8rem;
+    font-weight: 500;
+    padding: 0.4rem 0.9rem;
+    border-radius: 7px;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    background: var(--bg-2);
+    color: var(--text);
+}
+.btn:hover  { opacity: 0.85; }
+.btn:active { transform: scale(0.97); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Share-Tab (MASTER-ONLY): Teilnehmerliste der Systemdaten-Freigabe ───────── */
+.share-search {
+    display: block;
+    width: 100%;
+    max-width: 320px;
+    margin-bottom: 10px;
+    padding: 7px 10px;
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.82rem;
+}
+.share-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+.share-table th,
+.share-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+}
+.share-table th {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+.share-table th.share-sortable {
+    cursor: pointer;
+    user-select: none;
+}
+.share-table th.share-sortable:hover { color: var(--text); }
+/* Immer ein Pfeil sichtbar – auch unsortiert ein neutrales ↕ als Hinweis "hier lässt
+   sich sortieren" (Fund 2026-08-14: mit leerem content war die Sortierbarkeit vor dem
+   ersten Klick unsichtbar). Aktive Spalte hebt sich per Akzentfarbe + Richtungspfeil ab. */
+.share-table th.share-sortable::after {
+    content: '↕';
+    display: inline-block;
+    width: 1em;
+    margin-left: 3px;
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+.share-table th.share-sortable.sort-asc::after  { content: '↑'; color: var(--accent); opacity: 1; }
+.share-table th.share-sortable.sort-desc::after { content: '↓'; color: var(--accent); opacity: 1; }
+.share-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 28px 12px;
+}
+.share-pagination.hidden { display: none; }
+.share-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 12px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+.share-pagination button {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 10px;
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.share-pagination button:hover:not(:disabled) { background: var(--surface); }
+.share-pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
+.share-user {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.share-user-name { font-weight: 600; }
+.share-user-name.share-noname { font-weight: 400; color: var(--text-muted); font-style: italic; }
+.share-mail-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 0.95rem;
+    color: var(--accent);
+    padding: 2px;
+    line-height: 1;
+}
+.share-mail-btn:hover { opacity: 0.75; }
+.share-status-lapsed {
+    display: block;
+    font-size: 0.71rem;
+    color: var(--warn);
+    margin-top: 2px;
+}
+.share-table select {
+    background: var(--bg-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 0.82rem;
 }

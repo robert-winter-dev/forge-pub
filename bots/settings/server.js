@@ -37,9 +37,11 @@ import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
 import updateRouter   from './routes/update.js';
+import healthShareRouter from './routes/health-share.js';
 import i18nRouter     from './routes/i18n.js';
 import timezoneRouter from './routes/timezone.js';
 import { displayVersion } from '../../lib/version.js';
+import { phpToHtml } from './bin/generate-html.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_VERSION = displayVersion();
@@ -87,6 +89,8 @@ app.use('/api/addresses', addressesRouter);
 app.use('/api/messages',  messagesRouter);
 app.use('/api/premium',   premiumRouter);
 app.use('/api/update',    updateRouter);
+// Master-only (Systemdaten-Freigabe) – die Route riegelt sich selbst ab, siehe dort.
+app.use('/api/health-share', healthShareRouter);
 
 // FORGE-Dashboards intern erreichbar unter /forge/ (identisch zum externen Pfad)
 // Kein PHP-Interpreter: .php-Dateien werden als text/html serviert (PHP-Tags werden vom Browser ignoriert).
@@ -144,6 +148,24 @@ const FORGE_STATIC_OPTS = {
         }
     },
 };
+// Health Monitor: seit 2026-08-13 LAN-only. bin/sync.sh schließt health.php samt
+// Assets vom Dashboard-Sync aus (der öffentliche Webserver zeigt nur noch die beiden
+// Bot-Dashboards), hier ist er der einzige verbliebene Zugang. Ohne diese Route würde express.static
+// die Datei zwar ausliefern, aber der führende PHP-Block ginge als Quelltext an den
+// Browser (er verschluckt ihn nur zufällig als Bogus-Comment) – phpToHtml() ist
+// dieselbe Transformation, die auch der Fork-Export nutzt.
+// Kein Redirect auf .html: html/js/nav.js verlinkt auf /forge/health.php, und der
+// Fork ersetzt genau diesen String per Sanitize-Regel (sanitize-text.js).
+app.get('/forge/health.php', (req, res, next) => {
+    const src = path.join(FORGE_HTML, 'health.php');
+    if (!fs.existsSync(src)) return next();   // Fork: dort liegt nur health.html
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.send(phpToHtml(fs.readFileSync(src, 'utf8'), process.env.FORGE_TZ || 'Europe/Berlin'));
+});
+
 app.use('/forge', express.static(FORGE_HTML, FORGE_STATIC_OPTS));
 
 // Settings-Frontend (root)
@@ -461,7 +483,7 @@ caApp.get('/', (req, res) => {
   });
 </script>
 <script type="module">
-  import { initNav } from '/forge/js/nav.js?v=20260811b';
+  import { initNav } from '/forge/js/nav.js?v=20260816a';
   initNav({ current: 'ssl-cert' });
 </script>
 </body>

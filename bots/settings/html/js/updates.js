@@ -10,15 +10,19 @@
  * live zu pollen (siehe runCheck()).
  */
 
-import { initNav, initFooter }        from '/forge/js/nav.js?v=20260811b';
+import { initNav, initFooter }        from '/forge/js/nav.js?v=20260816a';
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast }                  from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
-import { initMessageBell }            from '/forge/js/message-bell.js?v=20260809a';
+import { initMessageBell }            from '/forge/js/message-bell.js?v=20260816a';
 import { initForgeTooltip }           from './tooltip.js?v=20260811a';
 
 initNav({ current: 'updates' });
-initFooter({ botName: tr('upd.updates', 'Settings') });
+// Bewusst ohne botName: die zweite Footer-Zeile ist für "<Name>: <Version>" gedacht
+// und wird per id="footerVersion" nachgefüllt (siehe initFooter() in nav.js). Diese
+// Seite hat keine eigene Bot-Version zu zeigen – übrig blieb ein nacktes "Settings:"
+// ohne Wert dahinter (2026-08-16, gleicher Fund wie zuvor in message.js).
+initFooter();
 initForgeTooltip();
 // Ungelesen-Zähler im Kopf – gleiche Einbindung wie index.html/message.html.
 // Fehlte hier bis 2026-08-10: ein Update erzeugt eine System-Nachricht

@@ -6,15 +6,20 @@
  *
  * Zwei Eskalationsstufen (Config aus settings.db → pool_settings.tvlProtection,
  * gepflegt im ForgeSettings-„Risk-Management"-Modal, Tab TVL):
- *   - L1 (Stufe 1, optional, höhere Schwelle): zieht withdrawPct % der Position
- *     per decreaseLiquidity. Position bleibt offen, Pool bleibt aktiv.
- *   - L2 (Stufe 2, default aktiv, tiefere Schwelle): schließt den Rest komplett
+ *   - L1 (Stufe 1, default aktiv, höhere Schwelle): zieht withdrawPct % der Position
+ *     per decreaseLiquidity. Position bleibt offen, Pool bleibt aktiv — außer bei
+ *     withdrawPct = 100, dann ist es ein Voll-Exit wie L2 (`isFull`, s.u.). Genau so
+ *     ist der Default seit 2026-08-15 belegt: eine Stufe, eine Schwelle, 100 % raus.
+ *   - L2 (Stufe 2, default aus, tiefere Schwelle): schließt den Rest komplett
  *     (closePosition) und deaktiviert den Pool. Egal ob L1 vorher lief — L2 zieht
  *     immer alles Verbliebene, sodass L1+L2 zusammen 100 % ergeben.
  *
  * Priorität: L2 wird vor L1 geprüft (tiefere Schwelle = gravierender).
- * Jede Stufe feuert pro Position maximal einmal (tvl_executions.position_id+level).
- * Zusätzlich Cooldown (cooldownHours) gegen schnelles Re-Triggern bei Teil-Abzug.
+ * Jede Stufe feuert pro Position maximal einmal (tvl_executions.position_id+level) —
+ * das ist der einzige Schutz gegen Mehrfach-Auslösung. Der konfigurierte
+ * `cooldownHours` wirkt bewusst NICHT hier, sondern ausschließlich im Cleanup
+ * (bin/cleanup.js): er verhindert das sofortige Wiederbefüllen eines gerade
+ * verlassenen Pools, darf aber nie den Kapitalschutz selbst aussperren.
  *
  * TVL-Quelle: letzter pool_stats.tvl_usd (stündlich aktualisiert) — kein API-Call
  * im Trigger-Check. Schwelle === null → Fallback auf pools.json (tvlWarn/Exit).
@@ -41,7 +46,8 @@ import {
     closePosition as markPositionClosedInDb,
     updatePositionCapital, updatePositionHodl,
     createTvlExecution, updateTvlExecution, getIncompleteTvlExecutions,
-    isTvlLevelExecutedForPosition, getLastTvlExecutionAt,
+    isTvlLevelExecutedForPosition, getLastTvlLevelExecutionAt,
+    rebaseHwmForCapitalFlow,
 } from './db.js';
 import * as notify from './notify.js';
 import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees } from './exit-finalizer.js';
@@ -53,6 +59,19 @@ const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
 
 const PARTIAL_SLIPPAGE = Percentage.fromFraction(1, 200); // 0,5 % für decreaseLiquidity
+
+/**
+ * Melde-Cooldown der Stufe-1-Warnung: höchstens EINE Warnung pro Pool und Tag.
+ *
+ * Bewusst getrennt vom Ausführungs-Cooldown (`cooldownHours`, Default 12 h): ein
+ * anhaltend niedriger TVL ist ein Dauerzustand, den der Nutzer aussitzen können soll,
+ * ohne mehrfach täglich dieselbe Meldung zu bekommen. Die Aktion selbst (Teil-Abzug)
+ * läuft unabhängig davon weiter — gedrosselt wird nur die Benachrichtigung.
+ *
+ * Gilt ausdrücklich NICHT für Stufe 2 und nicht für einen L1-Abzug von 100 %: beides
+ * ist ein Voll-Exit und wird immer gemeldet.
+ */
+const WARN_NOTIFY_COOLDOWN_MS = 24 * 3_600_000;
 
 // ─── Settings-DB lesen ────────────────────────────────────────────────────────
 
@@ -106,11 +125,18 @@ function resolveTrigger(pool, db) {
     const tvl = latestTvl(db, pool.id);
     if (!(tvl > 0)) return null; // kein verlässlicher TVL → nichts tun
 
-    // Cooldown: nach letzter Auslösung für diesen Pool eine Weile nichts tun
-    const cooldownMs = Math.max(0, Number(cfg.cooldownHours) || 0) * 3_600_000;
-    if (cooldownMs > 0 && (Date.now() - getLastTvlExecutionAt(db, pool.id)) < cooldownMs) {
-        return null;
-    }
+    // Kein Cooldown-Check an dieser Stelle — bewusst.
+    //
+    // `cooldownHours` ist der *Cleanup*-Cooldown: er hält den Ranking-/Invest-Cleanup
+    // davon ab, einen gerade verlassenen Pool sofort wieder zu befüllen (bin/cleanup.js,
+    // _loadCleanupCooldownBlockedPools). Der Schutz selbst muss davon unberührt bleiben,
+    // sonst wäre bis zu `cooldownHours` lang kein L2-Notfall-Exit möglich, obwohl der TVL
+    // weiter fällt — der Cooldown würde also ausgerechnet den Kapitalschutz aussperren,
+    // den er nie gemeint hat (Klarstellung 2026-08-13).
+    //
+    // Gegen Mehrfach-Auslösung schützt stattdessen isTvlLevelExecutedForPosition():
+    // jede Stufe feuert pro Position genau einmal. Die Drosselung der *Meldung* sitzt
+    // getrennt davon in executeTvlProtection() (WARN_NOTIFY_COOLDOWN_MS).
 
     // L2 zuerst prüfen (tiefere Schwelle, gravierender)
     const t2 = effectiveThreshold(l2, pool.tvlExitThreshold);
@@ -118,7 +144,16 @@ function resolveTrigger(pool, db) {
         return { level: 2, levelCfg: l2, threshold: t2, tvl, cfg, position };
     }
 
-    const t1 = effectiveThreshold(l1, pool.tvlWarnThreshold);
+    // Fallback-Schwelle für Stufe 1: normalerweise die Warn-Schwelle aus pools.json.
+    // Zieht Stufe 1 aber 100 % (seit 2026-08-15 der Default — der Voll-Exit läuft über
+    // Stufe 1), dann ist sie keine Warnstufe mehr und muss beim Ernstfall-Wert greifen.
+    // Sonst liquidierte ein Pool ohne eigene Schwelle bereits bei der höheren Warnschwelle
+    // komplett. Greift nur als Netz: ensureTvlProtectionDefaults setzt die Schwelle bei
+    // jeder Aktivierung explizit, also bevor überhaupt eine Position existieren kann.
+    const l1Fallback = Number(l1.withdrawPct) >= 100
+        ? (pool.tvlExitThreshold ?? pool.tvlWarnThreshold)
+        : pool.tvlWarnThreshold;
+    const t1 = effectiveThreshold(l1, l1Fallback);
     if (l1.enabled && t1 && tvl < t1 && !isTvlLevelExecutedForPosition(db, position.id, 1)) {
         return { level: 1, levelCfg: l1, threshold: t1, tvl, cfg, position };
     }
@@ -230,6 +265,22 @@ async function stepWithdrawPartial(pool, db, execId, withdrawPct) {
     const oldCapital = position.capital_usdc ?? 0;
     updatePositionCapital(db, position.id, Math.max(0, oldCapital - withdrawnUsdc));
     updatePositionHodl(db, position.id, -coinsA, -coinsB);
+
+    // HWM nachziehen — zwingend, sonst löst der eigene Teil-Abzug den Trailing Stop aus.
+    // Der Trailing Stop vergleicht lp_value_usd gegen hwm_usd. Ein L1-Abzug von z.B. 50 %
+    // halbiert lp_value_usd, während hwm_usd auf dem Wert VOR dem Eingriff stehen bleibt —
+    // der resultierende „Drawdown" von ~50 % reißt jede übliche Schwelle (Default 2 %) und
+    // schließt die Position komplett. Damit war L1 faktisch wirkungslos: statt „Position
+    // bleibt offen, Pool bleibt aktiv" (siehe Kopf dieser Datei) folgte binnen Sekunden ein
+    // Voll-Exit. Belegt 2026-08-13 auf Master und forge-pub1, je zweimal in Folge
+    // (HWM 21,46 → lp 10,71 = 50,1 % Drawdown, Trailing Stop 29 s später).
+    // bin/withdraw.js macht dasselbe bei jeder manuellen Teilentnahme — hier fehlte es.
+    // Kein harter Reset: rebaseHwmForCapitalFlow() rettet den bereits aufgelaufenen Abstand zum
+    // Höchststand über den Eingriff hinweg (posValue = gemessener Wert VOR dem Abzug), den neuen
+    // absoluten Referenzwert etabliert der nächste Bot-Snapshot.
+    const hwmRebase = rebaseHwmForCapitalFlow(db, position.id, posValue);
+    console.log(`[tvl-protection:${pool.id}] Trailing-Stop-Referenz übertragen (Teil-Abzug ${withdrawPct}%, Abstand zum Höchststand ${hwmRebase.drawdownPct.toFixed(2)} %)`);
+
     if ((result.fraction ?? 1) < 0.999) {
         // Sofort-Snapshot für Dashboard; currentPrice aus letztem pool_stats
         const priceRow = db.prepare(
@@ -244,7 +295,13 @@ async function stepWithdrawPartial(pool, db, execId, withdrawPct) {
         type:     'withdraw',
         amountA:  coinsA,
         amountB:  coinsB,
-        usdValue: -withdrawnUsdc,
+        // Betrag IMMER positiv — die Richtung steckt im `type`. Ein negatives
+        // usd_value dreht in lib/pnl.js (CASE ... ELSE -usd_value) das Vorzeichen
+        // ein zweites Mal: die Entnahme wird dort zur Einzahlung, der Kapital-Anker
+        // wächst statt zu schrumpfen und es entsteht ein Phantomverlust in Höhe des
+        // DOPPELTEN Abzugs. Belegt 2026-08-13 auf forge-pub1: Abzug 28,23 USDC →
+        // PnL −56,41 USDC bei real unverändertem Guthaben.
+        usdValue: withdrawnUsdc,
         txHash:   result.txHash,
         txFeeSol: wdFee,
         note:     'tvl-protection-l1',
@@ -291,11 +348,24 @@ export async function executeTvlProtection(pool, db) {
     const withdrawPct = Number(levelCfg.withdrawPct);
     const isFull = level === 2 || withdrawPct >= 100;
 
+    // Pool-Wert vor dem Withdraw festhalten (für die Abschlussmeldung) – gleiche
+    // Quelle wie trailing-stop.js: letzter position_snapshots-Eintrag, kein API-Call.
+    const lpValueRow = db.prepare(
+        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
+         ORDER BY recorded_at DESC LIMIT 1`
+    ).get(pool.id);
+    const lpValueUsd = lpValueRow?.lp_value_usd ?? null;
+
     // swapToUsdc/sendTo gelten global für beide Stufen. Im Snapshot mitspeichern,
     // damit der Resume-Pfad nach einem Crash selbst-enthaltend ist.
     const actionCfg = { ...levelCfg, swapToUsdc: cfg.swapToUsdc, sendTo: cfg.sendTo };
 
     console.log(`[tvl-protection:${pool.id}] Stufe ${level} ausgelöst: TVL ${(tvl/1e6).toFixed(2)}M < Schwelle ${(threshold/1e6).toFixed(2)}M → ${isFull ? 'Voll-Exit' : withdrawPct + '% Teil-Abzug'}`);
+
+    // Melde-Cooldown der L1-Warnung: VOR createTvlExecution lesen, sonst zählt die
+    // gerade angelegte Ausführung als „letzte" und die Sperre greift nie.
+    const lastWarnAt   = (!isFull && level === 1) ? getLastTvlLevelExecutionAt(db, pool.id, 1) : 0;
+    const suppressWarn = lastWarnAt > 0 && (Date.now() - lastWarnAt) < WARN_NOTIFY_COOLDOWN_MS;
 
     await waitForCleanupToFinish();
     acquireSlLock();
@@ -315,9 +385,14 @@ export async function executeTvlProtection(pool, db) {
         // Der frühere zusätzliche insertNotification()-Eintrag (lokale DB, ohne Pool-Name)
         // landete über export.js als redundanter zweiter Eintrag in derselben Dashboard-
         // Glocke (gleiches Muster wie der APR-Alert-Fix, siehe bot.js). Entfernt.
-        await (isFull
-            ? notify.tvlExitAlert(pool, tvl, threshold)
-            : notify.tvlWarnAlert(pool, tvl, threshold)).catch(() => {});
+        if (suppressWarn) {
+            const hoursAgo = ((Date.now() - lastWarnAt) / 3_600_000).toFixed(1);
+            console.log(`[tvl-protection:${pool.id}] TVL-Warnung unterdrückt – letzte Warnung vor ${hoursAgo} h (Melde-Cooldown 24 h). Teil-Abzug läuft trotzdem.`);
+        } else {
+            await (isFull
+                ? notify.tvlExitAlert(pool, tvl, threshold)
+                : notify.tvlWarnAlert(pool, tvl, threshold)).catch(() => {});
+        }
 
         // Bei Voll-Exit: Pool sofort inaktiv → verhindert Re-Open im nächsten Tick.
         // Zusätzlich Benutzer-Freigabe entziehen (enabled=false): nach einem
@@ -358,6 +433,11 @@ export async function executeTvlProtection(pool, db) {
 
         // Phase 5: Abschluss
         updateTvlExecution(db, execId, { step: 'complete', completed_at: Date.now() });
+        if (isFull) {
+            await notify.tvlExitCompleted(pool, tvl, threshold, {
+                lpValueUsd, coinsA, coinsB, swappedUsdc,
+            }).catch(() => {});
+        }
         console.log(`[tvl-protection:${pool.id}] Stufe ${level} vollständig abgeschlossen.`);
 
     } catch (err) {

@@ -10,18 +10,22 @@
  * GET  /api/messages/support/unread-count → { unread: N }
  * GET  /api/messages/support/threads      → Inbox: eine Zeile pro Gegenstelle
  * GET  /api/messages/support/thread/:peer → Alle Nachrichten mit einer Gegenstelle
+ *                                      (rein lesend, quittiert nichts – siehe .../read)
+ * POST /api/messages/support/thread/:peer/read → Anliegen als gelesen markieren
  * DELETE /api/messages/support/thread/:peer → Konversation lokal löschen
  * POST /api/messages/support/send   → Text-Nachricht per Nostr-DM versenden
  * GET  /api/messages/premium        → Flache Liste humanisierter Premium-Protokoll-
  *                                      Nachrichten (kein JSON-Rohtext im Frontend)
  * GET  /api/messages/premium/unread-count → { unread: N }
  * POST /api/messages/premium/:id/read     → einzelne Premium-Nachricht als gelesen markieren
- * GET  /api/messages/system         → System-Notifications aus nexus.db, paginiert
- *                                      (?page=&q=), bleibt hier, kein Nostr-Bezug.
- *                                      unreadCount + allIds sind unpaginiert (max. 100) –
+ * GET  /api/messages/system         → System-Notifications aus nexus.db, fensterweise
+ *                                      (?limit=&offset=&q=), bleibt hier, kein Nostr-Bezug.
+ *                                      unreadCount + allIds sind ungefenstert (max. 100) –
  *                                      allIds nur noch für die "alle als gelesen"-Bulk-Aktion.
  * POST /api/messages/system/mark-read → { ids:[...] } als gelesen markieren, proxied an
  *                                        den Nexus (schreibt exklusiv auf nexus.db).
+ * DELETE /api/messages/system/:id   → einzelne System-Meldung löschen (ebenfalls über den Nexus)
+ * DELETE /api/messages/premium/:id  → einzelne Premium-Nachricht löschen (lokale Kopie)
  * GET  /api/messages/notify-settings  → { system, support, premium } Benachrichtigungs-Toggles
  * POST /api/messages/notify-settings  → { type, enabled } einzelnes Toggle setzen (proxied an Nexus)
  * GET  /api/messages/identity       → npub/pubkey/Alias der eigenen Identität
@@ -37,26 +41,25 @@ import { t } from '../../../lib/i18n.js';
 import { notificationText } from '../../../lib/notify-render.js';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
-import { listBots } from '../../../lib/bot-registry.js';
 
 const PREMIUM_BASE = `http://127.0.0.1:${process.env.PREMIUM_PORT || '3110'}`;
 const NEXUS_BASE   = `http://127.0.0.1:${process.env.NEXUS_PORT || '3100'}`;
 const NEXUS_DB_PATH = PATHS.nexusDb;
 
-// bot_id → Anzeigename, für Zeilen ohne gespeichertes display_name (alle Meldungen
-// von vor dem 30.07.2026 sowie Absender, die den Namen nicht mitschicken).
-// Quelle ist config/bots.json über die Registry — kein zweiter Namens-Katalog.
-const BOT_DISPLAY_NAMES = Object.fromEntries(
-    listBots().map(([id, cfg]) => [id, cfg.displayName]),
-);
-
 /**
  * Anzeigename des betroffenen Bots für die Kopfzeile im Message Center.
- * Reihenfolge: gespeichertes display_name → Registry-Name → "System".
- * Nie die rohe botId — "wallet-monitor" ist für einen Nicht-Techniker kein Absender.
+ *
+ * Bewusst NUR drei mögliche Werte, unabhängig vom frei gewählten display_name
+ * jedes einzelnen Absenders (Betreiber-Vorgabe 2026-08-16): der Nutzer soll auf
+ * den ersten Blick sehen, ob eine Meldung von einem der beiden Bots kommt oder
+ * vom FORGE-Kern — nicht die uneinheitlichen Rohnamen der ~10 verschiedenen
+ * Skripte, die an /notify senden (z.B. "Monitoring", "Auto-Update"). Das
+ * gespeicherte display_name bleibt in der DB erhalten, wird hier nur ignoriert.
  */
 function resolveBotName(displayName, botId) {
-    return displayName || BOT_DISPLAY_NAMES[botId] || 'System';
+    if (botId === 'liquidity') return 'Liquidity Bot';
+    if (botId === 'lending')   return 'Lending Bot';
+    return 'FORGE';
 }
 
 // Pool-Name neben dem Bot-Namen in der Message-Center-Kopfzeile (Ticket 2026-08-08):
@@ -135,6 +138,14 @@ router.get('/support/thread/:peer', (req, res) => {
     proxyJson(req, res, `/support/thread/${encodeURIComponent(req.params.peer)}${qs}`);
 });
 
+// Markiert ein Anliegen als gelesen. Eigener Aufruf, weil der GET oben seit
+// 2026-08-16 nichts mehr quittiert – nur eine Nutzeraktion darf das (Klick auf die
+// Konversation oder auf den "alle als gelesen"-Haken, siehe message.js).
+router.post('/support/thread/:peer/read', (req, res) => {
+    const qs = typeof req.query.threadId === 'string' ? `?threadId=${encodeURIComponent(req.query.threadId)}` : '';
+    proxyJson(req, res, `/support/thread/${encodeURIComponent(req.params.peer)}/read${qs}`, { method: 'POST', body: '{}' });
+});
+
 router.delete('/support/thread/:peer', (req, res) => {
     const qs = typeof req.query.threadId === 'string' ? `?threadId=${encodeURIComponent(req.query.threadId)}` : '';
     proxyJson(req, res, `/support/thread/${encodeURIComponent(req.params.peer)}${qs}`, { method: 'DELETE' });
@@ -149,6 +160,9 @@ router.get('/premium/unread-count', (req, res) => proxyJson(req, res, '/premium/
 
 router.post('/premium/:id/read', (req, res) =>
     proxyJson(req, res, `/premium/${encodeURIComponent(req.params.id)}/read`, { method: 'POST', body: '{}' }));
+
+router.delete('/premium/:id', (req, res) =>
+    proxyJson(req, res, `/premium/${encodeURIComponent(req.params.id)}`, { method: 'DELETE' }));
 
 // SSE muss gestreamt werden (kein einmaliges Response-Body wie bei proxyJson) —
 // Chunks vom Premium-Dienst direkt an den Browser weiterreichen, Verbindung offen halten.
@@ -191,10 +205,14 @@ router.get('/support/stream', async (req, res) => {
     }
 });
 
-// GET /system?page=<1-based>&q=<Volltextsuche, optional>
-// perPage fest 10 (Vorgabe vom 2026-08-08: max. 10 Seiten à 10 Zeilen je Rubrik):
-// 10 Seiten × 10 = 100 Zeilen, exakt das Fenster, das notify-db.js per Pruning nach
-// jedem Insert offen hält (MAX_NOTIFICATIONS).
+// GET /system?limit=<1..100>&offset=<0-based>&q=<Volltextsuche, optional>
+// Seit 2026-08-16 ein reines Fenster (limit/offset) statt fester Seiten à 10 Zeilen:
+// die Liste im Message Center lädt beim Herunterscrollen nach (Infinite Scroll,
+// siehe loadMoreSystem() in message.js), es gibt keine Seitenzahlen mehr. Der
+// Höchstwert 100 entspricht dem Fenster, das notify-db.js per Pruning nach jedem
+// Insert offen hält (MAX_NOTIFICATIONS) – mehr Zeilen kann es gar nicht geben.
+// page= wird weiterhin akzeptiert (1-basiert, mit perPage=limit), damit ältere
+// geöffnete Tabs nach einem Deploy nicht ins Leere laufen.
 // q durchsucht message/category/bot_id/level (2026-07-30: Sender-Dropdown durch
 // Live-Volltextsuche ersetzt, praktischer als eine feste Filterliste; level
 // dazugenommen, damit sich z.B. "Warnung" im Modal-Titel-Badge auch anklicken/
@@ -210,13 +228,26 @@ router.get('/support/stream', async (req, res) => {
 // Bewusst per Filter statt DELETE auf notifications — die Nexus-DB gehört
 // exklusiv dem Nexus-Prozess (siehe notify-db.js), kein Fremdprozess schreibt
 // hinein.
+//
+// Ausnahme von der level='info'-Blende (2026-08-13): der stündliche
+// Systemdaten-Report (category 'health-share-report', Absender "Monitoring
+// Daten") ist bewusst 'info' – kein Alarm, aber trotzdem die eine Meldung, die
+// diese Rubrik laut Freigabe-Tab ("Daten teilen") verspricht sichtbar zu machen.
+// Ohne diese Ausnahme verschwand er lautlos hinter demselben Filter wie die
+// Positions-/Deposit-Rauschmeldungen, die die Blende ursprünglich abstellen
+// sollte (Fund 2026-08-13: Report kam korrekt in der DB an, war aber nie sichtbar).
 router.get('/system', (req, res) => {
     // Reine Lese-Queries auf die Nexus-DB sind laut Konvention erlaubt (exklusiver
     // Schreibzugriff bleibt beim Nexus selbst, siehe notify-db.js). Kein Nostr-Bezug,
     // bleibt deshalb hier statt im Premium-Dienst.
-    const PER_PAGE = 10;
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const q    = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const MAX_LIMIT = 100;
+    const limit  = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    // offset hat Vorrang; page nur als Rückfallebene für Alt-Clients (siehe Kommentar oben).
+    const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const offset = Number.isInteger(parseInt(req.query.offset, 10))
+        ? Math.max(0, parseInt(req.query.offset, 10))
+        : (page - 1) * limit;
+    const q      = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
     let db;
     try {
@@ -230,7 +261,7 @@ router.get('/system', (req, res) => {
             .all().some(c => c.name === 'display_name');
         const nameCol = hasDisplayName ? 'display_name' : 'NULL';
 
-        const baseFilter = "level != 'info' AND message NOT LIKE '%APR-Alert%'";
+        const baseFilter = "(level != 'info' OR category = 'health-share-report') AND message NOT LIKE '%APR-Alert%'";
         // Suche schließt Anzeigename UND context mit ein: die UI zeigt "Liquidity Bot"
         // sowie (seit 2026-08-08) den Pool aus dem context-JSON-Blob in der Thema-Spalte
         // (siehe extractPool()) – ohne beide Spalten in der Suche wäre genau der
@@ -246,7 +277,6 @@ router.get('/system', (req, res) => {
         const params   = q ? searchCols.map(() => like) : [];
 
         const totalCount = db.prepare(`SELECT COUNT(*) AS c FROM notifications ${whereSql}`).get(...params).c;
-        const totalPages = Math.max(1, Math.ceil(totalCount / PER_PAGE));
 
         // read kam erst am 03.08.2026 dazu (Migration läuft beim Nexus-Start, siehe
         // notify-db.js) – gleiche Vorsichtsmaßnahme wie bei display_name oben.
@@ -266,7 +296,7 @@ router.get('/system', (req, res) => {
             ${whereSql}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
-        `).all(...params, PER_PAGE, (page - 1) * PER_PAGE)
+        `).all(...params, limit, offset)
           // notificationText() entscheidet als EINZIGE Stelle, ob aus msg_key neu
           // gerendert oder der gespeicherte Text genommen wird (Altbestand).
           .map(({ context, msg_key, msg_params, ...r }) => ({
@@ -292,10 +322,11 @@ router.get('/system', (req, res) => {
             ? (db.prepare(`SELECT MIN(timestamp) AS t FROM notifications ${whereSql} AND read = 0`).get(...params).t ?? null)
             : null;
 
-        res.json({ notifications: rows, page, perPage: PER_PAGE, totalCount, totalPages, allIds, unreadCount, oldestUnread });
+        // hasMore statt totalPages: der Client hängt beim Scrollen an, statt zu blättern.
+        res.json({ notifications: rows, limit, offset, totalCount, hasMore: offset + rows.length < totalCount, allIds, unreadCount, oldestUnread });
     } catch {
         // nexus.db existiert noch nicht oder hat noch keine Notification erhalten.
-        res.json({ notifications: [], page: 1, perPage: PER_PAGE, totalCount: 0, totalPages: 1, allIds: [], unreadCount: 0 });
+        res.json({ notifications: [], limit, offset, totalCount: 0, hasMore: false, allIds: [], unreadCount: 0 });
     } finally {
         db?.close();
     }
@@ -307,6 +338,15 @@ router.post('/system/mark-read', async (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
     if (ids.length === 0) return res.json({ ok: true, count: 0 });
     proxyNexusJson(req, res, '/notifications/mark-read', { method: 'POST', body: JSON.stringify({ ids }) });
+});
+
+// DELETE /system/:id – löscht eine einzelne System-Meldung. Nach außen (UI) ein
+// REST-DELETE wie beim Support-Thread, nach innen der ID-Listen-Endpoint des
+// Nexus, der als einziger Prozess auf nexus.db schreibt (siehe notify-db.js).
+router.delete('/system/:id', (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isInteger(id)) return res.status(400).json({ error: t('msg.support.invalid_id') });
+    proxyNexusJson(req, res, '/notifications/delete', { method: 'POST', body: JSON.stringify({ ids: [id] }) });
 });
 
 // GET  /notify-settings → { system, support, premium } – Benachrichtigungs-Toggles

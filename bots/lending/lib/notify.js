@@ -102,15 +102,19 @@ async function send(level, category, msgKey, params = {}) {
 
 // ─── Lebenszyklus ─────────────────────────────────────────────────────────────
 
-/** @param {string} pools Kommagetrennte Pool-Labels (kanonische Bezeichner, E11) */
-export async function startup(pools) {
-    if (isUpdateInProgress()) return;
-    await send('lifecycle', 'system', 'notify.len.startup', { bot: config.botDisplayName, pools, _action: ACTION.fyi });
+/**
+ * Deaktiviert (2026-08-14): reine Routine-Meldung ohne Mehrwert – der
+ * Bediener löst den Neustart i.d.R. selbst aus und weiß es bereits. Ein
+ * Crash-Neustart wird unabhängig davon von forge-check.js über systemd
+ * (crashRestarts) erkannt und als Anomalie gemeldet.
+ * @param {string} pools Kommagetrennte Pool-Labels (kanonische Bezeichner, E11)
+ */
+export async function startup(pools) { // eslint-disable-line no-unused-vars
+    return;
 }
 
-export async function shutdown(signal) {
-    if (isUpdateInProgress()) return;
-    await send('lifecycle', 'system', 'notify.len.shutdown', { bot: config.botDisplayName, signal, _action: ACTION.autoRestart });
+export async function shutdown(signal) { // eslint-disable-line no-unused-vars
+    return;
 }
 
 export async function unhandledRejection(message) {

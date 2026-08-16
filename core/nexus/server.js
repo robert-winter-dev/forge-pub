@@ -41,7 +41,7 @@ import { TxQueue }           from './tx-queue.js';
 import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
-import { insertNotification, updateRepeatCount, markNotificationsRead, getNotifySettings, setNotifySetting } from './notify-db.js';
+import { insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting } from './notify-db.js';
 import { checkDedup, setDedupRowId, checkRateLimit, fmtTime } from './dedup.js';
 import { readMaintenanceFlag } from '../maintenance.js';
 import { envFile } from '../../config/paths.js';
@@ -471,15 +471,18 @@ app.get('/tx/status/:ticketId', (req, res) => {
 // warn-Kategorien die trotzdem eine Telegram-Notification auslösen (Exit-Strategien)
 const TELEGRAM_WARN_CATEGORIES = new Set([
     'score-limit', 'score-limit-done',
-    'ranking-exit', 'ranking-exit-done',
     'trailing-stop', 'trailing-stop-done',
     'range-hint',
     'new-pool-alert',
 ]);
 
 app.post('/notify', async (req, res) => {
-    const { botId, displayName, level, category, message, context, telegramOnly, msgKey, params } = req.body ?? {};
+    const { botId, displayName, level, category, message, context, telegramOnly, msgKey, params, timestamp } = req.body ?? {};
     const i18n = msgKey ? { msgKey, params: params ?? null } : null;
+    // Nur für Backfill/Migration bekannter, vergangener Ereignisse (z.B.
+    // bin/health-share-migrate-reports.js) – normale Aufrufer schicken das Feld nicht,
+    // dann greift der Default Date.now() in insertNotification().
+    const insertTimestamp = Number.isFinite(timestamp) ? timestamp : undefined;
 
     // Pflichtfelder prüfen
     if (!botId || !level || !category || !message) {
@@ -502,7 +505,7 @@ app.post('/notify', async (req, res) => {
         } else {
             console.log(`[nexus:notify] LIFECYCLE | ${botId} | ${category} | telegram=SUPPRESSED (Wartungsmodus: ${maintenance.reason})`);
         }
-        insertNotification(botId, level, category, message, context ?? null, sentTg, displayName ?? null, i18n);
+        insertNotification(botId, level, category, message, context ?? null, sentTg, displayName ?? null, i18n, insertTimestamp);
         return res.json({ ok: true, sentTelegram: sentTg });
     }
 
@@ -543,7 +546,7 @@ app.post('/notify', async (req, res) => {
     // telegramOnly: Nachricht bewusst nicht in nexus.db (→ keine Dashboard-Glocke),
     // z.B. für den scan-new-pools-Hinweis (nur Telegram-Erinnerung, kein DB-Datensatz).
     if (!telegramOnly) {
-        const rowId = insertNotification(botId, level, category, message, context ?? null, sentTelegram, displayName ?? null, i18n);
+        const rowId = insertNotification(botId, level, category, message, context ?? null, sentTelegram, displayName ?? null, i18n, insertTimestamp);
         if (dedupResult) {
             setDedupRowId(botId, level, category, rowId);
         }
@@ -635,6 +638,18 @@ app.post('/notifications/mark-read', (req, res) => {
     }
     markNotificationsRead(ids);
     res.json({ ok: true, count: ids.length });
+});
+
+// Löschen einzelner System-Meldungen (Message Center, 2026-08-14). Gleicher Weg
+// wie mark-read: forge-settings schickt die IDs hierher, statt selbst auf
+// nexus.db zu schreiben.
+app.post('/notifications/delete', (req, res) => {
+    const { ids } = req.body ?? {};
+    if (!Array.isArray(ids) || ids.some(id => typeof id !== 'number')) {
+        return res.status(400).json({ error: 'ids muss ein Array von Zahlen sein' });
+    }
+    const deleted = deleteNotifications(ids);
+    res.json({ ok: true, deleted });
 });
 
 // Benachrichtigungs-Toggles (System/Support/Premium, Message-Center-Einstellungen) –

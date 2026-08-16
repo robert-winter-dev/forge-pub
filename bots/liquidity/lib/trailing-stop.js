@@ -19,7 +19,23 @@
  * Bei Bot-Restart wird jede unvollständige Ausführung fortgesetzt
  * (resumePendingTsExecutions).
  *
- * Settings: pool.settings.trailingStop = { enabled, thresholdPct, autoSwapToUSDC, sendTo }
+ * Zwei Drawdown-Stufen (seit 2026-08-15):
+ *   Stufe 1 (`thresholdPct`)  – gilt ab Eröffnung, bewusst weit: direkt nach dem Einstieg
+ *                               soll normale Schwankung nicht sofort zum Exit führen.
+ *   Stufe 2 (`thresholdPct2`) – optional, enger. Schaltet scharf, sobald die HWM die
+ *                               Einstiegsreferenz um Stufe 1 übertroffen hat, und sichert
+ *                               ab da den erreichten Gewinn deutlich enger ab.
+ * Beide messen denselben Abstand zur HWM, nur mit unterschiedlicher Weite. Beispiel
+ * (Stufe 1 = 2 %, Stufe 2 = 1 %): Ein Anstieg auf +3 % schaltet Stufe 2 scharf (die +2 %
+ * wurden überschritten); der Exit liegt danach bei HWM − 1 %, also bei +2 % Gewinn.
+ *
+ * Die Scharfschaltung ist ein Ratchet — `positions.d2_armed_at` bleibt für die Lebensdauer
+ * der Position stehen. Ein Zurückfallen auf Stufe 1 würde bei Werten, die um die Schwelle
+ * pendeln, zu Flapping führen. Rebalancing trägt den Zustand auf die neue Position weiter
+ * (bot.js → carryEntryToRebalancedPosition).
+ *
+ * Settings: pool.settings.trailingStop = { enabled, thresholdPct, thresholdPct2,
+ *           autoSwapToUSDC, sendTo }
  *           (settings.db → pool_settings, geliefert vom ForgeSettings-„Risk-Management"-
  *           Modal Tab Trailing Stop).
  */
@@ -44,7 +60,12 @@ const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
 
 const DEFAULT_THRESHOLD_PCT = 10;
-const MIN_THRESHOLD_PCT     = 1;
+// 0,5 % ist die untere Grenze, nicht 1 %: bei schwach volatilen Paaren (besonders am
+// Wochenende) ist ein enger zweiter Drawdown sinnvoll. Tiefer geht bewusst nicht — die
+// Messgrößen selbst schwanken um rund einen Prozentpunkt (Orca-Quote vs. gemessener
+// Positionswert, siehe rebaseHwmForCapitalFlow), darunter würde Rauschen den Exit auslösen
+// statt der Markt.
+const MIN_THRESHOLD_PCT     = 0.5;
 const MAX_THRESHOLD_PCT     = 90;
 
 /**
@@ -63,6 +84,9 @@ const DEFAULT_COOLDOWN_HOURS = 1;
 const FALLBACK_TS_CONFIG = {
     enabled:         true,
     thresholdPct:    DEFAULT_THRESHOLD_PCT,
+    // Zweite Stufe im Fallback bewusst aus: Ohne ausdrückliche Konfiguration darf der
+    // Schutz nicht enger sein, als der Nutzer erwartet.
+    thresholdPct2:   null,
     minimumValueUsd: null,
     autoSwapToUSDC:  true,
     sendTo:          '',
@@ -107,6 +131,68 @@ function normalizeThreshold(raw) {
     return Math.min(MAX_THRESHOLD_PCT, Math.max(MIN_THRESHOLD_PCT, n));
 }
 
+/**
+ * Stufe 2, sofern sie gültig konfiguriert ist — sonst null.
+ *
+ * Die Bedingung „enger als Stufe 1" wird hier erneut geprüft, obwohl das Settings-UI und
+ * die API sie bereits erzwingen: Eine Stufe 2, die weiter wäre als Stufe 1, würde den
+ * Schutz nach dem Scharfschalten *lockern* statt ihn zu verschärfen — also genau das
+ * Gegenteil der Absicht. Ein Altbestand oder ein von Hand editierter Settings-Eintrag darf
+ * das nicht auslösen können.
+ */
+function resolveSecondThreshold(cfg, firstPct) {
+    const raw = cfg?.thresholdPct2;
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+
+    const pct = Math.min(MAX_THRESHOLD_PCT, Math.max(MIN_THRESHOLD_PCT, n));
+    return pct < firstPct ? pct : null;
+}
+
+/**
+ * Ermittelt die aktuell geltende Drawdown-Schwelle für eine Position.
+ * @returns {{ pct: number, stage: 1|2, firstPct: number, secondPct: number|null }}
+ */
+function resolveActiveThreshold(cfg, position) {
+    const firstPct  = normalizeThreshold(cfg.thresholdPct);
+    const secondPct = resolveSecondThreshold(cfg, firstPct);
+
+    if (secondPct != null && position?.d2_armed_at) {
+        return { pct: secondPct, stage: 2, firstPct, secondPct };
+    }
+    return { pct: firstPct, stage: 1, firstPct, secondPct };
+}
+
+/**
+ * Schaltet Stufe 2 scharf, sobald die HWM die Einstiegsreferenz um Stufe 1 übertroffen hat.
+ *
+ * Läuft im Snapshot-Pfad direkt nach dem HWM-Update und liest die Position bewusst frisch —
+ * das übergebene Objekt stammt vom Zyklusbeginn und kennt die gerade geschriebene HWM nicht.
+ *
+ * Einmal gesetzt, bleibt `d2_armed_at` stehen (Ratchet, siehe Modulkopf).
+ */
+function armSecondStageIfReached(db, poolId, positionId, cfg) {
+    const firstPct  = normalizeThreshold(cfg.thresholdPct);
+    const secondPct = resolveSecondThreshold(cfg, firstPct);
+    if (secondPct == null) return;   // keine zweite Stufe konfiguriert
+
+    const row = db.prepare(
+        `SELECT hwm_usd, entry_usd, d2_armed_at FROM positions WHERE id = ?`
+    ).get(positionId);
+    if (!row || row.d2_armed_at) return;                       // schon scharf
+    if (!(row.hwm_usd > 0) || !(row.entry_usd > 0)) return;     // Referenzen noch nicht etabliert
+
+    const armAt = row.entry_usd * (1 + firstPct / 100);
+    if (row.hwm_usd < armAt) return;
+
+    const now = Date.now();
+    db.prepare(`UPDATE positions SET d2_armed_at = ? WHERE id = ?`).run(now, positionId);
+
+    const gainPct = ((row.hwm_usd - row.entry_usd) / row.entry_usd) * 100;
+    console.log(`[trailing-stop:${poolId}] Stufe 2 scharf: Höchststand ${row.hwm_usd.toFixed(2)} USDC liegt ${gainPct.toFixed(2)}% über dem Einstieg (${row.entry_usd.toFixed(2)} USDC, Schwelle ${firstPct}%). Drawdown-Schwelle ab jetzt ${secondPct}% statt ${firstPct}%.`);
+}
+
 // ─── HWM-Update (wird nach jedem Per-Pool-Snapshot aufgerufen) ────────────────
 
 /**
@@ -116,6 +202,16 @@ function normalizeThreshold(raw) {
 export function updateHwm(db, pool, position, lpValueUsd) {
     if (!position || !(lpValueUsd > 0)) return;
     updatePositionHwm(db, position.id, lpValueUsd);
+
+    // Direkt danach prüfen, ob die zweite Stufe scharf wird. Reine DB-Arbeit, kein API-Call.
+    // Ein Settings-Fehler darf den Snapshot-Pfad nicht abbrechen — im Zweifel bleibt Stufe 1
+    // aktiv, das ist die sichere Richtung.
+    try {
+        const cfg = loadTsConfig(pool.id);
+        if (cfg?.enabled) armSecondStageIfReached(db, pool.id, position.id, cfg);
+    } catch (err) {
+        console.warn(`[trailing-stop:${pool.id}] Stufe-2-Prüfung übersprungen: ${err.message}`);
+    }
 }
 
 // ─── HWM-Reset auf manuelle Anforderung aus ForgeSettings ─────────────────────
@@ -168,9 +264,17 @@ export function processHwmResetIfRequested(db, pool, position, lpValueUsd) {
     const targetUsd = (cfg.resetTargetUsd > 0) ? Math.min(cfg.resetTargetUsd, lpValueUsd) : lpValueUsd;
 
     // Hard-Reset: hwm_usd auf Zielwert setzen.
-    db.prepare(`UPDATE positions SET hwm_usd = ?, hwm_at = ? WHERE id = ?`)
-      .run(targetUsd, Date.now(), position.id);
-    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, lp=${lpValueUsd.toFixed(2)})`);
+    //
+    // Einstiegsreferenz und Stufe-2-Scharfschaltung werden mit zurückgesetzt. Der Reset
+    // bedeutet ausdrücklich „Referenz neu ansetzen"; bliebe eine scharfe Stufe 2 stehen,
+    // liefe der Pool danach mit dem engen Drawdown weiter, gemessen an einem gerade erst
+    // gesenkten Höchststand — also mit einem viel schärferen Stop, als der Nutzer beim
+    // Klick auf „Höchststand zurücksetzen" erwartet. Nach dem Reset muss Stufe 2 erneut
+    // verdient werden. Das ist die sichere Richtung: zu weit schadet weniger als zu eng.
+    db.prepare(
+        `UPDATE positions SET hwm_usd = ?, hwm_at = ?, entry_usd = ?, entry_flow_ratio = NULL, d2_armed_at = NULL WHERE id = ?`
+    ).run(targetUsd, Date.now(), targetUsd, position.id);
+    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, lp=${lpValueUsd.toFixed(2)}); Einstiegsreferenz mit zurückgesetzt, Stufe 2 wieder entschärft.`);
 
     clearResetFlag(pool.id);
     return true;
@@ -250,10 +354,10 @@ export function shouldTriggerTs(pool, db) {
     const cfg = loadTsConfig(pool.id);
     if (!cfg?.enabled) return false;
 
-    const thresholdPct = normalizeThreshold(cfg.thresholdPct);
-
     const position = getOpenPosition(db, pool.id);
     if (!position) return false;
+
+    const { pct: thresholdPct } = resolveActiveThreshold(cfg, position);
 
     const hwmUsd = position.hwm_usd ?? 0;
     if (!(hwmUsd > 0)) return false; // HWM noch nicht etabliert
@@ -352,9 +456,10 @@ export async function executeTs(pool, db) {
     const cfg = loadTsConfig(pool.id);
     if (!cfg?.enabled) return;
 
-    const thresholdPct = normalizeThreshold(cfg.thresholdPct);
     const position     = getOpenPosition(db, pool.id);
     const hwmUsd       = position?.hwm_usd ?? 0;
+
+    const { pct: thresholdPct, stage } = resolveActiveThreshold(cfg, position);
 
     const row = db.prepare(
         `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
@@ -365,9 +470,10 @@ export async function executeTs(pool, db) {
 
     const minValueUsd      = Number(cfg.minimumValueUsd) || 0;
     const triggeredByMin   = minValueUsd > 0 && currentUsd < minValueUsd;
+    const stageLabel       = stage === 2 ? 'Stufe 2, Gewinnsicherung' : 'Stufe 1';
     const triggerReason    = triggeredByMin
         ? `Mindestwert-Unterschreitung (${currentUsd.toFixed(2)} < ${minValueUsd.toFixed(2)} USDC)`
-        : `Drawdown ${drawdownPct.toFixed(1)}% (Schwelle ${thresholdPct}%)`;
+        : `Drawdown ${drawdownPct.toFixed(1)}% (Schwelle ${thresholdPct}% — ${stageLabel})`;
     console.log(`[trailing-stop:${pool.id}] Trailing Stop ausgelöst: HWM ${hwmUsd.toFixed(2)} → ${currentUsd.toFixed(2)} USDC, Grund: ${triggerReason}`);
 
     await waitForCleanupToFinish();
@@ -408,8 +514,14 @@ export async function executeTs(pool, db) {
         updateTsExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         const execLabel = triggeredByMin
             ? { k: 'notify.liq.rm_label_min_value', p: { usdc: minValueUsd.toFixed(0) } }
-            : { k: 'notify.liq.rm_label_trailing', p: { pct: thresholdPct } };
-        await notify.rmExecuted(pool, execLabel, currentUsd).catch(() => {});
+            // Bei zweistufiger Konfiguration die Stufe mitschicken: sonst steht in der
+            // Meldung ein Prozentwert, den der Nutzer im Modal so nicht wiederfindet.
+            : (stage === 2
+                ? { k: 'notify.liq.rm_label_trailing_s2', p: { pct: thresholdPct } }
+                : { k: 'notify.liq.rm_label_trailing',    p: { pct: thresholdPct } });
+        await notify.rmExecuted(pool, execLabel, {
+            lpValueUsd: currentUsd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc,
+        }).catch(() => {});
 
         // Mindestwert nach Mindestwert-Exit nullen, damit eine Wiedereröffnung nicht
         // sofort wieder triggert (neues Kapital liegt i.d.R. unterhalb des alten Grenzwerts).

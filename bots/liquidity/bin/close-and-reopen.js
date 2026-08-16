@@ -12,6 +12,7 @@ import {
     openDatabase, syncPools, getOpenPosition,
     closePosition, insertTransaction, insertFeeHistory, getPoolStats,
 } from '../lib/db.js';
+import { logChainTx } from '../lib/chain-tx-log.js';
 import { getAdapter } from '../lib/pool-adapter/index.js';
 import { refreshAfterAction } from '../lib/refresh-state.js';
 import {
@@ -104,6 +105,15 @@ for (const pool of poolsToProcess) {
                 usdValue:   null,
                 action:     'close',
                 txHash:     feeResult.txHash,
+            });
+            // Gebündelt in die folgende close_position-Zeile → eigene Zuordnung für
+            // den Abgleich (lib/chain-tx-log.js), sonst gilt der Abfluss als unerklärt.
+            logChainTx(db, {
+                txHash:     feeResult.txHash,
+                poolId:     pool.id,
+                positionId: position.id,
+                kind:       'exit_fee_claim',
+                note:       'gebündelt in close_position (close-and-reopen)',
             });
             console.log(`[${pool.id}] Fees geclaimed: TX=${feeResult.txHash}`);
         } catch (err) {

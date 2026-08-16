@@ -49,6 +49,7 @@ import { writeWalletSnapshot, getLatestWalletBalance } from './wallet-monitor-cl
 import { getTokenUsdPrice } from './deposit-lib.js';
 import { config } from './config.js';
 import { syncDashboard } from './sync.js';
+import { settle } from './settle-promise.js';
 
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 
@@ -340,9 +341,9 @@ export async function writeFreshWalletSnapshot(db, { walletId = 'liquidity', wal
     // Token-2022 (TokenzQd...) ist ein separates Program — getParsedTokenAccountsByOwner
     // mit programId=TOKEN_PROGRAM_ID übersieht Token-2022-Accounts vollständig (PUMP, USDG).
     const [lamports, tokenAccounts, token22Accounts] = await Promise.all([
-        conn.getBalance(keypair.publicKey, 'confirmed'),
-        conn.getParsedTokenAccountsByOwner(keypair.publicKey, { programId: TOKEN_PROGRAM_ID }),
-        conn.getParsedTokenAccountsByOwner(keypair.publicKey, { programId: TOKEN_2022_PROGRAM_ID }),
+        settle(conn.getBalance(keypair.publicKey, 'confirmed')),
+        settle(conn.getParsedTokenAccountsByOwner(keypair.publicKey, { programId: TOKEN_PROGRAM_ID })),
+        settle(conn.getParsedTokenAccountsByOwner(keypair.publicKey, { programId: TOKEN_2022_PROGRAM_ID })),
     ]);
     const solBalance = lamports / 1_000_000_000;
 

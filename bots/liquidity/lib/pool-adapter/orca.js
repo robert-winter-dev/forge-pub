@@ -47,6 +47,8 @@ import Decimal               from 'decimal.js';
 import BN                    from 'bn.js';
 import { getConnection, getKeypair, assertSufficientSol, assertSufficientSolForExit, getTxFee, getSolBalance, getSolBalanceFresh, getTokenBalance, getTokenBalanceFresh } from '../wallet.js';
 import { rpcLimiter, geckoLimiter } from '../rate-limiter.js';
+import { settle } from '../settle-promise.js';
+import { emitChainTxLeg } from '../chain-tx-log.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -250,9 +252,9 @@ export class OrcaAdapter {
      */
     async getPoolStats(pool) {
         const [onChain, orcaStats, volumeCandles] = await Promise.all([
-            this._getPriceOnChain(pool),
-            this._getOrcaV2Stats(pool.address),
-            this._getVolumeCandles(pool.address),
+            settle(this._getPriceOnChain(pool)),
+            settle(this._getOrcaV2Stats(pool.address)),
+            settle(this._getVolumeCandles(pool.address)),
         ]);
 
         return {
@@ -378,8 +380,8 @@ export class OrcaAdapter {
         // Batch 1: Pool + Position (immer nötig – tickSpacing muss on-chain verifiziert werden)
         await rpcLimiter.wait();
         const [whirlpool, position] = await Promise.all([
-            client.getPool(poolPubkey, IGNORE_CACHE),
-            client.getPosition(posPda.publicKey, IGNORE_CACHE),
+            settle(client.getPool(poolPubkey, IGNORE_CACHE)),
+            settle(client.getPosition(posPda.publicKey, IGNORE_CACHE)),
         ]);
         const poolData = whirlpool.getData();
         const posData  = position.getData();
@@ -395,8 +397,8 @@ export class OrcaAdapter {
         // → Fetch startet sofort nach Batch 1, minimiert den Slot-Split-Zeitraum erheblich.
         if (!positionHint) await rpcLimiter.wait();
         const [tickArrayLowerData, tickArrayUpperData] = await Promise.all([
-            this._ctx.fetcher.getTickArray(tickArrayLowerPda.publicKey, IGNORE_CACHE),
-            this._ctx.fetcher.getTickArray(tickArrayUpperPda.publicKey, IGNORE_CACHE),
+            settle(this._ctx.fetcher.getTickArray(tickArrayLowerPda.publicKey, IGNORE_CACHE)),
+            settle(this._ctx.fetcher.getTickArray(tickArrayUpperPda.publicKey, IGNORE_CACHE)),
         ]);
 
         const inRange = poolData.tickCurrentIndex >= posData.tickLowerIndex &&
@@ -469,8 +471,8 @@ export class OrcaAdapter {
         // Batch 1: Pool-State + Position-Daten parallel (je 1 getMultipleAccounts = 2 Credits)
         await rpcLimiter.wait();
         const [poolsMap, positionsMap] = await Promise.all([
-            ctx.fetcher.getPools(poolPubkeys, IGNORE_CACHE),
-            ctx.fetcher.getPositions(posPdas, IGNORE_CACHE),
+            settle(ctx.fetcher.getPools(poolPubkeys, IGNORE_CACHE)),
+            settle(ctx.fetcher.getPositions(posPdas, IGNORE_CACHE)),
         ]);
 
         // Tick-Array-PDAs aus den geladenen Daten ableiten
@@ -714,11 +716,21 @@ export class OrcaAdapter {
         const mintPubkey = new PublicKey(positionNftMint);
         const posPda     = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, mintPubkey);
 
+        // Jedes gesendete Leg SOFORT vermerken, nicht erst über den Rückgabewert:
+        // Bricht der Vorgang zwischen zwei Legs ab (Stale-Read-Fehler, Prozesstod),
+        // gibt es keinen Rückgabewert mehr — das bereits gesendete Leg wäre für
+        // lib/capital-reconcile.js dann ein unerklärter Abfluss (Vorfall 2026-08-15).
+        const sendLeg = async (kind, txBuilder, label) => {
+            const hash = await execTx(txBuilder, this._ctx.connection, label);
+            emitChainTxLeg({ txHash: hash, poolId: pool.id, kind, note: `NFT=${positionNftMint}` });
+            return hash;
+        };
+
         // Position + Pool laden
         await rpcLimiter.wait();
         const [whirlpool, position] = await Promise.all([
-            this._getClient().getPool(new PublicKey(pool.address), IGNORE_CACHE),
-            client.getPosition(posPda.publicKey, IGNORE_CACHE),
+            settle(this._getClient().getPool(new PublicKey(pool.address), IGNORE_CACHE)),
+            settle(client.getPosition(posPda.publicKey, IGNORE_CACHE)),
         ]);
 
         const poolData = whirlpool.getData();
@@ -746,7 +758,7 @@ export class OrcaAdapter {
             await rpcLimiter.wait();
             try {
                 const decreaseTx = await position.decreaseLiquidity(quote);
-                decreaseTxHash = await execTx(decreaseTx, this._ctx.connection, `decreaseLiquidity NFT=${positionNftMint}`);
+                decreaseTxHash = await sendLeg('exit_decrease', decreaseTx, `decreaseLiquidity NFT=${positionNftMint}`);
                 console.log(`[orca] Liquidität entfernt: NFT=${positionNftMint} TX=${decreaseTxHash}`);
             } catch (err) {
                 // Stale read (Fall 1): posData zeigte Liquidität, on-chain ist sie bereits 0
@@ -773,7 +785,7 @@ export class OrcaAdapter {
                         });
                         await rpcLimiter.wait();
                         const retryTx = await freshPos.decreaseLiquidity(freshQuote);
-                        decreaseTxHash = await execTx(retryTx, this._ctx.connection, `retry decreaseLiquidity NFT=${positionNftMint}`);
+                        decreaseTxHash = await sendLeg('exit_decrease', retryTx, `retry decreaseLiquidity NFT=${positionNftMint}`);
                         console.log(`[orca] Retry decreaseLiquidity OK: NFT=${positionNftMint} TX=${decreaseTxHash}`);
                     } else {
                         console.log(`[orca] Frische Liquidität ist 0 – überspringe decreaseLiquidity: NFT=${positionNftMint}`);
@@ -801,7 +813,7 @@ export class OrcaAdapter {
         try {
             const burnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
                 .addInstruction(burnIx);
-            burnTxHash = await execTx(burnTx, this._ctx.connection, `closePositionIx NFT=${positionNftMint}`);
+            burnTxHash = await sendLeg('exit_burn', burnTx, `closePositionIx NFT=${positionNftMint}`);
             console.log(`[orca] Position-NFT geburnt (Rent zurück): TX=${burnTxHash}`);
         } catch (err) {
             // Stale read (Fall 2): posData zeigte liquidity=0, on-chain hat sie noch Liquidität
@@ -822,13 +834,13 @@ export class OrcaAdapter {
                     });
                     await rpcLimiter.wait();
                     const retryTx = await freshPos.decreaseLiquidity(freshQuote);
-                    decreaseTxHash = await execTx(retryTx, this._ctx.connection, `retry decreaseLiquidity NFT=${positionNftMint}`);
+                    decreaseTxHash = await sendLeg('exit_decrease', retryTx, `retry decreaseLiquidity NFT=${positionNftMint}`);
                     console.log(`[orca] Retry decreaseLiquidity OK: NFT=${positionNftMint} TX=${decreaseTxHash}`);
                 }
                 await rpcLimiter.wait();
                 const retryBurnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
                     .addInstruction(burnIx);
-                burnTxHash = await execTx(retryBurnTx, this._ctx.connection, `retry closePositionIx NFT=${positionNftMint}`);
+                burnTxHash = await sendLeg('exit_burn', retryBurnTx, `retry closePositionIx NFT=${positionNftMint}`);
                 console.log(`[orca] Retry closePositionIx OK: TX=${burnTxHash}`);
             } else {
                 throw err;
@@ -839,6 +851,13 @@ export class OrcaAdapter {
             amountA: fromRawAmount(quote.tokenMinA, pool.decimalsA),
             amountB: fromRawAmount(quote.tokenMinB, pool.decimalsB),
             txHash: decreaseTxHash ?? burnTxHash,
+            // Beide Legs einzeln: gebucht wird nur `txHash`, aber der Abgleich in
+            // lib/capital-reconcile.js muss auch das andere Leg zuordnen können
+            // (lib/chain-tx-log.js). Setzt ein Resume den Exit fort, ist das
+            // kapitalbewegende Decrease sogar aus einem FRÜHEREN Durchlauf und
+            // taucht hier gar nicht mehr auf — deshalb wird es dort protokolliert,
+            // wo es gesendet wird, nicht erst hier.
+            txHashes: { decrease: decreaseTxHash, burn: burnTxHash },
         };
     }
 
@@ -1081,8 +1100,8 @@ export class OrcaAdapter {
 
         await rpcLimiter.wait();
         const [whirlpool, position] = await Promise.all([
-            client.getPool(new PublicKey(pool.address), IGNORE_CACHE),
-            client.getPosition(posPda.publicKey, IGNORE_CACHE),
+            settle(client.getPool(new PublicKey(pool.address), IGNORE_CACHE)),
+            settle(client.getPosition(posPda.publicKey, IGNORE_CACHE)),
         ]);
 
         const poolData = whirlpool.getData();

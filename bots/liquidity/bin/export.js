@@ -2386,7 +2386,8 @@ try {
 // auf note. usdc_amount ist bereits signiert: Withdraws stehen mit negativem Vorzeichen.
 // Bot-interne Pseudo-Flows ('Neue Position automatisch...', 'Baseline-Reset/Fix...')
 // werden ausgefiltert — sie wurden bis v0.3.46 vom alten _openNewPosition geschrieben
-// und sind seit v0.3.47 nicht mehr vorhanden (Backfill via cleanup-baseline-history.js).
+// und sind seit v0.3.47 nicht mehr vorhanden — die Altbestände wurden damals einmalig
+// bereinigt (Skript nach Gebrauch entfernt, siehe doc/CHANGELOG/2026-08-15.md).
 const _isRealFlow = (note) => {
     if (!note) return false;
     return /^Manueller Deposit/i.test(note)
@@ -2635,6 +2636,11 @@ const data = {
     // getPremiumCoverage() in lib/premium-wallet.js für die volle Herleitung.
     premiumAutoPayEnabled: _premiumCoverage.autoPayEnabled,
     premiumCoveredUntilMs: _premiumCoverage.coveredUntilMs,
+    // 'paid' | 'shared' | null — trennt „bezahlte Stunde" von „Deckung über die
+    // Systemdaten-Freigabe". Ohne diese Unterscheidung läse das Dashboard eine
+    // Freigabe-Deckung als „Auto-Pay aus, Restlaufzeit läuft" und meldete dem
+    // Nutzer fälschlich, der Premium Service sei deaktiviert (siehe app.js).
+    premiumCoverageSource: _premiumCoverage.coverageSource,
     // Nur bei echtem outagePaused (Master/Netzwerk nicht erreichbar) darf das
     // Dashboard veraltete Daten als "Premium Service derzeit nicht erreichbar"
     // erklären. Fehlendes Guthaben ist eine ANDERE Ursache (premiumAutoPayEnabled
