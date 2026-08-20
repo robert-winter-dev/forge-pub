@@ -53,7 +53,7 @@ import {
     createTsExecution, updateTsExecution, getIncompleteTsExecutions,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition, computeExitPnl } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
@@ -519,8 +519,16 @@ export async function executeTs(pool, db) {
             : (stage === 2
                 ? { k: 'notify.liq.rm_label_trailing_s2', p: { pct: thresholdPct } }
                 : { k: 'notify.liq.rm_label_trailing',    p: { pct: thresholdPct } });
+        // Best-effort: eine fehlschlagende PnL-Berechnung darf den bereits
+        // abgeschlossenen Exit nicht nachträglich als Fehler melden.
+        let pnlUsdc = null;
+        try {
+            if (position) pnlUsdc = computeExitPnl(db, pool, position);
+        } catch (err) {
+            console.warn(`[trailing-stop:${pool.id}] PnL-Berechnung fehlgeschlagen (nicht kritisch): ${err.message}`);
+        }
         await notify.rmExecuted(pool, execLabel, {
-            lpValueUsd: currentUsd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc,
+            lpValueUsd: currentUsd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc, pnlUsdc,
         }).catch(() => {});
 
         // Mindestwert nach Mindestwert-Exit nullen, damit eine Wiedereröffnung nicht

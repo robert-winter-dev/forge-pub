@@ -73,6 +73,7 @@ const ACTION = {
     autoRestart:'notify.len.act.auto_restart',
     support:    'notify.len.act.support',
     check:      'notify.len.act.check_dashboard',
+    vanished:   'notify.len.act.position_vanished',
 };
 
 // ─── Interner Sender ──────────────────────────────────────────────────────────
@@ -141,10 +142,14 @@ export async function tvlBelow(pool, threshold, tvl) {
     await send('warn', 'system', 'notify.len.tvl_below', { pool, threshold, tvl, _action: ACTION.observePool });
 }
 
-/** Auto-Exit ausgeführt – Kapital wurde aus dem Protokoll gezogen. */
-export async function autoExitExecuted(pool, { tvl, threshold, amount, tx, sentTo, sentAmount, sentTx, leftoverLp, leftoverUsdc }) {
+/**
+ * Auto-Exit ausgeführt – Kapital wurde aus dem Protokoll gezogen.
+ * `metric` benennt die Kennzahl, die den Exit ausgelöst hat (TVL oder
+ * Liquidität) – als Katalog-Verweis, damit sie mitübersetzt wird.
+ */
+export async function autoExitExecuted(pool, { metric, tvl, threshold, amount, tx, sentTo, sentAmount, sentTx, leftoverLp, leftoverUsdc }) {
     await send('error', 'system', 'notify.len.auto_exit_done', {
-        pool, tvl, threshold, amount, tx,
+        pool, metric: metric ?? { k: 'notify.len.metric_tvl' }, tvl, threshold, amount, tx,
         sendLine: sentTo
             ? { k: 'notify.len.auto_exit_sent', p: { amount: sentAmount, addr: sentTo.slice(0, 8), tx: sentTx } }
             : undefined,
@@ -159,8 +164,10 @@ export async function autoExitSendFailed(pool, message) {
     await send('warn', 'system', 'notify.len.auto_exit_send_failed', { pool, message, _action: ACTION.inWallet });
 }
 
-export async function autoExitFailed(pool, tvl, message) {
-    await send('warn', 'system', 'notify.len.auto_exit_failed', { pool, tvl, message, _action: ACTION.checkPool });
+export async function autoExitFailed(pool, tvl, message, metric) {
+    await send('warn', 'system', 'notify.len.auto_exit_failed', {
+        pool, metric: metric ?? { k: 'notify.len.metric_tvl' }, tvl, message, _action: ACTION.checkPool,
+    });
 }
 
 // ─── Auto-Deploy ──────────────────────────────────────────────────────────────
@@ -171,6 +178,37 @@ export async function autoDeploySkippedUnavailable(pool) {
 
 export async function autoDeploySkippedDisabled(pool) {
     await send('warn', 'trade', 'notify.len.deploy_skipped_disabled', { pool, _action: ACTION.enablePool });
+}
+
+/**
+ * Auto-Deploy im Modus „Bestimmter Pool" übersprungen, weil eine Schutzschwelle
+ * unterschritten ist oder die Datenbasis nicht reicht. Bewusst je Grund ein eigener
+ * Katalog-Key mit Zahlen statt eines fertigen Satzes: die Meldung wird in der Sprache
+ * des Empfängers gerendert, der Grund entsteht aber im Bot.
+ *
+ * @param {string} pool
+ * @param {string} rule    'tvl' | 'liquidity' | 'tvl_unknown' | 'liq_unknown' | 'data_basis'
+ * @param {object} detail  Zahlen für den jeweiligen Key
+ */
+export async function autoDeploySkippedGuard(pool, rule, detail = {}) {
+    const KEYS = {
+        tvl:         'notify.len.deploy_skipped_tvl',
+        liquidity:   'notify.len.deploy_skipped_liq',
+        tvl_unknown: 'notify.len.deploy_skipped_no_tvl',
+        liq_unknown: 'notify.len.deploy_skipped_no_liq',
+        data_basis:  'notify.len.deploy_skipped_basis',
+    };
+    const fmt = v => v == null ? '?' : Math.round(v).toLocaleString('de-DE');
+    await send('warn', 'trade', KEYS[rule] ?? KEYS.tvl_unknown, {
+        pool,
+        value:     fmt(detail.tvl ?? detail.liquidity),
+        threshold: fmt(detail.threshold),
+        points:    detail.points    ?? '?',
+        minPoints: detail.minPoints ?? '?',
+        hours:     detail.hours    != null ? detail.hours.toFixed(1) : '?',
+        minHours:  detail.minHours  ?? '?',
+        _action:   ACTION.waitPool,
+    });
 }
 
 export async function autoDeploySkippedNoPools(funds) {
@@ -213,6 +251,29 @@ export async function solTopupFailed(message, sol) {
 /** LP-Reste nach einem Withdraw – Restake nötig, Support kontaktieren. */
 export async function lpRemainder(pool, message) {
     await send('warn', 'system', 'notify.len.lp_remainder', { pool, message, _action: ACTION.support });
+}
+
+// ─── Position verschwunden ────────────────────────────────────────────────────
+
+/**
+ * Eine Position mit echtem Buchwert wurde geschlossen, weil das Protokoll sie
+ * mehrfach in Folge als leer gemeldet hat — das Kapital ist also nicht über einen
+ * Withdraw ins Wallet zurückgekommen, sondern schlicht verschwunden.
+ *
+ * Warum das eine eigene Meldung braucht (Fund 2026-08-20): Am 09.08.2026 wurden auf
+ * diesem Weg 70,61 USDC abgeschrieben, ohne dass irgendeine Benachrichtigung lief —
+ * der Bot loggte eine Zeile und schloss die Position. Dass die Ursache damals eine
+ * bekannte war (versehentlich mitgeburntes NFT), ändert nichts daran: Kapital, das
+ * ohne Auszahlung aus der Bilanz fällt, darf nicht unbemerkt bleiben. Der Betrag
+ * taucht sonst erst Wochen später beim Nachrechnen als PnL-Ausreißer auf.
+ *
+ * Bewusst 'error': Das Geld ist zu diesem Zeitpunkt bereits fort, der Bot kann
+ * nichts mehr retten — aber der Betreiber muss es sofort erfahren.
+ */
+export async function positionVanished(pool, amount) {
+    await send('error', 'system', 'notify.len.position_vanished', {
+        pool, amount, _action: ACTION.vanished,
+    });
 }
 
 export { ACTION };

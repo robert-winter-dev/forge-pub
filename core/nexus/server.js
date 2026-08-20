@@ -43,6 +43,7 @@ import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
 import { insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting } from './notify-db.js';
 import { checkDedup, setDedupRowId, checkRateLimit, fmtTime } from './dedup.js';
+import { visibility, checkLogOnlyKeys } from './notify-visibility.js';
 import { readMaintenanceFlag } from '../maintenance.js';
 import { envFile } from '../../config/paths.js';
 
@@ -509,6 +510,24 @@ app.post('/notify', async (req, res) => {
         return res.json({ ok: true, sentTelegram: sentTg });
     }
 
+    // ── Sichtbarkeit prüfen ───────────────────────────────────────────────────
+    // Meldungen, die sich mit hoher Wahrscheinlichkeit selbst heilen oder reinen
+    // Betriebsablauf protokollieren, gehören nicht vor den Nutzer (Begründung und
+    // Einordnungskriterium: notify-visibility.js). Sie landen ausschließlich hier
+    // im Nexus-Journal — kein DB-Eintrag, keine Glocke im Dashboard, kein Telegram.
+    //
+    // Bewusst VOR Dedup/Rate-Limit: der Dedup-Schlüssel ist botId:level:category
+    // und damit gröber als der msgKey. Stünde der Filter dahinter, könnte eine
+    // unterdrückte Meldung das Dedup-Fenster ihrer Kategorie öffnen und dadurch
+    // eine sichtbare Meldung derselben Kategorie verschlucken — z.B. würde
+    // `open_position_error` (unsichtbar) die Eskalation `open_position_gave_up`
+    // (sichtbar, ACTION.manual) schlucken, die typischerweise kurz danach kommt.
+    if (visibility(msgKey) === 'log') {
+        console.log(`[nexus:notify] ${level.toUpperCase().padEnd(5)} | ${botId} | ${category} | LOG-ONLY | ${msgKey}`
+            + `\n${message}`);
+        return res.json({ ok: true, sentTelegram: false, logOnly: true });
+    }
+
     // ── Dedup prüfen ──────────────────────────────────────────────────────────
     // Dedup vor Rate-Limit: Duplikate zählen nicht gegen das Rate-Limit-Kontingent.
     const dedupResult = checkDedup(botId, level, category, (bId, lv, cat, state) => {
@@ -660,8 +679,8 @@ app.get('/notifications/settings', (_req, res) => {
 
 app.post('/notifications/settings', (req, res) => {
     const { type, enabled } = req.body ?? {};
-    if (!['system', 'support', 'premium'].includes(type) || typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'type muss system/support/premium sein, enabled ein Boolean' });
+    if (!['system', 'bots', 'support', 'premium'].includes(type) || typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'type muss system/bots/support/premium sein, enabled ein Boolean' });
     }
     setNotifySetting(type, enabled);
     res.json({ ok: true });
@@ -1239,6 +1258,9 @@ const server = app.listen(PORT, HOST, async () => {
     console.log(`[FORGE Nexus] GeckoTerminal:  3 req/min  | kein Key erforderlich`);
     console.log(`[FORGE Nexus] Helius:         8 req/s    | Key: ${helKey}  → ${HELIUS_RPC_URL.split('?')[0]}`);
     console.log(`[FORGE Nexus] Telegram:       ${tgKey}`);
+    // Verwaiste/umbenannte Keys in der Sichtbarkeits-Blockliste sofort melden —
+    // sonst greift der Filter still nicht mehr (siehe notify-visibility.js).
+    checkLogOnlyKeys();
     await sendTelegram('🟢 forge-nexus → running');
 });
 

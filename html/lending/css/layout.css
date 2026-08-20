@@ -221,7 +221,8 @@ body {
 .lb-pools-header,
 .lb-pools-row {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    /* Pool | Asset | APY | TVL | Liquidität – die Pool-Spalte braucht mehr Platz */
+    grid-template-columns: 1.4fr 0.7fr 1fr 1fr 1.3fr;
     gap: 0 10px;
     padding: 7px 14px;
     font-size: 0.82rem;
@@ -245,6 +246,16 @@ body {
 }
 .lb-pools-row.lb-row-active { font-weight: 500; }
 .lb-pools-row.lb-row-inactive { opacity: 0.45; }
+
+/* Deaktivierter Pool: zusätzlich zur Ausgrauung immer das Verbots-Icon in der
+   Pool-Spalte – die Information darf nie allein an der Farbe hängen. */
+.lb-pools-row.lb-row-disabled { opacity: 0.4; }
+.lb-pools-row.lb-row-disabled span:not(.lb-below) { color: var(--text-muted); }
+
+/* Unterschrittene Schutz-Schwelle (TVL bzw. Liquidität): roter Wert PLUS Icon
+   links davon, dessen Tooltip die Bedeutung ausschreibt. */
+.lb-pools-row .lb-below { color: var(--danger); font-weight: 600; }
+.lb-pool-icon { cursor: help; }
 
 .lb-pools-scroll {
     overflow-y: auto;
@@ -300,7 +311,7 @@ body {
 
 @media (max-width: 480px) {
     .lb-pools-header, .lb-pools-row {
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: 1.4fr 0.7fr 1fr 1fr 1.3fr;
     }
     .lb-active-header, .lb-active-row {
         grid-template-columns: repeat(4, 1fr);
@@ -311,7 +322,7 @@ body {
 @media (orientation: portrait) and (max-width: 768px) {
     .lb-pools-col-asset { display: none; }
     .lb-pools-header, .lb-pools-row {
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: 1.4fr 1fr 1fr 1.3fr;
     }
 
     .lb-active-col-yield { display: none; }

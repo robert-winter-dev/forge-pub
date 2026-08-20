@@ -219,6 +219,25 @@ export const chains = [
                 bots:        ['liq'],
                 description: 'Empfang der vom Master alle 10 Min gelieferten Premium-Score-Daten (core/premium/server.js → bots/liquidity/lib/premium-ingest.js). Zeigt, wie alt der letzte erfolgreich integrierte Blob ist – unabhängig davon, ob der Nostr-Relay-Verbindungsstatus selbst grün ist.',
             }] : []),
+            // Nur auf einem FORGE-public-Fork relevant (siehe IS_FORK) – bin/update-check.js
+            // läuft nie auf dem Master. Bewusst KEIN eigener GitHub-Request: reines Auslesen
+            // der beiden Dateien, die update-check.js bei seinem täglichen Cron-Lauf ohnehin
+            // schreibt (release-list-cache.json, update-fetch-failures.json). Ein
+            // zusätzlicher periodischer Ping hätte genau das Risiko provoziert, das dieser
+            // Check eigentlich beobachten soll: GitHub limitiert unauthentifizierte Requests
+            // auf 60/h PRO QUELL-IP, und forge-pub1/forge-pub2 teilen sich eine öffentliche
+            // IP – ein Vorfall am 2026-08-05 hat dieses Budget bereits einmal an einem
+            // Nachmittag geleert (siehe Kopfkommentar bin/update-check.js). Bewusst NICHT in
+            // der "Sonstiges"-Kette: die entfällt beim Fork-Export komplett (siehe
+            // tools/pub-export/sanitize-text.js) – dort wäre dieser Fork-only-Check nie
+            // im ausgelieferten Artefakt gelandet.
+            ...(IS_FORK ? [{
+                id:          'github-update',
+                name:        'GitHub (Auto-Update)',
+                type:        'github_update_status',
+                bots:        [],
+                description: 'GitHub liefert die signierten Releases für die automatischen Code-Updates (bin/update-check.js, täglich per Cron). Zeigt das Ergebnis des letzten Abrufs – kein eigener Check-Request, reine Auswertung des ohnehin laufenden Update-Checks.',
+            }] : []),
         ],
     },
 

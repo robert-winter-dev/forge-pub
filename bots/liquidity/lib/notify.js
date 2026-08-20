@@ -38,6 +38,9 @@ import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
 import { renderNotification } from '../../../lib/notify-render.js';
 import { getLang, t }    from '../../../lib/i18n.js';
+// Preisformatierung liegt unter html/js/, weil das Dashboard dieselbe Regel braucht und
+// nur der html/-Baum ausgeliefert wird — Begründung im Kopf des Moduls.
+import { formatPrice, quoteSymbol } from '../../../html/js/format-price.js';
 
 const NEXUS_URL      = 'http://127.0.0.1:3100';
 const BOT_ID         = config.botId;
@@ -91,6 +94,8 @@ const ACTION = {
     fyi:       'notify.act.fyi',
     /** Position/Kapital wurde bewegt, Geld liegt in der Wallet. */
     inWallet:  'notify.act.in_wallet',
+    /** Kapital ist Teil der offenen Position, nicht in der Wallet. */
+    inPosition: 'notify.act.in_position',
     /** Bot versucht es erneut; wenn es bleibt, ist ein Blick nötig. */
     retrying:  'notify.act.retrying',
     /** Endgültig gescheitert, Nutzer muss handeln. */
@@ -158,8 +163,9 @@ export async function positionOpened(pool, position) {
     const pair = pool.displayPair ?? pool.pair;
     await send('info', 'trade', 'notify.liq.position_opened', {
         pair,
-        lower: position.priceLower.toFixed(2),
-        upper: position.priceUpper.toFixed(2),
+        lower: formatPrice(position.priceLower),
+        upper: formatPrice(position.priceUpper),
+        unit:  quoteSymbol(pool),
         _action: ACTION.fyi,
     }, { pair });
 }
@@ -177,10 +183,11 @@ export async function outOfRange(pool, currentPrice, priceLower, priceUpper) {
     const pair = pool.displayPair ?? pool.pair;
     await send('info', 'grid', 'notify.liq.out_of_range', {
         pair,
-        price: currentPrice.toFixed(2),
+        price: formatPrice(currentPrice),
         side:  inline(currentPrice < priceLower ? 'notify.common.below' : 'notify.common.above'),
-        lower: priceLower.toFixed(2),
-        upper: priceUpper.toFixed(2),
+        lower: formatPrice(priceLower),
+        upper: formatPrice(priceUpper),
+        unit:  quoteSymbol(pool),
     }, { pair });
 }
 
@@ -189,7 +196,8 @@ export async function backInRange(pool, currentPrice) {
     const pair = pool.displayPair ?? pool.pair;
     await send('info', 'grid', 'notify.liq.back_in_range', {
         pair,
-        price:  currentPrice.toFixed(2),
+        price:  formatPrice(currentPrice),
+        unit:   quoteSymbol(pool),
         action: inline(ACTION.fyi),
     }, { pair });
 }
@@ -471,16 +479,17 @@ export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
 /**
  * Kapitalbewegung on-chain gefunden, die NICHT gebucht ist und die der
  * Reconciler bewusst nicht selbst nachträgt (Richtung mehrdeutig, Bewertung
- * nicht belastbar). ACTION.verify — hier darf nichts automatisch übernommen werden.
+ * nicht belastbar). Das Kapital selbst ist nicht weg — `location` sagt, wo es
+ * gerade liegt (Wallet oder offene Position), das steuert die Handlungsaufforderung.
  */
-export async function capitalFlowNeedsReview(pool, { txHash, whenMs, reason }) {
+export async function capitalFlowNeedsReview(pool, { txHash, whenMs, reason, location }) {
     await send('warn', 'system', 'notify.liq.capital_unclear', {
         pair: pool.displayPair ?? pool.pair,
         tx:   txHash,
         when: new Date(whenMs).toLocaleString('de-DE'),
         reason,
-        _action: ACTION.verify,
-    }, { context: pool.id, txHash, reason });
+        _action: location === 'wallet' ? ACTION.inWallet : ACTION.inPosition,
+    }, { context: pool.id, txHash, reason, location });
 }
 
 /** Manueller Deposit in eine bestehende oder neue Position */
@@ -490,9 +499,13 @@ export async function depositAdded(pool, depositUsdc, amountA, amountB, txHash, 
     await send('info', 'trade', 'notify.liq.deposit_added', {
         pair,
         what:    inline(isNew ? 'notify.liq.deposit_new' : 'notify.liq.deposit_increase'),
-        amountA: amountA.toFixed(6),
+        // Token-MENGEN, keine Preise: mehr signifikante Stellen als bei Kursen, sonst
+        // verschwinden kleine Bestände (0,00074 cbBTC stand vorher als "0.00" da).
+        amountA: formatPrice(amountA, { sig: 6 }),
         tokenA,
-        amountB: amountB.toFixed(2),
+        amountB: formatPrice(amountB, { sig: 6 }),
+        tokenB:  quoteSymbol(pool),
+        // `deposit` ist der tatsächlich eingezahlte USDC-Betrag und bleibt USDC.
         deposit: depositUsdc.toFixed(2),
         _action: ACTION.fyi,
     }, { pair });
@@ -549,7 +562,7 @@ export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
  * automatisch entfallen (Konvention 1, notify-render.js) statt eine falsche
  * Zahl zu erfinden.
  */
-function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc } = {}) {
+function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc } = {}) {
     const [symA, symB] = pool.pair.split('/');
     const hasCoins = coinsA != null && coinsB != null;
     return {
@@ -565,6 +578,18 @@ function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc } = {
                   cost: lpValueUsd != null ? (lpValueUsd - swappedUsdc).toFixed(2) : undefined,
               } }
             : undefined,
+        // Vorzeichen immer explizit (+/−), damit auf einen Blick klar ist, ob der
+        // Ausstieg ein Gewinn oder Verlust war. Prozent relativ zum Pool-Wert bei
+        // Schließung – dieselbe Bezugsgröße wie die PnL-%-Anzeige im Dashboard
+        // (html/liquidity/js/app.js: pnl / myValue), keine neue Konvention.
+        pnlLine: pnlUsdc != null
+            ? { k: 'notify.liq.rm_pnl', p: {
+                  pnl:    `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)}`,
+                  pnlPct: (lpValueUsd != null && lpValueUsd !== 0)
+                      ? ` / ${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / lpValueUsd * 100).toFixed(2)}%`
+                      : '',
+              } }
+            : undefined,
     };
 }
 
@@ -572,8 +597,8 @@ function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc } = {
  * Risk-Management Ausführung abgeschlossen – ersetzt alle szenario-spezifischen
  * Completed-Nachrichten (trailingStopCompleted, scoreLimitCompleted).
  *
- * @param {object} exitInfo  { lpValueUsd, coinsA, coinsB, swappedUsdc } – alle
- *   optional, fehlende Werte lassen die zugehörige Zeile entfallen.
+ * @param {object} exitInfo  { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc } –
+ *   alle optional, fehlende Werte lassen die zugehörige Zeile entfallen.
  */
 export async function rmExecuted(pool, scenarioLabel, exitInfo = {}) {
     const pair = pool.displayPair ?? pool.pair;

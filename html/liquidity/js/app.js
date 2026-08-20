@@ -12,9 +12,10 @@ import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a'
 import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
 import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260609a';
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
+import { formatPrice }                         from '../../js/format-price.js?v=20260820a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
-import { initMessageBell }                     from '../../js/message-bell.js?v=20260816a';
+import { initMessageBell }                     from '../../js/message-bell.js?v=20260818a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
 import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20260727a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
@@ -68,9 +69,17 @@ function fmtPct(v, dec = 2) {
     return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u202f%';
 }
 
-function fmtPrice(v, dec = 4) {
-    if (v == null) return '—';
-    return Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec });
+/**
+ * Preisformatierung — delegiert an die gemeinsame Regel in js/format-price.js, damit
+ * Dashboard und Bot-Meldungen nicht auseinanderlaufen (beide zeigten für cbBTC/SOL
+ * „0,00", weil sie unabhängig voneinander feste Nachkommastellen benutzten).
+ *
+ * `dec` wird als MINDEST-Stellenzahl weitergereicht: bei großen Kursen bleibt die
+ * Darstellung damit wie bisher, kleine Kurse bekommen so viele Stellen dazu, dass vier
+ * signifikante Ziffern sichtbar sind.
+ */
+function fmtPrice(v, dec = 4, unit = null) {
+    return formatPrice(v, { locale: NUM_LOCALE, min: dec, unit });
 }
 
 function fmtTs(ts) {
@@ -420,6 +429,40 @@ function formatPremiumCountdown(coveredUntilMs) {
     const tz = window.FORGE_TZ || 'Europe/Berlin';
     const timeStr = new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(coveredUntilMs));
     return `(noch aktiviert bis ${timeStr} Uhr)`;
+}
+
+/**
+ * „Bester Pool" überspringt diesen Pool: Verbots-Icon vor dem Score.
+ *
+ * Der Score bleibt sichtbar und korrekt — er sagt nur nichts mehr darüber aus, ob
+ * hier investiert wird. Ohne dieses Zeichen wäre ein still übersprungener Pool nicht
+ * von einem defekten zu unterscheiden (derselbe Merksatz wie beim LendingBot).
+ * Bewusst das Verbots-Icon und nicht das Warndreieck der Risk-Management-Schwellen:
+ * dort ist Kapital in Gefahr, hier wird nur keines hineingelegt. Die Bedeutung steht
+ * im Tooltip, nie allein in der Farbe.
+ *
+ * Der Platzhalter (visibility:hidden) hält die Score-Spalte bündig — dasselbe Muster
+ * wie beim ⚠ der PnL-Spalte.
+ */
+function _investBlockedIcon(pool) {
+    const b = pool?.investBlocked;
+    const slot = html => `<span style="display:inline-block;min-width:1.2em;text-align:center">${html}</span>`;
+    if (!b) return slot('<span style="visibility:hidden">⛔</span>');
+
+    const fmtUsd = v => Math.round(v).toLocaleString(NUM_LOCALE) + ' USDC';
+    let text;
+    if (b.rule === 'tvl') {
+        text = tr('liq.invest_blocked_tvl', 'Der TVL liegt unter der Schwelle des TVL-Schutzes ({threshold}) – eine Einzahlung würde sofort wieder abgezogen.')
+            .replace('{threshold}', fmtUsd(b.threshold ?? 0)).replace('{tvl}', fmtUsd(b.tvl ?? 0));
+    } else if (b.rule === 'tvl_unknown') {
+        text = tr('liq.invest_blocked_tvl_unknown', 'Für diesen Pool liegt kein TVL-Messwert vor – solange das so ist, wird er übersprungen.');
+    } else {
+        text = tr('liq.invest_blocked_score', 'Der Exit-Score ({score}) liegt unter dem Score-Limit ({min}) – eine Einzahlung würde sofort wieder abgezogen.')
+            .replace('{score}', String(b.exitScore ?? '?')).replace('{min}', String(b.minScore ?? '?'));
+    }
+    const note = tr('liq.invest_blocked_note', 'Der Pool rankt automatisch wieder mit, sobald die Regel nicht mehr greift.');
+    const title = tr('liq.invest_blocked_title', 'Für Investitionen gesperrt');
+    return slot(`<span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text + ' ' + note)}" data-tooltip-type="text" style="cursor:default;color:#f59e0b">⛔</span>`);
 }
 
 function renderOpportunityScores(data) {
@@ -852,7 +895,7 @@ function renderOpportunityScores(data) {
         <div class="opp-score-row${rowCls}">
             <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${badge}${newPoolBadge}</span></span>
             <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg}</button>
-            <span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span>
+            <span>${_investBlockedIcon(pool)}<span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span></span>
             ${pnlCell}
             <span class="opp-col-detail ${mc} ${slopeCls(s?.priceSlopePct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${s?.priceSlopePct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.priceSlopePct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="' + tr('liq.slope_apr_show', 'APR-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
@@ -3833,6 +3876,10 @@ function renderRangeChart(data, poolPair) {
     }
 
     const { priceLower, priceUpper, priceNow, poolId } = pos;
+    // Einheit ist das Quote-Token des Pools (tokenB), NICHT pauschal USDC: bei SOL-Pools
+    // ist der Kurs z.B. cbBTC pro SOL. Kommt fertig aus dem Export — `pair` ist ein
+    // Label-Feld und bei einzelnen Pools invertiert, das darf das Frontend nicht raten.
+    const priceUnit = pos.priceUnit ?? null;
     const history  = (data?.priceHistory ?? []).filter(r => r.poolId === poolId);
     let   filtered = filterByRange(history, _rangeChartRange, r => r.t);
 
@@ -3931,7 +3978,7 @@ function renderRangeChart(data, poolPair) {
         tMin: minT, tMax: maxT, spanMs: maxT - minT,
         PAD_L: pad.left, cW: iW, PAD_T: pad.top, cH: iH,
         yMin: minV, yMax: maxV,
-        formatY: v => fmtPrice(v, 2) + ' USDC',
+        formatY: v => fmtPrice(v, 2, priceUnit),
     });
 
     if (!_rangeResizeOb && typeof ResizeObserver !== 'undefined') {

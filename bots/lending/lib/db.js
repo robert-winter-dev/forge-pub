@@ -89,6 +89,7 @@ function initSchema(db) {
             pool_type   TEXT    NOT NULL,   -- 'lending' | 'regular' | 'protected'
             apy         REAL    NOT NULL,   -- APY in %
             tvl         REAL,               -- Total Value Locked in USDC (null = nicht verfügbar)
+            liquidity   REAL,               -- sofort abhebbare Liquidität in USDC (null = nicht verfügbar)
             recorded_at INTEGER NOT NULL    -- Unix-Timestamp (ms)
         );
 
@@ -172,6 +173,13 @@ function initSchema(db) {
     // ── Migration: tvl-Spalte nachrüsten falls DB vor v0.3.0 erstellt wurde ──
     try {
         db.exec(`ALTER TABLE protocol_stats ADD COLUMN tvl REAL`);
+    } catch { /* Spalte existiert bereits – kein Fehler */ }
+
+    // ── Migration: liquidity-Spalte (sofort abhebbare Liquidität, 2026-08-18) ──
+    // TVL != verfügbare Liquidität: der TVL enthält auch verliehenes und extern
+    // geparktes Kapital, nur der idle-Anteil bedient eine Abhebung sofort.
+    try {
+        db.exec(`ALTER TABLE protocol_stats ADD COLUMN liquidity REAL`);
     } catch { /* Spalte existiert bereits – kein Fehler */ }
 
     // ── Migration: fee_sol-Spalte nachrüsten falls DB vor v0.4.0 erstellt wurde ──
@@ -425,11 +433,11 @@ export function completePendingWithdrawal(id, completeTxHash = null) {
 
 // ─── Protocol Stats (APY-Zeitreihe) ──────────────────────────────────────────
 
-/** APY- und TVL-Eintrag speichern */
-export function recordProtocolStat({ protocol, poolType, apy, tvl = null }) {
+/** APY-, TVL- und Liquiditäts-Eintrag speichern */
+export function recordProtocolStat({ protocol, poolType, apy, tvl = null, liquidity = null }) {
     return getDb()
-        .prepare('INSERT INTO protocol_stats (bot_id, protocol, pool_type, apy, tvl, recorded_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .run(config.botId, protocol, poolType, apy, tvl ?? null, Date.now());
+        .prepare('INSERT INTO protocol_stats (bot_id, protocol, pool_type, apy, tvl, liquidity, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(config.botId, protocol, poolType, apy, tvl ?? null, liquidity ?? null, Date.now());
 }
 
 /** APY-Verlauf der letzten N Tage für alle Protokolle */
@@ -437,7 +445,7 @@ export function getProtocolStatsHistory(days = 30) {
     const cutoff = Date.now() - days * 86_400_000;
     return getDb()
         .prepare(`
-            SELECT protocol, pool_type, apy, tvl, recorded_at
+            SELECT protocol, pool_type, apy, tvl, liquidity, recorded_at
             FROM protocol_stats
             WHERE bot_id = ? AND recorded_at >= ?
             ORDER BY recorded_at ASC
@@ -484,7 +492,7 @@ export function getProtocolStatNear24h(protocol) {
 export function getLatestProtocolStats() {
     return getDb()
         .prepare(`
-            SELECT protocol, pool_type, apy, tvl, MAX(recorded_at) AS recorded_at
+            SELECT protocol, pool_type, apy, tvl, liquidity, MAX(recorded_at) AS recorded_at
             FROM protocol_stats
             WHERE bot_id = ?
             GROUP BY protocol, pool_type

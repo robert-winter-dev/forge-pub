@@ -14,7 +14,7 @@ import { initNav, initFooter }        from '/forge/js/nav.js?v=20260816a';
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast }                  from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
-import { initMessageBell }            from '/forge/js/message-bell.js?v=20260816a';
+import { initMessageBell }            from '/forge/js/message-bell.js?v=20260818a';
 import { initForgeTooltip }           from './tooltip.js?v=20260811a';
 
 initNav({ current: 'updates' });

@@ -186,12 +186,13 @@ export function deleteNotifications(ids) {
     return db.prepare(`DELETE FROM notifications WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
-const NOTIFY_TYPES = ['system', 'support', 'premium'];
+// 'bots' kam am 18.08.2026 mit der eigenen Rubrik für Bot-Meldungen dazu.
+const NOTIFY_TYPES = ['system', 'bots', 'support', 'premium'];
 
 /**
- * Liest die Benachrichtigungs-Toggles (System/Support/Premium). Default AN
+ * Liest die Benachrichtigungs-Toggles (System/Bots/Support/Premium). Default AN
  * (kein gespeicherter Wert = true), wie zuvor bei den localStorage-Keys.
- * @returns {{system: boolean, support: boolean, premium: boolean}}
+ * @returns {{system: boolean, bots: boolean, support: boolean, premium: boolean}}
  */
 export function getNotifySettings() {
     const db = getDb();
@@ -200,7 +201,7 @@ export function getNotifySettings() {
     return Object.fromEntries(NOTIFY_TYPES.map(t => [t, stored[t] ?? true]));
 }
 
-/** @param {string} type – 'system' | 'support' | 'premium' */
+/** @param {string} type – 'system' | 'bots' | 'support' | 'premium' */
 export function setNotifySetting(type, enabled) {
     if (!NOTIFY_TYPES.includes(type)) return;
     const db = getDb();

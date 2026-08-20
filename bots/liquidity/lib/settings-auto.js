@@ -14,7 +14,7 @@ import { PATHS } from '../../../config/paths.js';
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
 
-const DEFAULT_SCORE_LIMIT = {
+export const DEFAULT_SCORE_LIMIT = {
     enabled:    true,
     minScore:   30,
     swapToUsdc: true,
@@ -27,7 +27,7 @@ const DEFAULT_SCORE_LIMIT = {
 // zum Bestand. Die Schwelle für Stufe 1 wird mit dem **Exit**-Wert aus pools.json
 // vorbefüllt (nicht mit dem höheren Warn-Wert), damit die Umstellung den Voll-Exit
 // nicht früher auslöst als zuvor.
-const DEFAULT_TVL_PROTECTION = {
+export const DEFAULT_TVL_PROTECTION = {
     level1: { enabled: true,  thresholdUsd: null, withdrawPct: 100 },
     level2: { enabled: false, thresholdUsd: null, withdrawPct: 100 },
     swapToUsdc:      true,   // global für beide Stufen

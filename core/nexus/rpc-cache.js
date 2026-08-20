@@ -28,6 +28,19 @@ const METHOD_TTL = {
     // External-Transfer-Check: läuft 1×/Tick (20s) → mit 20s TTL fast immer Cache-Hit
     getSignaturesForAddress:       20_000,
 
+    // Token-Metadaten (Helius DAS): Symbol und Name eines Mints ändern sich
+    // praktisch nie, die Abfrage kostete aber bis 2026-08-19 jedes Mal einen Credit
+    // — die Methode fehlte hier schlicht. forge-check.js fragt sie stündlich für
+    // jeden unbekannten Mint im Wallet ab: allein zwischen dem 17. und 19.08. waren
+    // das 79 Aufrufe mit identischer Antwort, Trefferquote 0 %.
+    //
+    // 24 h, weil die Antwort quasi statisch ist. Theoretisch kann eine Metaplex
+    // Update Authority das Symbol ändern; für unsere Nutzung (Imitat-Erkennung) ist
+    // das unkritisch — der Schlüssel ist der Mint, nicht das Symbol. Der Cache ist
+    // In-Memory und nach einem Nexus-Neustart leer; die dauerhafte Ablage ist
+    // token_meta in core/wallet-monitor (überlebt Neustarts).
+    getAsset:                   86_400_000,
+
     // Chain-Metadaten: selten relevant für Trading
     getEpochInfo:                  60_000,
     getSlot:                        5_000,

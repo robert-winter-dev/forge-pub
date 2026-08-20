@@ -7,16 +7,19 @@
  *     Nachrichtendaten geladen oder zum Webserver exportiert.
  *   - Klick auf Icon ODER Zahl (Badge liegt als Kind-Element mit pointer-events:none
  *     im Button, siehe .notif-badge in settings.css → Klick bubbelt zum Button hoch)
- *     → Message Center, und zwar direkt in die Rubrik (system/support/premium) mit
+ *     → Message Center, und zwar direkt in die Rubrik (system/bots/support/premium) mit
  *     der ältesten ungelesenen Nachricht (Default: /message.html#<rubrik>; per
  *     onClick überschreibbar, siehe message.js). Ohne ungelesene Nachricht einfach
  *     /message.html ohne Hash. getOldestUnreadCategory() exportiert diese Rubrik
  *     auch für Aufrufer, die den Klick selbst behandeln (z.B. message.js, das beim
  *     Klick nur den Tab wechseln statt neu zu laden muss).
- *   - Badge = Summe aus ungelesenen Support-, Premium- und neuen System-Nachrichten
- *     (Nexus-Notifications aus /api/messages/system, z.B. SOL-Limit-Alert oder
- *     Bot-Lifecycle-Meldungen bei Start/Stop – ersetzt seit 2026-07-28 die
- *     permanenten Inline-Banner auf den Bot-Dashboards, siehe html/liquidity/js/app.js).
+ *   - Badge = Summe der ungelesenen Nachrichten aller vier Rubriken (System, Bots,
+ *     Support, Premium). System und Bots kommen beide aus den Nexus-Notifications,
+ *     seit 2026-08-18 über zwei getrennte Endpoints (/api/messages/system bzw.
+ *     /bots, disjunkte Teilmengen derselben Tabelle – siehe routes/messages.js):
+ *     Kern-/Update-Meldungen hier, alles Bot-Bezogene inkl. SOL-Limit-Alert dort.
+ *     Ersetzt seit 2026-07-28 die permanenten Inline-Banner auf den Bot-Dashboards
+ *     (siehe html/liquidity/js/app.js).
  *     "Ungelesen" bei System-Nachrichten kommt seit 2026-08-03 server-seitig aus
  *     dem read-Flag in nexus.db (unreadCount in der /api/messages/system-Antwort,
  *     geschrieben über POST /api/messages/system/mark-read → Nexus → notify-db.js).
@@ -25,11 +28,11 @@
  *     "alle als gelesen" auf dem anderen Gerät hängen, weil jeder Browser sein
  *     eigenes localStorage hatte. Menü-Zähler im Message Center (message.js) und
  *     dieses Modul lesen jetzt denselben Server-Wert, können also nie mehr auseinanderlaufen.
- *   - Jede der drei Kategorien lässt sich unter Einstellungen → Benachrichtigungen
+ *   - Jede der vier Kategorien lässt sich unter Einstellungen → Benachrichtigungen
  *     einzeln abschalten (isNotifyEnabled()): dann trägt sie weder zu diesem
  *     Badge noch zum jeweiligen Menü-Zähler im Message Center bei – die
  *     Nachrichten selbst bleiben dort trotzdem normal sichtbar, nur ohne Zähler.
- *     Auch diese drei Toggles kommen seit 2026-08-03 server-seitig (Nexus
+ *     Auch diese Toggles kommen seit 2026-08-03 server-seitig (Nexus
  *     GET/POST /notifications/settings, hier via loadNotifySettings()/
  *     setNotifyEnabled() gecacht) statt aus localStorage – sonst zeigte ein Gerät
  *     ein abgeschaltetes Premium-Badge, ein anderes (nie umgestelltes) Gerät
@@ -57,7 +60,7 @@ export function isLanAccess() {
 // vielen Stellen inline in Badge-Berechnungen aufgerufen) – dafür wird der Stand
 // per loadNotifySettings() einmalig gecacht, mit "alle an" als Default bis die
 // erste Server-Antwort da ist (gleiches Verhalten wie der alte localStorage-Default).
-let _notifySettings = { system: true, support: true, premium: true };
+let _notifySettings = { system: true, bots: true, support: true, premium: true };
 let _notifySettingsPromise = null;
 
 /** Lädt die Toggles vom Server (einmalig, danach aus dem Cache) – vor der ersten
@@ -98,14 +101,14 @@ export async function setNotifyEnabled(type, enabled) {
  *                      zählen (z.B. direkt nach "alle als gelesen" im Message Center,
  *                      statt auf den nächsten 30s-Poll zu warten).
  */
-// Rubrik mit der ältesten ungelesenen Nachricht (über alle drei Kategorien
+// Rubrik mit der ältesten ungelesenen Nachricht (über alle Kategorien
 // hinweg) – wird bei jedem refreshUnread() neu bestimmt und von der Default-
 // Navigation sowie den aufrufenden Seiten (message.js) genutzt, damit ein Klick
 // auf Icon ODER Zahl immer zur Rubrik springt, in der am längsten etwas
 // ungelesen liegt, statt fest auf eine Rubrik (z.B. "Support") zu verlinken.
 let _oldestUnreadCategory = null;
 
-/** Rubrik ('system'|'support'|'premium') mit der ältesten ungelesenen Nachricht, oder
+/** Rubrik ('system'|'bots'|'support'|'premium') mit der ältesten ungelesenen Nachricht, oder
  *  null, wenn nichts ungelesen ist. Erst nach dem ersten refreshUnread() aussagekräftig. */
 export function getOldestUnreadCategory() {
     return _oldestUnreadCategory;
@@ -137,8 +140,12 @@ export function initMessageBell({ requireLan = true, onClick = null } = {}) {
     async function refreshUnread() {
         await loadNotifySettings();
         let supportUnread = 0, supportOldest = null;
-        let systemNew = 0, systemOldest = null;
         let premiumUnread = 0, premiumOldest = null;
+        // System und Bots kommen aus derselben Notification-Tabelle, aber über zwei
+        // Endpoints (disjunkte Teilmengen, siehe routes/messages.js) – jede Rubrik
+        // zählt und schaltet für sich.
+        const notifCounts = { system: 0, bots: 0 };
+        const notifOldest = { system: null, bots: null };
 
         if (isNotifyEnabled('support')) {
             try {
@@ -147,13 +154,18 @@ export function initMessageBell({ requireLan = true, onClick = null } = {}) {
             } catch { /* API nicht erreichbar → Zähler bleibt 0 */ }
         }
 
-        if (isNotifyEnabled('system')) {
+        for (const scope of ['system', 'bots']) {
+            if (!isNotifyEnabled(scope)) continue;
             try {
                 // unreadCount/oldestUnread sind server-seitig aus dem read-Flag berechnet
-                // (nexus.db), unpaginiert über die volle Fenstergröße (max. 300, siehe
+                // (nexus.db), unpaginiert über die volle Fenstergröße (max. 100, siehe
                 // routes/messages.js).
-                const r = await fetch('/api/messages/system');
-                if (r.ok) ({ unreadCount: systemNew, oldestUnread: systemOldest } = await r.json());
+                const r = await fetch(`/api/messages/${scope}`);
+                if (r.ok) {
+                    const { unreadCount, oldestUnread } = await r.json();
+                    notifCounts[scope] = unreadCount ?? 0;
+                    notifOldest[scope] = oldestUnread ?? null;
+                }
             } catch { /* API nicht erreichbar → Zähler bleibt 0 */ }
         }
 
@@ -168,15 +180,16 @@ export function initMessageBell({ requireLan = true, onClick = null } = {}) {
         // Zeitstempel gewinnt) – nur Rubriken mit tatsächlich ungelesenen Nachrichten
         // zählen mit.
         const candidates = [
-            { key: 'system',  unread: systemNew,      oldest: systemOldest },
-            { key: 'support', unread: supportUnread,   oldest: supportOldest },
-            { key: 'premium', unread: premiumUnread,   oldest: premiumOldest },
+            { key: 'system',  unread: notifCounts.system, oldest: notifOldest.system },
+            { key: 'bots',    unread: notifCounts.bots,   oldest: notifOldest.bots },
+            { key: 'support', unread: supportUnread,      oldest: supportOldest },
+            { key: 'premium', unread: premiumUnread,      oldest: premiumOldest },
         ].filter(c => c.unread > 0 && c.oldest != null);
         _oldestUnreadCategory = candidates.length
             ? candidates.reduce((a, b) => (a.oldest <= b.oldest ? a : b)).key
             : null;
 
-        const total = supportUnread + systemNew + premiumUnread;
+        const total = supportUnread + notifCounts.system + notifCounts.bots + premiumUnread;
         // Nav-Badge im Hamburger-Menü (Message Center → Nachrichten) mit demselben
         // Fetch aktuell halten – sonst zeigt nur das Brief-Icon im Header den
         // korrekten Stand, während der Menü-Zähler auf Seiten ohne message.js

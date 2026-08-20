@@ -96,6 +96,7 @@ MSG=(
     [PACKAGES_SQLITE_MISSING]="sqlite3 (diagnostics, not required): sudo apt-get install -y sqlite3"
     [PACKAGES_MISSING_HEADER]="Missing packages – please install and re-run:"
     [PACKAGES_INSTALLING_HELPERS]="  → Installing helper packages: %s"
+    [PACKAGES_JOURNALD_LIMIT_SET]="  → Capped systemd journal at 500 MB (otherwise unbounded growth is possible)"
     [PACKAGES_ALL_OK]="All prerequisites met."
     [USER_STEP]="System user '%s'"
     [USER_EXISTS]="already exists."
@@ -130,6 +131,7 @@ MSG=(
     [CONFIG_KEY_RETRY_PROMPT]="Enter the key again?"
     [CONFIG_KEY_INVALID_NONINTERACTIVE]="Invalid API key – aborting (--non-interactive allows no follow-up question). No service can start without a valid key."
     [CONFIG_ABORTED_INVALID_KEY]="Installation aborted: no service can start without a valid API key."
+    [CONFIG_LANG_SET_FAILED]="Could not set backend language to \"%s\" (bots keep running with the default language)."
     [CONFIG_DONE]="Configuration written."
 
     # wallets.sh

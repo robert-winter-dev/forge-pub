@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260731e">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/message.css?v=20260816a">
+    <link rel="stylesheet" href="css/message.css?v=20260819b">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
     <script src="/forge/i18n/active.js"></script>
@@ -40,6 +40,9 @@
             <button class="mctab active" data-tab="system" role="tab" aria-selected="true">
                 <span data-i18n="nav.message.system">System</span><span class="mctab-count" id="mcTabCountSystem" hidden>0</span>
             </button>
+            <button class="mctab" data-tab="bots" role="tab" aria-selected="false">
+                <span data-i18n="nav.message.bots">Bots</span><span class="mctab-count" id="mcTabCountBots" hidden>0</span>
+            </button>
             <button class="mctab" data-tab="support" role="tab" aria-selected="false">
                 <span data-i18n="nav.message.support">Support</span><span class="mctab-count" id="mcTabCountSupport" hidden>0</span>
             </button>
@@ -52,7 +55,7 @@
 
 <main class="main-content mc-layout">
 
-    <!-- Postfach (System/Support/Premium): Suchzeile über einer Zwei-Spalten-Ansicht
+    <!-- Postfach (System/Bots/Support/Premium): Suchzeile über einer Zwei-Spalten-Ansicht
          – links die scrollbare Nachrichtenliste (lädt beim Herunterscrollen nach,
          keine Seitenzahlen mehr), rechts die Detailansicht. Ersetzt seit 2026-08-16
          die vorherigen Volltabellen mit Detail-Modal; Vorbild ist die Verlaufsliste
@@ -84,6 +87,6 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/message.js?v=20260816f"></script>
+<script type="module" src="js/message.js?v=20260819c"></script>
 </body>
 </html>

@@ -11,6 +11,7 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml } from '/forge/js/scam-tab.js?v=20260819f';
 
 // 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
 // Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
@@ -514,7 +515,12 @@ function _openAutoDeployRowModal(wrap, mode, cfg, protocols, recordedAt) {
     });
 }
 
-// ── TVL-Schutz (Auto-Exit) pro Protokoll ──────────────────────────────────────
+// ── TVL-Schutz / Liquiditäts-Schutz (Auto-Exit) pro Protokoll ────────────────
+//
+// Beide Schutzmechanismen sind strukturgleich (Schalter + Schwelle + optionale
+// Empfängeradresse) und unterscheiden sich nur in der überwachten Kennzahl:
+// Markt-TVL vs. sofort abhebbare Liquidität. Deshalb EIN Modal, über GUARD_KINDS
+// parametrisiert — zwei Kopien würden garantiert auseinanderlaufen.
 
 /** Formatiert einen USDC-Betrag kompakt (K/M). */
 function _fmtTvlUsdc(n) {
@@ -525,20 +531,57 @@ function _fmtTvlUsdc(n) {
     return v.toFixed(0) + ' USDC';
 }
 
-/** Kurz-Zusammenfassung der TVL-Schutz-Einstellung eines Protokolls. */
-function _tvlGuardSummary(guard) {
+/**
+ * Beschreibung der beiden Schutzarten. `field` ist zugleich der Settings-Block
+ * im Protokoll-Objekt und – als API-Pfad – der Endpunkt zum Speichern.
+ */
+const GUARD_KINDS = {
+    tvl: {
+        field:    'tvlGuard',
+        endpoint: 'tvl-guard',
+        current:  proto => proto.currentTvl,
+        label:    () => tr('sb.tvl_guard', 'TVL-Schutz'),
+        metric:   () => tr('liq.tvl', 'TVL'),
+        modalTitle: pool => tr('slen.tvl_guard_modal_title', 'TVL-Schutz – {pool}', { pool }),
+        currentLabel: () => tr('sb.current_tvl', 'Aktueller TVL'),
+        toggleTip: () => tr('slen.tvl_guard_tip', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen.'),
+        thresholdLabel: () => tr('slen.tvl_threshold', 'TVL-Schwelle'),
+        thresholdTip: () => tr('slen.tvl_threshold_tip', 'Fällt der Markt-TVL unter diesen Wert, wird die Position zu 100 % abgezogen. Solange die Schwelle unterschritten ist, investiert „Bester Pool“ nicht in diesen Pool.'),
+        thresholdErr: () => tr('slen.tvl_threshold_gt0', 'TVL-Schwelle muss größer als 0 sein.'),
+        savedToast: pool => tr('slen.tvl_guard_saved', 'TVL-Schutz ({pool}) gespeichert', { pool }),
+    },
+    liq: {
+        field:    'liqGuard',
+        endpoint: 'liq-guard',
+        current:  proto => proto.currentLiquidity,
+        label:    () => tr('sb.liq_guard', 'Liquiditäts-Schutz'),
+        metric:   () => tr('len.liquidity', 'Liquidität'),
+        modalTitle: pool => tr('slen.liq_guard_modal_title', 'Liquiditäts-Schutz – {pool}', { pool }),
+        currentLabel: () => tr('sb.current_liq', 'Aktuelle Liquidität'),
+        toggleTip: () => tr('slen.liq_guard_tip', 'Fällt die sofort abhebbare Liquidität dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen. Der TVL sagt nichts über die Abhebbarkeit aus – ein Pool kann viel TVL und trotzdem keine abhebbare Liquidität haben.'),
+        thresholdLabel: () => tr('slen.liq_threshold', 'Liquiditäts-Schwelle'),
+        thresholdTip: () => tr('slen.liq_threshold_tip', 'Fällt die sofort abhebbare Liquidität unter diesen Wert, wird die Position zu 100 % abgezogen. Solange die Schwelle unterschritten ist, investiert „Bester Pool“ nicht in diesen Pool.'),
+        thresholdErr: () => tr('slen.liq_threshold_gt0', 'Liquiditäts-Schwelle muss größer als 0 sein.'),
+        savedToast: pool => tr('slen.liq_guard_saved', 'Liquiditäts-Schutz ({pool}) gespeichert', { pool }),
+    },
+};
+
+/** Kurz-Zusammenfassung einer Schutz-Einstellung eines Protokolls. */
+function _guardSummary(kind, guard) {
     if (!guard?.enabled) return '<span class="pool-summary-off">' + tr('sb.off', 'Aus') + '</span>';
-    return `<span class="pool-summary-on">TVL &lt; ${_fmtTvlUsdc(guard.thresholdUsd)}</span>`;
+    return `<span class="pool-summary-on">${GUARD_KINDS[kind].metric()} &lt; ${_fmtTvlUsdc(guard.thresholdUsd)}</span>`;
 }
 
 /**
- * Öffnet das TVL-Schutz-Modal für ein einzelnes Protokoll.
- * @param {Object} proto  { id, label, tvlGuard, currentTvl, tvlAtActivation }
+ * Öffnet das Schutz-Modal (TVL oder Liquidität) für ein einzelnes Protokoll.
+ * @param {'tvl'|'liq'} kind
+ * @param {Object} proto  { id, label, tvlGuard, liqGuard, currentTvl, currentLiquidity, tvlAtActivation }
  * @param {HTMLElement} card  Pools-Karte (für Reload nach Save)
  */
-async function _openTvlGuardModal(proto, card) {
-    const mid   = 'lb-tvlguard-modal';
-    const guard = proto.tvlGuard ?? { enabled: true, thresholdUsd: 100_000, sendTo: '' };
+async function _openGuardModal(kind, proto, card) {
+    const spec  = GUARD_KINDS[kind];
+    const mid   = `lb-${kind}guard-modal`;
+    const guard = proto[spec.field] ?? { enabled: true, thresholdUsd: 100_000, sendTo: '' };
     const on    = !!guard.enabled;
 
     let addrs = [];
@@ -547,10 +590,13 @@ async function _openTvlGuardModal(proto, card) {
         `<option value="${_esc(a.address)}" ${a.address === (guard.sendTo ?? '') ? 'selected' : ''}>${_esc(a.name)}</option>`
     ).join('');
 
-    const curTvl = proto.currentTvl != null
-        ? `<strong style="color:var(--text);">${_fmtTvlUsdc(proto.currentTvl)}</strong>`
-        : `<strong style="color:var(--text-muted);">—</strong>`;
-    const actTvl = proto.tvlAtActivation != null
+    const curVal = spec.current(proto);
+    const curStr = curVal != null
+        ? `<strong style="color:var(--text);">${_fmtTvlUsdc(curVal)}</strong>`
+        : `<strong style="color:var(--text-muted);">${tr('len.no_data', 'no data')}</strong>`;
+    // TVL bei Aktivierung gibt es nur für den TVL-Schutz – für die Liquidität
+    // wird kein Wert zum Deposit-Zeitpunkt erfasst.
+    const actTvl = kind === 'tvl' && proto.tvlAtActivation != null
         ? ` <span style="color:var(--text-muted);font-weight:400;">(${_fmtTvlUsdc(proto.tvlAtActivation)}
                <span class="info-tip-label" data-tooltip-title="${tr('slen.tvl_at_activation', 'TVL bei Aktivierung')}"
                    data-tooltip-content="${tr('slen.tvl_at_activation_tip', 'Markt-TVL zum Zeitpunkt des Deposits in dieses Protokoll.')}">&#9432;</span>)</span>`
@@ -558,19 +604,19 @@ async function _openTvlGuardModal(proto, card) {
 
     showModal({
         id:    mid,
-        title: tr('slen.tvl_guard_modal_title', 'TVL-Schutz – {pool}', { pool: _esc(proto.label) }),
+        title: spec.modalTitle(_esc(proto.label)),
         body:  `
             <div style="display:flex;flex-direction:column;gap:0.95rem;">
                 <div class="settings-row" style="background:var(--bg-soft, rgba(255,255,255,0.03));border-radius:8px;padding:0.6rem 0.8rem;">
-                    <span class="settings-label">${tr('sb.current_tvl', 'Aktueller TVL')}</span>
-                    <span style="text-align:right;">${curTvl}${actTvl}</span>
+                    <span class="settings-label">${spec.currentLabel()}</span>
+                    <span style="text-align:right;">${curStr}${actTvl}</span>
                 </div>
                 <div class="settings-row" style="border:none;">
                     <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
                         ${tr('slen.autoexit_active', 'Auto-Exit aktiv')}
                         <span class="info-tip-label"
-                            data-tooltip-title="${tr('sb.tvl_guard_title', 'TVL-Schutz (Auto-Exit)')}"
-                            data-tooltip-content="${tr('slen.tvl_guard_tip', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen.')}">&#9432;</span>
+                            data-tooltip-title="${spec.label()}"
+                            data-tooltip-content="${spec.toggleTip()}">&#9432;</span>
                     </span>
                     <label class="toggle-switch">
                         <input type="checkbox" id="lb-tg-enabled" ${on ? 'checked' : ''}>
@@ -579,10 +625,10 @@ async function _openTvlGuardModal(proto, card) {
                 </div>
                 <div class="tg-dependent" style="opacity:${on ? '1' : '0.4'};">
                     <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.4rem;color:var(--text-muted)">
-                        ${tr('slen.tvl_threshold', 'TVL-Schwelle')}
+                        ${spec.thresholdLabel()}
                         <span class="info-tip-label"
-                            data-tooltip-title="${tr('slen.tvl_threshold', 'TVL-Schwelle')}"
-                            data-tooltip-content="${tr('slen.tvl_threshold_tip', 'Fällt der Markt-TVL unter diesen Wert, wird die Position zu 100 % abgezogen.')}">&#9432;</span>
+                            data-tooltip-title="${spec.thresholdLabel()}"
+                            data-tooltip-content="${spec.thresholdTip()}">&#9432;</span>
                     </label>
                     <div style="display:flex;align-items:center;gap:0.5rem;">
                         <input type="number" id="lb-tg-threshold" min="0" step="10000" value="${Number(guard.thresholdUsd) || 100000}"
@@ -605,7 +651,7 @@ async function _openTvlGuardModal(proto, card) {
                 <div class="modal-feedback" id="lb-tg-feedback"></div>
             </div>`,
         actions: [
-            { label: tr('msg.save', 'Speichern'), primary: true, onClick: () => _saveTvlGuardModal(mid, proto, card) },
+            { label: tr('msg.save', 'Speichern'), primary: true, onClick: () => _saveGuardModal(kind, mid, proto, card) },
             { label: tr('common.close', 'Schließen'),               onClick: () => closeModal(mid) },
         ],
     });
@@ -619,13 +665,14 @@ async function _openTvlGuardModal(proto, card) {
         const en = e.target.checked;
         modalEl.querySelectorAll('.tg-dependent').forEach(el => { el.style.opacity = en ? '1' : '0.4'; });
         const t = modalEl.querySelector('#lb-tg-threshold');
-        const s = modalEl.querySelector('#lb-tg-sendto');
+        const sel = modalEl.querySelector('#lb-tg-sendto');
         if (t) t.disabled = !en;
-        if (s) s.disabled = !en;
+        if (sel) sel.disabled = !en;
     });
 }
 
-async function _saveTvlGuardModal(mid, proto, card) {
+async function _saveGuardModal(kind, mid, proto, card) {
+    const spec      = GUARD_KINDS[kind];
     const modalEl   = getModal(mid);
     const fb        = modalEl?.querySelector('#lb-tg-feedback');
     const enabled   = modalEl?.querySelector('#lb-tg-enabled')?.checked ?? false;
@@ -633,13 +680,13 @@ async function _saveTvlGuardModal(mid, proto, card) {
     const sendTo    = modalEl?.querySelector('#lb-tg-sendto')?.value ?? '';
 
     if (enabled && (!Number.isFinite(threshold) || threshold <= 0)) {
-        if (fb) { fb.textContent = tr('slen.tvl_threshold_gt0', 'TVL-Schwelle muss größer als 0 sein.'); fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = spec.thresholdErr(); fb.className = 'modal-feedback error'; }
         return;
     }
 
     if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
-        const res = await fetch(`/api/lending/tvl-guard/${proto.id}`, {
+        const res = await fetch(`/api/lending/${spec.endpoint}/${proto.id}`, {
             method:  'PUT',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ enabled, thresholdUsd: threshold, sendTo }),
@@ -647,7 +694,7 @@ async function _saveTvlGuardModal(mid, proto, card) {
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
 
         if (fb) { fb.textContent = tr('sb.saved_dot', '✓ Gespeichert.'); fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.(tr('slen.tvl_guard_saved', 'TVL-Schutz ({pool}) gespeichert', { pool: proto.label }), 'success');
+        _ctx.showToast?.(spec.savedToast(proto.label), 'success');
         await _refreshProtocolsCard(card);
         setTimeout(() => closeModal(mid), 600);
     } catch (err) {
@@ -774,7 +821,7 @@ function _formatLastCheck(ms) {
  *   ok === false → roter Kreuz + Tooltip (zu wenig SOL)
  *   null         → kein Haken/Kreuz, normale Textfarbe (noch keine SOL-Daten vorhanden)
  */
-function _walletRowHtml(label, balance, status = null) {
+function _walletRowHtml(label, balance, status = null, scam = null) {
     const amountText = balance?.recorded_at
         ? `${(balance.total_usd ?? 0).toFixed(2)} USDC`
         : '<span class="wat-muted">' + tr('sb.no_data_click_refresh', 'noch keine Daten – auf Aktualisieren klicken') + '</span>';
@@ -788,7 +835,7 @@ function _walletRowHtml(label, balance, status = null) {
 
     return `
         <tr>
-            <td class="wat-label">${_esc(label)}</td>
+            <td class="wat-label">${_esc(label)}${scamInfoIconHtml(scam?.tokens)}</td>
             <td class="wat-info">${infoHtml}</td>
             <td class="wat-action">
                 <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
@@ -829,6 +876,9 @@ async function _renderWallet(el) {
         const info    = await infoRes.json();
         const balance = await balRes.json();
         const addrs   = await addrRes.json();
+        // Auffällige Token: die Route rechnet nur aus der wallet-monitor-DB,
+        // kein RPC- und kein Jupiter-Call beim Öffnen der Seite.
+        const scam    = await fetchScamTokens('lending');
 
         const lendingStatus = balance?.sol != null
             ? { ok: balance.sol > SOL_LOW_THRESHOLD_LENDING, tooltip: tr('sb.sol_low_tip', 'Zu wenig SOL im Wallet für den Betrieb des Bots.') }
@@ -843,7 +893,7 @@ async function _renderWallet(el) {
             </div>
             <table class="wallet-action-table">
                 <tbody>
-                    ${_walletRowHtml(tr('nav.lending', 'Lending Bot'), balance, lendingStatus)}
+                    ${_walletRowHtml(tr('nav.lending', 'Lending Bot'), balance, lendingStatus, scam)}
                     <tr>
                         <td class="wat-label">${tr('sb.last_check', 'Letzter Check')}</td>
                         <td class="wat-info">${_esc(_formatLastCheck(balance?.recorded_at))}</td>
@@ -870,7 +920,7 @@ async function _renderWallet(el) {
                 if (balR.ok)  freshBalance = await balR.json();
                 if (addrR.ok) freshAddrs   = await addrR.json();
             } catch { /* Fallback auf zuletzt geladenen Stand */ }
-            _openWalletManageModal(el, freshInfo, freshBalance, freshAddrs);
+            await _openWalletManageModal(el, freshInfo, freshBalance, freshAddrs);
         });
 
     } catch (err) {
@@ -897,9 +947,53 @@ function _walletMonitorShape(balance) {
     };
 }
 
+
+const SCAM_INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
+// ── „Verschieben" aus dem Reiter „Auffällig" ─────────────────────────────────
+//
+// Öffnet bewusst KEIN eigenes Formular, sondern den vorhandenen Senden-Reiter:
+// Adressbuch, Betragsfeld und Rückmeldungen sind dort schon gebaut und dem Nutzer
+// vertraut. Der Token wird als zusätzliche Option in die Auswahl gehängt und trägt
+// seinen Mint an der Option — daran erkennt der Sende-Knopf, dass er die
+// Verschiebe-Route nehmen muss statt der regulären.
+function _openMoveInSendTab(modalEl, tk) {
+    const tabBtn = modalEl.querySelector('.wb-tab[data-wb="senden"]');
+    tabBtn?.click();
+
+    const sel = modalEl.querySelector('#wm-token');
+    if (!sel) return;
+
+    const symbol = (tk.symbol ?? '').replace(SCAM_INVISIBLE_RE, '').trim() || tk.mint.slice(0, 8) + '…';
+
+    let opt = sel.querySelector(`option[data-mint="${CSS.escape(tk.mint)}"]`);
+    if (!opt) {
+        opt = document.createElement('option');
+        opt.value           = symbol;
+        opt.dataset.mint    = tk.mint;
+        opt.dataset.bal     = String(tk.balance ?? 0);
+        opt.textContent     = `${symbol} (${_fmt(tk.balance ?? 0)})`;
+        sel.appendChild(opt);
+    }
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change'));
+
+    // Voller Bestand vorbelegt — der Sinn der Aktion ist, ihn loszuwerden.
+    const amountInp = modalEl.querySelector('#wm-amount');
+    if (amountInp) amountInp.value = String(tk.balance ?? 0);
+
+    const fb = modalEl.querySelector('#wm-send-feedback');
+    if (fb) {
+        fb.textContent = tr('scam.move_hint', 'Auffälliger Token – wird an die gewählte Adresse verschoben, nicht gelöscht.');
+        fb.className   = 'modal-feedback';
+    }
+}
+
 // ── Kombiniertes Wallet-Modal: Guthaben / Senden / Empfangen / Private Key ───
-function _openWalletManageModal(el, info, balance, addrs) {
+async function _openWalletManageModal(el, info, balance, addrs) {
     const mid   = 'lb-wallet-modal';
+    // Rein aus der DB gerechnet – kein externer Abruf beim Öffnen des Modals.
+    const scam  = await fetchScamTokens('lending');
     const tokens = [
         { symbol: 'SOL',  balance: balance.sol  ?? 0 },
         { symbol: 'USDC', balance: balance.usdc ?? 0 },
@@ -916,6 +1010,7 @@ function _openWalletManageModal(el, info, balance, addrs) {
                 <button class="wb-tab" data-wb="senden">${tr('msg.send', 'Senden')}</button>
                 <button class="wb-tab" data-wb="empfangen">${tr('sb.receive', 'Empfangen')}</button>
                 <button class="wb-tab" data-wb="key">${tr('sb.private_key', 'Private Key')}</button>
+                <button class="wb-tab" data-wb="scam">${tr('scam.tab', 'Auffällig')}${(scam.tokens ?? []).length ? ` (${scam.tokens.length})` : ''}</button>
             </div>
             <div id="wb-tab-guthaben">${buildWalletDetailHtml(_walletMonitorShape(balance))}</div>
             <div id="wb-tab-senden" hidden>
@@ -924,7 +1019,8 @@ function _openWalletManageModal(el, info, balance, addrs) {
                 <div class="bot-actions" id="wm-send-actions" style="margin-top:0.6rem;"></div>
             </div>
             <div id="wb-tab-empfangen" hidden>${_buildReceivePanelHtml(info)}</div>
-            <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(info)}</div>`,
+            <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(info)}</div>
+            <div id="wb-tab-scam" hidden>${buildScamTabHtml(scam)}</div>`,
         footerNote: '<span id="wb-footer-note">' + tr('sb.value_gt_zero', 'Wert &gt; 0,00 USDC') + '</span>',
         actions: [
             { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
@@ -941,6 +1037,7 @@ function _openWalletManageModal(el, info, balance, addrs) {
             modalEl.querySelector('#wb-tab-senden').hidden    = btn.dataset.wb !== 'senden';
             modalEl.querySelector('#wb-tab-empfangen').hidden = btn.dataset.wb !== 'empfangen';
             modalEl.querySelector('#wb-tab-key').hidden       = btn.dataset.wb !== 'key';
+            modalEl.querySelector('#wb-tab-scam').hidden      = btn.dataset.wb !== 'scam';
             const note = modalEl.querySelector('#wb-footer-note');
             if (note) note.hidden = btn.dataset.wb !== 'guthaben';
         });
@@ -949,6 +1046,10 @@ function _openWalletManageModal(el, info, balance, addrs) {
     _wireSendPanel(modalEl, tokens, addrs);
     _wireReceivePanel(modalEl, info);
     _wireKeyPanel(modalEl, mid, el, info);
+    // Nach einem Löschvorgang Modal schließen und die Karte neu aufbauen — sonst
+    // stünde der eben entfernte Token weiter in der Liste.
+    wireScamTab(modalEl, 'lending', scam, () => { closeModal(mid); _renderWallet(el); },
+                tk => _openMoveInSendTab(modalEl, tk));
 }
 
 // ── Reiter "Empfangen": Adresse + QR-Code ────────────────────────────────────
@@ -1384,11 +1485,21 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
             fb.textContent   = tr('sb.tx_sending', 'Transaktion wird gesendet…');
             fb.className     = 'modal-feedback';
 
+            // Auffällige Token tragen ihren Mint an der Option. Sie gehen über eine
+            // eigene Route: der reguläre Sende-Pfad löst den Mint über das Symbol aus
+            // der Token-Registry auf, kennt nur das Legacy-Token-Programm und benutzt
+            // die veraltete Transfer-Instruktion — für diese Token alles untauglich.
+            const scamMint = tokenSel?.options[tokenSel.selectedIndex]?.dataset.mint || null;
+            const endpoint = scamMint ? '/api/wallet/lending/scam/move' : '/api/wallet/lending/send';
+            const payload  = scamMint
+                ? { mint: scamMint, amount, toAddress }
+                : { symbol, amount, toAddress };
+
             try {
-                const res  = await fetch('/api/wallet/lending/send', {
+                const res  = await fetch(endpoint, {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({ symbol, amount, toAddress }),
+                    body:    JSON.stringify(payload),
                 });
                 const data = await res.json();
 
@@ -1499,11 +1610,24 @@ function _renderProtocolsTable(card, lending, cfg) {
                         <span style="display:flex;align-items:center;gap:0.4rem;">${tr('sb.tvl_guard', 'TVL-Schutz')}
                         <span class="info-tip-label"
                             data-tooltip-title="${tr('sb.tvl_guard_title', 'TVL-Schutz (Auto-Exit)')}"
-                            data-tooltip-content="${tr('slen.tvl_guard_tip_addr', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen – optional an eine Adresse versendet.')}">&#9432;</span></span>
+                            data-tooltip-content="${tr('slen.tvl_guard_tip_addr', 'Fällt der Markt-TVL dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen – optional an eine Adresse versendet. Solange die Schwelle unterschritten ist, investiert „Bester Pool“ nicht in diesen Pool.')}">&#9432;</span></span>
                     </td>
-                    <td class="wat-info">${noData || (active && active.disabledReason) ? '<span class="pool-summary-off">—</span>' : _tvlGuardSummary(active?.tvlGuard)}</td>
+                    <td class="wat-info">${noData || (active && active.disabledReason) ? '<span class="pool-summary-off">—</span>' : _guardSummary('tvl', active?.tvlGuard)}</td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-tvlguard"
+                            ${noData ? 'disabled' : (active && active.disabledReason ? 'disabled title="' + tr('slen.pool_unusable_no_guard', 'Pool nicht nutzbar – kein TVL-Schutz nötig') + '"' : '')}>${tr('sb.manage', 'Verwalten')}</button>
+                    </td>
+                </tr>
+                <tr>
+                    <td class="wat-label">
+                        <span style="display:flex;align-items:center;gap:0.4rem;">${tr('sb.liq_guard', 'Liquiditäts-Schutz')}
+                        <span class="info-tip-label"
+                            data-tooltip-title="${tr('sb.liq_guard_title', 'Liquiditäts-Schutz (Auto-Exit)')}"
+                            data-tooltip-content="${tr('slen.liq_guard_tip_addr', 'Fällt die sofort abhebbare Liquidität dieses Protokolls unter die Schwelle, wird das Kapital automatisch zu 100 % abgezogen – optional an eine Adresse versendet. Solange die Schwelle unterschritten ist, investiert „Bester Pool“ nicht in diesen Pool.')}">&#9432;</span></span>
+                    </td>
+                    <td class="wat-info">${noData || (active && active.disabledReason) ? '<span class="pool-summary-off">—</span>' : _guardSummary('liq', active?.liqGuard)}</td>
+                    <td class="wat-action">
+                        <button class="btn btn-secondary btn-sm" id="lb-btn-liqguard"
                             ${noData ? 'disabled' : (active && active.disabledReason ? 'disabled title="' + tr('slen.pool_unusable_no_guard', 'Pool nicht nutzbar – kein TVL-Schutz nötig') + '"' : '')}>${tr('sb.manage', 'Verwalten')}</button>
                     </td>
                 </tr>
@@ -1560,7 +1684,9 @@ function _renderProtocolsTable(card, lending, cfg) {
     });
 
     card.querySelector('#lb-btn-tvlguard')
-        ?.addEventListener('click', () => active && _openTvlGuardModal(active, card));
+        ?.addEventListener('click', () => active && _openGuardModal('tvl', active, card));
+    card.querySelector('#lb-btn-liqguard')
+        ?.addEventListener('click', () => active && _openGuardModal('liq', active, card));
     card.querySelector('#lb-btn-deposit-proto')
         ?.addEventListener('click', () => active && _openProtoDepositModal(active, card));
     card.querySelector('#lb-btn-withdraw-proto')
@@ -1594,6 +1720,14 @@ async function _togglePoolEnabled(proto, card, btn) {
                 tr('slen.tvl_guard_lowered',
                     'TVL-Schutz-Schwelle für "{pool}" auf {value} USDC gesenkt (50 % des aktuellen TVL) – verhindert sofortiges Wieder-Deaktivieren.',
                     { pool: proto.label, value: Math.round(data.tvlGuard.thresholdUsd).toLocaleString(NUM_LOCALE) }),
+                'success'
+            );
+        }
+        if (data.liqGuard) {
+            _ctx.showToast?.(
+                tr('slen.liq_guard_lowered',
+                    'Liquiditäts-Schutz-Schwelle für "{pool}" auf {value} USDC gesenkt (50 % der aktuellen Liquidität) – verhindert einen sofortigen Abzug nach dem Einzahlen.',
+                    { pool: proto.label, value: Math.round(data.liqGuard.thresholdUsd).toLocaleString(NUM_LOCALE) }),
                 'success'
             );
         }

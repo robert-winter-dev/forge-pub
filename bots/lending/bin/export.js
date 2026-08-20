@@ -42,6 +42,8 @@ import { displayVersion } from '../../../lib/version.js';
 // (pct-Nenner, pnl = yield − tx_fees).
 import { pnlForPeriod } from '../../../lib/pnl.js';
 import { PATHS } from '../../../config/paths.js';
+import { isPoolEnabled, checkGuards } from '../lib/tvl-guard.js';
+import { get72hPoolStats, checkDataBasis, REBALANCER_CONFIG } from '../lib/rebalancer.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -196,8 +198,31 @@ export async function runExport() {
     const mergedPositions = [...mergedMap.values()];
 
     const latestStats   = getLatestProtocolStats();
+
+    // ── Nur aktuell überwachte Protokolle ins Dashboard ──────────────────────
+    // `protocol_stats` ist eine Historientabelle und behält jede je geschriebene
+    // Zeile. getLatestProtocolStats() liefert den letzten Stand pro Protokoll —
+    // ohne Rücksicht darauf, ob es noch gepollt wird. Wird ein Protokoll aus
+    // LENDING_PROTOCOLS/MONITOR_PROTOCOLS genommen, friert sein letzter Wert ein
+    // und das Dashboard zeigte ihn weiter als *aktuellen* Pool-Wert an.
+    // Beobachtet am 2026-08-18 auf dem Master: Jupiter Lend mit APY/TVL vom
+    // 13.05., Kamino Figure und Kamino OnRe mit Stand vom 01.06. — bei Kamino
+    // OnRe standen dort 44 Mio. USDC TVL, real waren es zu dem Zeitpunkt rund
+    // 4 USDC. Zusätzlich blieb deren `liquidity` leer ("no data"), weil die
+    // Spalte erst am 2026-08-18 dazukam und diese Zeilen älter sind.
+    // Protokolle mit offener Position sind immer enthalten — eine gehaltene
+    // Position darf nie aus dem Dashboard verschwinden.
+    const openProtocols  = new Set(mergedPositions.map(p => p.protocol));
+    const liveProtocols  = new Set([
+        ...config.protocols,
+        ...config.monitorProtocols,
+        ...openProtocols,
+    ]);
+    const currentStats = latestStats.filter(s => liveProtocols.has(s.protocol));
+
     // Schnell-Lookup: protocol → { tvl, apy }
     const tvlByProtocol = new Map(latestStats.map(s => [s.protocol, s.tvl ?? null]));
+    const liqByProtocol = new Map(latestStats.map(s => [s.protocol, s.liquidity ?? null]));
     // Fallback-APY aus protocolStats (für frisch angelegte Positionen ohne current_apy in DB)
     const latestApyMap  = new Map(latestStats.map(s => [s.protocol, s.apy ?? null]));
 
@@ -210,9 +235,42 @@ export async function runExport() {
     const weightedAvgApy   = totalInvested > 0
         ? positionsWithApy.reduce((s, p) => s + p.current_apy * p.amount, 0) / totalInvested
         : 0;
-    // Alle bekannten Protocol-Stats als Map für das Dashboard (inkl. inaktive Protokolle)
+    // Protocol-Stats der überwachten Protokolle als Map für das Dashboard
+    // (inkl. solcher ohne offene Position — "inaktiv" heißt hier nur "kein Kapital drin").
+    // Pro Protokoll zusätzlich der Schutz-Zustand (Pool-Freigabe + beide Schwellen),
+    // damit das Dashboard ohne eigenen settings.db-Zugriff anzeigen kann, warum ein
+    // Pool grau ist bzw. warum "Bester Pool" ihn gerade überspringt.
+    // Datenbasis je Protokoll (Messpunkte + Beobachtungsdauer im 72h-Fenster). Dritter
+    // Grund, aus dem "Bester Pool" einen Pool überspringen kann — neben Pool-Freigabe
+    // und den beiden Schutzschwellen. Bewusst nur Zahlen ans Dashboard, nicht der
+    // fertige Satz aus checkDataBasis(): die Oberfläche ist zweisprachig und formuliert
+    // den Grund selbst (html/lending/js/app.js).
+    const basisStats = get72hPoolStats();
+
     const protocolStats = Object.fromEntries(
-        latestStats.map(s => [s.protocol, { apy: s.apy ?? null, tvl: s.tvl ?? null }])
+        currentStats.map(s => {
+            const tvl = s.tvl ?? null;
+            // Sofort abhebbare Liquidität. Getrennt vom TVL, weil ein hoher TVL nichts
+            // über die Abhebbarkeit aussagt — verliehenes und extern geparktes Kapital
+            // zählen mit, sind aber nicht sofort auszahlbar.
+            const liquidity = s.liquidity ?? null;
+            const { tvlBelow, liqBelow, tvlGuard, liqGuard } = checkGuards(s.protocol, { tvl, liquidity });
+            const basis = basisStats.get(s.protocol);
+            return [s.protocol, {
+                apy:       s.apy ?? null,
+                tvl,
+                liquidity,
+                poolEnabled:  isPoolEnabled(s.protocol),
+                tvlThreshold: tvlGuard.enabled ? tvlGuard.thresholdUsd : null,
+                liqThreshold: liqGuard.enabled ? liqGuard.thresholdUsd : null,
+                tvlBelow,
+                liqBelow,
+                // Datenbasis: reicht sie für den Ranking-Vergleich? Zahlen roh, Text in der UI.
+                dataBasisBelow: !checkDataBasis(basis).ok,
+                dataPoints:     basis?.dataPoints ?? 0,
+                coverageHours:  basis?.coverageHours ?? 0,
+            }];
+        })
     );
 
     const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -286,6 +344,7 @@ export async function runExport() {
             lastUpdatedAt: p.last_updated_at,
             accruedYield,
             poolTvl:       tvlByProtocol.get(p.protocol) ?? null,
+            poolLiquidity: liqByProtocol.get(p.protocol) ?? null,
             txFeeUsdc,
             exitFeeUsdc,
             breakEven,
@@ -377,6 +436,7 @@ export async function runExport() {
     // Downsampling: 1 Punkt pro Stunde – jeder Protokoll-Schlüssel wird dynamisch gesetzt
     const statsByHour = new Map();
     const tvlByHour   = new Map();
+    const liqByHour   = new Map();
     for (const row of rawStats) {
         const bucket = Math.floor(row.recorded_at / 3_600_000);
         const key = row.protocol;
@@ -388,11 +448,21 @@ export async function runExport() {
             if (!tvlByHour.has(bucket)) tvlByHour.set(bucket, { ts: row.recorded_at });
             tvlByHour.get(bucket)[key] = row.tvl;
         }
+
+        // Liquidität wird erst seit 2026-08-18 erfasst und ist für einige
+        // Protokolle dauerhaft null (API liefert sie nicht) – eigener Bucket,
+        // damit im Chart keine Lücken als Nullwerte erscheinen.
+        if (row.liquidity != null) {
+            if (!liqByHour.has(bucket)) liqByHour.set(bucket, { ts: row.recorded_at });
+            liqByHour.get(bucket)[key] = row.liquidity;
+        }
     }
     // Alle Einträge direkt ausgeben – Dashboard liest nur die Keys die es kennt
     const apyHistory = [...statsByHour.values()]
         .sort((a, b) => a.ts - b.ts);
     const tvlHistory = [...tvlByHour.values()]
+        .sort((a, b) => a.ts - b.ts);
+    const liqHistory = [...liqByHour.values()]
         .sort((a, b) => a.ts - b.ts);
 
     // ── Portfolio-Verlauf → für Guthaben-Chart ────────────────────────────────
@@ -583,21 +653,25 @@ export async function runExport() {
     const feesYesterday = feesInPeriod(startOfYesterdayMs, startOfTodayMs);
     const feesMonth     = feesInPeriod(startOfMonthMs, null);
 
-    // rolling 24h = voller Ertrag seit Mitternacht + der Teil von gestern, der noch im
-    // 24h-Fenster liegt (Berlin-Tagesfraktion zum Export-Zeitpunkt).
+    // rolling 24h = echtes gleitendes Fenster, direkt aus der zentralen Lib.
     //
-    // 🔴 Fix 2026-08-09: Vorher stand hier `yToday * fracDay + yYesterday * (1 - fracDay)`.
-    //    `yToday` ist aber bereits der Teilbetrag von Mitternacht bis jetzt — also exakt
-    //    der Anteil des 24h-Fensters, der auf heute entfällt. Die zusätzliche Multiplikation
-    //    mit fracDay hat ihn ein zweites Mal gekürzt und den 24h-APR systematisch zu niedrig
-    //    ausgewiesen (Messung 09.08., 13:26 Uhr: 4,55 % statt 5,75 %).
-    const berlinHM = new Intl.DateTimeFormat('en-GB', {
-        timeZone: FORGE_TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-    }).formatToParts(new Date());
-    const bh = parseInt(berlinHM.find(p => p.type === 'hour').value, 10) % 24;
-    const bm = parseInt(berlinHM.find(p => p.type === 'minute').value, 10);
-    const fracDay  = (bh * 60 + bm) / 1440;
-    const yield24h = parseFloat((yToday + yYesterday * (1 - fracDay)).toFixed(6));
+    // 🔴 Fix 2026-08-20: Vorher wurde der Wert aus ZWEI Kalendertagen genähert
+    //    (`yToday + yYesterday * (1 - fracDay)`, Berlin-Tagesfraktion). Diese Näherung
+    //    unterstellt, dass der Ertrag innerhalb eines Kalendertages gleichmäßig anfällt —
+    //    bei schwankendem Kapital oder ungleich verteilten Erträgen stimmt das nicht, und
+    //    der ausgewiesene 24h-APR wich entsprechend ab (Messung 20.08., 14:30 Uhr:
+    //    3,67 % genähert gegen 8,19 % exakt, bei einem Protokoll-APY von 5,77 %).
+    //    pnlForPeriod kann das Fenster exakt — es ist dieselbe Primitive, die schon
+    //    Heute/Gestern/Monat speist, nur mit fromMs = jetzt − 24 h. Die frühere
+    //    Zwei-Tages-Konstruktion stammte noch aus der Zeit vor der Vereinheitlichung
+    //    auf lib/pnl.js (2026-08-12) und war seitdem überflüssig.
+    //
+    //    ⚠️  Der 24h-Wert bleibt bei kleinen Erträgen dennoch verrauscht: die
+    //    Bewertungsquelle der Protokolle schwankt je Snapshot deutlich stärker als der
+    //    Ertrag in diesem Intervall wächst (gemessen 20.08. bei Kamino Huma: 0,0421 gegen
+    //    0,00124 USDC). Das ist eine Eigenschaft der Datenquelle, kein Rechenfehler —
+    //    gegen genau diesen Effekt schützt aprIsEstimate weiter unten.
+    const yield24h = periodYield(now - 86_400_000, null)?.usdc ?? 0;
 
     const statistics = {
         today:     todayYield,
@@ -617,10 +691,26 @@ export async function runExport() {
             yesterday: parseFloat((yYesterday - feesYesterday).toFixed(6)),
             month:     parseFloat((yMonth     - feesMonth).toFixed(6)),
         },
-        rolling24h: {
-            yield: yield24h,
-            apr:   capitalBase > 0 ? parseFloat((yield24h / capitalBase * 365 * 100).toFixed(4)) : null,
-        },
+        rolling24h: (() => {
+            const apr = capitalBase > 0
+                ? parseFloat((yield24h / capitalBase * 365 * 100).toFixed(4))
+                : null;
+            // 🔴 Fix 2026-08-20: lib/pnl.js rundet jeden Yield-Betrag auf volle Cent
+            // (round2). Bei kleinem Kapital verschluckt das die daraus abgeleitete
+            // APR komplett — z.B. 20 USDC * 5 % / 365 ≈ 0,0027 USDC rundet auf 0,00,
+            // die APR fällt dann fälschlich auf 0,00 % statt ~5 %. Schwelle: Kapital,
+            // unterhalb dessen round2 den realen 24h-Ertrag beim aktuellen Ø-APY
+            // (weightedAvgApy, protokollseitig gemeldet, kapitalunabhängig) plausibel
+            // verschlucken kann. In diesem Fall weicht die Anzeige auf weightedAvgApy
+            // aus (aprIsEstimate=true, App zeigt das transparent an).
+            const roundingHidesYield = apr === 0 && capitalBase > 0 && weightedAvgApy > 0
+                && capitalBase * (weightedAvgApy / 100 / 365) < 0.005;
+            return {
+                yield: yield24h,
+                apr: roundingHidesYield ? parseFloat(weightedAvgApy.toFixed(4)) : apr,
+                aprIsEstimate: roundingHidesYield,
+            };
+        })(),
         capitalBase,
     };
 
@@ -688,6 +778,10 @@ export async function runExport() {
         config: {
             autoCompounding: config.autoCompounding,
             protocols:       config.protocols,
+            // Schwellen der Datenbasis-Prüfung – einmal statt je Pool, die UI baut
+            // daraus den Tooltip-Text (siehe dataBasisBelow in protocolStats).
+            minDataPoints:    REBALANCER_CONFIG.minDataPoints,
+            minCoverageHours: REBALANCER_CONFIG.minCoverageHours,
         },
         notifications,
 
@@ -708,6 +802,7 @@ export async function runExport() {
     const outputHistory = {
         apyHistory,
         tvlHistory,
+        liqHistory,
         portfolioHistory: portfolioHistoryChart,
     };
 

@@ -57,8 +57,10 @@ import {
 import {
     get72hPoolStats,
     getQualifiedPools,
+    checkDataBasis,
+    REBALANCER_CONFIG,
 } from '../lib/rebalancer.js';
-import { loadTvlGuard, isPoolEnabled, disablePool } from '../lib/tvl-guard.js';
+import { loadTvlGuard, loadLiqGuard, isPoolEnabled, disablePool, checkInvestGuards } from '../lib/tvl-guard.js';
 import { syncDashboard } from '../lib/sync.js';
 import { FORGE_TZ, todayTz } from '../../../core/config.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
@@ -242,6 +244,11 @@ const MAX_STALE_APY        = 1.00;  // 100% APY als obere Schranke – unrealist
  * Muss NACH recordProtocolStat() aufgerufen werden.
  */
 async function checkAlerts(proto, currentApy, currentTvl) {
+    // Nur Pools mit aktiver Position alarmieren – Monitor-Pools ohne Investment
+    // sind für den Betreiber nicht relevant (Ticket 2026-08-18).
+    const activeProtocols = new Set(getActivePositions().map(p => p.protocol));
+    if (!activeProtocols.has(proto.name)) return;
+
     // ── TVL-Schwellwert-Crossing ─────────────────────────────────────────────
     if (currentTvl != null) {
         const prev = getPreviousProtocolStat(proto.name);
@@ -276,20 +283,24 @@ async function checkApys(protocols) {
     const apyMap = new Map();
 
     for (const proto of protocols) {
-        let apy, tvl = null;
+        let apy, tvl = null, liquidity = null;
         try {
-            // getPoolStats() liefert APY + TVL in einem Call (falls implementiert)
+            // getPoolStats() liefert APY + TVL + Liquidität in einem Call (falls implementiert)
             if (typeof proto.getPoolStats === 'function') {
                 const stats = await proto.getPoolStats();
                 apy = stats.apy;
                 tvl = stats.tvl ?? null;
+                liquidity = stats.liquidity ?? null;
             } else {
                 apy = await proto.getSupplyAPY();
             }
             const tvlStr = tvl != null
                 ? ` | TVL: $${tvl >= 1e6 ? (tvl / 1e6).toFixed(1) + 'M' : tvl >= 1e3 ? (tvl / 1e3).toFixed(0) + 'K' : tvl.toFixed(0)}`
                 : '';
-            log(`APY ${proto.label}: ${fmt(apy, 2)} %${tvlStr}`);
+            const liqStr = liquidity != null
+                ? ` | frei: ${liquidity >= 1e6 ? (liquidity / 1e6).toFixed(1) + 'M' : liquidity >= 1e3 ? (liquidity / 1e3).toFixed(0) + 'K' : liquidity.toFixed(2)} USDC`
+                : '';
+            log(`APY ${proto.label}: ${fmt(apy, 2)} %${tvlStr}${liqStr}`);
             apyMap.set(proto.name, apy);
             resetFail(`apy:${proto.name}`);
         } catch (err) {
@@ -297,13 +308,14 @@ async function checkApys(protocols) {
             continue;
         }
 
-        // In DB speichern (inkl. TVL)
+        // In DB speichern (inkl. TVL + sofort abhebbarer Liquidität)
         try {
             recordProtocolStat({
                 protocol: proto.name,
                 poolType: proto.poolType ?? proto.name,
                 apy,
                 tvl,
+                liquidity,
             });
         } catch (err) {
             logErr(`DB recordProtocolStat (${proto.name}): ${err.message}`);
@@ -320,19 +332,28 @@ async function checkApys(protocols) {
     return apyMap;
 }
 
-// ─── Auto-Exit (TVL < 900K) ───────────────────────────────────────────────────
+// ─── Auto-Exit (TVL- / Liquiditäts-Schutz) ────────────────────────────────────
 
 /**
- * Prüft alle aktiven Positionen auf TVL-Unterschreitung.
- * Wenn TVL < autoExitTvlUsdc: sofortiger Withdraw, unabhängig vom Rebalancing-Cooldown.
+ * Prüft alle aktiven Positionen auf Unterschreitung einer der beiden
+ * Schutzschwellen: Markt-TVL (tvlGuard) oder sofort abhebbare Liquidität
+ * (liqGuard). Greift eine davon, wird sofort zu 100 % abgezogen — unabhängig
+ * vom Rebalancing-Cooldown.
  *
- * Das freigewordene Kapital kehrt ins Wallet zurück. Anders als früher wird der
- * Pool dabei zusätzlich deaktiviert (poolEnabled=false) — er nimmt danach an
- * KEINEM Deposit-Weg mehr teil (weder manuell noch Auto-Deploy), bis der Nutzer
- * ihn im Settings-UI bewusst wieder aktiviert.
+ * Das freigewordene Kapital kehrt ins Wallet zurück. Beim TVL-Schutz wird der
+ * Pool zusätzlich deaktiviert (poolEnabled=false) — er nimmt danach an KEINEM
+ * Deposit-Weg mehr teil (weder manuell noch Auto-Deploy), bis der Nutzer ihn im
+ * Settings-UI bewusst wieder aktiviert.
  *
- * Pools OHNE offene Position, deren TVL ebenfalls unter der Schwelle liegt,
- * werden aus demselben Grund deaktiviert (kein Withdraw nötig, nichts investiert).
+ * Beim Liquiditäts-Schutz bewusst NICHT: Liquidität schwankt mit jeder
+ * Kreditrückzahlung und kommt von selbst zurück. Solange sie unter der Schwelle
+ * liegt, ist der Pool ohnehin von "Bester Pool" ausgeschlossen
+ * (lib/rebalancer.js getQualifiedPools) — eine dauerhafte Deaktivierung mit
+ * manueller Reaktivierung wäre hier reine Handarbeit ohne Zusatznutzen.
+ *
+ * Pools OHNE offene Position, deren TVL unter der Schwelle liegt, werden aus
+ * demselben Grund deaktiviert (kein Withdraw nötig, nichts investiert). Auch das
+ * gilt nur für den TVL-Schutz.
  */
 async function checkAndAutoExit(allProtocols, walletAddress) {
     if (existsSync(MOVE_LOCK)) {
@@ -344,16 +365,33 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
     const activePositions  = getActivePositions();
     const activeProtocols  = new Set(activePositions.map(p => p.protocol));
 
-    // Protokolle mit aktiver Position UND TVL < protokoll-eigener Schwelle ermitteln.
-    // Schwelle + Versand-Adresse kommen pro Protokoll aus settings.db (ForgeSettings).
-    const exitInfo = new Map(); // protocol → { threshold, sendTo }
+    // Protokolle mit aktiver Position UND unterschrittener Schutzschwelle ermitteln.
+    // Schwellen + Versand-Adressen kommen pro Protokoll aus settings.db (ForgeSettings).
+    //
+    // 🔒 null heißt "nicht gemessen", nicht "0": ein fehlender Messwert (API liefert
+    // die Kennzahl (noch) nicht) darf niemals einen Abzug auslösen.
+    //
+    // Reihenfolge: TVL-Schutz vor Liquiditäts-Schutz. Greifen beide, gewinnt der
+    // TVL-Schutz — er ist der schärfere Fall (Pool wird zusätzlich deaktiviert).
+    const exitInfo = new Map(); // protocol → { metric, threshold, value, sendTo }
     for (const pos of activePositions) {
         const stats = stats72h.get(pos.protocol);
-        const tvl   = stats?.tvl ?? null;
-        if (tvl === null) continue;
-        const guard = loadTvlGuard(pos.protocol);
-        if (guard.enabled && guard.thresholdUsd > 0 && tvl < guard.thresholdUsd) {
-            exitInfo.set(pos.protocol, { threshold: guard.thresholdUsd, sendTo: guard.sendTo });
+        const tvl   = stats?.tvl       ?? null;
+        const liq   = stats?.liquidity ?? null;
+
+        const tvlGuard = loadTvlGuard(pos.protocol);
+        if (tvl !== null && tvlGuard.enabled && tvlGuard.thresholdUsd > 0 && tvl < tvlGuard.thresholdUsd) {
+            exitInfo.set(pos.protocol, {
+                metric: 'tvl', threshold: tvlGuard.thresholdUsd, value: tvl, sendTo: tvlGuard.sendTo,
+            });
+            continue;
+        }
+
+        const liqGuard = loadLiqGuard(pos.protocol);
+        if (liq !== null && liqGuard.enabled && liqGuard.thresholdUsd > 0 && liq < liqGuard.thresholdUsd) {
+            exitInfo.set(pos.protocol, {
+                metric: 'liquidity', threshold: liqGuard.thresholdUsd, value: liq, sendTo: liqGuard.sendTo,
+            });
         }
     }
 
@@ -377,11 +415,13 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
 
     for (const [protocolName, guard] of exitInfo) {
         const exitThreshold = guard.threshold;
-        const stats  = stats72h.get(protocolName);
-        const tvlFmt = stats?.tvl != null
-            ? (stats.tvl >= 1e6 ? `$${(stats.tvl / 1e6).toFixed(2)}M` : `$${(stats.tvl / 1e3).toFixed(0)}K`)
+        const isLiq         = guard.metric === 'liquidity';
+        const metricLabel   = isLiq ? 'Liquidität' : 'TVL';
+        // Für die Meldung: der Messwert, der den Exit ausgelöst hat (TVL oder Liquidität)
+        const tvlFmt = guard.value != null
+            ? (guard.value >= 1e6 ? `$${(guard.value / 1e6).toFixed(2)}M` : `$${(guard.value / 1e3).toFixed(0)}K`)
             : '—';
-        log(`⚠️ Auto-Exit: ${protocolName} TVL ${tvlFmt} < $${(exitThreshold / 1_000).toFixed(0)}K → Withdraw`);
+        log(`⚠️ Auto-Exit: ${protocolName} ${metricLabel} ${tvlFmt} < $${(exitThreshold / 1_000).toFixed(0)}K → Withdraw`);
 
         try {
             const proto  = createProtocolByName(protocolName);
@@ -397,8 +437,10 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             toClose.forEach(p => closePosition(p.id));
 
             // Pool deaktivieren – ab jetzt keine Deposits mehr (manuell + Auto-Deploy),
-            // bis der Nutzer im Settings-UI bewusst wieder aktiviert.
-            disablePool(protocolName);
+            // bis der Nutzer im Settings-UI bewusst wieder aktiviert. Nur beim
+            // TVL-Schutz: der Liquiditäts-Schutz sperrt nur solange die Liquidität
+            // tatsächlich zu dünn ist (siehe Kopfkommentar).
+            if (!isLiq) disablePool(protocolName);
 
             const fee = await fetchFeeSol(txSig);
             recordTransaction({
@@ -408,7 +450,7 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
                 amount:   exitAmount,
                 txHash:   txSig,
                 feeSol:   fee,
-                note:     `Auto-Exit: TVL ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K`,
+                note:     `Auto-Exit: ${metricLabel} ${tvlFmt} unter $${(exitThreshold / 1_000).toFixed(0)}K`,
             });
 
             log(`Auto-Exit ✅ ${protocolName}: ${fmt(exitAmount)} USDC → TX ${txSig}`);
@@ -459,6 +501,7 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             }
 
             await notify.autoExitExecuted(protocolName, {
+                metric:    isLiq ? { k: 'notify.len.metric_liquidity' } : { k: 'notify.len.metric_tvl' },
                 tvl:       tvlFmt,
                 threshold: `$${(exitThreshold / 1_000).toFixed(0)}K`,
                 amount:    fmt(exitAmount),
@@ -470,14 +513,16 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
                 leftoverUsdc: leftoverLpUsdc,
             });
             addNotification({ level: 'error', msgKey: 'notify.len.auto_exit_short',
-                params: { pool: protocolName, amount: fmt(exitAmount), tvl: tvlFmt } });
+                params: { pool: protocolName, amount: fmt(exitAmount), tvl: tvlFmt,
+                          metric: isLiq ? { k: 'notify.len.metric_liquidity' } : { k: 'notify.len.metric_tvl' } } });
         } catch (err) {
             // Betriebs-Kanäle (Log/Telegram) bekommen bewusst die technischen Rohdaten
             // (falls vorhanden) statt der nutzerfreundlichen Meldung aus wallet.js
             // simulate() – hier braucht es die Diagnose, nicht die Beruhigung.
             const detail = err.technicalDetail ?? err.message;
             logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${detail}`);
-            await notify.autoExitFailed(protocolName, tvlFmt, detail);
+            await notify.autoExitFailed(protocolName, tvlFmt, detail,
+                isLiq ? { k: 'notify.len.metric_liquidity' } : { k: 'notify.len.metric_tvl' });
             addNotification({ level: 'warn', msgKey: 'notify.len.auto_exit_failed_short',
                 params: { pool: protocolName, message: detail } });
         }
@@ -540,6 +585,16 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
     // Positionen aus API abfragen und summieren
     let totalYield = 0;
     for (const proto of protocols) {
+        // Ein deaktivierter Pool (Nutzer-Freigabe entzogen oder TVL-Schutz ausgelöst)
+        // steuert NICHTS mehr zum Positionswert bei — auch kein Restguthaben, das die
+        // Protokoll-API noch meldet. Grund: Deaktivieren ist nur möglich, wenn der Pool
+        // kein Kapital mehr hält (UI: hasProtocolCapital() blockiert es, Auto-Exit:
+        // disablePool() läuft erst nach erfolgreichem Withdraw). Was danach noch auftaucht,
+        // ist kein abrufbares Guthaben, sondern ein Rest — z.B. ungestakte LP-Token oder
+        // eine Fehlanzeige des Protokoll-Indexers. Zählte er mit, erschiene er als Gewinn
+        // im PnL, ohne dass eine Position dazu existiert, die ihn in den Metriken erklärt.
+        // Umkehrbar: Pool wieder freigeben → der Wert zählt ab dem nächsten Tick wieder mit.
+        const poolEnabled = isPoolEnabled(proto.name);
         try {
             const pos = await proto.getPosition(walletAddress);
             resetFail(`position:${proto.name}`);
@@ -557,12 +612,31 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
                     const dustInfo = pos?.amount > 0 ? ` (${fmt(pos.amount)} USDC Dust ignoriert)` : '';
 
                     if (streak < ZERO_BALANCE_CONFIRM_TICKS) {
-                        totalValue += stale.reduce((sum, p) => sum + p.amount, 0);
+                        if (poolEnabled) totalValue += stale.reduce((sum, p) => sum + p.amount, 0);
                         log(`⚠ Position ${proto.label}: 0 USDC${dustInfo} – ${streak}/${ZERO_BALANCE_CONFIRM_TICKS}, evtl. staler API-Response (z.B. nach Deposit), DB-Position vorerst behalten`);
                     } else {
+                        // Buchwert VOR dem Schließen festhalten: verschwindet hier echtes
+                        // Kapital (kein Withdraw, das Protokoll meldet die Position schlicht
+                        // nicht mehr), muss das gemeldet werden. Am 09.08.2026 fielen so
+                        // 70,61 USDC lautlos aus der Bilanz – nur diese eine Log-Zeile, keine
+                        // Benachrichtigung; der Betrag tauchte erst Wochen später beim
+                        // Nachrechnen als PnL-Ausreißer auf.
+                        const lostUsdc = stale.reduce((sum, p) => sum + (p.amount ?? 0), 0);
                         stale.forEach(p => closePosition(p.id));
                         _zeroBalanceStreak.delete(streakKey);
                         log(`Position ${proto.label}: 0 USDC${dustInfo} (${stale.length} DB-Position(en) geschlossen)`);
+
+                        // Schwelle = DUST_THRESHOLD_USDC: darunter ist das Schließen der
+                        // Normalfall nach einem vollständigen Withdraw (Rundungsreste), keine
+                        // Meldung wert.
+                        if (lostUsdc >= DUST_THRESHOLD_USDC) {
+                            log(`🚨 ${proto.label}: ${fmt(lostUsdc)} USDC Buchwert ohne Withdraw verschwunden`);
+                            await notify.positionVanished(proto.label, fmt(lostUsdc));
+                            addNotification({
+                                level: 'error', msgKey: 'notify.len.position_vanished_short',
+                                params: { pool: proto.label, amount: fmt(lostUsdc) },
+                            });
+                        }
                     }
                 }
             } else {
@@ -570,8 +644,12 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
             }
 
             if (pos && pos.amount >= DUST_THRESHOLD_USDC) {
-                totalValue += pos.amount;
-                log(`Position ${proto.label}: ${fmt(pos.amount)} USDC`);
+                if (poolEnabled) {
+                    totalValue += pos.amount;
+                    log(`Position ${proto.label}: ${fmt(pos.amount)} USDC`);
+                } else {
+                    log(`Position ${proto.label}: ${fmt(pos.amount)} USDC – Pool deaktiviert, zählt nicht zum Positionswert`);
+                }
 
                 // DB-Position aktualisieren: aktueller Betrag (für Yield-Berechnung) + APY
                 const currentApy = apyMap.get(proto.name) ?? null;
@@ -673,7 +751,7 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
         } catch (err) {
             // Fallback: aktive Positionen aus DB
             const dbPositions = getActivePositions().filter(p => p.protocol === proto.name);
-            if (dbPositions.length > 0) {
+            if (poolEnabled && dbPositions.length > 0) {
                 totalValue += Math.max(...dbPositions.map(p => p.amount ?? 0));
             }
             noteFail(`position:${proto.name}`, { k: 'notify.len.task_position', p: { pool: proto.label } }, err);
@@ -859,11 +937,42 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
             await notify.autoDeploySkippedDisabled(protocolId);
             return;
         }
+        const fixedStats = get72hPoolStats().get(protocolId) ?? null;
+
+        // Schutzschwellen live prüfen — dieselbe Funktion, die getQualifiedPools() im
+        // Ranking-Modus nutzt. Dieser Zweig hatte sie bis 2026-08-20 nicht: der TVL-Schutz
+        // fing das noch halbwegs auf (disablePool() nach dem Exit entzieht die Freigabe),
+        // der Liquiditäts-Schutz aber gar nicht — der deaktiviert bewusst NIE und verlässt
+        // sich ausdrücklich auf genau diese Live-Sperre. Ein illiquider Pool bekam hier
+        // also bei jedem Tick neues Kapital, das der Exit anschließend nicht herausholen
+        // kann. Bewusst kein Ausweichen auf ein anderes Protokoll: bei einem fest
+        // gewählten Ziel ist Nichtstun die einzig richtige Antwort.
+        const invest = checkInvestGuards(protocolId, fixedStats ?? {});
+        if (!invest.ok) {
+            log(`Auto-Deploy übersprungen: ${protocolId} – ${invest.reason}`);
+            await notify.autoDeploySkippedGuard(protocolId, invest.rule, invest.detail);
+            return;
+        }
+
+        // Mindest-Datenbasis: der avgApy eines frisch aufgenommenen Protokolls ist kein
+        // geglätteter Wert. Im Ranking ist er dadurch nicht vergleichbar; hier misst er
+        // gegen eine feste Schwelle, taugt dafür aus demselben Grund aber ebenso wenig.
+        const basis = checkDataBasis(fixedStats ?? {});
+        if (!basis.ok) {
+            log(`Auto-Deploy übersprungen: ${protocolId} – Datenbasis: ${basis.reason}`);
+            await notify.autoDeploySkippedGuard(protocolId, 'data_basis', {
+                points:    fixedStats?.dataPoints    ?? 0,
+                minPoints: REBALANCER_CONFIG.minDataPoints,
+                hours:     fixedStats?.coverageHours ?? 0,
+                minHours:  REBALANCER_CONFIG.minCoverageHours,
+            });
+            return;
+        }
+
         // APY-Schwelle für festes Protokoll prüfen
         const fixedMinApy = adCfg.fixedApyThresholdPercent;
         if (fixedMinApy > 0) {
-            const stats = get72hPoolStats().get(protocolId);
-            const curApy = stats?.avgApy ?? 0;
+            const curApy = fixedStats?.avgApy ?? 0;
             if (curApy < fixedMinApy) {
                 log(`Auto-Deploy übersprungen: ${protocolId} APY ${curApy.toFixed(2)}% < Minimum ${fixedMinApy}%`);
                 return;

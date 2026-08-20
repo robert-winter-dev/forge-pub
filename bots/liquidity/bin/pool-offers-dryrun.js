@@ -92,6 +92,14 @@ function runDryRun(pool) {
 }
 
 const sdb = new Database(SETTINGS_DB);
+sdb.exec(`
+    CREATE TABLE IF NOT EXISTS pool_settings (
+        bot_id   TEXT NOT NULL,
+        pool_id  TEXT NOT NULL,
+        settings TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (bot_id, pool_id)
+    )
+`);
 const db  = openDatabase();
 
 const results = [];

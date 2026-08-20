@@ -15,12 +15,14 @@
 
 import Database          from 'better-sqlite3';
 import { notificationText } from '../../../lib/notify-render.js';
+import { roundPrice, quoteSymbol } from '../../../html/js/format-price.js';
 import { readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'fs';
 import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
 import dotenv                from 'dotenv';
 import { getSplTokensUsd, getLatestWalletBalance } from '../lib/wallet-monitor-client.js';
 import { config } from '../lib/config.js';
+import { checkInvestEligibility } from '../lib/invest-eligibility.js';
 import { FORGE_TZ, midnightTzMs } from '../../../core/config.js';
 import { readMaintenanceFlag, getMaintenanceWindows } from '../../../core/maintenance.js';
 import { getActiveProfile }       from '../lib/economic-scorer/config.js';
@@ -92,6 +94,12 @@ try {
 const round2 = v => v != null ? Math.round(v * 100) / 100 : null;
 const round4 = v => v != null ? Math.round(v * 10000) / 10000 : null;
 const round6 = v => v != null ? Math.round(v * 1000000) / 1000000 : null;
+// 🔒 KURSE nicht mit round4() exportieren, sondern mit roundPrice(): Poolpreise überstreichen
+// viele Größenordnungen. round4 machte aus der cbBTC/SOL-Range 0.00119386–0.00126870 die
+// Werte 0.0012–0.0013 — priceNow fiel dabei exakt auf priceLower, und die Kurve im
+// Range-Chart wurde zur flachen Treppe, weil alle Punkte auf denselben Wert gerundet
+// wurden. roundPrice() hält bei großen Werten dieselbe Präzision wie bisher.
+// USD-BETRÄGE (Fees, Werte) bleiben bei round2/round4 — sie haben das Problem nicht.
 
 /**
  * Aggregiert die Tier-Übersicht für das Dashboard.
@@ -141,6 +149,11 @@ const poolsConfigRaw  = JSON.parse(readFileSync(poolsConfigPath, 'utf8'));
 const displayPairMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.displayPair ?? p.pair]));
 const volatilePairMap = Object.fromEntries(poolsConfigRaw.map(p => [p.id, !!p.volatilePair]));
 const poolTypeMap     = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.poolType ?? null]));
+// Einheit des Poolpreises (= echtes tokenB). Wird hier abgeleitet und fertig exportiert,
+// weil nur der Bot die volle Pool-Config kennt: `pair` ist ein Label-Feld und bei
+// liq-eurc-usdc (usdcIsTokenA) invertiert. Dasselbe Prinzip wie beim displayPair-Vertrag
+// unten — das Frontend soll nicht raten müssen, ob ein Pool intern gedreht ist.
+const priceUnitMap    = Object.fromEntries(poolsConfigRaw.map(p => [p.id, quoteSymbol(p)]));
 // active-Flag aus der DB (Single Source of Truth). Der Bot schreibt es unmittelbar
 // per Setter, daher gibt es keine Sync-Verzögerung mehr (früher wurde es aus pools.json
 // gelesen, weil pools.json der Live-Store war — jetzt ist es die DB).
@@ -311,7 +324,7 @@ const poolsOverview = pools.map(pool => {
         economic:         latestEconomic[pool.id] ?? null,
         capitalUSDC:      round2(investedCapital[pool.id] ?? null),
         positionOpenedAt: openPosByPool[pool.id]?.opened_at ?? null,
-        price:            round4(stats?.price ?? null),
+        price:            roundPrice(stats?.price ?? null),
         apr24h:           round2(stats?.apr_24h ?? null),
         tvl:              round2(stats?.tvl_usd ?? null),
         volume24h:        round2(stats?.volume_24h_usd ?? null),
@@ -659,7 +672,7 @@ try {
         for (const r of raw) buckets.set(Math.floor(r.recorded_at / 300_000), r);
         if (buckets.size > 0) {
             for (const r of buckets.values()) {
-                priceHistory.push({ t: r.recorded_at, poolId: pool.id, price: round4(r.price) });
+                priceHistory.push({ t: r.recorded_at, poolId: pool.id, price: roundPrice(r.price) });
             }
         } else {
             // Kein Eintrag in zentraler DB (z.B. neuer Pool) → Fallback auf pool_stats
@@ -667,7 +680,7 @@ try {
                 'SELECT price, recorded_at FROM pool_stats WHERE pool_id = ? AND recorded_at >= ? ORDER BY recorded_at ASC'
             ).all(pool.id, thirtyDaysAgo);
             for (const r of fallback) {
-                priceHistory.push({ t: r.recorded_at, poolId: pool.id, price: round4(r.price) });
+                priceHistory.push({ t: r.recorded_at, poolId: pool.id, price: roundPrice(r.price) });
             }
         }
     }
@@ -680,7 +693,7 @@ try {
         SELECT pool_id, price, recorded_at FROM pool_stats
         WHERE recorded_at >= ? ORDER BY recorded_at ASC
     `).all(thirtyDaysAgo);
-    priceHistory = fallbackRaw.map(r => ({ t: r.recorded_at, poolId: r.pool_id, price: round4(r.price) }));
+    priceHistory = fallbackRaw.map(r => ({ t: r.recorded_at, poolId: r.pool_id, price: roundPrice(r.price) }));
 }
 
 // Fensterbreite für Meine-APR: Live-Anzeige + Chart verwenden denselben Wert.
@@ -1235,7 +1248,7 @@ const rebalances = rebalanceRows.map(r => ({
     pair:            r.pair,
     displayPair:     displayPairMap[r.pool_id] ?? r.pair,
     reason:          r.reason,
-    priceAtEvent:    round4(r.price_at_event),
+    priceAtEvent:    roundPrice(r.price_at_event),
     costSol:         round6(r.cost_sol),
     rebalancedAt:    r.rebalanced_at,
     lpValueAtEvent:  r.lp_value_at_event != null ? round2(r.lp_value_at_event) : null,
@@ -1405,9 +1418,10 @@ function buildPosition(pos, isActive) {
                                 : null)
                                 : false,
         active:             isActive,
-        priceLower:         round4(pos.price_lower),
-        priceUpper:         round4(pos.price_upper),
-        priceNow:           round4(priceNow),
+        priceLower:         roundPrice(pos.price_lower),
+        priceUpper:         roundPrice(pos.price_upper),
+        priceNow:           roundPrice(priceNow),
+        priceUnit:          priceUnitMap[pos.pool_id] ?? null,
         impermanentLossUsd: round2(posSnap?.il_usd ?? null),
         impermanentLossPct: round2(posSnap?.il_pct ?? null),
         currentNpUsd:       posSnap?.il_usd != null
@@ -2536,6 +2550,26 @@ for (const po of poolsOverview) {
     const l2 = tp.level2 ?? {};
     po.tvlWarnThreshold = (l1.enabled && Number(l1.thresholdUsd) > 0) ? Number(l1.thresholdUsd) : null;
     po.tvlExitThreshold = (l2.enabled && Number(l2.thresholdUsd) > 0) ? Number(l2.thresholdUsd) : null;
+}
+
+// Invest-Guard fürs Dashboard: welche Pools würde „Bester Pool" jetzt überspringen,
+// weil TVL-Schutz oder Score-Limit sie sofort wieder räumen würden (lib/invest-
+// eligibility.js — dieselbe Funktion, die bin/cleanup.js vor dem Sortieren aufruft).
+//
+// 🔒 Jedes Tor, das „Bester Pool" schließt, braucht eine Entsprechung im Dashboard:
+// ein still übersprungener Pool ist für den Betreiber sonst nicht von einem defekten
+// zu unterscheiden. Bewusst nur Zahlen + maschinenlesbare Regel — die Oberfläche ist
+// zweisprachig und formuliert den Satz selbst.
+for (const po of poolsOverview) {
+    try {
+        const poolCfg = _allPoolsConfig.find(p => p.id === po.id);
+        if (!poolCfg) continue;
+        const elig = checkInvestEligibility(poolCfg, db, {
+            exitScore: po.investScore?.exitValue ?? po.investScore?.value ?? null,
+            settings:  poolSettings[po.id] ?? {},
+        });
+        po.investBlocked = elig.ok ? null : { rule: elig.rule, ...elig.detail };
+    } catch { po.investBlocked = null; }
 }
 
 // ─── Zusammenführen ───────────────────────────────────────────────────────────

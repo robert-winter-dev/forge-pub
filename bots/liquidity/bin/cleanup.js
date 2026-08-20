@@ -51,6 +51,7 @@ import {
 } from '../lib/db.js';
 import { loadTsConfig } from '../lib/trailing-stop.js';
 import { loadTvlConfig } from '../lib/tvl-protection.js';
+import { checkInvestEligibility } from '../lib/invest-eligibility.js';
 import { loadConfig as loadScoreLimitConfig } from '../lib/score-limit.js';
 import { calculateRange } from '../lib/range.js';
 import { PATHS } from '../../../config/paths.js';
@@ -108,6 +109,21 @@ const CLEANUP_MIN_DEPOSIT = (() => {
     const v = parseFloat(process.env.CLEANUP_MIN_DEPOSIT ?? '0');
     return v >= 1 ? v : 0;
 })();
+
+/**
+ * Exit-Score eines einzelnen Pools aus data.json — derselbe Wert, den das Score-Limit
+ * auswertet (exitValue, ohne Volumen-Malus). null wenn nicht ermittelbar; der Guard
+ * lässt das Score-Limit dann außen vor, statt auf einer Lücke zu sperren.
+ */
+function _loadExitScore(poolId) {
+    try {
+        const data = JSON.parse(readFileSync(LIQUIDITY_DATA_PATH, 'utf8'));
+        const p = (data.pools ?? []).find(x => x.id === poolId);
+        return p?.investScore?.exitValue ?? p?.investScore?.value ?? null;
+    } catch {
+        return null;
+    }
+}
 
 function _loadAllOpportunityScores() {
     const data = JSON.parse(readFileSync(LIQUIDITY_DATA_PATH, 'utf8'));
@@ -546,6 +562,18 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
         return;
     }
 
+    // Invest-Guard: TVL-Schutz / Score-Limit würden den Pool sofort wieder räumen.
+    // Der Ranking-Pfad hat solche Pools bereits vor dem Sortieren aussortiert (dort ist
+    // diese Prüfung dann wirkungslos); CLEANUP_MODE='pool:<id>' und der Reaktivierungspfad
+    // laufen aber direkt hier herein und hätten sonst weiterhin die alte Lücke.
+    // Bewusst kein Ausweichen auf einen anderen Pool: bei einem fest gewählten Ziel ist
+    // Nichtstun die einzig richtige Antwort.
+    const elig = checkInvestEligibility(targetPool, db, { exitScore: _loadExitScore(targetPoolId) });
+    if (!elig.ok) {
+        console.log(`[cleanup:invest] ${t('cli.cl.guard_blocked', { pool: targetPool.pair, reason: elig.reason })}`);
+        return;
+    }
+
     // Range-Guard VOR den Swaps. Die Deposit-Pfade in lib/deposit-lib.js prüfen state.inRange
     // selbst, aber erst am Anfang der Einzahlung — also nachdem _invest*() das USDC bereits in
     // beide Pool-Tokens getauscht hat. Der Cleanup kaufte dann Tokens, konnte sie nicht
@@ -662,7 +690,8 @@ async function runCleanupByRanking(db, keypair, connection) {
         return;
     }
 
-    const scored = [];
+    const scored   = [];
+    const excluded = [];   // vom Guard verworfene Kandidaten (mit Grund) – fürs Decision-Log
     const poolById = new Map(config.pools.all.map(p => [p.id, p]));
     for (const poolId of configuredIds) {
         if (ineligible.has(poolId)) continue;
@@ -672,6 +701,19 @@ async function runCleanupByRanking(db, keypair, connection) {
         if (!isPoolEnabled(poolById.get(poolId))) continue;
         const sc = scoreByPool.get(poolId);
         if (!sc) continue;
+
+        // Invest-Guard VOR dem Sortieren: Regeln, die den Pool sofort wieder räumen
+        // würden (TVL-Schutz, Score-Limit), schließen ihn hier aus der Rangliste aus.
+        // Dadurch ist scored[0] per Konstruktion der beste ZULÄSSIGE Pool — es gibt
+        // kein „Platz 1 überspringen" als Sonderfall, die Liste entsteht ohne ihn.
+        // Beliebig tief: sind Platz 1–3 gesperrt, gewinnt Platz 4.
+        const elig = checkInvestEligibility(poolById.get(poolId), db, { exitScore: sc.exitValue ?? sc.value ?? null });
+        if (!elig.ok) {
+            excluded.push({ id: poolId, score: sc.value, rule: elig.rule, reason: elig.reason, ...elig.detail });
+            console.log(`[cleanup:ranking] ${t('cli.cl.guard_excluded', { pool: poolId, reason: elig.reason })}`);
+            continue;
+        }
+
         scored.push({ id: poolId, score: sc.value, hopiumVeto: sc.hopiumVeto ?? false });
     }
 
@@ -690,8 +732,8 @@ async function runCleanupByRanking(db, keypair, connection) {
     try {
         db.prepare(`
             INSERT INTO cleanup_decisions
-                (decided_at, winner_pool, winner_score, runner_up, runner_up_score, candidates, skipped)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (decided_at, winner_pool, winner_score, runner_up, runner_up_score, candidates, skipped, excluded)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             Date.now(),
             best.id,
@@ -700,6 +742,10 @@ async function runCleanupByRanking(db, keypair, connection) {
             runnerUp?.score ?? null,
             JSON.stringify(scored),
             best.score < CLEANUP_MIN_SCORE ? 1 : 0,
+            // Ohne diese Spalte wäre in der Historie später nicht mehr erkennbar, dass ein
+            // höher bewerteter Pool überhaupt angetreten war — winner/runner_up sind seit
+            // dem Guard die besten ZULÄSSIGEN, nicht die bestbewerteten.
+            excluded.length > 0 ? JSON.stringify(excluded) : null,
         );
     } catch (err) {
         console.warn(`[cleanup:ranking] Decision-Log fehlgeschlagen: ${err.message}`);

@@ -40,6 +40,25 @@ do_packages() {
         apt-get update -qq && apt-get install -y -qq "${hilf[@]}"
         command -v crontab &>/dev/null && systemctl enable --now cron >/dev/null 2>&1 || true
     fi
+
+    # Gleiche Kategorie wie der logrotate-Helfer oben: schmale, nicht-invasive
+    # Maßnahme gegen unbegrenztes Plattenwachstum, kein Blind-Install fremder
+    # Software. Fund 2026-08-20: journald hat auf Ubuntu standardmäßig KEIN
+    # SystemMaxUse gesetzt — auf forge-pub1/pub2 wuchs das Journal dadurch
+    # unbeobachtet, bis die Platte knapp wurde. Drop-in statt journald.conf
+    # direkt zu editieren (empfohlener Weg laut deren Kopfkommentar). Idempotent
+    # per reiner Existenzprüfung, bewusst NICHT per Inhaltsvergleich: hat der
+    # Betreiber die Datei nach der Installation selbst angepasst (anderer Wert,
+    # eigener Grund), darf ein erneuter setup.sh-Lauf das nie stillschweigend
+    # zurücksetzen — nur ein völlig fehlender Drop-in gilt als "noch nie gesetzt".
+    local journald_dropin="/etc/systemd/journald.conf.d/forge-retention.conf"
+    if [[ ! -f "$journald_dropin" ]]; then
+        mkdir -p "$(dirname "$journald_dropin")"
+        printf '[Journal]\nSystemMaxUse=500M\n' > "$journald_dropin"
+        systemctl restart systemd-journald >/dev/null 2>&1 || true
+        c_ok "$(t PACKAGES_JOURNALD_LIMIT_SET)"
+    fi
+
     c_ok "$(t PACKAGES_ALL_OK)"
     [[ "$JSON_OUT" -eq 1 ]] && echo '{"ok":true}'
     return 0
@@ -288,6 +307,14 @@ do_config() {
     for f in "$nexus_env" "$settings_env" "$liq" "$lend" "$prem"; do
         set_env_var "$f" FORGE_TZ "$OPT_TIMEZONE"
     done
+
+    # Backend-Sprache (lib/i18n.js, gilt pro Installation, siehe deren Kopfkommentar)
+    # auf dieselbe Wahl setzen wie im Installer (LANG_CODE, select_language_interactive()/
+    # resolve_language() in output.sh) — sonst bräuchte es eine zweite, unabhängige
+    # Sprachwahl nur fürs Backend, die leicht von der Installer-Sprache abweichen könnte.
+    # setLang() schreibt zugleich html/i18n/active.js neu (kein separater Schritt nötig).
+    sudo -u "$INSTALL_USER" node "$APP_DIR/bin/i18n-lang.js" "$LANG_CODE" >/dev/null \
+        || c_warn "$(t CONFIG_LANG_SET_FAILED "$LANG_CODE")"
 
     chown "$INSTALL_USER:$INSTALL_USER" "$ENV_DIR"/*.env 2>/dev/null || true
     chmod 600 "$ENV_DIR"/*.env 2>/dev/null || true

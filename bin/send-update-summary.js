@@ -18,6 +18,8 @@
  */
 
 import { FORGE_TZ } from '../core/config.js';
+import { t, getLang, numLocale } from '../lib/i18n.js';
+import { renderNotification } from '../lib/notify-render.js';
 
 const NEXUS_URL = 'http://127.0.0.1:3100';
 
@@ -34,50 +36,52 @@ function parseArgs(argv) {
     return out;
 }
 
+// msgKey statt fertigem Text (Schritt 5 der Mehrsprachigkeit, siehe
+// lib/notify-render.js): dieses Script schickte bisher rohen deutschen
+// Fließtext an /notify — auf einer EN-Installation blieb die Zusammenfassung
+// nach JEDEM Update trotzdem deutsch, da der zentrale Notify-Endpoint msgKey
+// nicht zur Pflicht macht und ohne ihn `message` unverändert durchreicht.
 function fmtDuration(sec) {
-    if (!Number.isFinite(sec) || sec < 0) return 'unbekannt';
+    if (!Number.isFinite(sec) || sec < 0) return t('cli.upd.unknown_word');
     const m = Math.floor(sec / 60);
     const s = Math.round(sec % 60);
-    if (m === 0) return `${s} Sek.`;
-    return `${m} Min. ${s} Sek.`;
+    if (m === 0) return t('notify.upd.summary_dur_sec', { s });
+    return t('notify.upd.summary_dur_min_sec', { m, s });
 }
 
 function fmtTimestamp(iso) {
     const d = new Date(iso);
-    if (isNaN(d.getTime())) return iso ?? 'unbekannt';
-    return new Intl.DateTimeFormat('de-DE', {
+    if (isNaN(d.getTime())) return iso ?? t('cli.upd.unknown_word');
+    return new Intl.DateTimeFormat(numLocale(), {
         timeZone: FORGE_TZ, day: '2-digit', month: '2-digit', year: 'numeric',
         hour: '2-digit', minute: '2-digit',
     }).format(d);
 }
 
-function buildMessage({ version, startedAt, durationSec, services, problems }) {
-    const lines = [];
-    lines.push(`Das FORGE Update Version ${version ?? 'unbekannt'} wurde eingespielt.`);
-    lines.push('');
-    lines.push(`Beginn: ${fmtTimestamp(startedAt)} Uhr`);
-    lines.push(`Dauer: ${fmtDuration(durationSec)}`);
-    lines.push('');
-    if (services.length > 0) {
-        lines.push('Folgende Dienste wurden neu gestartet:');
-        lines.push('');
-        for (const s of services) lines.push(`* ${s}`);
-    } else {
-        lines.push('Es waren keine Bot-Dienste aktiv, daher wurde keiner neu gestartet.');
-    }
-    lines.push('');
-    if (problems.length === 0) {
-        lines.push('Vom Monitoring wurden keine Auffälligkeiten gemeldet.');
-    } else {
-        lines.push('⚠️ Es wurden Auffälligkeiten festgestellt:');
-        for (const p of problems) lines.push(`* ${p}`);
-    }
-    return lines.join('\n');
+function buildParams({ version, startedAt, durationSec, services, problems }) {
+    const servicesBlock = services.length > 0
+        ? t('notify.upd.summary_services_list', { list: services.map(s => `* ${s}`).join('\n') })
+        : t('notify.upd.summary_no_services');
+    const problemsBlock = problems.length === 0
+        ? t('notify.upd.summary_no_problems')
+        : t('notify.upd.summary_problems_list', { list: problems.map(p => `* ${p}`).join('\n') });
+    return {
+        version:  version ?? t('cli.upd.unknown_word'),
+        started:  fmtTimestamp(startedAt),
+        duration: fmtDuration(durationSec),
+        services: servicesBlock,
+        problems: problemsBlock,
+    };
 }
 
-const args = parseArgs(process.argv.slice(2));
-const message = buildMessage(args);
-const level = args.problems.length > 0 ? 'error' : 'lifecycle';
+const args     = parseArgs(process.argv.slice(2));
+const msgKey   = 'notify.upd.summary';
+const params   = buildParams(args);
+const level    = args.problems.length > 0 ? 'error' : 'lifecycle';
+const message  = renderNotification(
+    { msgKey, params, displayName: 'FORGE Update', timestamp: Date.now() },
+    getLang(),
+);
 
 try {
     const res = await fetch(`${NEXUS_URL}/notify`, {
@@ -88,7 +92,7 @@ try {
             displayName: 'FORGE Update',
             level,
             category:    'system',
-            message,
+            message, msgKey, params,
         }),
         signal: AbortSignal.timeout(5000),
     });

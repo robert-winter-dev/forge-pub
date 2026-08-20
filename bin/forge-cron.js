@@ -25,7 +25,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { spawn } from 'child_process';
-import { openSync, closeSync, mkdirSync, existsSync, readFileSync, writeFileSync,
+import { openSync, closeSync, writeSync, mkdirSync, existsSync, readFileSync, writeFileSync,
          appendFileSync, renameSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join, isAbsolute } from 'path';
@@ -249,7 +249,18 @@ function runJob(job) {
         const child = spawn(job.command, {
             cwd,
             shell: true,
-            stdio: ['ignore', fd, fd],
+            stdio: ['ignore', fd, 'pipe'],
+        });
+
+        // stderr weiterhin ins Job-Log schreiben (wie bisher gemeinsam mit stdout),
+        // zusätzlich die letzten Zeilen puffern – damit ein Absturz mit Exit-Code
+        // sich direkt aus cron-state.json diagnostizieren lässt, ohne das Log
+        // manuell durchsuchen zu müssen (siehe forge-pub#0301).
+        let stderrTail = '';
+        const STDERR_TAIL_MAX = 500;
+        child.stderr.on('data', (chunk) => {
+            try { writeSync(fd, chunk); } catch { /* Log darf nie den Lauf killen */ }
+            stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_MAX);
         });
 
         const finish = (exitCode, errMsg) => {
@@ -277,6 +288,7 @@ function runJob(job) {
         child.on('error', (err) => finish(null, `Startfehler: ${err.message}`));
         child.on('close', (code, signal) => {
             if (signal) finish(null, `beendet durch Signal ${signal}`);
+            else if (code !== 0 && stderrTail.trim()) finish(code, stderrTail.trim().slice(-300));
             else finish(code, null);
         });
     });

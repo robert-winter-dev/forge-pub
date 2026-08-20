@@ -5,7 +5,7 @@
     const { EarningsToast }     = await import('./earnings-toast.js?v=20260720a');
     const { renderNotifItem }   = await import('./notifications.js');
     const { NotifHub }          = await import('./notif-hub.js?v=20260720a');
-    const { initMessageBell }   = await import('./message-bell.js?v=20260816a');
+    const { initMessageBell }   = await import('./message-bell.js?v=20260818a');
     const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260816a');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
@@ -490,7 +490,7 @@
 
             return `<tr>
                 <td><a href="${r.href}" class="bt-name">${r.label}</a></td>
-                <td><span class="bt-val">${g}</span></td>
+                <td><span class="${pCls}">${g}</span></td>
                 <td><span class="${pCls}">${pTxt}</span></td>
                 <td><span class="${aCls}">${aTxt}</span></td>
             </tr>`;
@@ -502,14 +502,14 @@
 
         const tgEl = document.getElementById('totalGesamt');
         const tpEl = document.getElementById('totalProfit');
-        if (tgEl) tgEl.textContent = fmt2(totalGesamt) + '\u00A0USDC';
+        const totalProfitRounded = Math.round(totalProfit * 100) / 100;
+        const totalCls = totalProfitRounded === 0 ? 'bt-val' : totalProfit >= 0 ? 'bt-pos' : 'bt-neg';
+        if (tgEl) tgEl.innerHTML = `<span class="${totalCls}">${fmt2(totalGesamt)}\u00A0USDC</span>`;
         if (tpEl) {
-            const totalProfitRounded = Math.round(totalProfit * 100) / 100;
-            const cls = totalProfitRounded === 0 ? 'bt-val' : totalProfit >= 0 ? 'bt-pos' : 'bt-neg';
             const txt = totalProfitRounded === 0
                 ? '0,00\u00A0USDC'
                 : (totalProfit >= 0 ? '+' : '') + fmt2(totalProfit) + '\u00A0USDC';
-            tpEl.innerHTML = `<span class="${cls}">${txt}</span>`;
+            tpEl.innerHTML = `<span class="${totalCls}">${txt}</span>`;
         }
     }
 

@@ -11,6 +11,7 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
+import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml } from '/forge/js/scam-tab.js?v=20260819f';
 
 // 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
 // Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
@@ -1245,7 +1246,7 @@ async function _refreshWalletMonitor(card, el) {
  *   null         → kein Haken/Kreuz, normale Textfarbe (z.B. Premium deaktiviert
  *                   oder noch keine SOL-Daten vorhanden)
  */
-function _walletRowHtml(label, balance, status = null) {
+function _walletRowHtml(label, balance, status = null, scam = null) {
     const amountText = balance?.recorded_at
         ? `${(balance.total_usd ?? 0).toFixed(2)} USDC`
         : '<span class="wat-muted">' + tr('sb.no_data_click_refresh', 'noch keine Daten – auf Aktualisieren klicken') + '</span>';
@@ -1259,7 +1260,7 @@ function _walletRowHtml(label, balance, status = null) {
 
     return `
         <tr>
-            <td class="wat-label">${_esc(label)}</td>
+            <td class="wat-label">${_esc(label)}${scamInfoIconHtml(scam?.tokens)}</td>
             <td class="wat-info">${infoHtml}</td>
             <td class="wat-action">
                 <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
@@ -1276,6 +1277,9 @@ async function _renderWallet(el) {
             fetch('/api/addresses'),
             fetch('/api/wallet/premium/info'),
         ]);
+        // Auffällige Token: die Route rechnet nur aus der wallet-monitor-DB,
+        // kein RPC- und kein Jupiter-Call beim Öffnen der Seite.
+        const scamLiquidity = await fetchScamTokens('liquidity');
         if (!infoRes.ok) throw new Error(tr('sb.wallet_info_failed', 'Wallet-Info konnte nicht geladen werden (HTTP {status})', { status: infoRes.status }));
         if (!balRes.ok) throw new Error(tr('sb.wallet_balance_failed', 'Wallet-Bestand konnte nicht geladen werden (HTTP {status})', { status: balRes.status }));
         if (!addrRes.ok) throw new Error(tr('sb.addrbook_failed', 'Adressbuch konnte nicht geladen werden (HTTP {status})', { status: addrRes.status }));
@@ -1288,7 +1292,9 @@ async function _renderWallet(el) {
         // (Master oder Fork ohne Wallet → premiumInfo.available === false).
         let premiumBalance = null;
         let premiumEnabled = false;
+        let scamPremium    = null;
         if (premiumInfo.available) {
+            scamPremium = await fetchScamTokens('premium');
             try {
                 const [balR, statR] = await Promise.all([
                     fetch('/api/wallet/premium/balance'),
@@ -1318,8 +1324,8 @@ async function _renderWallet(el) {
             </div>
             <table class="wallet-action-table">
                 <tbody>
-                    ${_walletRowHtml(tr('nav.liquidity', 'Liquidity Bot'), balance, liquidityStatus)}
-                    ${premiumInfo.available ? _walletRowHtml(tr('sliq.premium_service', 'Premium Service'), premiumBalance, premiumStatus) : ''}
+                    ${_walletRowHtml(tr('nav.liquidity', 'Liquidity Bot'), balance, liquidityStatus, scamLiquidity)}
+                    ${premiumInfo.available ? _walletRowHtml(tr('sliq.premium_service', 'Premium Service'), premiumBalance, premiumStatus, scamPremium) : ''}
                     <tr>
                         <td class="wat-label">${tr('sb.last_check', 'Letzter Check')}</td>
                         <td class="wat-info">${_esc(_formatLastCheck(lastCheckMs))}</td>
@@ -1347,7 +1353,7 @@ async function _renderWallet(el) {
                 if (balR.ok)  freshBalance = await balR.json();
                 if (addrR.ok) freshAddrs   = await addrR.json();
             } catch { /* Fallback auf zuletzt geladenen Stand */ }
-            _openWalletManageModal('liquidity', el, freshInfo, freshBalance, freshAddrs);
+            await _openWalletManageModal('liquidity', el, freshInfo, freshBalance, freshAddrs);
         });
 
         if (premiumInfo.available) {
@@ -1363,7 +1369,7 @@ async function _renderWallet(el) {
                     if (balR.ok)  freshBalance = await balR.json();
                     if (addrR.ok) freshAddrs   = await addrR.json();
                 } catch { /* Fallback auf zuletzt geladenen Stand */ }
-                _openWalletManageModal('premium', el, freshInfo, freshBalance, freshAddrs);
+                await _openWalletManageModal('premium', el, freshInfo, freshBalance, freshAddrs);
             });
         }
 
@@ -1391,8 +1397,52 @@ function _walletMonitorShape(balance) {
     };
 }
 
+
+const SCAM_INVISIBLE_RE = /[\u200B-\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g;
+
+// ── „Verschieben" aus dem Reiter „Auffällig" ─────────────────────────────────
+//
+// Öffnet bewusst KEIN eigenes Formular, sondern den vorhandenen Senden-Reiter:
+// Adressbuch, Betragsfeld und Rückmeldungen sind dort schon gebaut und dem Nutzer
+// vertraut. Der Token wird als zusätzliche Option in die Auswahl gehängt und trägt
+// seinen Mint an der Option — daran erkennt der Sende-Knopf, dass er die
+// Verschiebe-Route nehmen muss statt der regulären.
+function _openMoveInSendTab(modalEl, tk) {
+    const tabBtn = modalEl.querySelector('.wb-tab[data-wb="senden"]');
+    tabBtn?.click();
+
+    const sel = modalEl.querySelector('#wm-token');
+    if (!sel) return;
+
+    const symbol = (tk.symbol ?? '').replace(SCAM_INVISIBLE_RE, '').trim() || tk.mint.slice(0, 8) + '…';
+
+    let opt = sel.querySelector(`option[data-mint="${CSS.escape(tk.mint)}"]`);
+    if (!opt) {
+        opt = document.createElement('option');
+        opt.value           = symbol;
+        opt.dataset.mint    = tk.mint;
+        opt.dataset.bal     = String(tk.balance ?? 0);
+        opt.textContent     = `${symbol} (${_fmt(tk.balance ?? 0)})`;
+        sel.appendChild(opt);
+    }
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event('change'));
+
+    // Voller Bestand vorbelegt — der Sinn der Aktion ist, ihn loszuwerden.
+    const amountInp = modalEl.querySelector('#wm-amount');
+    if (amountInp) amountInp.value = String(tk.balance ?? 0);
+
+    const fb = modalEl.querySelector('#wm-send-feedback');
+    if (fb) {
+        fb.textContent = tr('scam.move_hint', 'Auffälliger Token – wird an die gewählte Adresse verschoben, nicht gelöscht.');
+        fb.className   = 'modal-feedback';
+    }
+}
+
 // ── Kombiniertes Wallet-Modal: Guthaben / Senden / Empfangen / Private Key ───
-function _openWalletManageModal(flavor, el, info, balance, addrs) {
+async function _openWalletManageModal(flavor, el, info, balance, addrs) {
+    // Rein aus der DB gerechnet – kein externer Abruf beim Öffnen des Modals.
+    const scam = await fetchScamTokens(flavor);
     const mid   = `${flavor}-wallet-modal`;
     const title = flavor === 'premium' ? tr('sliq.manage_premium_wallet', 'Premium-Wallet verwalten') : tr('sb.manage_wallet', 'Wallet verwalten');
     const tokens = [
@@ -1411,6 +1461,7 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
                 <button class="wb-tab" data-wb="senden">${tr('msg.send', 'Senden')}</button>
                 <button class="wb-tab" data-wb="empfangen">${tr('sb.receive', 'Empfangen')}</button>
                 <button class="wb-tab" data-wb="key">${tr('sb.private_key', 'Private Key')}</button>
+                <button class="wb-tab" data-wb="scam">${tr('scam.tab', 'Auffällig')}${(scam.tokens ?? []).length ? ` (${scam.tokens.length})` : ''}</button>
             </div>
             <div id="wb-tab-guthaben">${buildWalletDetailHtml(_walletMonitorShape(balance))}</div>
             <div id="wb-tab-senden" hidden>
@@ -1419,7 +1470,8 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
                 <div class="bot-actions" id="wm-send-actions" style="margin-top:0.6rem;"></div>
             </div>
             <div id="wb-tab-empfangen" hidden>${_buildReceivePanelHtml(flavor, info)}</div>
-            <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(flavor, info)}</div>`,
+            <div id="wb-tab-key" hidden>${_buildKeyPanelHtml(flavor, info)}</div>
+            <div id="wb-tab-scam" hidden>${buildScamTabHtml(scam)}</div>`,
         footerNote: '<span id="wb-footer-note">' + tr('sb.value_gt_zero', 'Wert &gt; 0,00 USDC') + '</span>',
         actions: [
             { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
@@ -1436,6 +1488,7 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
             modalEl.querySelector('#wb-tab-senden').hidden    = btn.dataset.wb !== 'senden';
             modalEl.querySelector('#wb-tab-empfangen').hidden = btn.dataset.wb !== 'empfangen';
             modalEl.querySelector('#wb-tab-key').hidden       = btn.dataset.wb !== 'key';
+            modalEl.querySelector('#wb-tab-scam').hidden      = btn.dataset.wb !== 'scam';
             const note = modalEl.querySelector('#wb-footer-note');
             if (note) note.hidden = btn.dataset.wb !== 'guthaben';
         });
@@ -1444,6 +1497,10 @@ function _openWalletManageModal(flavor, el, info, balance, addrs) {
     _wireSendPanel(modalEl, flavor, tokens, addrs);
     _wireReceivePanel(modalEl, info);
     _wireKeyPanel(modalEl, flavor, mid, el, info);
+    // Nach einem Löschvorgang Modal schließen und die Karte neu aufbauen — sonst
+    // stünde der eben entfernte Token weiter in der Liste.
+    wireScamTab(modalEl, flavor, scam, () => { closeModal(mid); _renderWallet(el); },
+                tk => _openMoveInSendTab(modalEl, tk));
 }
 
 // ── Reiter "Empfangen": Adresse + QR-Code (wie bisheriges Einzahlen-Modal) ───
@@ -1879,11 +1936,23 @@ function _wireSendPanel(modalEl, flavor, tokens, initialAddrs) {
             fb.textContent   = tr('sb.tx_sending', 'Transaktion wird gesendet…');
             fb.className     = 'modal-feedback';
 
+            // Auffällige Token tragen ihren Mint an der Option. Sie gehen über eine
+            // eigene Route: der reguläre Sende-Pfad löst den Mint über das Symbol aus
+            // der Token-Registry auf, kennt nur das Legacy-Token-Programm und benutzt
+            // die veraltete Transfer-Instruktion — für diese Token alles untauglich.
+            const scamMint = tokenSel?.options[tokenSel.selectedIndex]?.dataset.mint || null;
+            const endpoint = scamMint
+                ? `/api/wallet/${flavor}/scam/move`
+                : `/api/wallet/${flavor}/send`;
+            const payload  = scamMint
+                ? { mint: scamMint, amount, toAddress }
+                : { symbol, amount, toAddress };
+
             try {
-                const res  = await fetch(`/api/wallet/${flavor}/send`, {
+                const res  = await fetch(endpoint, {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({ symbol, amount, toAddress }),
+                    body:    JSON.stringify(payload),
                 });
                 const data = await res.json();
 

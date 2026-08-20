@@ -454,6 +454,19 @@ function migrateSchema(db) {
         db.exec(`ALTER TABLE transactions ADD COLUMN tx_fee_sol REAL`);
     }
 
+    // Invest-Guard (2026-08-20): Kandidaten, die TVL-Schutz/Score-Limit vor dem Sortieren
+    // aus der Rangliste geworfen haben. Ohne diese Spalte ist in der Historie später nicht
+    // mehr erkennbar, dass ein höher bewerteter Pool angetreten war — winner_pool ist seit
+    // dem Guard der beste ZULÄSSIGE, nicht der bestbewertete Pool.
+    const cdTables = db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all().map(t => t.name);
+    if (cdTables.includes('cleanup_decisions')) {
+        const cdCols = db.prepare(`PRAGMA table_info(cleanup_decisions)`).all().map(c => c.name);
+        if (!cdCols.includes('excluded')) {
+            db.exec(`ALTER TABLE cleanup_decisions ADD COLUMN excluded TEXT`);
+            console.log('[db] Migration: cleanup_decisions.excluded ergänzt.');
+        }
+    }
+
     // Phase 5 (v0.3.47): portfolio_history.wallet_sol/wallet_usdc/sol_price entfernen.
     // Single Source of Truth für Wallet-Werte ist jetzt wallet-monitor.db. Die alten
     // Spalten waren eine zweite, oft veraltete Wallet-Quelle und Ursache wiederkehrender
@@ -1101,8 +1114,9 @@ function migrateSchema(db) {
                 winner_score    REAL    NOT NULL,
                 runner_up       TEXT,
                 runner_up_score REAL,
-                candidates      TEXT    NOT NULL,  -- JSON: [{id, score, hopiumVeto}]
-                skipped         INTEGER NOT NULL DEFAULT 0  -- 1 wenn min_score nicht erreicht
+                candidates      TEXT    NOT NULL,  -- JSON: [{id, score, hopiumVeto}] – nur ZULÄSSIGE
+                skipped         INTEGER NOT NULL DEFAULT 0, -- 1 wenn min_score nicht erreicht
+                excluded        TEXT    -- JSON: [{id, score, rule, reason, ...}] vom Invest-Guard verworfen
             );
             CREATE INDEX idx_cleanup_decisions_time
                 ON cleanup_decisions(decided_at DESC);

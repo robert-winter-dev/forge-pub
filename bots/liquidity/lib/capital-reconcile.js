@@ -237,9 +237,11 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
             if (deltas.length === 0) continue;   // berührt die Vaults nicht (z.B. reine Metadaten-TX)
 
             const isInflow = deltas.every(d => d.delta >= 0);
-            const flag = (reason) => {
+            // `location` sagt der Notification, wo das Kapital gerade liegt (wallet vs.
+            // position) — Grundlage für die passende Handlungsaufforderung in notify.js.
+            const flag = (reason, location) => {
                 log(`[reconcile] ⚠ ${pool.pair}: ${s.signature.slice(0, 12)}… nicht gebucht – ${reason}`);
-                flagged.push({ poolId: pool.id, pair: pool.displayPair ?? pool.pair, txHash: s.signature, whenMs, reason });
+                flagged.push({ poolId: pool.id, pair: pool.displayPair ?? pool.pair, txHash: s.signature, whenMs, reason, location });
             };
 
             if (!isInflow) {
@@ -262,20 +264,21 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
                 if (explained) continue;
 
                 // Abfluss: decreaseLiquidity und collectFees sind on-chain nicht
-                // unterscheidbar (siehe Dateikopf). Nicht raten.
-                flag('Abfluss aus dem Pool – Entnahme und Fee-Claim sind on-chain nicht unterscheidbar, bitte manuell zuordnen');
+                // unterscheidbar (siehe Dateikopf). Nicht raten. Das Kapital selbst ist in
+                // beiden Fällen in der Wallet gelandet, nur die Buchung ist offen.
+                flag('es lässt sich nicht sicher unterscheiden, ob es eine normale Entnahme oder eine Gebühren-Auszahlung war', 'wallet');
                 continue;
             }
 
             const jump = snapshotJump(db, pool.id, whenMs);
             if (!jump) {
-                flag('kein Snapshot-Paar eng genug um die TX – Wert nicht belastbar bestimmbar');
+                flag('der genaue Wert lässt sich gerade nicht zuverlässig bestimmen', 'position');
                 continue;
             }
             if (jump.usd <= 0) {
                 // Zufluss on-chain, aber der Positionswert ist nicht gestiegen —
                 // die beiden Quellen widersprechen sich, das muss ein Mensch ansehen.
-                flag(`Zufluss on-chain, aber Wertsprung ${jump.usd.toFixed(2)} USDC – widersprüchlich`);
+                flag(`on-chain kam Kapital in den Pool, der Positionswert ist aber nicht im gleichen Maß gestiegen (${jump.usd.toFixed(2)} USDC) – die Zahlen passen nicht zusammen`, 'position');
                 continue;
             }
             if (jump.usd < MIN_BOOKABLE_USD) continue;   // Staub
@@ -328,7 +331,7 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
             if (seen[f.txHash]) continue;
             seen[f.txHash] = Date.now();
             const pool = poolsById instanceof Map ? poolsById.get(f.poolId) : poolsById?.[f.poolId];
-            if (pool) await notify.capitalFlowNeedsReview(pool, { txHash: f.txHash, whenMs: f.whenMs, reason: f.reason });
+            if (pool) await notify.capitalFlowNeedsReview(pool, { txHash: f.txHash, whenMs: f.whenMs, reason: f.reason, location: f.location });
         }
         saveSeen(seen);
     }

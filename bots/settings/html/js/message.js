@@ -1,10 +1,18 @@
 /**
  * FORGE Message Center – Postfach mit Rubriken-Reitern und Zwei-Spalten-Ansicht
  *
- * Rubriken: System (read-only Spiegel der Notifications aus nexus.db), Premium
- * (humanisierte Premium-Protokoll-Nachrichten, kein JSON-Rohtext), Support
- * (Nostr-DM-Inbox, einzige Rubrik in der man selbst schreiben kann) sowie
- * Einstellungen (Sound/Popups + Nostr-Identität).
+ * Rubriken (Zuschnitt seit 2026-08-18):
+ *   System  – Updates und Kern-Meldungen aus nexus.db, Absender "System".
+ *   Bots    – alles, was einen der beiden Bots betrifft (inkl. der SOL-Guthaben-
+ *             Alerts des Wallet-Monitors), Absender "Liquidity Bot"/"Lending Bot".
+ *             Start-/Stop-Meldungen sind hier bewusst ausgenommen.
+ *   Support – Nostr-DM-Verkehr mit dem FORGE Master, einzige Rubrik in der man
+ *             selbst schreiben kann.
+ *   Premium – Ereignisse rund um den Premium-Service, Absender "FORGE Master".
+ * Dazu Einstellungen (Sound/Popups + Nostr-Identität) als eigenes Vollbreite-Panel.
+ *
+ * System und Bots teilen sich dieselbe Datenquelle (Notifications in nexus.db) und
+ * denselben Code-Pfad – getrennt wird serverseitig, siehe routes/messages.js.
  *
  * Umbau 2026-08-16 – drei Änderungen gegenüber der Vorversion:
  *   1. Zwischen System/Support/Premium wird über Reiter direkt unter dem Header
@@ -32,10 +40,14 @@ import { showToast } from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal } from '/forge/js/modal.js?v=20260731a';
 import {
     initMessageBell, isNotifyEnabled, loadNotifySettings, setNotifyEnabled, getOldestUnreadCategory,
-} from '/forge/js/message-bell.js?v=20260816a';
+} from '/forge/js/message-bell.js?v=20260818a';
 
 // Rubriken mit Nachrichtenliste (= Reiter) und die reine Einstellungen-Ansicht.
-const TABS        = ['system', 'support', 'premium'];
+// Reihenfolge = Reihenfolge der Reiter in message.html.
+const TABS        = ['system', 'bots', 'support', 'premium'];
+// Rubriken, die aus den Nexus-Notifications gespeist werden (dieselbe Tabelle,
+// serverseitig in zwei disjunkte Mengen getrennt – siehe routes/messages.js).
+const NOTIF_TABS  = ['system', 'bots'];
 const VALID_MENUS = [...TABS, 'einstellungen'];
 const hashMenu    = location.hash.slice(1);
 const initialMenu = VALID_MENUS.includes(hashMenu) ? hashMenu : 'system';
@@ -119,11 +131,15 @@ function debounce(fn, delay = 250) {
  *                      Ausgehend: eigener Nick → Nick der Gegenstelle.
  *   Interne Meldung  → Absender immer "FORGE Public" (diese Instanz hat sie
  *                      erzeugt), Empfänger immer der Nick des Nutzers.
- *   Ausnahme System  → Absender ist NICHT "FORGE Public", sondern der Name des
- *                      betroffenen Bots (`n.botName`) — siehe openSystemMessage().
- *                      Grund: bei System-Meldungen ist der Urheber (Liquidity Bot/
- *                      Lending Bot/FORGE-Kern) die relevante Information, nicht die
- *                      Instanz-Identität.
+ *   Ausnahme System/Bots → Absender ist NICHT "FORGE Public", sondern der Name des
+ *                      Urhebers (`n.botName`: "Liquidity Bot"/"Lending Bot" in der
+ *                      Rubrik Bots, "System" in der Rubrik System) — siehe
+ *                      openSystemMessage(). Grund: hier ist der Urheber die
+ *                      relevante Information, nicht die Instanz-Identität.
+ *   Ausnahme Premium → Absender ist "FORGE Master" (Vorgabe 2026-08-18), auch bei
+ *                      lokal protokollierten Ereignissen wie einer ausgeführten
+ *                      Zahlung. Die Rubrik bildet die Premium-Beziehung zum Master
+ *                      ab; "FORGE Public" hätte den Nutzer auf sich selbst verwiesen.
  *
  * Die npub steht nur noch gekürzt in der geöffneten Nachricht (peerLabelWithNpub),
  * nie in der Liste – für den Nutzer ist sie dort keine brauchbare Information,
@@ -131,7 +147,6 @@ function debounce(fn, delay = 250) {
  */
 function myNick()   { return currentAlias || tr('msg.forge_public_user', 'FORGE Public User'); }
 function peerNick(name) { return name || tr('msg.forge_master', 'FORGE Master'); }
-function forgePublic()  { return tr('msg.forge_public', 'FORGE Public'); }
 
 /**
  * "Von"/"An"-Zeilen der Detailansicht. Bei Nostr-Nachrichten steht die gekürzte
@@ -152,7 +167,7 @@ function metaHtml(rows) {
 }
 
 // ── Zustand ──────────────────────────────────────────────────────────────────
-let activeMenu   = null;   // 'system' | 'support' | 'premium' | 'einstellungen'
+let activeMenu   = null;   // 'system' | 'bots' | 'support' | 'premium' | 'einstellungen'
 let activeKey    = null;   // Schlüssel des rechts geöffneten Eintrags (siehe listItems())
 let activePeer   = null;   // Support: Gegenstelle des offenen Verlaufs
 let activeThreadId = null; // Support: Anliegen (thread_id) des offenen Verlaufs, null = alter Sammel-Thread
@@ -163,10 +178,17 @@ let currentAlias = null;
 // allein, ob beim Verfassen eine freie npub-Eingabe erscheint – siehe openCompose().
 let isMasterIdentity = false;
 
-// System: serverseitiges Fenster, wird beim Scrollen verlängert.
-let systemItems   = [];
-let systemHasMore = false;
-let systemSearchQuery = '';
+// System/Bots: serverseitiges Fenster, wird beim Scrollen verlängert. Beide
+// Rubriken lesen dieselbe Tabelle (nexus.db), der Server liefert je Rubrik die
+// passende Teilmenge – Fenster, Suche und Ungelesen-Zähler laufen deshalb getrennt.
+const notifScopes = {
+    system: { endpoint: '/api/messages/system', items: [], hasMore: false, search: '' },
+    bots:   { endpoint: '/api/messages/bots',   items: [], hasMore: false, search: '' },
+};
+/** true für die beiden Notification-Rubriken (System/Bots). */
+function isNotifTab(name) { return NOTIF_TABS.includes(name); }
+/** Zustand der aktiven Notification-Rubrik. */
+function notif() { return notifScopes[activeMenu]; }
 // Premium/Support: vollständige Liste im Cache (max. 100), clientseitig eingeblendet.
 let premiumCache = [];
 let premiumShown = PAGE_SIZE;
@@ -187,10 +209,11 @@ const elSearch   = document.getElementById('mcSearchInput');
 // siehe notify-db.js) statt im localStorage – unreadCount kommt fertig aus
 // /api/messages/system. Damit sind Brief-Icon, Reiter-Zähler und Nav-Badge
 // automatisch synchron, auch über mehrere Geräte hinweg.
-const unreadCounts = { system: 0, support: 0, premium: 0 };
+const unreadCounts = { system: 0, bots: 0, support: 0, premium: 0 };
 
 const TAB_COUNT_EL = {
     system:  document.getElementById('mcTabCountSystem'),
+    bots:    document.getElementById('mcTabCountBots'),
     support: document.getElementById('mcTabCountSupport'),
     premium: document.getElementById('mcTabCountPremium'),
 };
@@ -208,7 +231,7 @@ function setUnread(key, n) {
         el.textContent = String(unreadCounts[key]);
         el.hidden = unreadCounts[key] === 0;
     }
-    setNavBadge('message-inbox', unreadCounts.system + unreadCounts.support + unreadCounts.premium);
+    setNavBadge('message-inbox', TABS.reduce((sum, k) => sum + unreadCounts[k], 0));
 }
 
 async function markSystemRead(ids) {
@@ -224,12 +247,14 @@ async function markSystemRead(ids) {
 
 async function refreshBadges() {
     await loadNotifySettings();
-    try {
-        // limit=1: es geht hier nur um unreadCount, nicht um die Zeilen selbst.
-        const r = await fetch('/api/messages/system?limit=1');
-        const { unreadCount } = await r.json();
-        setUnread('system', unreadCount ?? 0);
-    } catch { setUnread('system', 0); }
+    for (const scope of NOTIF_TABS) {
+        try {
+            // limit=1: es geht hier nur um unreadCount, nicht um die Zeilen selbst.
+            const r = await fetch(`${notifScopes[scope].endpoint}?limit=1`);
+            const { unreadCount } = await r.json();
+            setUnread(scope, unreadCount ?? 0);
+        } catch { setUnread(scope, 0); }
+    }
     try {
         const r = await fetch('/api/messages/support/unread-count');
         const { unread } = await r.json();
@@ -271,7 +296,8 @@ function selectMenu(name, { keepSelection = false } = {}) {
     if (changed) {
         // Suche ist bewusst je Rubrik eigenständig – ein Suchbegriff aus der
         // Systemliste ergibt im Support-Postfach selten Sinn.
-        elSearch.value = { system: systemSearchQuery, support: supportSearchQuery, premium: premiumSearchQuery }[name] ?? '';
+        elSearch.value = (isNotifTab(name) ? notifScopes[name].search
+            : { support: supportSearchQuery, premium: premiumSearchQuery }[name]) ?? '';
         elList.scrollTop = 0;
         renderPanePlaceholder();
     }
@@ -307,13 +333,17 @@ const refreshBellBadge = initMessageBell({
  * in der Liste, sondern in der Detailansicht rechts, wo Platz dafür ist.
  */
 function listItems() {
-    if (activeMenu === 'system') {
-        return systemItems.map(n => ({
+    if (isNotifTab(activeMenu)) {
+        return notif().items.map(n => ({
             key:     `s${n.id}`,
             unread:  !n.read,
-            from:    n.botName || n.botId || forgePublic(),
+            from:    n.botName || n.botId || tr('nav.message.system', 'System'),
             time:    n.timestamp,
-            level:   n.level === 'lifecycle' ? '' : (LEVEL_LABEL[n.level] ?? n.level),
+            // Auch "lifecycle" bekommt sein Label (seit 2026-08-18 "Info"): sonst
+            // stünde die Meldungsart hier allein in der Abwesenheit des Badges —
+            // eine Kodierung, die niemand liest. Solange das Label "Status" hieß
+            // und nichts aussagte, war das Weglassen vertretbar.
+            level:   LEVEL_LABEL[n.level] ?? n.level,
             // Pool-Bezug steht seit 2026-08-08 im Betreff statt beim Absender. Bei
             // Pool-Meldungen ersetzt "Pool <Pair>:" das Level – welcher Pool betroffen
             // ist, wiegt hier schwerer als die Art der Meldung.
@@ -330,7 +360,7 @@ function listItems() {
             // hat diese Instanz selbst erzeugt (ausgehende DM: eigener Nick;
             // lokales Ereignis ohne Gegenstelle, z.B. eine ausgeführte Zahlung:
             // "FORGE Public").
-            from:    m.peerPubkey ? (m.direction === 'in' ? peerNick(m.peerName) : myNick()) : forgePublic(),
+            from:    m.peerPubkey ? (m.direction === 'in' ? peerNick(m.peerName) : myNick()) : peerNick(null),
             time:    m.timestamp,
             level:   '',
             subject: stripEmoji(m.summary),
@@ -347,13 +377,14 @@ function listItems() {
 }
 
 function hasMore() {
-    if (activeMenu === 'system')  return systemHasMore;
+    if (isNotifTab(activeMenu))   return notif().hasMore;
     if (activeMenu === 'premium') return premiumShown < filteredPremium().length;
     return supportShown < filteredSupport().length;
 }
 
 const EMPTY_TEXT = {
     system:  () => tr('msg.no_system_notifications', 'Keine System-Benachrichtigungen.'),
+    bots:    () => tr('msg.no_bot_notifications', 'Keine Bot-Meldungen.'),
     premium: () => tr('msg.no_premium_messages', 'Noch keine Premium-Nachrichten.'),
     support: () => tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.'),
 };
@@ -396,10 +427,11 @@ async function loadMore() {
     if (loadingMore || !hasMore()) return;
     loadingMore = true;
     try {
-        if (activeMenu === 'system') {
-            const data = await fetchSystem({ offset: systemItems.length, limit: PAGE_SIZE });
-            systemItems   = systemItems.concat(data.notifications ?? []);
-            systemHasMore = !!data.hasMore;
+        if (isNotifTab(activeMenu)) {
+            const st   = notif();
+            const data = await fetchNotifications({ offset: st.items.length, limit: PAGE_SIZE });
+            st.items   = st.items.concat(data.notifications ?? []);
+            st.hasMore = !!data.hasMore;
         } else if (activeMenu === 'premium') {
             premiumShown += PAGE_SIZE;
         } else {
@@ -423,16 +455,17 @@ elList.addEventListener('scroll', () => {
  */
 async function reloadActiveList({ reset = false } = {}) {
     await loadNotifySettings();
-    if (activeMenu === 'system') {
-        if (reset) systemItems = [];
-        const limit = Math.max(PAGE_SIZE, systemItems.length);
-        const data  = await fetchSystem({ offset: 0, limit });
-        systemItems   = data.notifications ?? [];
-        systemHasMore = !!data.hasMore;
+    if (isNotifTab(activeMenu)) {
+        const st = notif();
+        if (reset) st.items = [];
+        const limit = Math.max(PAGE_SIZE, st.items.length);
+        const data  = await fetchNotifications({ offset: 0, limit });
+        st.items   = data.notifications ?? [];
+        st.hasMore = !!data.hasMore;
         // Bei aktiver Suche zählt der Server nur die Treffer – als Rubrik-Zähler wäre
         // das falsch (er soll alle ungelesenen zeigen, nicht die im Filter). Dann
         // übernimmt refreshBadges() den ungefilterten Wert.
-        if (!systemSearchQuery) setUnread('system', data.unreadCount ?? 0);
+        if (!st.search) setUnread(activeMenu, data.unreadCount ?? 0);
     } else if (activeMenu === 'premium') {
         if (reset) premiumShown = PAGE_SIZE;
         premiumCache = await fetchPremium();
@@ -446,7 +479,7 @@ async function reloadActiveList({ reset = false } = {}) {
 
 elSearch.addEventListener('input', debounce((e) => {
     const q = e.target.value.trim();
-    if (activeMenu === 'system')       { systemSearchQuery = q; }
+    if (isNotifTab(activeMenu))        { notif().search = q; }
     else if (activeMenu === 'premium') { premiumSearchQuery = q; }
     else                               { supportSearchQuery = q; }
     elList.scrollTop = 0;
@@ -454,21 +487,21 @@ elSearch.addEventListener('input', debounce((e) => {
 }));
 
 // ── Datenquellen ─────────────────────────────────────────────────────────────
-async function fetchSystem({ offset = 0, limit = PAGE_SIZE } = {}) {
+async function fetchNotifications({ offset = 0, limit = PAGE_SIZE, scope = activeMenu } = {}) {
     try {
         const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
-        if (systemSearchQuery) params.set('q', systemSearchQuery);
-        const r = await fetch(`/api/messages/system?${params}`);
+        if (notifScopes[scope].search) params.set('q', notifScopes[scope].search);
+        const r = await fetch(`${notifScopes[scope].endpoint}?${params}`);
         return await r.json();
     } catch {
         return { notifications: [], hasMore: false, allIds: [], unreadCount: 0 };
     }
 }
 
-/** Vollständige, ungefilterte ID-Liste – Grundlage für "alle als gelesen". */
-async function fetchAllSystemIds() {
+/** Vollständige, ungefilterte ID-Liste der Rubrik – Grundlage für "alle als gelesen". */
+async function fetchAllNotificationIds(scope = activeMenu) {
     try {
-        const r = await fetch('/api/messages/system?limit=1');
+        const r = await fetch(`${notifScopes[scope].endpoint}?limit=1`);
         const { allIds } = await r.json();
         return allIds ?? [];
     } catch { return []; }
@@ -541,11 +574,16 @@ function stripEmoji(text) {
         .trim();
 }
 
+// "lifecycle" ist eine Zustellklasse des Nexus (immer Telegram, kein Dedup —
+// siehe core/nexus/server.js), keine eigene Meldungsart für den Leser: eine
+// eingespielte Aktualisierung oder ein Bot-Start ist für ihn schlicht eine
+// Information. Es trägt deshalb dasselbe Label wie "info"; das frühere "Status"
+// sagte nicht, was gemeint war (Betreiber-Vorgabe 2026-08-18).
 const LEVEL_LABEL = {
     info:      tr('msg.level_info',  'Info'),
     warn:      tr('msg.level_warn',  'Warnung'),
     error:     tr('msg.level_error', 'Fehler'),
-    lifecycle: tr('set.status',      'Status'),
+    lifecycle: tr('msg.level_info',  'Info'),
 };
 
 // ── Detailansicht (rechte Spalte) ────────────────────────────────────────────
@@ -586,7 +624,7 @@ function openKey(key) {
  * für einen Nicht-Techniker weder Art noch Urheber der Meldung erkennbar.
  */
 function openSystemMessage(id) {
-    const n = systemItems.find(x => x.id === id);
+    const n = notif().items.find(x => x.id === id);
     if (!n) return;
     if (!n.read) {
         n.read = true;
@@ -613,7 +651,7 @@ function openSystemMessage(id) {
                 [tr('msg.to',   'An'),  esc(myNick())],
                 [tr('msg.date', 'Datum'), esc(fmtDateTimeLong(n.timestamp))],
             ])}
-            <div class="mc-detail-text">${esc(stripEmoji(stripNotifyHeader(n.message)))}</div>
+            ${n.riskExit ? riskExitHtml(n.riskExit) : `<div class="mc-detail-text">${esc(stripEmoji(stripNotifyHeader(n.message)))}</div>`}
         </div>`;
 
     elPane.querySelector('#msgForwardBtn').addEventListener('click', () => confirmForwardSystemMessage(n));
@@ -624,12 +662,38 @@ function openSystemMessage(id) {
 }
 
 /**
- * Eigene Darstellung für automatische Zahlungen (m.payment gesetzt, siehe
- * core/premium/server.js humanizePremiumMessage() Fall 'premium-payment'):
- * strukturierte Zeilen statt Fließtext, damit die TX als klickbarer
- * Block-Explorer-Link dargestellt werden kann. Empfängeradresse bewusst ungekürzt
- * (passt ohne Umbruch), die deutlich längere TX-Signatur auf etwa Adresslänge gekürzt.
+ * Eigene Darstellung für Risk-Management-Exits (n.riskExit gesetzt, siehe
+ * routes/messages.js extractRiskExit() aus msg_params von notify.js rmExecuted()):
+ * strukturierte Zeilen statt Fließtext, damit der PnL auf einen Blick als
+ * Gewinn/Verlust erkennbar ist (Vorzeichen im Text, Farbe nur als Zusatz – siehe
+ * feedback_color_blindness).
+ *
+ * Bewusst KEIN Label/Wert-Raster mit fester Spaltenbreite (anders als
+ * premiumPaymentHtml()) – die Labels hier sind teils lang ("Pool-Wert bei
+ * Schließung") und würden in einer schmalen Spalte hässlich umbrechen. Jede
+ * Zeile fließt stattdessen als ein Satz ("Label: Wert"), genau wie im
+ * ursprünglichen Fließtext.
  */
+function riskExitHtml(r) {
+    const pnlClass = r.pnlUsdc == null ? '' : (r.pnlUsdc.trim().startsWith('-') ? 'msg-pnl-negative' : 'msg-pnl-positive');
+    const rows = [
+        r.lpValue     != null && [tr('msg.risk_exit_pool_value', 'Pool-Wert bei Schließung'), `${esc(r.lpValue)} USDC`],
+        (r.coinsA != null && r.coinsB != null) &&
+            [tr('msg.risk_exit_withdrawn', 'Entnommen'), `${esc(r.coinsA)} ${esc(r.symA)} + ${esc(r.coinsB)} ${esc(r.symB)}`],
+        r.swappedUsdc != null && [tr('msg.risk_exit_swapped', 'Getauscht'), `${esc(r.swappedUsdc)} USDC`],
+        r.exitCost    != null && [tr('msg.risk_exit_cost', 'Exit-Kosten'), `${esc(r.exitCost)} USDC`],
+        r.pnlUsdc     != null && [tr('msg.risk_exit_pnl', 'PnL'),
+            `<span class="${pnlClass}">${esc(r.pnlUsdc)} USDC${r.pnlPct != null ? ` / ${esc(r.pnlPct)}` : ''}</span>`],
+    ].filter(Boolean);
+
+    return `
+        ${r.scenario ? `<p class="mc-detail-text">${esc(r.scenario)}</p>` : ''}
+        <ul class="mc-risk-list">
+            ${rows.map(([label, value]) => `<li><span class="mc-risk-label">${esc(label)}:</span> ${value}</li>`).join('')}
+        </ul>
+        ${r.actionText ? `<p class="mc-detail-text">${esc(r.actionText)}</p>` : ''}`;
+}
+
 function premiumPaymentHtml(p) {
     return `
         <div class="msg-pay-row"><span class="msg-pay-label">${tr('msg.amount', 'Betrag')}</span><span>${esc(p.amountUsdc)} USDC</span></div>
@@ -645,7 +709,7 @@ async function openPremiumMessage(id) {
     // kam und ging keine DM, Absender ist diese Instanz selbst.
     const [from, to] = m.peerPubkey
         ? (m.direction === 'in' ? [peerNick(m.peerName), myNick()] : [myNick(), peerNick(m.peerName)])
-        : [forgePublic(), myNick()];
+        : [peerNick(null), myNick()];
     // npub nur bei echten DMs anzeigen – und nur die der Gegenstelle, die eigene
     // steht unter Einstellungen.
     const fromHtml = m.peerPubkey && m.direction === 'in' ? peerLabelWithNpub(m.peerNpub, from) : esc(from);
@@ -1070,10 +1134,11 @@ async function deleteSupportThread(peerPubkeyHex, threadId) {
 
 // ── "Alle als gelesen" ───────────────────────────────────────────────────────
 document.getElementById('mcMarkAllBtn').addEventListener('click', async () => {
-    if (activeMenu === 'system') {
-        // fetchAllSystemIds() fragt bewusst OHNE Suchbegriff ab – sonst markiert
+    if (isNotifTab(activeMenu)) {
+        // fetchAllNotificationIds() fragt bewusst OHNE Suchbegriff ab – sonst markiert
         // "alle als gelesen" bei aktiver Suche nur die paar Treffer (Bug 2026-07-30).
-        await markSystemRead(await fetchAllSystemIds());
+        // Betrifft nur die aktive Rubrik: System und Bots werden getrennt quittiert.
+        await markSystemRead(await fetchAllNotificationIds());
     } else if (activeMenu === 'premium') {
         for (const m of premiumCache.filter(x => x.direction === 'in' && !x.read)) {
             m.read = true;
@@ -1118,6 +1183,13 @@ async function renderSettingsPanel() {
                     <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen System-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik System trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifySystem">
+            </label>
+            <label class="msg-setting-row">
+                <span>
+                    <span class="msg-setting-label">${tr('msg.bot_messages', 'Bot-Nachrichten')}</span>
+                    <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen Meldungen von Liquidity Bot und Lending Bot. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Bots trotzdem sichtbar.</span>
+                </span>
+                <input type="checkbox" id="setNotifyBots">
             </label>
             <label class="msg-setting-row">
                 <span>
@@ -1175,7 +1247,7 @@ async function renderSettingsPanel() {
 
     // Betrifft ausschließlich Zähler/Badges (Reiter + Brief-Icon) – die Nachrichten
     // selbst bleiben immer sichtbar, siehe isNotifyEnabled() in message-bell.js.
-    const NOTIFY_CHECKBOX_IDS = { system: 'setNotifySystem', support: 'setNotifySupport', premium: 'setNotifyPremium' };
+    const NOTIFY_CHECKBOX_IDS = { system: 'setNotifySystem', bots: 'setNotifyBots', support: 'setNotifySupport', premium: 'setNotifyPremium' };
     await loadNotifySettings();
     for (const [type, elId] of Object.entries(NOTIFY_CHECKBOX_IDS)) {
         const cb = document.getElementById(elId);

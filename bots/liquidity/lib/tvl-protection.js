@@ -50,10 +50,11 @@ import {
     rebaseHwmForCapitalFlow,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, computeExitPnl } from './exit-finalizer.js';
 import { Percentage } from '@orca-so/common-sdk';
 import { PATHS } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
+import { resolveTvlThresholds } from './tvl-thresholds.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
@@ -87,14 +88,6 @@ export function loadTvlConfig(poolId) {
     } catch {
         return null;
     }
-}
-
-/** Effektive Schwelle einer Stufe: konfiguriert, sonst pools.json-Fallback. */
-function effectiveThreshold(levelCfg, fallback) {
-    const t = Number(levelCfg?.thresholdUsd);
-    if (Number.isFinite(t) && t > 0) return t;
-    const f = Number(fallback);
-    return Number.isFinite(f) && f > 0 ? f : null;
 }
 
 /** Letzter bekannter Pool-TVL aus pool_stats. */
@@ -138,22 +131,21 @@ function resolveTrigger(pool, db) {
     // jede Stufe feuert pro Position genau einmal. Die Drosselung der *Meldung* sitzt
     // getrennt davon in executeTvlProtection() (WARN_NOTIFY_COOLDOWN_MS).
 
+    // Schwellen beider Stufen zentral auflösen (lib/tvl-thresholds.js) — dieselbe
+    // Auflösung nutzt der Invest-Guard, damit „darf hinein" und „muss heraus" nie
+    // auseinanderlaufen können.
+    const th = resolveTvlThresholds(pool, cfg);
+
     // L2 zuerst prüfen (tiefere Schwelle, gravierender)
-    const t2 = effectiveThreshold(l2, pool.tvlExitThreshold);
+    const t2 = th.l2.threshold;
     if (l2.enabled && t2 && tvl < t2 && !isTvlLevelExecutedForPosition(db, position.id, 2)) {
         return { level: 2, levelCfg: l2, threshold: t2, tvl, cfg, position };
     }
 
-    // Fallback-Schwelle für Stufe 1: normalerweise die Warn-Schwelle aus pools.json.
-    // Zieht Stufe 1 aber 100 % (seit 2026-08-15 der Default — der Voll-Exit läuft über
-    // Stufe 1), dann ist sie keine Warnstufe mehr und muss beim Ernstfall-Wert greifen.
-    // Sonst liquidierte ein Pool ohne eigene Schwelle bereits bei der höheren Warnschwelle
-    // komplett. Greift nur als Netz: ensureTvlProtectionDefaults setzt die Schwelle bei
-    // jeder Aktivierung explizit, also bevor überhaupt eine Position existieren kann.
-    const l1Fallback = Number(l1.withdrawPct) >= 100
-        ? (pool.tvlExitThreshold ?? pool.tvlWarnThreshold)
-        : pool.tvlWarnThreshold;
-    const t1 = effectiveThreshold(l1, l1Fallback);
+    // Stufe-1-Schwelle: konfiguriert, sonst pools.json (Fallback-Wahl siehe
+    // lib/tvl-thresholds.js). Greift nur als Netz — ensureTvlProtectionDefaults setzt
+    // die Schwelle bei jeder Aktivierung explizit, also bevor eine Position existiert.
+    const t1 = th.l1.threshold;
     if (l1.enabled && t1 && tvl < t1 && !isTvlLevelExecutedForPosition(db, position.id, 1)) {
         return { level: 1, levelCfg: l1, threshold: t1, tvl, cfg, position };
     }
@@ -434,8 +426,16 @@ export async function executeTvlProtection(pool, db) {
         // Phase 5: Abschluss
         updateTvlExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         if (isFull) {
+            // Best-effort: eine fehlschlagende PnL-Berechnung darf den bereits
+            // abgeschlossenen Exit nicht nachträglich als Fehler melden.
+            let pnlUsdc = null;
+            try {
+                if (position) pnlUsdc = computeExitPnl(db, pool, position);
+            } catch (err) {
+                console.warn(`[tvl-protection:${pool.id}] PnL-Berechnung fehlgeschlagen (nicht kritisch): ${err.message}`);
+            }
             await notify.tvlExitCompleted(pool, tvl, threshold, {
-                lpValueUsd, coinsA, coinsB, swappedUsdc,
+                lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc,
             }).catch(() => {});
         }
         console.log(`[tvl-protection:${pool.id}] Stufe ${level} vollständig abgeschlossen.`);

@@ -26,6 +26,9 @@ import { execSync } from 'child_process';
 import { getBotConfig }     from '../../lib/bot-registry.js';
 import { isAutoPayEnabled } from '../../lib/premium-auto-pay-store.js';
 import { PATHS } from '../../config/paths.js';
+import { renderNotification } from '../../lib/notify-render.js';
+import { getLang } from '../../lib/i18n.js';
+import { fetchJupiterPrices } from '../../lib/scam-classify.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..', '..');
@@ -149,6 +152,51 @@ db.exec(`
         value_usd   REAL
     );
 
+    -- Unbekannte Token-Konten (nicht auf der Whitelist, Balance > 0).
+    --
+    -- Diese Mints wurden bisher beim Snapshot eingesammelt und sofort weggeworfen.
+    -- Für den Reiter "Auffällig" in den Einstellungen werden sie stattdessen
+    -- festgehalten — das kostet KEINEN zusätzlichen RPC-Call, die Konten stehen
+    -- ohnehin in der Antwort von getParsedTokenAccountsByOwner.
+    --
+    -- Der Zustand wird pro (wallet_id, mint) fortgeschrieben statt je Snapshot neu
+    -- angelegt: first_seen ist die Information, die zählt (seit wann liegt das Ding
+    -- da), und die Tabelle bleibt klein genug, um sie ohne Aufräumjob zu führen.
+    CREATE TABLE IF NOT EXISTS unknown_tokens (
+        wallet_id   TEXT    NOT NULL,
+        mint        TEXT    NOT NULL,
+        balance     REAL    NOT NULL,
+        price_usd   REAL,
+        -- Beide Felder kommen ohne Zusatzkosten aus derselben Jupiter-Antwort wie der
+        -- Preis. Für die Beurteilung eines unbekannten Tokens sind sie wertvoller als
+        -- der Preis: ein wenige Stunden alter Mint mit vierstelliger Liquidität ist ein
+        -- Airdrop, ein 2024er Mint mit dreistelliger Millionen-Liquidität nicht.
+        created_at  TEXT,
+        liquidity   REAL,
+        -- Empfangs-Transaktion: die älteste Signatur des Token-KONTOS ist der Vorgang,
+        -- mit dem der Token ins Wallet kam. Unveränderlich, deshalb genau einmal je
+        -- Konto abgefragt und danach nie wieder. Für einen Laien ist "am 19.08. von
+        -- einer unbekannten Adresse geschickt bekommen" die verständlichste Evidenz,
+        -- die wir überhaupt anbieten können.
+        received_sig TEXT,
+        received_at  INTEGER,
+        first_seen  INTEGER NOT NULL,
+        last_seen   INTEGER NOT NULL,
+        PRIMARY KEY (wallet_id, mint)
+    );
+
+    -- Metadaten-Cache je Mint. Symbol und Name eines Mints ändern sich praktisch
+    -- nie, die Abfrage (Helius DAS getAsset) kostet aber jedes Mal einen Credit.
+    -- Ohne diesen Cache fragte forge-check.js sie stündlich neu ab: 79 Aufrufe
+    -- allein zwischen dem 17. und 19.08.2026, Trefferquote 0 %.
+    -- Bewusst OHNE wallet_id — ein Mint ist global, nicht pro Wallet.
+    CREATE TABLE IF NOT EXISTS token_meta (
+        mint       TEXT PRIMARY KEY,
+        symbol     TEXT,
+        name       TEXT,
+        fetched_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_snap_wallet_time ON snapshots(wallet_id, recorded_at DESC);
     CREATE INDEX IF NOT EXISTS idx_tok_snap         ON token_balances(snapshot_id);
 `);
@@ -173,6 +221,64 @@ async function fetchPrices() {
     return prices;
 }
 
+// Nachrüsten für DBs, die unknown_tokens vor created_at/liquidity angelegt haben.
+// Kein Migrationsskript nötig: ADD COLUMN ist billig und die Tabelle ist tagesjung.
+for (const col of [['created_at', 'TEXT'], ['liquidity', 'REAL'], ['received_sig', 'TEXT'], ['received_at', 'INTEGER']]) {
+    const exists = db.prepare("SELECT 1 FROM pragma_table_info('unknown_tokens') WHERE name = ?").get(col[0]);
+    if (!exists) db.exec(`ALTER TABLE unknown_tokens ADD COLUMN ${col[0]} ${col[1]}`);
+}
+
+// ─── Token-Metadaten via Helius DAS (durch Nexus) ────────────────────────────
+//
+// Wird NUR für Mints aufgerufen, die noch nicht in token_meta stehen — Symbol und
+// Name eines Mints sind praktisch unveränderlich. Das Ergebnis wird persistent
+// gecacht und überlebt damit auch einen Nexus-Neustart (dessen In-Memory-Cache
+// nicht).
+async function fetchAssetMeta(mint) {
+    try {
+        const res = await fetch(config.rpcUrl, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getAsset', params: { id: mint } }),
+        });
+        if (!res.ok) return null;
+        const json = await res.json();
+        const md   = json?.result?.content?.metadata;
+        return md ? { symbol: md.symbol ?? null, name: md.name ?? null } : null;
+    } catch { return null; }
+}
+
+// ─── Empfangs-Transaktion eines Token-Kontos ─────────────────────────────────
+//
+// Die ÄLTESTE Signatur des Kontos ist der Vorgang, mit dem der Token ankam (das Konto
+// entsteht erst mit dem Empfang). Wird nur einmal je Konto abgefragt und dann dauerhaft
+// gespeichert — der Wert kann sich nicht mehr ändern.
+//
+// Grenze bewusst in Kauf genommen: bei mehr als `limit` Transaktionen wäre die älteste
+// hier nicht die tatsächlich erste. Für einen unaufgefordert zugeschickten Token ist das
+// praktisch nie der Fall (der geprüfte Airdrop hatte genau eine Signatur); Paginierung
+// dafür kostete pro Token weitere Calls, ohne die Aussage zu verbessern.
+async function fetchReceiveTx(account) {
+    try {
+        const res = await fetch(config.rpcUrl, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+                jsonrpc: '2.0', id: 1, method: 'getSignaturesForAddress',
+                params: [account, { limit: 100 }],
+            }),
+        });
+        if (!res.ok) return null;
+        const sigs = (await res.json())?.result ?? [];
+        if (sigs.length === 0) return null;
+        const oldest = sigs[sigs.length - 1];
+        return {
+            signature: oldest.signature ?? null,
+            at:        oldest.blockTime ? oldest.blockTime * 1000 : null,
+        };
+    } catch { return null; }
+}
+
 // ─── Wallet-Balances via RPC (durch forge-api-proxy) ─────────────────────────
 
 const connection = new Connection(config.rpcUrl, 'confirmed');
@@ -191,9 +297,10 @@ async function fetchWalletSnapshot(walletAddress) {
 
     const solBalance = lamports / LAMPORTS_PER_SOL;
     let   usdcBalance = 0;
-    const tokenBalances = {};   // mint → balance
+    const tokenBalances  = {};   // mint → balance (Whitelist)
+    const unknownTokens  = {};   // mint → balance (alles andere mit Balance > 0)
 
-    for (const { account } of [...tokenAccounts.value, ...token22Accounts.value]) {
+    for (const { account, pubkey } of [...tokenAccounts.value, ...token22Accounts.value]) {
         const info   = account.data.parsed.info;
         const mint   = info.mint;
         const amount = info.tokenAmount.uiAmount ?? 0;
@@ -202,11 +309,22 @@ async function fetchWalletSnapshot(walletAddress) {
             usdcBalance = amount;
         } else if (whitelistMints.has(mint)) {
             tokenBalances[mint] = amount;
+        } else if (amount > 0) {
+            // Früher verworfen. Jetzt festgehalten: das ist die Datengrundlage für
+            // den Reiter "Auffällig" — ohne einen einzigen zusätzlichen RPC-Call,
+            // die Konten stehen bereits in der Antwort oben.
+            //
+            // Die Konto-Adresse (pubkey) wird mitgeführt, weil die Empfangs-Transaktion
+            // an ihr hängt, nicht am Mint: die älteste Signatur DIESES Kontos ist der
+            // Vorgang, mit dem der Token ins Wallet kam.
+            unknownTokens[mint] = {
+                balance: (unknownTokens[mint]?.balance ?? 0) + amount,
+                account: pubkey?.toString?.() ?? String(pubkey ?? ''),
+            };
         }
-        // Alle anderen Mints (SPAM, unbekannte Airdrops) → ignoriert
     }
 
-    return { solBalance, usdcBalance, tokenBalances };
+    return { solBalance, usdcBalance, tokenBalances, unknownTokens };
 }
 
 // ─── DB-Statements ────────────────────────────────────────────────────────────
@@ -273,9 +391,11 @@ try {
 
 // 2. Pro Wallet: Balance lesen + in DB schreiben (sequenziell – Rate-Limit-freundlich)
 let successCount = 0;
+const unknownByWallet = new Map();   // wallet_id → { mint: balance }
 for (const wallet of config.wallets) {
     try {
-        const { solBalance, usdcBalance, tokenBalances } = await fetchWalletSnapshot(wallet.address);
+        const { solBalance, usdcBalance, tokenBalances, unknownTokens } = await fetchWalletSnapshot(wallet.address);
+        unknownByWallet.set(wallet.id, unknownTokens);
 
         // Gesamtwert summieren
         let totalUsd = usdcBalance;
@@ -343,14 +463,19 @@ for (const wallet of config.wallets) {
                 // im Fließtext (der betroffene Bot steht jetzt als eigene Kopfzeile im
                 // Message Center, siehe displayName unten) — und ein Schlusssatz, der
                 // sagt was zu TUN ist, inklusive der Option einfach abzuwarten.
-                const alertMessage = isPremiumWallet
-                    ? `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
-                      `Ohne SOL kann die stündliche Premium-Zahlung nicht mehr gesendet werden ` +
-                      `und der Premium-Datenbezug endet.\n` +
-                      `Bitte Wallet mit mindestens 0,15 SOL aufladen. Der Bot läuft weiter, nur ohne Premium-Daten.`
-                    : `SOL-Reserve beträgt aktuell ${solBalance.toFixed(4)} SOL. ` +
-                      `Unter 0,1 SOL werden keine neuen Positionen mehr eröffnet.\n` +
-                      `Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`;
+                //
+                // msgKey statt fertigem Text (Schritt 5 der Mehrsprachigkeit, siehe
+                // lib/notify-render.js): vorher schickte dieser Alert rohen deutschen
+                // Fließtext an /notify, der auf einer EN-Installation trotzdem deutsch
+                // blieb — der zentrale Notify-Endpoint macht msgKey nicht zur Pflicht,
+                // fehlt er, wird `message` unverändert durchgereicht.
+                const msgKey       = isPremiumWallet ? 'notify.wm.sol_low_premium' : 'notify.wm.sol_low';
+                const displayName  = walletDisplayName(wallet);
+                const params       = { sol: solBalance.toFixed(4) };
+                const message = renderNotification(
+                    { msgKey, params, displayName, timestamp: now },
+                    getLang(),
+                );
                 try {
                     await fetch(config.notifyUrl, {
                         method:  'POST',
@@ -360,10 +485,10 @@ for (const wallet of config.wallets) {
                             // Nicht der Absender, sondern der BETROFFENE Bot: ein
                             // wallet-monitor überwacht mehrere Wallets, "wallet-monitor"
                             // als Absender sagt dem Nutzer nicht, welcher Bot gemeint ist.
-                            displayName: walletDisplayName(wallet),
+                            displayName,
                             level:    'error',
                             category: 'sol_low',
-                            message:  alertMessage,
+                            message, msgKey, params,
                         }),
                     });
                     console.log(`[wallet-monitor] SOL-Alert gesendet: ${wallet.label} (${solBalance.toFixed(4)} SOL)`);
@@ -392,6 +517,113 @@ for (const wallet of config.wallets) {
     } catch (err) {
         console.error(`[wallet-monitor] FEHLER ${wallet.label}: ${err.message}`);
     }
+}
+
+// 2b. Unbekannte Token festhalten (Datengrundlage für den Reiter "Auffällig")
+//
+// Kostenbild, bewusst so gebaut:
+//   Token-Liste  – 0 zusätzliche Calls, steht oben schon in der RPC-Antwort
+//   Metadaten    – 1 Helius-DAS-Call pro ERSTMALIG gesehenem Mint, danach nie wieder
+//   Jupiter-Preis– 1 Batch-Call pro Lauf, und nur solange überhaupt etwas Unbekanntes
+//                  im Wallet liegt. Im Normalfall (sauberes Wallet) also gar keiner.
+//
+// Der Preis wird bewusst JEDEN Lauf neu geholt statt einmalig beim ersten Sehen:
+// er entscheidet über die Stufe REVIEW (Imitat MIT Wert, Abtipp-Hürde) gegenüber
+// BURN (Imitat ohne Wert, einfache Rückfrage). Ein eingefrorener Null-Preis würde
+// ein wertvolles Imitat dauerhaft als harmlos einstufen — das ist genau die
+// Richtung, in die man nicht irren darf. Ein Call alle 10 Minuten, und nur während
+// einer laufenden Airdrop-Welle, ist dafür der richtige Preis.
+try {
+    const allUnknownMints = [...new Set(
+        [...unknownByWallet.values()].flatMap(m => Object.keys(m))
+    )];
+
+    // Bereits bekannte Empfangs-Transaktionen — was hier steht, wird nie neu geholt.
+    const knownReceives = new Map(
+        db.prepare('SELECT wallet_id, mint, received_sig, received_at FROM unknown_tokens WHERE received_sig IS NOT NULL')
+          .all().map(r => [`${r.wallet_id}::${r.mint}`, { signature: r.received_sig, at: r.received_at }])
+    );
+
+    if (allUnknownMints.length > 0) {
+        console.log(`[wallet-monitor] ${allUnknownMints.length} unbekannte Mint(s) – Metadaten/Preis prüfen…`);
+
+        // Metadaten nur für Mints holen, die wir noch nie gesehen haben.
+        const cachedMints = new Set(
+            db.prepare('SELECT mint FROM token_meta').all().map(r => r.mint)
+        );
+        const newMints = allUnknownMints.filter(m => !cachedMints.has(m));
+        const stmtMeta = db.prepare(`
+            INSERT INTO token_meta (mint, symbol, name, fetched_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(mint) DO UPDATE SET symbol = excluded.symbol, name = excluded.name, fetched_at = excluded.fetched_at
+        `);
+        for (const mint of newMints) {
+            const meta = await fetchAssetMeta(mint);
+            stmtMeta.run(mint, meta?.symbol ?? null, meta?.name ?? null, now);
+            console.log(`[wallet-monitor]   neuer Mint ${mint.slice(0, 12)}… → ${meta?.symbol ?? '?'}`);
+        }
+
+        const unknownPrices = await fetchJupiterPrices(config.jupPriceUrl, allUnknownMints);
+
+        // Empfangs-Transaktion nur für Paare holen, die wir noch nicht kennen.
+        const receives = new Map(knownReceives);
+        for (const [walletId, mints] of unknownByWallet) {
+            for (const [mint, entry] of Object.entries(mints)) {
+                const key = `${walletId}::${mint}`;
+                if (receives.has(key) || !entry.account) continue;
+                const rcv = await fetchReceiveTx(entry.account);
+                if (rcv?.signature) receives.set(key, rcv);
+            }
+        }
+
+        const stmtUnknown = db.prepare(`
+            INSERT INTO unknown_tokens
+                (wallet_id, mint, balance, price_usd, created_at, liquidity,
+                 received_sig, received_at, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_id, mint) DO UPDATE SET
+                balance      = excluded.balance,
+                price_usd    = excluded.price_usd,
+                created_at   = excluded.created_at,
+                liquidity    = excluded.liquidity,
+                -- Nie überschreiben: der Empfang liegt in der Vergangenheit und ist
+                -- unveränderlich. Ein fehlgeschlagener Abruf darf einen bereits
+                -- gespeicherten Wert nicht auf NULL zurücksetzen.
+                received_sig = COALESCE(excluded.received_sig, unknown_tokens.received_sig),
+                received_at  = COALESCE(excluded.received_at,  unknown_tokens.received_at),
+                last_seen    = excluded.last_seen
+        `);
+        const stmtDropWallet = db.prepare('DELETE FROM unknown_tokens WHERE wallet_id = ?');
+
+        db.transaction(() => {
+            for (const [walletId, mints] of unknownByWallet) {
+                // Verschwundene Mints (bereinigt oder weitergeschickt) müssen raus,
+                // sonst zeigt die Oberfläche dauerhaft Token an, die es nicht mehr gibt.
+                // Nur für Wallets, die in DIESEM Lauf erfolgreich gelesen wurden —
+                // sonst würde ein RPC-Fehler die Liste fälschlich leeren.
+                stmtDropWallet.run(walletId);
+                for (const [mint, entry] of Object.entries(mints)) {
+                    const jup = unknownPrices[mint];
+                    const rcv = receives.get(`${walletId}::${mint}`) ?? null;
+                    stmtUnknown.run(
+                        walletId, mint, entry.balance,
+                        jup?.price ?? null, jup?.createdAt ?? null, jup?.liquidity ?? null,
+                        rcv?.signature ?? null, rcv?.at ?? null,
+                        now, now,
+                    );
+                }
+            }
+        })();
+    } else {
+        // Alle erfolgreich gelesenen Wallets sind sauber → Alteinträge entfernen.
+        const stmtDropWallet = db.prepare('DELETE FROM unknown_tokens WHERE wallet_id = ?');
+        db.transaction(() => {
+            for (const walletId of unknownByWallet.keys()) stmtDropWallet.run(walletId);
+        })();
+    }
+} catch (err) {
+    // Bewusst nicht fatal: der Snapshot ist das Kerngeschäft dieses Dienstes,
+    // die Auffällig-Liste ist Beiwerk und darf ihn nie scheitern lassen.
+    console.error(`[wallet-monitor] Unbekannte Token nicht verarbeitet: ${err.message}`);
 }
 
 // 3. Alte Snapshots aufräumen (> retainDays Tage)

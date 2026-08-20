@@ -10,7 +10,7 @@
  */
 
 import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260816a';
-import { initMessageBell } from './message-bell.js?v=20260816a';
+import { initMessageBell } from './message-bell.js?v=20260818a';
 // Sprache: t() nimmt den deutschen Text als Fallback UND Vorlage, applyDom()
 // übersetzt das statische Markup. Dynamisch erzeugte Karten gehen durch t().
 import { t, applyDom, NUM_LOCALE } from './i18n.js?v=20260813a';
@@ -26,6 +26,26 @@ const BOT_LABELS = {
     lend: 'Lending Bot',
     liq: 'Liquidity Bot',
 };
+
+// config/health-config.js liefert Name/Beschreibung jedes Dienstes fest auf Deutsch
+// (das bleibt so – sendPersistenceAlert() in bin/health-check.js baut daraus
+// Telegram-Alerts, die als interner Operator-Kanal Deutsch bleiben sollen). Für die
+// Anzeige im Dashboard übersetzen wir hier pro Dienst-ID, mit dem deutschen Rohtext
+// als Fallback für Sprachen ohne Katalogeintrag.
+// Nostr-Relays sind dynamisch (eins pro Eintrag in config/nostr-relays.json) und
+// teilen sich denselben Beschreibungstext – ein gemeinsamer Key statt einem pro
+// Relay-URL. Der Name ist ohnehin die Relay-URL selbst, keine Übersetzung nötig.
+function svcName(svc) {
+    if (svc.type === 'nostr_relay') return svc.name;
+    return t(`health.svc.${svc.id}.name`, svc.name);
+}
+function svcDesc(svc) {
+    if (!svc.description) return svc.description;
+    const key = svc.type === 'nostr_relay'
+        ? 'health.svc.nostr_relay.description'
+        : `health.svc.${svc.id}.description`;
+    return t(key, svc.description);
+}
 
 initNav({ current: 'health' });
 initFooter();
@@ -79,7 +99,7 @@ function renderServiceCard(svc, chainId) {
     <div class="svc-header">
         <span class="status-dot ${cls}"></span>
         <span class="svc-name"
-              data-tip="${escAttr(svc.description ?? '')}">${escHtml(svc.name)}</span>
+              data-tip="${escAttr(svcDesc(svc) ?? '')}">${escHtml(svcName(svc))}</span>
         <span class="svc-meta">
             <span class="svc-latency">${escHtml(lat)}</span>
             <span class="svc-status-label ${cls}"
@@ -261,7 +281,7 @@ function openModal(chainId, svcId) {
 
     const cls = sanitizeStatus(svc.status);
     modalDot.className   = `svc-modal-dot ${cls}`;
-    modalTitle.textContent = svc.name;
+    modalTitle.textContent = svcName(svc);
     modalBody.innerHTML    = renderModalBody(svc, currentData.nexus, chainId);
     backdrop.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
@@ -278,8 +298,9 @@ function renderModalBody(svc, nexus, chainId) {
     const parts  = [];
 
     // ── Beschreibung ────────────────────────────────────────────────────────────
-    if (svc.description) {
-        parts.push(`<div class="modal-description">${escHtml(svc.description)}</div>`);
+    const desc = svcDesc(svc);
+    if (desc) {
+        parts.push(`<div class="modal-description">${escHtml(desc)}</div>`);
     }
 
     // ── Basis-Stats ─────────────────────────────────────────────────────────────

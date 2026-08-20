@@ -81,8 +81,8 @@ export class KaminoProtocol {
     }
 
     /**
-     * APY und TVL in einem API-Call abfragen.
-     * @returns {Promise<{apy: number, tvl: number|null}>}
+     * APY, TVL und sofort verfügbare Liquidität in einem API-Call abfragen.
+     * @returns {Promise<{apy: number, tvl: number|null, liquidity: number|null}>}
      */
     async getPoolStats() {
         const url  = `${KAMINO_API}/kamino-market/${this.market}/reserves/metrics`;
@@ -99,7 +99,18 @@ export class KaminoProtocol {
         const tvlRaw = usdc.totalSupply ?? usdc.supplyAmount ?? usdc.liquidityAmount ?? null;
         const tvl = tvlRaw != null ? parseFloat(tvlRaw) || null : null;
 
-        return { apy, tvl };
+        // Sofort verfügbare (abhebbare) Liquidität: Was eingezahlt, aber nicht verliehen
+        // ist. Kamino exponiert das nicht direkt, totalSupply − totalBorrow ist die
+        // übliche Herleitung. Bewusst NICHT aus dem TVL abgeleitet — TVL ist eine
+        // Wachstumszahl und sagt nichts über die Abhebbarkeit aus — ein beobachteter
+        // Vault hatte bei 1 Mio. USDC TVL 0,00 USDC sofort verfügbare Liquidität.
+        const supplyRaw = usdc.totalSupply != null ? parseFloat(usdc.totalSupply) : null;
+        const borrowRaw = usdc.totalBorrow != null ? parseFloat(usdc.totalBorrow) : null;
+        const liquidity = Number.isFinite(supplyRaw) && Number.isFinite(borrowRaw)
+            ? Math.max(0, supplyRaw - borrowRaw)
+            : null;
+
+        return { apy, tvl, liquidity };
     }
 
     /**
@@ -240,14 +251,28 @@ export class JupiterLendProtocol {
     }
 
     /**
-     * APY + TVL in einem Call.
-     * @returns {Promise<{apy: number, tvl: number}>}
+     * APY, TVL + sofort verfügbare Liquidität in einem Call.
+     * @returns {Promise<{apy: number, tvl: number, liquidity: number|null}>}
      */
     async getPoolStats() {
         const usdc = await this._getUsdcToken();
+
+        // `liquiditySupplyData.withdrawable` ist Jupiters eigene Angabe, wie viel gerade
+        // tatsächlich abhebbar ist — sie berücksichtigt bereits das rollierende
+        // Withdrawal-Limit (`withdrawableUntilLimit`) und ist damit die ehrlichere Zahl
+        // als supply − borrow. Fällt das Feld weg, lieber `null` (= "no data") melden als
+        // eine selbstgebaute Ersatzformel: eine zu hohe Liquiditätsangabe ist gefährlicher
+        // als gar keine.
+        const lsd = usdc.liquiditySupplyData;
+        const withdrawableRaw = lsd?.withdrawable ?? null;
+        const liquidity = withdrawableRaw != null && Number.isFinite(parseFloat(withdrawableRaw))
+            ? parseFloat(withdrawableRaw) / 1e6   // Lamports → USDC
+            : null;
+
         return {
             apy: usdc.totalRate / 100,
             tvl: parseInt(usdc.totalAssets) / 1e6,  // Lamports → USDC
+            liquidity,
         };
     }
 
@@ -466,7 +491,10 @@ export class DriftProtocol {
                 // TVL optional – nicht werfen
             }
 
-            return { apy, tvl };
+            // Liquidität (deposits − borrows) wäre aus dem SpotMarket herleitbar, ist aber
+            // ungetestet: Drift ist seit 2026-04-02 deaktiviert. Bewusst `null` (= "no data")
+            // statt einer ungeprüften Formel.
+            return { apy, tvl, liquidity: null };
         } finally {
             await client.unsubscribe();
         }
@@ -754,9 +782,9 @@ export class LoopscaleProtocol {
     }
 
     /**
-     * APY und TVL in einem API-Call abfragen.
+     * APY, TVL und sofort verfügbare Liquidität in einem API-Call abfragen.
      * TVL-Format: in Lamports (USDC = 6 Dezimalstellen) oder USDC.
-     * @returns {Promise<{apy: number, tvl: number|null}>}
+     * @returns {Promise<{apy: number, tvl: number|null, liquidity: number|null}>}
      */
     async getPoolStats() {
         const vault    = await this._getVaultInfo();
@@ -834,7 +862,15 @@ export class LoopscaleProtocol {
             ? extInfoBal / 1e6   // Typ B: externalYieldInfo.balance
             : standardTvl;       // Typ A: ext + deployed
 
-        return { apy, tvl };
+        // ── Sofort verfügbare Liquidität ─────────────────────────────────────
+        // `tokenBalance` = idle im Vault, das einzige was ein Withdraw sofort bedienen
+        // kann. `currentDeployedAmount` (verliehen) und `externalYieldAmount` (extern
+        // geparkt) sind es ausdrücklich NICHT. `liquidityBuffer` bleibt bewusst außen vor:
+        // bei "USDC Frontier" waren das 0,05 USDC — mitzuzählen würde eine Verfügbarkeit
+        // suggerieren, die für eine echte Abhebung bedeutungslos ist.
+        const liquidity = Number.isFinite(idleRaw) ? idleRaw / 1e6 : null;
+
+        return { apy, tvl, liquidity };
     }
 
     /**
@@ -1078,10 +1114,12 @@ export class LoopscaleProtocol {
      * darauf reagieren.
      *
      * @param {string} walletAddress  Base58
-     * @returns {Promise<{lpAmount: number, estimatedUsdc: number|null}|null>}
+     * @returns {Promise<{lpAmount: number, lpBaseUnits: number, estimatedUsdc: number|null}|null>}
      *          null wenn nichts gefunden wurde oder die Prüfung selbst fehlschlug
      *          (z.B. RPC/API nicht erreichbar – wird bewusst verschluckt, ist ein
-     *          Best-Effort-Sicherheitsnetz, kein kritischer Pfad).
+     *          Best-Effort-Sicherheitsnetz, kein kritischer Pfad). `lpBaseUnits` ist
+     *          der exakte On-Chain-Integer (keine Float-Rundung über `uiAmount`) –
+     *          Grundlage für buildStakeTx().
      */
     async checkLeftoverLp(walletAddress) {
         try {
@@ -1100,25 +1138,114 @@ export class LoopscaleProtocol {
             );
             if (lpAmount <= 0) return null;
 
+            // Exakter Integer direkt aus der Chain – niemals aus lpAmount (Float,
+            // uiAmount) zurückrechnen. Bei mehreren Token-Konten für denselben Mint
+            // (unüblich, aber möglich) werden die Rohbeträge einfach summiert – das
+            // ist für einen einzelnen buildStakeTx()-Aufruf über den vollen Bestand
+            // korrekt, solange kein Aufrufer einen Teilbetrag daraus ableitet.
+            const lpBaseUnits = accounts.value.reduce(
+                (sum, acc) => sum + parseInt(acc.account.data.parsed.info.tokenAmount.amount, 10),
+                0,
+            );
+
             // Grobe USDC-Schätzung über den aktuellen Vault-Kurs (Assets/lpSupply) –
             // dieselbe Methode, mit der wir den Fund am 09.08.2026 manuell verifiziert
             // haben. Rein informativ für die Notification, keine Grundlage für TX-Beträge.
+            //
+            // 🔴 `externalYieldAmount` MUSS mitgezählt werden (Fix 2026-08-15): Vaults
+            //    können ihr Kapital in eine externe Ertragsquelle auslagern
+            //    (`externalYieldSource`), dann steht es NICHT mehr in tokenBalance/
+            //    currentDeployedAmount. Bei "USDC Frontier" passierte genau das zwischen
+            //    dem 09.08. und 15.08.: 751.822 von 999.937 USDC lagen extern, tokenBalance
+            //    fiel auf 0. Ohne diesen Posten sank der errechnete LP-Kurs von 1,0288 auf
+            //    0,2562 – ein scheinbarer Wertverlust von 75 %, der nie stattgefunden hat
+            //    (echter Kurs: 1,0326). Eine solche Fehlanzeige in einer Warnmeldung wäre
+            //    schlimmer als gar keine Schätzung.
             const strategy    = vault.vaultStrategy?.strategy;
             const lpSupply    = parseFloat(vault.vault?.lpSupply ?? 0);
             const assetsRaw   = parseFloat(strategy?.tokenBalance ?? 0)
                                + parseFloat(strategy?.currentDeployedAmount ?? 0)
+                               + parseFloat(strategy?.externalYieldAmount ?? 0)
                                + parseFloat(strategy?.outstandingInterestAmount ?? 0)
                                - parseFloat(strategy?.feeClaimable ?? 0);
             const estimatedUsdc = lpSupply > 0
                 ? parseFloat((lpAmount * (assetsRaw / lpSupply)).toFixed(4))
                 : null;
 
-            return { lpAmount, estimatedUsdc };
+            return { lpAmount, lpBaseUnits, estimatedUsdc };
         } catch {
             // Best-Effort – ein Fehler hier darf den eigentlichen Withdraw nicht
             // nachträglich als fehlgeschlagen erscheinen lassen.
             return null;
         }
+    }
+
+    /**
+     * Baut eine Stake-Transaktion, um LP-Token aus dem rohen Wallet-Token-Konto
+     * zurück in einen Stake-Account zu überführen — macht sie für Loopscales
+     * Index (`/deposits`, Grundlage für getPosition()/buildWithdrawTx()) wieder
+     * sichtbar.
+     *
+     * Hintergrund (2026-08-10, Loopscale-Discord, Support-Mitglied Luket):
+     *   POST /markets/lending_vaults/stake { vault, amount }
+     * `amount` ist der LP-Betrag in Base-Units (roher On-Chain-Integer, siehe
+     * `checkLeftoverLp().lpBaseUnits` — NICHT aus dem UI-Betrag zurückrechnen,
+     * das würde bei Rundung zu wenig/zu viel anfordern).
+     *
+     * Response-Format identisch zu buildDepositTx()/buildWithdrawTx(): base64
+     * VersionedMessage + Server-Co-Signaturen (protocol_admin + ein weiterer
+     * Signer) — bereits am 10.08.2026 lesend gegen die echte API verifiziert
+     * (liefert eine gültige, unsignierte TX zurück, ohne dass etwas gesendet wird).
+     *
+     * @param {string} walletAddress  Base58
+     * @param {number} lpBaseUnits    LP-Betrag in Base-Units (roher Integer)
+     * @returns {Promise<string>}     base64-codierte VersionedTransaction (server co-signiert)
+     */
+    async buildStakeTx(walletAddress, lpBaseUnits) {
+        if (!Number.isInteger(lpBaseUnits) || lpBaseUnits <= 0) {
+            throw new Error(`${this.label} Stake: lpBaseUnits muss ein positiver Integer sein (erhalten: ${lpBaseUnits})`);
+        }
+
+        const data = await apiPost(
+            `${LOOPSCALE_API}/markets/lending_vaults/stake`,
+            { vault: this.vaultAddress, amount: lpBaseUnits },
+            { 'user-wallet': walletAddress },
+        );
+
+        // Response ist ein Array wie bei Deposit/Withdraw ([{ message, signatures }]),
+        // nicht ein einzelnes Objekt – am 10.08.2026 gegen die echte API verifiziert.
+        const txData = Array.isArray(data) ? data[0] : data;
+        if (!txData) throw new Error(`${this.label} Stake: Keine Transaction in API-Antwort`);
+
+        if (typeof txData === 'string') {
+            return await this._wrapTxMessage(txData);
+        }
+
+        const messageBase64 = txData.message ?? txData.transaction;
+        if (!messageBase64) throw new Error(`${this.label} Stake: Keine Message in TX-Antwort`);
+
+        const { VersionedTransaction, VersionedMessage } = await import('@solana/web3.js');
+        const messageBytes = Buffer.from(messageBase64, 'base64');
+
+        try {
+            VersionedTransaction.deserialize(messageBytes);
+            return messageBase64;
+        } catch { /* nur Message → weiter */ }
+
+        const message = VersionedMessage.deserialize(messageBytes);
+        const vTx = new VersionedTransaction(message);
+
+        if (Array.isArray(txData.signatures)) {
+            for (const { publicKey, signature } of txData.signatures) {
+                if (!signature || !publicKey) continue;
+                const idx = message.staticAccountKeys.findIndex(k => k.toBase58() === publicKey);
+                if (idx >= 0 && idx < message.header.numRequiredSignatures) {
+                    vTx.signatures[idx] = Buffer.from(signature, 'base64');
+                }
+            }
+        }
+
+        return Buffer.from(vTx.serialize()).toString('base64');
     }
 }
 

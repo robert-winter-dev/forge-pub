@@ -35,7 +35,7 @@ import {
     closePosition as markPositionClosedInDb,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition, computeExitPnl } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
@@ -297,6 +297,11 @@ export async function executeScoreLimit(pool, db) {
     const minScore = Number.isFinite(cfg.minScore) ? cfg.minScore : 30;
     console.log(`[scoreLimit:${pool.id}] Score Limit ausgelöst: Opportunity Score ${score} < ${minScore}`);
 
+    // Vor dem Withdraw gelesen (für die PnL-Berechnung nach Abschluss gebraucht,
+    // siehe computeExitPnl weiter unten) – stepWithdraw() liest sie sich für den
+    // eigentlichen Exit unabhängig noch einmal selbst.
+    const positionForPnl = getOpenPosition(db, pool.id);
+
     await waitForCleanupToFinish();
     acquireSlLock();
 
@@ -344,8 +349,16 @@ export async function executeScoreLimit(pool, db) {
         updateScoreLimitExecution(db, execId, { step: 'complete', completed_at: Date.now() });
         console.log(`[scoreLimit:${pool.id}] Score Limit vollständig abgeschlossen.`);
         const snap = db.prepare(`SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(pool.id);
+        // Best-effort: eine fehlschlagende PnL-Berechnung darf den bereits
+        // abgeschlossenen Exit nicht nachträglich als Fehler melden.
+        let pnlUsdc = null;
+        try {
+            if (positionForPnl) pnlUsdc = computeExitPnl(db, pool, positionForPnl);
+        } catch (err) {
+            console.warn(`[scoreLimit:${pool.id}] PnL-Berechnung fehlgeschlagen (nicht kritisch): ${err.message}`);
+        }
         await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_score', p: { score, min: minScore } }, {
-            lpValueUsd: snap?.lp_value_usd ?? null, coinsA, coinsB, swappedUsdc,
+            lpValueUsd: snap?.lp_value_usd ?? null, coinsA, coinsB, swappedUsdc, pnlUsdc,
         }).catch(() => {});
         triggerPoolTypeAdvisorAsync(pool.id);
 

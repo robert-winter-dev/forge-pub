@@ -311,10 +311,11 @@ main {
     font-weight: 600;
     font-size: 0.92rem;
     color: var(--text);
-    text-decoration: none;
+    text-decoration: underline dotted rgba(255,255,255,0.35);
+    text-underline-offset: 3px;
     transition: color 0.15s;
 }
-.bt-name:hover { color: var(--accent); }
+.bt-name:hover { color: var(--accent); text-decoration-color: currentColor; }
 .bt-val { font-weight: 600; color: var(--text); }
 .bt-pos { font-weight: 700; color: var(--success); }
 .sol-warn { color: var(--danger); cursor: help; }

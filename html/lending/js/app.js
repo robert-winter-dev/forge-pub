@@ -8,6 +8,7 @@
  *   positions: [{ id, protocol, protocolLabel, asset, amount, netInvested, currentApy, startedAt, accruedYield }],
  *   apyHistory: [{ ts, kamino?, lulo?, marinade? }],
  *   tvlHistory: [{ ts, kamino?, lulo?, marinade? }],  // TVL in USDC pro Protokoll
+ *   liqHistory: [{ ts, kamino?, lulo?, marinade? }],  // sofort abhebbare Liquidität in USDC
  *   portfolioHistory: [{ ts, v }],
  *   transactions: [{ id, type, protocol, asset, amount, txHash, createdAt }],
  *   config: { apyThreshold, autoCompounding, autoRebalance },
@@ -18,7 +19,7 @@
 import { DataManager }    from './data.js?v=20260421f';
 import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
-import { initMessageBell } from '../../js/message-bell.js?v=20260816a';
+import { initMessageBell } from '../../js/message-bell.js?v=20260818a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
 import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
@@ -64,6 +65,33 @@ function fmtTvl(n) {
     if (n >= 1_000_000) return '$\u202f' + fmt(n / 1_000_000, 1) + '\u202fM';
     if (n >= 1_000)     return '$\u202f' + fmt(n / 1_000, 0) + '\u202fK';
     return '$\u202f' + fmt(n, 0);
+}
+
+// ─── Sofort verfügbare Liquidität ────────────────────────────────────────────
+//
+// TVL != verfügbare Liquidität: der TVL eines Lending-Pools ist die Summe aus
+// verliehenem, extern geparktem und idle liegendem Kapital. Nur der idle-Anteil kann
+// eine Abhebung sofort bedienen. Bei Loopscale "USDC Frontier" lag der TVL Mitte
+// August 2026 bei ~1 Mio. USDC, während 0,00 USDC abhebbar waren — ein hoher TVL ist
+// also kein Sicherheitsmerkmal.
+//
+// Bis 18.08.2026 bewertete das Dashboard die Liquidität über eigene Heuristik-Stufen
+// (crit/warn, absolute Beträge + Anteil am TVL). Die sind ersatzlos entfallen: die
+// maßgebliche Grenze ist jetzt die im Settings-UI eingestellte Liquiditäts-Schutz-
+// Schwelle — genau der Wert, ab dem der Bot tatsächlich handelt (Abzug + kein
+// Investment über „Bester Pool“). Zwei konkurrierende Grenzen im selben Feld waren
+// nicht erklärbar.
+
+/**
+ * Liquidität formatieren: null → 'no data', ≥1M → '1,0 M USDC', ≥1K → '630 K USDC',
+ * sonst auf 2 Nachkommastellen — bei kleinen Beständen ist genau das der springende
+ * Punkt (0,00 vs. 0,05 USDC).
+ */
+function fmtLiquidity(n) {
+    if (n == null || isNaN(n)) return tr('len.no_data', 'no data');
+    if (n >= 1_000_000) return fmt(n / 1_000_000, 1) + '\u202fM\u202fUSDC';
+    if (n >= 1_000)     return fmt(n / 1_000, 0) + '\u202fK\u202fUSDC';
+    return fmt(n, 2) + '\u202fUSDC';
 }
 
 /** Nur Datum – in FORGE_TZ */
@@ -746,13 +774,31 @@ function renderAvailablePools(data) {
     const stats     = data?.protocolStats ?? {};
 
     const allRows = ALL_KNOWN_PROTOCOLS
-        .map(proto => ({
-            id:     proto.id,
-            label:  proto.label,
-            apy:    stats[proto.id]?.apy ?? null,
-            tvl:    stats[proto.id]?.tvl ?? null,
-            active: activeIds.has(proto.id),
-        }))
+        .map(proto => {
+            const st = stats[proto.id] ?? {};
+            return {
+                id:      proto.id,
+                label:   proto.label,
+                apy:     st.apy ?? null,
+                tvl:     st.tvl ?? null,
+                liq:     st.liquidity ?? null,
+                // Schutz-Zustand kommt fertig aus dem Export (bin/export.js) – das
+                // Dashboard hat keinen Zugriff auf die settings.db.
+                enabled:      st.poolEnabled !== false,
+                tvlBelow:     st.tvlBelow === true,
+                liqBelow:     st.liqBelow === true,
+                tvlThreshold: st.tvlThreshold ?? null,
+                liqThreshold: st.liqThreshold ?? null,
+                // Dritter Grund, aus dem "Bester Pool" einen Pool überspringt: zu
+                // wenig Messpunkte für einen fairen APY-Vergleich (frisch ins
+                // Polling aufgenommen). Kein Fehler und keine Gefahr – ein
+                // Übergangszustand, der sich von selbst erledigt.
+                basisBelow:    st.dataBasisBelow === true,
+                dataPoints:    st.dataPoints ?? 0,
+                coverageHours: st.coverageHours ?? 0,
+                active:  activeIds.has(proto.id),
+            };
+        })
         .filter(r => r.apy != null)
         .sort((a, b) => b.apy - a.apy);
 
@@ -772,6 +818,7 @@ function renderAvailablePools(data) {
             <span class="col-r lb-pools-col-asset">${tr('len.asset', 'Asset')}</span>
             <span class="col-r">${tr('len.apy', 'APY')}</span>
             <span class="col-r">${tr('liq.tvl', 'TVL')}</span>
+            <span class="col-r">${tr('len.liquidity', 'Liquidität')}</span>
         </div>`;
 
     if (rows.length === 0) {
@@ -779,19 +826,48 @@ function renderAvailablePools(data) {
     } else {
         let rowsHtml = '';
         for (const r of rows) {
-            const rowCls    = r.active ? 'lb-row-active' : 'lb-row-inactive';
-            const note      = PROTOCOL_NOTES[r.id];
-            const noteTitle = PROTOCOL_NOTE_TITLES[r.id] ?? 'Hinweis';
-            const noteHtml  = note
-                ? ` <span class="pc-info has-tooltip" data-tooltip-title="${noteTitle}" data-tooltip-content="${note}">ⓘ</span>`
+            // Zeilen-Zustand: deaktivierte Pools werden grau dargestellt und mit
+            // einem Verbots-Icon markiert. Die Bedeutung steht immer im Tooltip —
+            // Farbe allein trägt hier nie die Information.
+            const rowCls = [
+                r.active ? 'lb-row-active' : 'lb-row-inactive',
+                r.enabled ? '' : 'lb-row-disabled',
+            ].filter(Boolean).join(' ');
+
+            const disabledIcon = r.enabled ? '' :
+                `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.pool_disabled_title', 'Pool deaktiviert')}" data-tooltip-content="${tr('len.pool_disabled_tip', 'Dieser Pool ist deaktiviert. Es wird weder automatisch noch manuell in ihn eingezahlt, bis du ihn in den Einstellungen wieder aktivierst.')}">\uD83D\uDEAB</span> `;
+
+            const apyStr = r.apy != null ? fmt(r.apy, 2) + ' %' : '—';
+
+            // Zu dünne Datenbasis: Sanduhr-Icon an der APY-Spalte – dort steht der
+            // Wert, der noch nicht vergleichbar ist. Bewusst NICHT das Warndreieck
+            // der beiden Schutzschwellen: hier ist nichts in Gefahr, es fehlen nur
+            // noch Messpunkte. Die Bedeutung steht im Tooltip, nie in der Farbe.
+            const basisIcon = r.basisBelow
+                ? `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.basis_below_title', 'Datenbasis reicht noch nicht')}" data-tooltip-content="${tr('len.basis_below_tip', 'Für den Vergleich über „Bester Pool“ braucht ein Pool mindestens {minPoints} Messpunkte über {minHours} Stunden. Dieser Pool hat bisher {points} Messpunkte über {hours} Stunden — sein Durchschnitts-APY ist damit noch nicht mit dem der anderen Pools vergleichbar. Der Wert wird weiter erfasst, der Pool rankt automatisch mit, sobald die Datenbasis reicht.', {
+                    minPoints: data?.config?.minDataPoints ?? 12,
+                    minHours:  data?.config?.minCoverageHours ?? 24,
+                    points:    r.dataPoints,
+                    hours:     fmt(r.coverageHours, 1),
+                  })}">⏳</span> `
                 : '';
-            const apyStr = r.apy != null ? fmt(r.apy, 2) + ' %' : '—';
+
+            // Unterschrittene Schutz-Schwelle: Wert rot + Icon links davon.
+            // Beides zusammen, nie Farbe allein.
+            const tvlIcon = r.tvlBelow
+                ? `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.tvl_below_title', 'TVL unter der Schwelle')}" data-tooltip-content="${tr('len.tvl_below_tip', 'Der TVL dieses Pools liegt unter der eingestellten TVL-Schutz-Schwelle ({threshold}). Über „Bester Pool“ wird derzeit nicht in diesen Pool investiert.', { threshold: fmtTvl(r.tvlThreshold) })}">\u26A0</span> `
+                : '';
+            const liqIcon = r.liqBelow
+                ? `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.liq_below_title', 'Liquidität unter der Schwelle')}" data-tooltip-content="${tr('len.liq_below_tip', 'Die sofort abhebbare Liquidität dieses Pools liegt unter der eingestellten Liquiditäts-Schutz-Schwelle ({threshold}). Über „Bester Pool“ wird derzeit nicht in diesen Pool investiert.', { threshold: fmtLiquidity(r.liqThreshold) })}">\u26A0</span> `
+                : '';
+
             rowsHtml += `
             <div class="lb-pools-row ${rowCls}">
-                <span>${escHtml(r.label)}${noteHtml}</span>
+                <span>${disabledIcon}${escHtml(r.label)}</span>
                 <span class="col-r lb-pools-col-asset" style="color:var(--text-muted);font-size:0.78rem">USDC</span>
-                <span class="col-r"><span class="apy-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.apy_history', 'APY-Verlauf')}">${apyStr}</span></span>
-                <span class="col-r"><span class="tvl-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.tvl_history', 'TVL-Verlauf')}">${fmtTvl(r.tvl)}</span></span>
+                <span class="col-r">${basisIcon}<span class="apy-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.apy_history', 'APY-Verlauf')}">${apyStr}</span></span>
+                <span class="col-r">${tvlIcon}<span class="tvl-clickable${r.tvlBelow ? ' lb-below' : ''}" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.tvl_history', 'TVL-Verlauf')}">${fmtTvl(r.tvl)}</span></span>
+                <span class="col-r">${liqIcon}<span class="liq-clickable${r.liqBelow ? ' lb-below' : ''}" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.liq_history', 'Liquiditäts-Verlauf')}">${fmtLiquidity(r.liq)}</span></span>
             </div>`;
         }
         container.innerHTML = header + `<div class="lb-pools-scroll">${rowsHtml}</div>`;
@@ -1098,6 +1174,16 @@ function renderStatistics(data) {
             topEl.textContent = '0,00';
             topGroup?.setAttribute('data-type', 'neutral');
         }
+    }
+    // Bei sehr kleinem Kapital rundet lib/pnl.js den 24h-Ertrag auf 0,00 USDC — export.js
+    // weicht dann auf den protokollseitig gemeldeten Ø-APY aus (siehe rolling24h.aprIsEstimate).
+    // Ein ⓘ-Icon macht das transparent, statt den Schätzwert wie eine gemessene Rendite
+    // aussehen zu lassen (nicht nur Text/Farbe wäre bei Farbschwäche nicht eindeutig genug).
+    const estimateIconEl = document.getElementById('renditeEstimateIcon');
+    if (estimateIconEl) {
+        estimateIconEl.innerHTML = stats.rolling24h?.aprIsEstimate
+            ? `<span class="pc-info has-tooltip" data-tooltip-title="${tr('len.apr_estimate.title', 'Geschätzter Wert')}" data-tooltip-content="${tr('len.apr_estimate', "Bei so kleinem Kapital rundet sich dein 24h-Ertrag auf 0,00 USDC – daraus ließe sich keine sinnvolle Rendite berechnen. Stattdessen zeigen wir dir hier den aktuell vom Protokoll gemeldeten Zinssatz.")}">ⓘ</span>`
+            : '';
     }
 
     // Click-Handler (via clickable-value spans)
@@ -1839,6 +1925,7 @@ function initPoolApyModal() {
         if (e.key === 'Escape') {
             closePoolApyModal();
             closePoolTvlModal();
+            closePoolLiqModal();
             closePoolTxModal();
         }
     });
@@ -1911,6 +1998,78 @@ function initPoolTvlModal() {
     document.getElementById('poolTvlModalClose')?.addEventListener('click', closePoolTvlModal);
     document.getElementById('poolTvlModal')?.addEventListener('click', e => {
         if (e.target === e.currentTarget) closePoolTvlModal();
+    });
+}
+
+// ─── Pool-Liquiditäts-Modal ──────────────────────────────────────────────────
+//
+// Baugleich zum TVL-Modal: die Liquidität ist die zweite Kennzahl, an der ein
+// Schutz hängt — ihr Verlauf muss genauso nachvollziehbar sein wie der TVL-Verlauf.
+
+const LS_POOL_LIQ_RANGE = 'lendingbot_pool_liq_range';
+let _poolLiqRange = localStorage.getItem(LS_POOL_LIQ_RANGE) ?? '1D';
+let _poolLiqCtx   = null;  // { protoKey, label, data }
+
+function openPoolLiqModal(protoKey, label, data) {
+    _poolLiqCtx = { protoKey, label, data };
+
+    document.getElementById('poolLiqModalTitle').textContent = label + tr('len.liq_hist_suffix', ' – Liquiditäts-Verlauf');
+
+    const history = (data?.liqHistory ?? []).filter(r => r[protoKey] != null);
+
+    updateChartRangeBtns(
+        history, r => r.ts,
+        'poolLiqRangeBtns',
+        () => _poolLiqRange,
+        v  => { _poolLiqRange = v; localStorage.setItem(LS_POOL_LIQ_RANGE, v); },
+        ()  => renderPoolLiqChart()
+    );
+
+    document.getElementById('poolLiqModal').classList.remove('hidden');
+    document.getElementById('poolLiqModalClose').focus();
+    document.body.classList.add('modal-open');
+    requestAnimationFrame(() => requestAnimationFrame(() => renderPoolLiqChart()));
+}
+
+function closePoolLiqModal() {
+    document.getElementById('poolLiqModal').classList.add('hidden');
+    _poolLiqCtx = null;
+    document.body.classList.remove('modal-open');
+}
+
+function renderPoolLiqChart() {
+    if (!_poolLiqCtx) return;
+    const { protoKey, data } = _poolLiqCtx;
+    const svg      = document.getElementById('poolLiqChartSvg');
+    const emptyMsg = document.getElementById('poolLiqChartEmptyMsg');
+
+    const history  = (data?.liqHistory ?? []).filter(r => r[protoKey] != null);
+    const filtered = filterByRange(history, _poolLiqRange, r => r.ts);
+
+    if (filtered.length < 2) {
+        svg.style.display      = 'none';
+        emptyMsg.style.display = 'block';
+        return;
+    }
+    svg.style.display      = 'block';
+    emptyMsg.style.display = 'none';
+
+    const points = filtered.map(r => ({ ts: r.ts, v: r[protoKey] }));
+    const H      = parseInt(svg.getAttribute('height')) || 200;
+    const geo    = _buildPoolLineSvg(svg, points, H, 62, 16, 16, 28, _poolLiqRange, v => fmtLiquidity(v));
+    if (geo) attachHoverOverlay(svg, geo);
+}
+
+function initPoolLiqModal() {
+    document.addEventListener('click', e => {
+        const span = e.target.closest('.liq-clickable[data-protocol]');
+        if (!span) return;
+        openPoolLiqModal(span.dataset.protocol, span.dataset.label, dm.data);
+    });
+
+    document.getElementById('poolLiqModalClose')?.addEventListener('click', closePoolLiqModal);
+    document.getElementById('poolLiqModal')?.addEventListener('click', e => {
+        if (e.target === e.currentTarget) closePoolLiqModal();
     });
 }
 
@@ -2205,6 +2364,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initMessageBell();
     initPoolApyModal();
     initPoolTvlModal();
+    initPoolLiqModal();
     initPoolInOutModal();
     initInactiveToggle();
     initYieldRangeBtns();

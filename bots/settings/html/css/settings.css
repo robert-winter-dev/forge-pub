@@ -1154,3 +1154,81 @@ body {
     outline: none;
 }
 .lang-select:hover { border-color: #475569; color: #f1f5f9; }
+
+
+/* ── Reiter „Auffällig" im Wallet-Modal (CORE#0304) ───────────────────────────
+   Karten statt Tabelle: vier Spalten passen nicht in 480px, das Ergebnis war ein
+   waagerechter Scrollbalken. Ein Kartenblock fließt und bleibt auf jeder Breite
+   lesbar — und hat Platz für die Belege, auf die es hier ankommt. */
+
+/* Etwas breiter als der Standard, damit Zeile 1 samt Einstufung und beiden Knöpfen
+   nebeneinander Platz hat. Gleiches Muster wie beim Ranking-Modal oben, id-bezogen —
+   die übrigen Modals bleiben bei 480px. */
+#forge-modal-liquidity-wallet-modal .forge-modal,
+#forge-modal-premium-wallet-modal   .forge-modal,
+#forge-modal-lb-wallet-modal        .forge-modal { max-width: 600px; }
+
+.scam-intro { margin-bottom: 0.8rem; }
+
+/* Höhenbegrenzung statt einer "ab 3 Token"-Regel: das greift auch dann richtig,
+   wenn einzelne Karten zusammengeklappt sind, und lässt das Modal nie über den
+   Bildschirm hinauswachsen. */
+.scam-list {
+    max-height: 22rem;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* Platz für den Scrollbalken, damit er nicht auf den Karten klebt. */
+    padding-right: 0.25rem;
+}
+
+.scam-card {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.75rem;
+    margin-bottom: 0.6rem;
+}
+.scam-card:last-child { margin-bottom: 0; }
+
+/* Ignoriert: nur Zeile 1, kompakter. Die Abschwächung ist zusätzlich, nicht
+   alleiniges Signal — der Knopf trägt aria-pressed und einen eigenen Titel. */
+.scam-card-collapsed {
+    padding: 0.35rem 0.75rem;
+    opacity: 0.65;
+    border-style: dashed;
+}
+
+.scam-line1 {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+.scam-amount { font-weight: 600; }
+.scam-symbol {
+    font-weight: 600;
+    color: inherit;
+    text-decoration: none;
+    /* Ein Scam-Symbol kann beliebig lang sein — hier umbrechen statt die Karte
+       aufzuspreizen (sonst ist der waagerechte Balken sofort wieder da). */
+    overflow-wrap: anywhere;
+}
+.scam-symbol:hover { text-decoration: underline; }
+.scam-worth { color: var(--text-muted); }
+
+/* Die Einstufung trägt ihre Aussage im TEXT, nicht in der Farbe (Farbschwäche). */
+.scam-verdict { font-size: 0.85rem; white-space: nowrap; }
+
+.scam-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 0.3rem;
+    flex-shrink: 0;
+}
+
+.scam-detail {
+    font-size: 0.9rem;
+    margin-top: 0.3rem;
+    overflow-wrap: anywhere;
+}
+.scam-detail-muted { color: var(--text-muted); font-size: 0.85rem; cursor: help; }
+.scam-tx { color: inherit; }

@@ -460,6 +460,27 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
 }
+/* ── Risk-Management-Exit-Details (strukturierte Zeilen statt Fließtext) ─────
+   Bewusst KEIN Label/Wert-Raster mit fester Spaltenbreite wie bei
+   .msg-pay-row/.msg-pay-label – die Labels sind teils lang ("Pool-Wert bei
+   Schließung") und würden dort hässlich umbrechen (Befund 2026-08-19, per
+   Screenshot gemeldet). Jede Zeile ist stattdessen ein normal fließender Satz. */
+.mc-risk-list {
+    list-style: none;
+    margin: 0.5rem 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+.mc-risk-label { color: var(--text-muted); }
+/* PnL-Zeile: das Vorzeichen im Text (+/−) trägt die Bedeutung, die Farbe ist
+   nur Verstärkung (siehe feedback_color_blindness). */
+.msg-pnl-positive { color: var(--success); font-weight: 600; }
+.msg-pnl-negative { color: var(--danger);  font-weight: 600; }
 
 /* ── Einstellungen-Panel ─────────────────────────────────────────────────────
    Grid: nutzt die volle Breite – auf breiten Bildschirmen stehen mehrere Zeilen

@@ -65,6 +65,8 @@ import { fileURLToPath } from 'url';
 import path              from 'path';
 import { PATHS }         from '../config/paths.js';
 import fs                from 'fs';
+import { renderNotification } from '../lib/notify-render.js';
+import { getLang }       from '../lib/i18n.js';
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = path.join(__dirname, '..');
@@ -219,16 +221,24 @@ function sleep(ms) {
 
 // ─── Nexus-Notification ───────────────────────────────────────────────────────
 
-async function sendNotification(level, message, context = null) {
+// msgKey statt fertigem Text (Schritt 5 der Mehrsprachigkeit) — sonst kommt
+// diese Meldung auf einer EN-Installation trotzdem deutsch an, siehe
+// lib/notify-render.js.
+async function sendNotification(level, msgKey, params = {}, context = null) {
+    const message = renderNotification(
+        { msgKey, params, displayName: 'Emergency Exit', timestamp: Date.now() },
+        getLang(),
+    );
     try {
         await fetch(`${NEXUS_URL}/notify`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({
-                botId:    'emergency-exit',
+                botId:       'emergency-exit',
+                displayName: 'Emergency Exit',
                 level,
-                category: 'emergency_exit',
-                message,
+                category:    'emergency_exit',
+                message, msgKey, params,
                 context,
             }),
             signal: AbortSignal.timeout(5000),
@@ -328,7 +338,8 @@ async function main() {
         const botNames = targets.map(t => t.botCfg.name).join(', ');
         await sendNotification(
             'lifecycle',
-            `🚨 Emergency Exit gestartet – Kapitalabzug aus: ${botNames}`,
+            'notify.emg.started',
+            { bots: botNames },
             { botNames, chain: targets.map(t => t.chain) }
         );
     }
@@ -373,7 +384,8 @@ async function main() {
                 .join(' | ');
             await sendNotification(
                 'error',
-                `⚠ Emergency-Exit Selbsttest fehlgeschlagen – ${failedDetail}`,
+                'notify.emg.dryrun_failed',
+                { detail: failedDetail },
                 { dryRunLevel, results: results.map(r => ({ bot: r.name, success: r.success, errors: r.errors })) }
             );
             error(`Selbsttest FEHLGESCHLAGEN (Level ${dryRunLevel})`);
@@ -382,11 +394,11 @@ async function main() {
         }
     } else {
         // Live: immer abschließende Meldung senden
-        const status   = overallOk ? '✅ abgeschlossen' : '⚠ mit Fehlern abgeschlossen';
         const botNames = targets.map(t => t.botCfg.name).join(', ');
         await sendNotification(
             overallOk ? 'lifecycle' : 'error',
-            `🚨 Emergency Exit ${status} – ${botNames}`,
+            'notify.emg.finished',
+            { bots: botNames, status: { k: overallOk ? 'notify.emg.status_ok' : 'notify.emg.status_errors' } },
             { results: results.map(r => ({ bot: r.name, success: r.success })) }
         );
     }

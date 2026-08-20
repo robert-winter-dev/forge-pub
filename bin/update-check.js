@@ -571,7 +571,17 @@ async function main() {
     }
     log(`✓ ${t('cli.upd.unpacked', { dir: stageTarget })}`);
 
-    if (dryRun) { log(t('cli.upd.dry_run_end')); return; }
+    // Ab hier hat das Entpacken seinen Zweck erfüllt (Prüfung/Anzeige) und stageTarget
+    // muss vor JEDEM verbleibenden Rückkehrpunkt aufgeräumt werden – nicht nur im
+    // Erfolgspfad ganz unten (siehe dortiger Kommentar). Ohne das häuften sich pro
+    // Fork-Installation mehrere hundert MB an: der TÄGLICHE Normalfall ist genau der
+    // "Update verfügbar, aber kein Auto-Apply"-Zweig direkt darunter (jeder Cron-Lauf,
+    // der eine neuere, nicht-Patch-Version findet, kehrte bislang zurück, ohne den
+    // gerade entpackten Release je zu löschen). Fund 2026-08-20: 23 bzw. 13 liegen-
+    // gebliebene Staging-Verzeichnisse auf forge-pub1/forge-pub2, 524 MB / 283 MB.
+    const cleanupStaging = () => { try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker */ } };
+
+    if (dryRun) { log(t('cli.upd.dry_run_end')); cleanupStaging(); return; }
 
     const policy = readPolicy();
     const isPatchLevel = installed.version
@@ -594,6 +604,7 @@ async function main() {
                 ...(release.releaseUrl ? { changelog: release.releaseUrl } : {}),
             },
             ACTION.confirm);
+        cleanupStaging();
         return;
     }
 
@@ -614,6 +625,7 @@ async function main() {
         log(`🔴 ${t('cli.upd.setup_failed')}`);
         process.exitCode = EXIT.applyFailed;
         await notify('error', CAT.apply, 'notify.upd.apply_failed', { version: manifest.version, code: applyResult.status }, ACTION.urgent);
+        cleanupStaging();
         return;
     }
 
@@ -621,7 +633,7 @@ async function main() {
     // (do_deploy kopiert nach /opt/forge/app) — unabhängig vom Health-Gate-Ausgang
     // danach. Ohne dieses Aufräumen sammeln sich pro Update ~200MB unter staging/
     // an (live gefunden: forge-pub1 nach dem ersten echten Apply-Test, 2026-08-03).
-    try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker fürs Health-Gate */ }
+    cleanupStaging();
 
     log(t('cli.upd.health_checking'));
     const regressed = await waitForStableServices(preActive, preRestarts);

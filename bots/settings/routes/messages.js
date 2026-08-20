@@ -18,6 +18,11 @@
  *                                      Nachrichten (kein JSON-Rohtext im Frontend)
  * GET  /api/messages/premium/unread-count → { unread: N }
  * POST /api/messages/premium/:id/read     → einzelne Premium-Nachricht als gelesen markieren
+ * GET  /api/messages/bots           → Bot-Meldungen aus nexus.db (Liquidity/Lending),
+ *                                      gleiche Parameter und gleiches Antwortformat wie
+ *                                      /system – nur die Gegenmenge derselben Query.
+ *                                      Gelesen-Markierung und Löschen laufen weiter über
+ *                                      /system/... (Notification-IDs sind rubrikunabhängig).
  * GET  /api/messages/system         → System-Notifications aus nexus.db, fensterweise
  *                                      (?limit=&offset=&q=), bleibt hier, kein Nostr-Bezug.
  *                                      unreadCount + allIds sind ungefenstert (max. 100) –
@@ -39,46 +44,174 @@
 import { Router } from 'express';
 import { t } from '../../../lib/i18n.js';
 import { notificationText } from '../../../lib/notify-render.js';
+import { pnlForPeriod } from '../../../lib/pnl.js';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
+import { getBotConfig } from '../../../lib/bot-registry.js';
 
 const PREMIUM_BASE = `http://127.0.0.1:${process.env.PREMIUM_PORT || '3110'}`;
 const NEXUS_BASE   = `http://127.0.0.1:${process.env.NEXUS_PORT || '3100'}`;
 const NEXUS_DB_PATH = PATHS.nexusDb;
 
+// Die beiden echten Bots – Anzeigenamen kommen aus der zentralen Registry
+// (config/bots.json), damit eine Umbenennung dort nicht hier nachgezogen werden muss.
+const BOT_IDS       = ['liquidity', 'lending'];
+const BOT_NAMES     = BOT_IDS.map(id => getBotConfig(id).displayName);
+const BOT_NAME_BY_ID = Object.fromEntries(BOT_IDS.map(id => [id, getBotConfig(id).displayName]));
+
 /**
  * Anzeigename des betroffenen Bots für die Kopfzeile im Message Center.
  *
- * Bewusst NUR drei mögliche Werte, unabhängig vom frei gewählten display_name
+ * Bewusst NUR drei mögliche Werte ("Liquidity Bot", "Lending Bot", "System"),
+ * unabhängig vom frei gewählten display_name
  * jedes einzelnen Absenders (Betreiber-Vorgabe 2026-08-16): der Nutzer soll auf
  * den ersten Blick sehen, ob eine Meldung von einem der beiden Bots kommt oder
  * vom FORGE-Kern — nicht die uneinheitlichen Rohnamen der ~10 verschiedenen
  * Skripte, die an /notify senden (z.B. "Monitoring", "Auto-Update"). Das
  * gespeicherte display_name bleibt in der DB erhalten, wird hier nur ignoriert.
+ *
+ * Ausnahme seit 2026-08-18 (Rubrik "Bots"): Absender, die selbst kein Bot sind,
+ * aber den BETROFFENEN Bot im display_name mitschicken, werden darüber zugeordnet.
+ * Praktisch relevant für den SOL-Guthaben-Alert des Wallet-Monitors (botId
+ * 'wallet-monitor', display_name 'Liquidity Bot'/'Lending Bot' — siehe
+ * core/wallet-monitor/monitor.js). Vorher stand dort als Absender "FORGE", die
+ * Meldung wäre also in der falschen Rubrik gelandet.
  */
 function resolveBotName(displayName, botId) {
-    if (botId === 'liquidity') return 'Liquidity Bot';
-    if (botId === 'lending')   return 'Lending Bot';
-    return 'FORGE';
+    if (BOT_NAME_BY_ID[botId]) return BOT_NAME_BY_ID[botId];
+    if (BOT_NAMES.includes(displayName)) return displayName;
+    // Alles Übrige landet in der Rubrik "System" und heißt dort auch so (Vorgabe
+    // 2026-08-18). Vorher stand "FORGE" – dieselbe Meldung, aber ein Name, der
+    // sich nicht mehr auf die Rubrik zurückführen ließ, seit es daneben eine
+    // Rubrik "Bots" gibt, deren Meldungen ja ebenso von FORGE stammen.
+    return 'System';
 }
 
 // Pool-Name neben dem Bot-Namen in der Message-Center-Kopfzeile (Ticket 2026-08-08):
-// die meisten notify.js-Aufrufer schreiben den Pool bereits strukturiert in den
-// context-JSON-Blob (Key "pair", bei tierTransition zusätzlich "pool" — beide
-// werden hier geprüft). Für ältere, bereits gespeicherte Nachrichten, die den
-// Pool nur im Fließtext haben (context war zum Sendezeitpunkt leer), greift als
-// Fallback eine Regex auf den Nachrichtentext — deckt das gängige "TOKEN/TOKEN"-
-// Format ab, das jede Pool-Pair-Bezeichnung in FORGE hat.
-const PAIR_TEXT_RE = /\b[A-Za-z0-9]{2,10}\/[A-Za-z0-9]{2,10}\b/;
-function extractPool(context, message) {
-    if (context) {
-        try {
-            const parsed = JSON.parse(context);
-            const pool = parsed?.pair ?? parsed?.pool ?? null;
-            if (pool) return pool;
-        } catch { /* kein valides JSON – Fallback greift unten */ }
+// notify.js-Aufrufer schreiben den Pool strukturiert in den context-JSON-Blob
+// (Key "pair", bei tierTransition zusätzlich "pool" — beide werden hier geprüft).
+//
+// Bis 2026-08-18 gab es zusätzlich einen Regex-Fallback auf den Fließtext
+// (/\b[A-Za-z0-9]{2,10}\/[A-Za-z0-9]{2,10}\b/) für Altmeldungen ohne context.
+// Der ist ersatzlos entfallen: das Muster trifft auch Nicht-Pools — bei
+// englischer Spracheinstellung das Datum ("08/18/2026" → Pool "08/18"), im
+// deutschen Fließtext Wortpaare wie "Ein/Aus". Beides stand als "Pool <X>" in
+// der Liste bzw. hinter dem Level in der Detailansicht. Nutzen hatte der
+// Fallback ohnehin keinen mehr: es werden nur die letzten 100 Notifications
+// aufbewahrt (MAX_NOTIFICATIONS in core/nexus/notify-db.js), Meldungen von vor
+// 2026-08-08 sind daher längst verdrängt. Fehlt der Pool jetzt in der Kopfzeile,
+// steht er weiterhin im Nachrichtentext selbst.
+function extractPool(context) {
+    if (!context) return null;
+    try {
+        const parsed = JSON.parse(context);
+        return parsed?.pair ?? parsed?.pool ?? null;
+    } catch {
+        return null;  // kein valides JSON – dann eben kein Pool-Bezug
     }
-    return message?.match(PAIR_TEXT_RE)?.[0] ?? null;
+}
+
+/**
+ * PnL eines Risk-Management-Exits aus lib/pnl.js NACHTRÄGLICH ermitteln – nur für
+ * Altmeldungen von vor Einführung der pnlLine (03.08.2026er Mehrsprachigkeits-
+ * Umbau kam vor dieser Erweiterung), deren msg_params noch keinen pnl-Wert
+ * enthalten. Neue Meldungen liefern pnlLine bereits fertig mit (siehe
+ * bots/liquidity/lib/exit-finalizer.js computeExitPnl()).
+ *
+ * Nur Lesezugriff auf liquiditybot.db (fremde Bot-DB, laut Konvention erlaubt).
+ * Bewusst konservativ: ohne einen zeitlich eindeutigen Treffer (Positions-Ende
+ * innerhalb weniger Minuten um den Meldungszeitpunkt) lieber gar kein PnL zeigen
+ * als eines aus einer falsch zugeordneten Position.
+ */
+const LEGACY_MATCH_TOLERANCE_MS = 5 * 60_000;
+
+// Token-Reihenfolge egal: notify.js schickt pool.displayPair (Orca-Konvention,
+// siehe project_pool_naming_orca), die pools-Tabelle speichert intern eine feste
+// (teils andere) Reihenfolge – z.B. Meldung "PUMP/SOL" vs. DB-Zeile "SOL/PUMP"
+// für denselben Pool. Ein Set-Vergleich der beiden Symbole ist robust dagegen.
+function pairKey(pair) {
+    return String(pair ?? '').split('/').map(s => s.trim().toLowerCase()).sort().join('/');
+}
+
+function backfillLegacyExitPnl(liquidityDb, pair, notifTimestampMs) {
+    if (!liquidityDb || !pair || !Number.isFinite(notifTimestampMs)) return null;
+    try {
+        const key = pairKey(pair);
+        const poolRow = liquidityDb.prepare(`SELECT id, pair FROM pools`).all()
+            .find(r => pairKey(r.pair) === key);
+        if (!poolRow) return null;
+        const pos = liquidityDb.prepare(`
+            SELECT opened_at, closed_at FROM positions
+             WHERE pool_id = ? AND closed_at IS NOT NULL
+             ORDER BY ABS(closed_at - ?) ASC LIMIT 1
+        `).get(poolRow.id, notifTimestampMs);
+        if (!pos || Math.abs(pos.closed_at - notifTimestampMs) > LEGACY_MATCH_TOLERANCE_MS) return null;
+
+        const lastDeposit = liquidityDb.prepare(`
+            SELECT MAX(created_at) AS t FROM capital_flows
+             WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
+        `).get(poolRow.id, pos.opened_at);
+        const fromMs = lastDeposit?.t ?? pos.opened_at;
+
+        return pnlForPeriod(liquidityDb, { flavor: 'liquidity', scope: poolRow.id, fromMs, toMs: pos.closed_at });
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Strukturierte Darstellung eines Risk-Management-Exits (Trailing Stop /
+ * Score-Limit, siehe bots/liquidity/lib/notify.js rmExecuted()) fürs Message
+ * Center – analog zum `payment`-Objekt der Premium-Zahlungen
+ * (core/premium/server.js humanizePremiumMessage()): eigene Frontend-Darstellung
+ * statt Fließtext, hier für die Exit-Kennzahlen inkl. PnL.
+ */
+function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
+    if (msgKey !== 'notify.liq.rm_executed') return null;
+    let p = msgParams;
+    if (typeof p === 'string') {
+        try { p = JSON.parse(p); } catch { return null; }
+    }
+    if (!p || typeof p !== 'object') return null;
+
+    try {
+        // scenario ist normalerweise ein Katalog-Verweis {k,p} (siehe rmScenario()
+        // in notify.js), Altbestand kann noch einen rohen String enthalten.
+        const scenario = p.scenario == null ? null
+            : (typeof p.scenario === 'object' && p.scenario.k) ? t(p.scenario.k, p.scenario.p)
+            : String(p.scenario);
+        const actionText = p._action ? t(String(p._action)) : null;
+        // pnlUsdcNum bleibt die Rohzahl (für die %-Berechnung unten), pnlUsdc die
+        // formatierte Anzeige – Backfill nur wenn msg_params noch keinen PnL trägt
+        // (Altmeldungen von vor dieser Erweiterung).
+        let pnlUsdcNum = p.pnlLine?.p?.pnl != null ? parseFloat(p.pnlLine.p.pnl) : null;
+        if (pnlUsdcNum == null) pnlUsdcNum = backfillLegacyExitPnl(liquidityDb, p.pair, timestamp);
+        const pnlUsdc = pnlUsdcNum != null ? `${pnlUsdcNum >= 0 ? '+' : ''}${pnlUsdcNum.toFixed(2)}` : null;
+
+        // Prozent relativ zum Pool-Wert bei Schließung – dieselbe Bezugsgröße wie
+        // die PnL-%-Anzeige im Dashboard (html/liquidity/js/app.js: pnl / myValue).
+        const lpValueNum = p.lpValue != null ? parseFloat(p.lpValue) : null;
+        const pnlPct = (pnlUsdcNum != null && lpValueNum != null && lpValueNum !== 0)
+            ? `${pnlUsdcNum >= 0 ? '+' : ''}${(pnlUsdcNum / lpValueNum * 100).toFixed(2)}%`
+            : null;
+
+        return {
+            pair:        p.pair ?? null,
+            scenario,
+            lpValue:     p.lpValue ?? null,
+            coinsA:      p.coinsA ?? null,
+            symA:        p.symA ?? null,
+            coinsB:      p.coinsB ?? null,
+            symB:        p.symB ?? null,
+            swappedUsdc: p.swappedLine?.p?.usdc ?? null,
+            exitCost:    p.swappedLine?.p?.cost ?? null,
+            pnlUsdc,
+            pnlPct,
+            actionText,
+        };
+    } catch {
+        return null;
+    }
 }
 
 const router = Router();
@@ -236,7 +369,7 @@ router.get('/support/stream', async (req, res) => {
 // Ohne diese Ausnahme verschwand er lautlos hinter demselben Filter wie die
 // Positions-/Deposit-Rauschmeldungen, die die Blende ursprünglich abstellen
 // sollte (Fund 2026-08-13: Report kam korrekt in der DB an, war aber nie sichtbar).
-router.get('/system', (req, res) => {
+function handleNotificationWindow(req, res, scope) {
     // Reine Lese-Queries auf die Nexus-DB sind laut Konvention erlaubt (exklusiver
     // Schreibzugriff bleibt beim Nexus selbst, siehe notify-db.js). Kein Nostr-Bezug,
     // bleibt deshalb hier statt im Premium-Dienst.
@@ -250,6 +383,16 @@ router.get('/system', (req, res) => {
     const q      = typeof req.query.q === 'string' ? req.query.q.trim() : '';
 
     let db;
+    // Nur bei Bedarf geöffnet (Legacy-PnL-Backfill, siehe extractRiskExit) – die
+    // meisten Requests haben keine rm_executed-Zeile im Fenster.
+    let liquidityDb = null;
+    const getLiquidityDb = () => {
+        if (liquidityDb === null) {
+            try { liquidityDb = new Database(PATHS.liquidityDb, { readonly: true, fileMustExist: true }); }
+            catch { liquidityDb = false; }
+        }
+        return liquidityDb || null;
+    };
     try {
         db = new Database(NEXUS_DB_PATH, { readonly: true, fileMustExist: true });
 
@@ -257,11 +400,52 @@ router.get('/system', (req, res) => {
         // siehe notify-db.js). Wird forge-settings vor forge-nexus neu gestartet, fehlt
         // die Spalte noch — ohne diese Prüfung würde die SELECT-Query werfen und der
         // catch-Zweig unten lieferte ein LEERES Message Center statt der Meldungen.
-        const hasDisplayName = db.prepare('PRAGMA table_info(notifications)')
-            .all().some(c => c.name === 'display_name');
+        const columns        = db.prepare('PRAGMA table_info(notifications)').all().map(c => c.name);
+        const hasDisplayName = columns.includes('display_name');
         const nameCol = hasDisplayName ? 'display_name' : 'NULL';
 
-        const baseFilter = "(level != 'info' OR category = 'health-share-report') AND message NOT LIKE '%APR-Alert%'";
+        // read und msg_key/msg_params kamen ebenfalls per Migration dazu (03.08. bzw.
+        // mit der Mehrsprachigkeit) – gleiche Vorsichtsmaßnahme wie bei display_name.
+        const hasRead  = columns.includes('read');
+        const readCol  = hasRead ? 'read' : '0';
+        const hasI18n  = columns.includes('msg_key');
+        const i18nCols = hasI18n ? 'msg_key, msg_params' : 'NULL AS msg_key, NULL AS msg_params';
+
+        // Rubriken-Trennung System/Bots (Vorgabe 2026-08-18): dieselbe Zuordnung wie
+        // resolveBotName() oben, nur in SQL – gefiltert wird serverseitig, damit
+        // Fenster (limit/offset), Trefferzahl und Ungelesen-Zähler je Rubrik stimmen.
+        // Die display_name-Spalte muss mit hinein, weil Absender wie der Wallet-Monitor
+        // ihre SOL-Meldungen unter eigener botId, aber mit dem Bot-Anzeigenamen senden.
+        const botListSql = BOT_IDS.map(() => '?').join(',');
+        const botNameSql = BOT_NAMES.map(() => '?').join(',');
+        // COALESCE ist Pflicht, nicht Kosmetik: bei display_name IS NULL (Zeilen von
+        // vor der 30.07.-Migration) liefert `display_name IN (...)` SQL-NULL, damit
+        // wird auch das umgebende NOT (...) zu NULL — die Zeile fiele aus BEIDEN
+        // Rubriken heraus statt in "System" zu landen.
+        const isBotSql   = hasDisplayName
+            ? `(COALESCE(bot_id,'') IN (${botListSql}) OR COALESCE(display_name,'') IN (${botNameSql}))`
+            : `(COALESCE(bot_id,'') IN (${botListSql}))`;
+        const scopeParams = hasDisplayName ? [...BOT_IDS, ...BOT_NAMES] : [...BOT_IDS];
+        const scopeSql    = scope === 'bots' ? isBotSql : `NOT ${isBotSql}`;
+
+        // Start-/Stop-Meldungen der Bots erscheinen in KEINER Rubrik (Vorgabe
+        // 2026-08-18): sie sagen dem Nutzer nichts, was er tun müsste, und ein
+        // Deploy/Auto-Restart hätte die Bot-Rubrik regelmäßig zugemüllt. Neu erzeugt
+        // werden sie ohnehin nicht mehr (notify.startup()/shutdown() sind seit
+        // 2026-08-14 leer, siehe bots/*/lib/notify.js) – der Filter räumt den
+        // Altbestand aus der Anzeige, ohne auf der Nexus-DB zu löschen (fremde DB,
+        // nur Lesezugriff erlaubt). Zwei Wege, weil ältere Zeilen noch kein msg_key
+        // haben: Katalogschlüssel für neue, Textmuster (DE/EN) für alte.
+        const restartKeys = ['notify.liq.startup', 'notify.liq.shutdown_expected',
+                             'notify.liq.shutdown_unexpected', 'notify.len.startup', 'notify.len.shutdown'];
+        const restartTexts = ['%Bot gestartet%', '%Bot gestoppt%', '%Bot started%', '%Bot stopped%'];
+        const restartSql = (hasI18n ? `COALESCE(msg_key,'') NOT IN (${restartKeys.map(() => '?').join(',')}) AND ` : '')
+            + restartTexts.map(() => "COALESCE(message,'') NOT LIKE ?").join(' AND ');
+        const restartParams = hasI18n ? [...restartKeys, ...restartTexts] : [...restartTexts];
+
+        const baseFilter = `(level != 'info' OR category = 'health-share-report')`
+            + ` AND message NOT LIKE '%APR-Alert%' AND ${scopeSql} AND ${restartSql}`;
+        const baseParams = [...scopeParams, ...restartParams];
         // Suche schließt Anzeigename UND context mit ein: die UI zeigt "Liquidity Bot"
         // sowie (seit 2026-08-08) den Pool aus dem context-JSON-Blob in der Thema-Spalte
         // (siehe extractPool()) – ohne beide Spalten in der Suche wäre genau der
@@ -274,21 +458,9 @@ router.get('/system', (req, res) => {
             ? `WHERE ${baseFilter} AND (${searchCols.map(c => `${c} LIKE ?`).join(' OR ')})`
             : `WHERE ${baseFilter}`;
         const like     = `%${q}%`;
-        const params   = q ? searchCols.map(() => like) : [];
+        const params   = q ? [...baseParams, ...searchCols.map(() => like)] : [...baseParams];
 
         const totalCount = db.prepare(`SELECT COUNT(*) AS c FROM notifications ${whereSql}`).get(...params).c;
-
-        // read kam erst am 03.08.2026 dazu (Migration läuft beim Nexus-Start, siehe
-        // notify-db.js) – gleiche Vorsichtsmaßnahme wie bei display_name oben.
-        const hasRead = db.prepare('PRAGMA table_info(notifications)')
-            .all().some(c => c.name === 'read');
-        const readCol = hasRead ? 'read' : '0';
-
-        // msg_key/msg_params kamen mit der Mehrsprachigkeit dazu (Schritt 5,
-        // Migration beim Nexus-Start) – gleiche Vorsichtsmaßnahme wie oben.
-        const hasI18n  = db.prepare('PRAGMA table_info(notifications)')
-            .all().some(c => c.name === 'msg_key');
-        const i18nCols = hasI18n ? 'msg_key, msg_params' : 'NULL AS msg_key, NULL AS msg_params';
 
         const rows = db.prepare(`
             SELECT id, timestamp, bot_id AS botId, level, category, message, context, ${nameCol} AS displayName, ${readCol} AS read, ${i18nCols}
@@ -301,10 +473,11 @@ router.get('/system', (req, res) => {
           // gerendert oder der gespeicherte Text genommen wird (Altbestand).
           .map(({ context, msg_key, msg_params, ...r }) => ({
               ...r,
-              message: notificationText({ ...r, msg_key, msg_params }),
-              read:    !!r.read,
-              botName: resolveBotName(r.displayName, r.botId),
-              pool:    extractPool(context, r.message),
+              message:  notificationText({ ...r, msg_key, msg_params }),
+              read:     !!r.read,
+              botName:  resolveBotName(r.displayName, r.botId),
+              pool:     extractPool(context),
+              riskExit: extractRiskExit(msg_key, msg_params, r.timestamp, getLiquidityDb()),
           }));
 
         // Für "alle als gelesen"-Bulk-Aktion, auf die aktuelle Suche beschränkt.
@@ -329,8 +502,14 @@ router.get('/system', (req, res) => {
         res.json({ notifications: [], limit, offset, totalCount: 0, hasMore: false, allIds: [], unreadCount: 0 });
     } finally {
         db?.close();
+        liquidityDb?.close?.();
     }
-});
+}
+
+// Zwei Rubriken, eine Query: /system liefert alles, was NICHT von einem der beiden
+// Bots stammt, /bots genau die Gegenmenge (siehe handleNotificationWindow()).
+router.get('/system', (req, res) => handleNotificationWindow(req, res, 'system'));
+router.get('/bots',   (req, res) => handleNotificationWindow(req, res, 'bots'));
 
 // POST /system/mark-read { ids: number[] } – proxied an den Nexus, der exklusiv
 // auf nexus.db schreibt (siehe notify-db.js/server.js).

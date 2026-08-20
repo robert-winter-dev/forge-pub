@@ -32,6 +32,7 @@ import {
     loadPremiumKeypair, getPremiumPublicKey,
 } from '../../../lib/premium-wallet.js';
 import { t } from '../../../lib/i18n.js';
+import { classify, buildKnownTokens } from '../../../lib/scam-classify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -522,9 +523,16 @@ const NEXUS_RPC_FRESH       = 'http://127.0.0.1:3100/rpc/fresh';
 const SPL_PROGRAM_ID   = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOC_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-function deriveATA(walletPubkey, mintPubkey) {
+/**
+ * Assoziiertes Token-Konto ableiten.
+ *
+ * Das Token-Programm ist Teil der Seeds: für einen Token-2022-Mint ergibt die
+ * Legacy-Programm-ID eine ANDERE, nicht existierende Adresse. Default bleibt das
+ * Legacy-Programm, damit die bestehenden Aufrufer sich nicht ändern.
+ */
+function deriveATA(walletPubkey, mintPubkey, programId = SPL_PROGRAM_ID) {
     const [ata] = PublicKey.findProgramAddressSync(
-        [walletPubkey.toBuffer(), SPL_PROGRAM_ID.toBuffer(), mintPubkey.toBuffer()],
+        [walletPubkey.toBuffer(), programId.toBuffer(), mintPubkey.toBuffer()],
         ASSOC_PROGRAM_ID,
     );
     return ata;
@@ -951,6 +959,331 @@ router.post('/lending/send', async (req, res) => {
         console.error(`[wallet/lending/send] Fehler: ${err.message}`);
         return res.status(500).json({ error: err.message });
     }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Auffällige Token ("Scam"-Reiter im Wallet-Modal)
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Rollenverteilung, bewusst dreigeteilt:
+//   wallet-monitor  – SAMMELT. Schreibt alle 10 Min die unbekannten Mints samt
+//                     Balance/Preis nach unknown_tokens und die Metadaten nach
+//                     token_meta. Kostet keinen zusätzlichen RPC-Call.
+//   diese Route     – BEWERTET. Liest nur aus der DB, ruft nichts Externes auf,
+//                     und wendet die volle Whitelist an (inkl. Positions-NFTs, die
+//                     wallet-monitor nicht kennt und deshalb als "unbekannt" ablegt).
+//   close-scam-*.js – ENTSCHEIDET beim Burn. Baut seine Whitelist selbst neu auf und
+//                     prüft erneut. Die Anzeige darf irren, der Burn nicht.
+//
+// Ein GET auf diese Route macht damit NULL externe Abfragen.
+
+const SCAM_FLAVORS = {
+    liquidity: { dir: () => PATHS.liquidity, walletId: 'liquidity' },
+    lending:   { dir: () => PATHS.lending,   walletId: 'lending'   },
+    premium:   { dir: () => path.join(FORGE_ROOT, 'core', 'premium'), walletId: 'premium' },
+};
+
+/** Pfad zum close-scam-Skript des Flavors, oder null wenn dort nicht vorhanden. */
+function scamScriptPath(flavor) {
+    const cfg = SCAM_FLAVORS[flavor];
+    if (!cfg) return null;
+    const p = path.join(cfg.dir(), 'bin', 'close-scam-tokens.js');
+    return fs.existsSync(p) ? p : null;
+}
+
+/** Keypair des jeweiligen Wallets — je Flavor eine andere Quelle. */
+function loadScamKeypair(flavor) {
+    if (flavor === 'premium') return loadPremiumKeypair();
+    const envPath = flavor === 'lending' ? LENDING_ENV : LIQUIDITYBOT_ENV;
+    const field   = flavor === 'lending' ? 'SOLANA_KEYPAIR_PATH' : 'KEYPAIR_PATH';
+    const kpData  = loadKeypairFull(envPath, field);
+    return kpData ? Keypair.fromSecretKey(kpData.bytes) : null;
+}
+
+/** Volle Whitelist für die Anzeige — für Liquidity inklusive Positions-NFTs. */
+function scamWhitelist(flavor) {
+    return buildKnownTokens({
+        forgeRoot:   FORGE_ROOT,
+        positionsDb: flavor === 'liquidity' ? PATHS.liquidityDb : null,
+        deps:        { readFileSync: fs.readFileSync, existsSync: fs.existsSync, Database },
+    });
+}
+
+/** Liest die gespeicherten unbekannten Token eines Wallets und stuft sie ein. */
+function readScamTokens(flavor) {
+    const cfg = SCAM_FLAVORS[flavor];
+    if (!cfg || !fs.existsSync(WALLET_MONITOR_DB)) return { tokens: [], recorded_at: null };
+
+    const db = new Database(WALLET_MONITOR_DB, { readonly: true });
+    let rows = [];
+    try {
+        rows = db.prepare(
+            `SELECT u.mint, u.balance, u.price_usd, u.created_at, u.liquidity,
+                    u.received_sig, u.received_at,
+                    u.first_seen, u.last_seen, m.symbol, m.name
+             FROM unknown_tokens u
+             LEFT JOIN token_meta m ON m.mint = u.mint
+             WHERE u.wallet_id = ?
+             ORDER BY u.first_seen ASC`
+        ).all(cfg.walletId);
+    } catch {
+        // Tabellen entstehen erst beim ersten Lauf des erweiterten wallet-monitor.
+        db.close();
+        return { tokens: [], recorded_at: null };
+    }
+    db.close();
+
+    const { mints: knownMints, symbols: knownSymbols } = scamWhitelist(flavor);
+
+    const tokens = rows
+        // wallet-monitor kennt nur seine eigene Token-Liste. Pool-Token und
+        // Positions-NFTs landen dort deshalb als "unbekannt" — hier fallen sie raus.
+        .filter(r => !knownMints.has(r.mint))
+        .map(r => {
+            const cl = classify(
+                { uiAmount: r.balance, meta: { symbol: r.symbol } },
+                r.price_usd != null ? { price: r.price_usd } : null,
+                knownSymbols,
+            );
+            return {
+                mint:       r.mint,
+                symbol:     r.symbol ?? null,
+                name:       r.name ?? null,
+                balance:    r.balance,
+                price:      r.price_usd ?? null,
+                // Beide aus derselben Jupiter-Antwort wie der Preis — für die
+                // Entscheidung des Nutzers aussagekräftiger als der Preis selbst.
+                createdAt:  r.created_at ?? null,
+                liquidity:  r.liquidity ?? null,
+                // Empfangs-Transaktion: verständlichster Beleg überhaupt — "am X von
+                // einer unbekannten Adresse geschickt bekommen" statt einer Kennzahl.
+                receivedSig: r.received_sig ?? null,
+                receivedAt:  r.received_at ?? null,
+                value:      cl.value,
+                tier:       cl.tier,
+                dupSymbol:  cl.dupSymbol,
+                first_seen: r.first_seen,
+                last_seen:  r.last_seen,
+                // Nur diese beiden Stufen bekommen in der Oberfläche einen
+                // Mülleimer. WARN heißt "wir wissen es nicht" — dort fehlt uns die
+                // Evidenz, und genau diese Klasse hat am 2026-08-12 LP-Token im Wert
+                // von ~70 USDC vernichtet.
+                burnable:   cl.tier === 'BURN' || cl.tier === 'REVIEW',
+                // REVIEW = Imitat MIT Wert: zusätzliche Abtipp-Hürde im Browser.
+                needsTyping: cl.tier === 'REVIEW',
+            };
+        })
+        // SKIP ist ein bekannter, wertvoller Token ohne Kollision — kein Befund.
+        .filter(tk => tk.tier !== 'SKIP');
+
+    const recorded_at = rows.length ? Math.max(...rows.map(r => r.last_seen)) : null;
+    return { tokens, recorded_at };
+}
+
+// ── GET /:flavor/scam ─────────────────────────────────────────────────────────
+router.get('/:flavor/scam', (req, res) => {
+    const { flavor } = req.params;
+    if (!SCAM_FLAVORS[flavor]) return res.status(404).json({ error: 'unknown_flavor' });
+
+    try {
+        const { tokens, recorded_at } = readScamTokens(flavor);
+        res.json({
+            available: !!scamScriptPath(flavor),
+            tokens,
+            recorded_at,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── POST /:flavor/scam/move ───────────────────────────────────────────────────
+//
+// Auffälligen Token an eine beliebige Adresse verschieben, statt ihn zu verbrennen.
+//
+// Warum eine eigene Route und nicht /:flavor/send: der bestehende Sende-Pfad ist an
+// drei Stellen auf Whitelist-Token zugeschnitten und für diese Token untauglich —
+//   1. Er löst den Mint über das SYMBOL aus der Token-Registry auf. Ein Scam-Token
+//      steht dort nicht und liefe in "unknown_token".
+//   2. Er nimmt fest das Legacy-Token-Programm an. Token-2022-Mints (die es unter
+//      den Airdrops gibt, close-scam-tokens.js behandelt beide Programme) bekämen
+//      eine falsche ATA-Adresse und eine ungültige Instruktion.
+//   3. Er benutzt die veraltete Transfer-Instruktion (3). Token-2022 mit
+//      Transfer-Fee-Extension lehnt die ab; TransferChecked (12) ist dort Pflicht
+//      und prüft nebenbei die Dezimalstellen mit.
+//
+// Das Quellkonto wird NICHT abgeleitet, sondern aus der Kette gelesen: ein
+// zugeschickter Token liegt nicht zwingend im kanonischen ATA.
+router.post('/:flavor/scam/move', async (req, res) => {
+    const { flavor } = req.params;
+    const cfg = SCAM_FLAVORS[flavor];
+    if (!cfg) return res.status(404).json({ error: 'unknown_flavor' });
+
+    const mint      = String(req.body?.mint ?? '').trim();
+    const toAddress = String(req.body?.toAddress ?? '').trim();
+    const amount    = Number(req.body?.amount);
+
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return res.status(400).json({ error: 'invalid_mint' });
+    if (!isValidSolanaAddress(toAddress))            return res.status(400).json({ error: t('api.wallet.invalid_target') });
+    if (!Number.isFinite(amount) || amount <= 0)     return res.status(400).json({ error: t('api.common.invalid_amount') });
+
+    // Nur was auch wirklich in der Liste steht — gleiche Absicherung wie beim Burn.
+    const { tokens } = readScamTokens(flavor);
+    if (!tokens.some(tk => tk.mint === mint)) return res.status(404).json({ error: 'not_listed' });
+
+    const keypair = loadScamKeypair(flavor);
+    if (!keypair) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: flavor }) });
+
+    const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+
+    try {
+        const mintPubkey = new PublicKey(mint);
+        const destOwner  = new PublicKey(toAddress);
+
+        // Konto + Token-Programm + Dezimalstellen in EINEM Call ermitteln.
+        const found = await connection.getParsedTokenAccountsByOwner(keypair.publicKey, { mint: mintPubkey });
+        const acc   = found.value?.[0];
+        if (!acc) return res.status(400).json({ error: 'no_token_account' });
+
+        const sourceAccount = acc.pubkey;
+        const programId     = new PublicKey(acc.account.owner.toString());
+        const info          = acc.account.data.parsed.info;
+        const decimals      = info.tokenAmount.decimals ?? 0;
+        const onChainRaw    = BigInt(info.tokenAmount.amount ?? '0');
+
+        if (onChainRaw === 0n) return res.status(400).json({ error: 'token_balance_zero' });
+
+        const requestedRaw = BigInt(Math.round(amount * 10 ** decimals));
+        const rawAmount    = requestedRaw > onChainRaw ? onChainRaw : requestedRaw;
+        if (rawAmount === 0n) return res.status(400).json({ error: 'token_balance_zero' });
+
+        const destATA = deriveATA(destOwner, mintPubkey, programId);
+        const tx      = new Transaction();
+
+        // Zielkonto anlegen, falls es fehlt — unter DEMSELBEN Token-Programm.
+        // Kostet den Absender rund 0,002 SOL Kontomiete.
+        if (!(await connection.getAccountInfo(destATA))) {
+            tx.add(new TransactionInstruction({
+                programId: ASSOC_PROGRAM_ID,
+                keys: [
+                    { pubkey: keypair.publicKey,       isSigner: true,  isWritable: true  },
+                    { pubkey: destATA,                 isSigner: false, isWritable: true  },
+                    { pubkey: destOwner,               isSigner: false, isWritable: false },
+                    { pubkey: mintPubkey,              isSigner: false, isWritable: false },
+                    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+                    { pubkey: programId,               isSigner: false, isWritable: false },
+                ],
+                data: Buffer.alloc(0),
+            }));
+        }
+
+        // TransferChecked: [12][amount u64 LE][decimals u8]
+        const data = Buffer.alloc(10);
+        data.writeUInt8(12, 0);
+        data.writeBigUInt64LE(rawAmount, 1);
+        data.writeUInt8(decimals, 9);
+
+        tx.add(new TransactionInstruction({
+            programId,
+            keys: [
+                { pubkey: sourceAccount,     isSigner: false, isWritable: true  },
+                { pubkey: mintPubkey,        isSigner: false, isWritable: false },
+                { pubkey: destATA,           isSigner: false, isWritable: true  },
+                { pubkey: keypair.publicKey, isSigner: true,  isWritable: false },
+            ],
+            data,
+        }));
+
+        const { blockhash } = await connection.getLatestBlockhash('confirmed');
+        tx.recentBlockhash = blockhash;
+        tx.feePayer        = keypair.publicKey;
+        tx.sign(keypair);
+
+        const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+        scheduleWalletRefreshAfterSend(connection, txHash);
+
+        // Der gespeicherte Stand ist jetzt veraltet — sonst stünde der Token bis zum
+        // nächsten Monitor-Lauf (bis zu 10 Min) weiter in der Liste.
+        runWalletMonitorRefresh().catch(() => {});
+
+        res.json({ ok: true, txHash, moved: Number(rawAmount) / 10 ** decimals });
+    } catch (err) {
+        console.error(`[wallet/scam/move] ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── POST /:flavor/scam/burn ───────────────────────────────────────────────────
+router.post('/:flavor/scam/burn', async (req, res) => {
+    const { flavor } = req.params;
+    const cfg = SCAM_FLAVORS[flavor];
+    if (!cfg) return res.status(404).json({ error: 'unknown_flavor' });
+
+    const script = scamScriptPath(flavor);
+    if (!script) return res.status(503).json({ error: 'script_unavailable' });
+
+    const mint = String(req.body?.mint ?? '').trim();
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) {
+        return res.status(400).json({ error: 'invalid_mint' });
+    }
+
+    // Serverseitige Gegenprüfung. Die Hürden stehen im Browser, aber ein Client ist
+    // keine Sicherheitsgrenze: hier wird unabhängig festgestellt, was der Mint
+    // überhaupt ist und ob er verbrannt werden darf.
+    const { tokens } = readScamTokens(flavor);
+    const target = tokens.find(tk => tk.mint === mint);
+    if (!target)          return res.status(404).json({ error: 'not_listed' });
+    if (!target.burnable) return res.status(400).json({ error: 'not_burnable', tier: target.tier });
+
+    // REVIEW: nennenswerter Wert auf dem Konto. Der Nutzer muss das Symbol
+    // abgetippt haben — sonst reicht ein Fehlklick für einen echten Verlust.
+    if (target.needsTyping) {
+        const typed = String(req.body?.confirmSymbol ?? '').trim().toLowerCase();
+        if (!typed || typed !== String(target.symbol ?? '').trim().toLowerCase()) {
+            return res.status(400).json({ error: 'confirm_symbol_mismatch' });
+        }
+    }
+
+    // --skip-warn ist hier nicht optional: ohne den Schalter zählt das Skript
+    // WARN-Token zu den brennbaren. Über diesen Weg darf ein WARN-Token NIE
+    // verbrannt werden, auch nicht bei einem manipulierten Request.
+    const args = [script, '--mint', mint, '--execute', '--yes', '--json', '--skip-warn'];
+
+    const result = await new Promise(resolve => {
+        const proc = spawn('node', args, { cwd: cfg.dir() });
+        let stdout = '';
+        let stderr = '';
+        const timer = setTimeout(() => {
+            try { proc.kill('SIGTERM'); } catch { /* schon beendet */ }
+            resolve({ ok: false, error: 'timeout' });
+        }, 120_000);
+
+        proc.on('error', err => {
+            clearTimeout(timer);
+            resolve({ ok: false, error: err.message });
+        });
+        proc.stdout.on('data', c => { stdout += c.toString(); });
+        proc.stderr.on('data', c => { stderr += c.toString(); });
+        proc.on('close', () => {
+            clearTimeout(timer);
+            const line = stdout.split('\n').map(l => l.trim()).filter(Boolean)
+                .reverse().find(l => l.startsWith('{') && l.endsWith('}'));
+            if (!line) return resolve({ ok: false, error: 'no_json_output', stderr: stderr.slice(0, 500) });
+            try { resolve(JSON.parse(line)); }
+            catch (err) { resolve({ ok: false, error: `json_parse_failed: ${err.message}` }); }
+        });
+    });
+
+    // Der Wochen-Cron hält eine Single-Instance-Lock. Das ist kein Fehler, sondern
+    // ein Zustand — die Oberfläche sagt "läuft gerade" statt etwas Rotes zu zeigen.
+    if (result.busy) return res.status(409).json(result);
+
+    // Nach einem erfolgreichen Burn ist der gespeicherte Stand veraltet: der Token
+    // liegt nicht mehr im Wallet, stünde aber bis zum nächsten Monitor-Lauf (bis zu
+    // 10 Min) weiter in der Liste.
+    if (result.ok && result.result?.closed?.length) runWalletMonitorRefresh().catch(() => {});
+
+    res.json(result);
 });
 
 // ── POST /refresh-monitor ─────────────────────────────────────────────────────

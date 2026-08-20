@@ -7,10 +7,10 @@
 
 import { initNav, initFooter } from '/forge/js/nav.js?v=20260816a';
 import { showToast }           from '/forge/js/toast.js?v=20260722b';
-import { initMessageBell }     from '/forge/js/message-bell.js?v=20260816a';
+import { initMessageBell }     from '/forge/js/message-bell.js?v=20260818a';
 import { t as tr }             from '/forge/js/i18n.js?v=20260811a';
-import * as liquidity          from './bot-liquidity.js?v=20260815c';
-import * as lending            from './bot-lending.js?v=20260813z';
+import * as liquidity          from './bot-liquidity.js?v=20260819f';
+import * as lending            from './bot-lending.js?v=20260819f';
 import { initForgeTooltip }    from './tooltip.js?v=20260811a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────

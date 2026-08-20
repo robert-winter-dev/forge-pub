@@ -30,6 +30,8 @@ import { insertTransaction } from './db.js';
 import { logChainTx } from './chain-tx-log.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
 import { settle } from './settle-promise.js';
+import { config } from './config.js';
+import { pnlForPeriod } from '../../../lib/pnl.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
 const USDC_DECIMALS  = 6;
@@ -271,6 +273,26 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
         console.log(`${logPrefix} Swap gesamt: ${totalOut.toFixed(2)} USDC (${nChunks} Chunks)`);
     }
     return { amountOut: totalOut };
+}
+
+/**
+ * PnL der soeben geschlossenen Position seit der letzten externen Einzahlung
+ * (oder seit Eröffnung, falls keine) – identische Herleitung wie das Tooltip
+ * "PnL seit Einzahlung" in bin/export.js. Ausschließlich über lib/pnl.js
+ * (CLAUDE.md-Pflicht) – hier steht keine eigene PnL-Mathematik.
+ *
+ * @param {object} db
+ * @param {object} pool      braucht pool.id
+ * @param {object} position  braucht position.opened_at (vor dem Withdraw gelesen)
+ * @returns {number|null}
+ */
+export function computeExitPnl(db, pool, position) {
+    const lastDeposit = db.prepare(`
+        SELECT MAX(created_at) AS t FROM capital_flows
+         WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
+    `).get(pool.id, position.opened_at);
+    const fromMs = lastDeposit?.t ?? position.opened_at;
+    return pnlForPeriod(db, { flavor: config.botId, scope: pool.id, fromMs });
 }
 
 // ─── High-level Step-Funktionen (für State-Machines) ─────────────────────────

@@ -2,16 +2,21 @@
  * /api/lending – Manuelle Aktionen für den LendingBot
  *
  * GET  /api/lending/config
- *     → Protokoll-Liste (name, label, active, enabled, tvlGuard) + auto-deploy-Status
+ *     → Protokoll-Liste (name, label, active, enabled, tvlGuard, liqGuard) + auto-deploy-Status
  *
  * PUT  /api/lending/pool-enabled/:protocolId
  *     Body: { enabled: bool }
- *     → Pool-Freigabe setzen. Beim Aktivieren: liegt der aktuelle TVL unter der
- *       TVL-Schutz-Schwelle, wird diese auf 50 % des aktuellen TVL gesenkt.
+ *     → Pool-Freigabe setzen. Beim Aktivieren: liegt der aktuelle TVL bzw. die
+ *       aktuelle Liquidität unter der jeweiligen Schutz-Schwelle, wird diese auf
+ *       50 % des aktuellen Werts gesenkt.
  *
  * PUT  /api/lending/tvl-guard/:protocolId
  *     Body: { enabled, thresholdUsd, sendTo }
  *     → TVL-Schutz-Settings pro Protokoll speichern
+ *
+ * PUT  /api/lending/liq-guard/:protocolId
+ *     Body: { enabled, thresholdUsd, sendTo }
+ *     → Liquiditäts-Schutz-Settings pro Protokoll speichern
  *
  * POST /api/lending/deposit
  *     Body: { protocol, amount }
@@ -54,9 +59,18 @@ const SETTINGS_DB    = PATHS.settingsDb;
 
 const router = Router();
 
-// ── TVL-Schutz pro Protokoll (settings.db, bot_id='lending') ──────────────────
-// Default je Protokoll: aktiv, Schwelle 100K, kein Versand.
+// ── TVL- / Liquiditäts-Schutz pro Protokoll (settings.db, bot_id='lending') ───
+// Default je Protokoll und Schutz: aktiv, Schwelle 100K, kein Versand.
+// Beide Blöcke sind strukturgleich und werden über dieselben Helfer gelesen und
+// geschrieben – Unterschied ist allein die Kennzahl (Markt-TVL vs. sofort
+// abhebbare Liquidität). Fachliche Herleitung: bots/lending/lib/tvl-guard.js.
 const DEFAULT_TVL_GUARD = { enabled: true, thresholdUsd: 100_000, sendTo: '' };
+const DEFAULT_LIQ_GUARD = { enabled: true, thresholdUsd: 100_000, sendTo: '' };
+
+const GUARD_FIELDS = {
+    tvlGuard: DEFAULT_TVL_GUARD,
+    liqGuard: DEFAULT_LIQ_GUARD,
+};
 
 function openSettingsDb() {
     const db = new Database(SETTINGS_DB);
@@ -71,36 +85,38 @@ function openSettingsDb() {
     return db;
 }
 
-/** Liest die tvlGuard-Settings eines Protokolls (mit Default-Merge). */
-function loadTvlGuard(db, protocolId) {
+/** Liest einen Schutz-Block (tvlGuard/liqGuard) eines Protokolls (mit Default-Merge). */
+function loadGuard(db, protocolId, field) {
+    const defaults = GUARD_FIELDS[field];
     const row = db.prepare(
         `SELECT settings FROM pool_settings WHERE bot_id = 'lending' AND pool_id = ?`
     ).get(protocolId);
-    if (!row) return { ...DEFAULT_TVL_GUARD };
+    if (!row) return { ...defaults };
     try {
-        const tg = JSON.parse(row.settings)?.tvlGuard;
-        return { ...DEFAULT_TVL_GUARD, ...(tg ?? {}) };
+        const g = JSON.parse(row.settings)?.[field];
+        return { ...defaults, ...(g ?? {}) };
     } catch {
-        return { ...DEFAULT_TVL_GUARD };
+        return { ...defaults };
     }
 }
 
-/** Schreibt die tvlGuard-Settings eines Protokolls (validiert). */
-function saveTvlGuard(db, protocolId, partial) {
+/** Schreibt einen Schutz-Block (tvlGuard/liqGuard) eines Protokolls (validiert). */
+function saveGuard(db, protocolId, field, partial) {
+    const defaults = GUARD_FIELDS[field];
     const row     = db.prepare(
         `SELECT settings FROM pool_settings WHERE bot_id = 'lending' AND pool_id = ?`
     ).get(protocolId);
     let current = {};
     if (row) { try { current = JSON.parse(row.settings); } catch { current = {}; } }
 
-    const merged = { ...DEFAULT_TVL_GUARD, ...(current.tvlGuard ?? {}), ...partial };
+    const merged = { ...defaults, ...(current[field] ?? {}), ...partial };
     const threshold = Number(merged.thresholdUsd);
     if (merged.enabled && !(threshold > 0)) {
         throw new Error(t('api.lending.tvl_threshold_positive'));
     }
-    current.tvlGuard = {
+    current[field] = {
         enabled:      !!merged.enabled,
-        thresholdUsd: threshold > 0 ? threshold : DEFAULT_TVL_GUARD.thresholdUsd,
+        thresholdUsd: threshold > 0 ? threshold : defaults.thresholdUsd,
         sendTo:       typeof merged.sendTo === 'string' ? merged.sendTo : '',
     };
 
@@ -108,8 +124,11 @@ function saveTvlGuard(db, protocolId, partial) {
         INSERT INTO pool_settings (bot_id, pool_id, settings) VALUES ('lending', ?, ?)
         ON CONFLICT(bot_id, pool_id) DO UPDATE SET settings = excluded.settings
     `).run(protocolId, JSON.stringify(current));
-    return current.tvlGuard;
+    return current[field];
 }
+
+const loadTvlGuard = (db, id) => loadGuard(db, id, 'tvlGuard');
+const saveTvlGuard = (db, id, partial) => saveGuard(db, id, 'tvlGuard', partial);
 
 // ── Pool-Freigabe pro Protokoll (settings.db, gleiche Zeile wie tvlGuard) ─────
 // Eigenes Feld `poolEnabled` (NICHT tvlGuard.enabled!): tvlGuard.enabled schaltet
@@ -288,6 +307,7 @@ router.get('/config', (req, res) => {
         const stats     = protocolStats[id] ?? {};
         const apy       = stats.apy  ?? null;
         const tvl       = stats.tvl  ?? 0;
+        const liquidity = stats.liquidity ?? null;
         const amount    = activeAmounts.get(id) ?? 0;
         const active    = amount > 0;
         const enabled   = loadPoolEnabled(sdb, id);
@@ -307,7 +327,9 @@ router.get('/config', (req, res) => {
         return {
             id, label, active, enabled, qualified, apy, amount, disabledReason,
             currentTvl:      tvl || null,
+            currentLiquidity: liquidity,
             tvlGuard:        loadTvlGuard(sdb, id),
+            liqGuard:        loadGuard(sdb, id, 'liqGuard'),
             tvlAtActivation: activationTvl.get(id) ?? null,
         };
     });
@@ -331,6 +353,26 @@ router.put('/tvl-guard/:protocolId', (req, res) => {
         const saved = saveTvlGuard(db, protocolId, body);
         db.close();
         res.json({ ok: true, tvlGuard: saved });
+    } catch (err) {
+        res.status(400).json({ ok: false, error: err.message });
+    }
+});
+
+// ── PUT /api/lending/liq-guard/:protocolId – Liquiditäts-Schutz speichern ────
+router.put('/liq-guard/:protocolId', (req, res) => {
+    const { protocolId } = req.params;
+    if (!PROTOCOL_LABELS[protocolId]) {
+        return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
+    }
+    const body = req.body ?? {};
+    if (typeof body !== 'object' || Array.isArray(body)) {
+        return res.status(400).json({ ok: false, error: t('api.common.body_object') });
+    }
+    try {
+        const db    = openSettingsDb();
+        const saved = saveGuard(db, protocolId, 'liqGuard', body);
+        db.close();
+        res.json({ ok: true, liqGuard: saved });
     } catch (err) {
         res.status(400).json({ ok: false, error: err.message });
     }
@@ -363,13 +405,28 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
     const db = openSettingsDb();
     try {
         let adjustedTvlGuard = null;
+        let adjustedLiqGuard = null;
 
         if (enabled) {
             let currentTvl = null;
+            let currentLiq = null;
             try {
                 const data = JSON.parse(fs.readFileSync(LB_DATA_JSON, 'utf8'));
                 currentTvl = data.protocolStats?.[protocolId]?.tvl ?? null;
+                currentLiq = data.protocolStats?.[protocolId]?.liquidity ?? null;
             } catch { /* data.json nicht verfügbar */ }
+
+            // Gleiche Schwellenkorrektur für den Liquiditäts-Schutz: sonst würde
+            // eine Einzahlung nach der Reaktivierung beim nächsten Tick sofort
+            // wieder abgezogen. currentLiq === null heißt "nicht gemessen" und
+            // löst bewusst keine Korrektur aus.
+            const liqGuard = loadGuard(db, protocolId, 'liqGuard');
+            if (currentLiq != null && currentLiq > 0 && liqGuard.enabled && currentLiq < liqGuard.thresholdUsd) {
+                adjustedLiqGuard = saveGuard(db, protocolId, 'liqGuard', {
+                    ...liqGuard,
+                    thresholdUsd: Math.max(1, Math.floor(currentLiq * 0.5)),
+                });
+            }
 
             const guard = loadTvlGuard(db, protocolId);
             if (currentTvl != null && currentTvl > 0 && guard.enabled && currentTvl < guard.thresholdUsd) {
@@ -387,7 +444,7 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
 
         savePoolEnabled(db, protocolId, enabled);
         db.close();
-        res.json({ ok: true, enabled, tvlGuard: adjustedTvlGuard });
+        res.json({ ok: true, enabled, tvlGuard: adjustedTvlGuard, liqGuard: adjustedLiqGuard });
     } catch (err) {
         db.close();
         res.status(400).json({ ok: false, error: err.message });

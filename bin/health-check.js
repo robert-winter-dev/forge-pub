@@ -16,6 +16,8 @@ import { fileURLToPath }           from 'url';
 import Database                    from 'better-sqlite3';
 import { PATHS, envFile }          from '../config/paths.js';
 import { listJobs }                from '../lib/cron-registry.js';
+import { t, getLang, numLocale }   from '../lib/i18n.js';
+import { renderNotification }      from '../lib/notify-render.js';
 
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..');
@@ -72,10 +74,19 @@ const healthCols = db.prepare('PRAGMA table_info(health_checks)').all().map(c =>
 if (!healthCols.includes('mem_bytes'))  db.exec('ALTER TABLE health_checks ADD COLUMN mem_bytes  INTEGER');
 if (!healthCols.includes('restarts'))   db.exec('ALTER TABLE health_checks ADD COLUMN restarts   INTEGER');
 if (!healthCols.includes('uptime_sec')) db.exec('ALTER TABLE health_checks ADD COLUMN uptime_sec INTEGER');
+// detail_code (Mehrsprachigkeit): `detail` ist jetzt übersetzter Anzeigetext, kann
+// also nicht mehr per Regex auf feste deutsche Formulierungen klassifiziert werden
+// (siehe classifyDetailCode() in lib/health-report.js — das war bis hierhin ein
+// stiller Vertrag auf exakten deutschen Text). Jede Check-Funktion liefert den Code
+// deshalb jetzt selbst mit, an der Quelle statt nachträglich aus Text geraten.
+// Altbestand (Zeilen ohne diese Spalte/ohne Wert) fällt in buildHealthReport() auf
+// classifyDetailCode() zurück – die dortigen Regexes bleiben als Fallback bestehen,
+// weil ältere Zeilen ausschließlich deutschen Text enthalten.
+if (!healthCols.includes('detail_code')) db.exec('ALTER TABLE health_checks ADD COLUMN detail_code TEXT');
 
 const INSERT = db.prepare(
-    `INSERT INTO health_checks (service_id, timestamp_ms, status, latency_ms, detail, mem_bytes, restarts, uptime_sec)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO health_checks (service_id, timestamp_ms, status, latency_ms, detail, mem_bytes, restarts, uptime_sec, detail_code)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 
 // ── Check-Funktionen ──────────────────────────────────────────────────────────
@@ -176,22 +187,24 @@ function checkSystemd(serviceId) {
         activeState = (e.stdout ?? '').trim() || (e.stderr ?? '').trim() || 'unknown';
     }
     if (loadState === 'not-found') {
-        return { status: 'error', latency_ms: null, detail: `Unit "${serviceId}" existiert nicht – Konfigurationsfehler in health-config.js prüfen` };
+        return { status: 'error', latency_ms: null, detail: t('health_check.systemd_not_found', { serviceId }) };
     }
     // Klartext statt der rohen systemd-Zustände (2026-08-13): dieser Text steht jetzt
     // als Erklärung im Status-Tooltip der Karte — "active" beantwortet dort niemandem
     // die Frage, was gerade los ist.
-    if (activeState === 'active')       return { status: 'ok', latency_ms: null, detail: 'läuft', ...processMetrics };
-    if (activeState === 'activating')   return { status: 'ok', latency_ms: null, detail: 'startet gerade', ...processMetrics };
-    if (activeState === 'deactivating') return { status: 'ok', latency_ms: null, detail: 'fährt gerade herunter', ...processMetrics };
+    if (activeState === 'active')       return { status: 'ok', latency_ms: null, detail: t('health_check.systemd_running'), ...processMetrics };
+    if (activeState === 'activating')   return { status: 'ok', latency_ms: null, detail: t('health_check.systemd_starting'), ...processMetrics };
+    if (activeState === 'deactivating') return { status: 'ok', latency_ms: null, detail: t('health_check.systemd_stopping'), ...processMetrics };
     if (activeState === 'inactive') {
         if (unitFileState === 'disabled' || unitFileState === 'masked') {
-            return { status: 'disabled', latency_ms: null, detail: 'deaktiviert – dieser Dienst ist bewusst abgeschaltet und startet auch beim Systemstart nicht', ...processMetrics };
+            return { status: 'disabled', latency_ms: null, detail: t('health_check.systemd_disabled'), ...processMetrics };
         }
-        return { status: 'warn', latency_ms: null, detail: 'angehalten – läuft erst nach einem Start wieder', ...processMetrics };
+        return { status: 'warn', latency_ms: null, detail: t('health_check.systemd_stopped'), ...processMetrics };
     }
     // 'failed' und alles Unerwartete ('unknown', leer, Fehlertext): echter Befund.
-    return { status: 'error', latency_ms: null, detail: activeState === 'failed' ? 'abgestürzt/gescheitert' : activeState, ...processMetrics };
+    // Der rohe activeState-Fallback (kein bekannter systemd-Zustand) bleibt technischer
+    // Rohtext – kein Katalogeintrag für jeden denkbaren Zustandsstring.
+    return { status: 'error', latency_ms: null, detail: activeState === 'failed' ? t('health_check.systemd_failed') : activeState, ...processMetrics };
 }
 
 // Ein `AbortSignal.timeout(n)` feuert normalerweise wenige Millisekunden nach Ablauf
@@ -227,9 +240,10 @@ function classifyTimeout(latencyMs, timeoutMs, message) {
         return {
             status:     'unknown',
             latency_ms: latencyMs,
-            detail:     `Messung ungültig – Abbruch erst nach ${(latencyMs / 1000).toFixed(1)} s statt nach ${timeoutMs / 1000} s. `
-                      + `Der Timer läuft lokal, die Verzögerung entstand also auf diesem Server (blockierter Prozess, `
-                      + `Speicherdruck), nicht beim Anbieter. Kein Hinweis auf einen Ausfall des Dienstes.`,
+            detail:     t('health_check.timeout_invalid', {
+                            latencyS: (latencyMs / 1000).toFixed(1),
+                            timeoutS: timeoutMs / 1000,
+                        }),
         };
     }
     return { status: 'error', latency_ms: latencyMs, detail: message };
@@ -263,7 +277,7 @@ const RPC_TIMEOUT_MS = 7000;
 
 async function checkHeliusRpc() {
     if (!HELIUS_API_KEY) {
-        return { status: 'warn', latency_ms: null, detail: 'HELIUS_API_KEY nicht konfiguriert' };
+        return { status: 'warn', latency_ms: null, detail: t('health_check.helius_key_missing') };
     }
     const t0 = Date.now();
     try {
@@ -284,7 +298,7 @@ async function checkHeliusRpc() {
 
 async function checkTelegram() {
     if (!TELEGRAM_TOKEN) {
-        return { status: 'warn', latency_ms: null, detail: 'TELEGRAM_BOT_TOKEN nicht konfiguriert' };
+        return { status: 'warn', latency_ms: null, detail: t('health_check.telegram_token_missing') };
     }
     const t0 = Date.now();
     try {
@@ -324,24 +338,23 @@ function checkHostDisk(path = '/') {
         // root, die ein Bot-Prozess nie nutzen kann. bfree würde den Engpass beschönigen.
         const free  = st.bavail * st.bsize;
         const usedPct = total > 0 ? ((total - free) / total) * 100 : 0;
-        const metric  = `${usedPct.toFixed(0)} % belegt · ${fmtBytes(free)} frei`;
+        const metric  = t('health_check.disk_metric', { pct: usedPct.toFixed(0), free: fmtBytes(free) });
 
+        // detailCode explizit (statt später aus dem Text geraten, siehe classifyDetailCode
+        // in lib/health-report.js) — Klassifizierung darf nicht von der Anzeigesprache
+        // abhängen.
         if (usedPct >= DISK_ERROR_PCT || free < DISK_ERROR_FREE) {
-            return { status: 'error', latency_ms: null, metric,
-                detail: `${path} ist zu ${usedPct.toFixed(1)} % belegt, nur noch ${fmtBytes(free)} frei. `
-                      + `Läuft das Dateisystem voll, können die Bots ihre Datenbanken nicht mehr schreiben. `
-                      + `Platz schaffen: alte Protokolle unter logs/ und nicht mehr benötigte Backups löschen.` };
+            return { status: 'error', latency_ms: null, metric, detailCode: 'disk_low',
+                detail: t('health_check.disk_error', { path, pct: usedPct.toFixed(1), free: fmtBytes(free) }) };
         }
         if (usedPct >= DISK_WARN_PCT) {
-            return { status: 'warn', latency_ms: null, metric,
-                detail: `${path} ist zu ${usedPct.toFixed(1)} % belegt, noch ${fmtBytes(free)} frei. `
-                      + `Noch unkritisch, aber der Trend sollte im Blick bleiben – bei anhaltendem Wachstum `
-                      + `alte Protokolle und Backups aufräumen.` };
+            return { status: 'warn', latency_ms: null, metric, detailCode: 'disk_low',
+                detail: t('health_check.disk_warn', { path, pct: usedPct.toFixed(1), free: fmtBytes(free) }) };
         }
         return { status: 'ok', latency_ms: null, metric,
-                 detail: `${path}: ${fmtBytes(free)} von ${fmtBytes(total)} frei (${usedPct.toFixed(1)} % belegt)` };
+                 detail: t('health_check.disk_ok', { path, free: fmtBytes(free), total: fmtBytes(total), pct: usedPct.toFixed(1) }) };
     } catch (e) {
-        return { status: 'unknown', latency_ms: null, detail: `Dateisystem ${path} nicht lesbar: ${e.message?.slice(0, 60)}` };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.disk_unreadable', { path, msg: e.message?.slice(0, 60) }) };
     }
 }
 
@@ -364,7 +377,7 @@ function checkHostMemory() {
         const total = info.MemTotal;
         const avail = info.MemAvailable;
         if (!total || avail == null) {
-            return { status: 'unknown', latency_ms: null, detail: '/proc/meminfo liefert MemTotal/MemAvailable nicht' };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.mem_missing') };
         }
         const availPct = (avail / total) * 100;
 
@@ -378,28 +391,26 @@ function checkHostMemory() {
         const swapPct   = swapTotal > 0 ? (swapUsed / swapTotal) * 100 : 0;
         const swapFull  = swapTotal > 0 && swapPct >= SWAP_FULL_PCT;
 
-        const metric = `${availPct.toFixed(0)} % verfügbar · ${fmtBytes(avail)}`
-                     + (swapTotal > 0 ? ` · Auslagerung ${swapPct.toFixed(0)} %` : '');
-        const swapNote = swapFull
-            ? ` Die Auslagerungsdatei ist zu ${swapPct.toFixed(0)} % belegt und steht als Reserve praktisch nicht mehr zur Verfügung.`
-            : '';
+        const metric = t('health_check.mem_metric', { pct: availPct.toFixed(0), avail: fmtBytes(avail) })
+                     + (swapTotal > 0 ? t('health_check.mem_metric_swap_suffix', { swapPct: swapPct.toFixed(0) }) : '');
+        const swapNote = swapFull ? t('health_check.mem_swap_note', { swapPct: swapPct.toFixed(0) }) : '';
 
+        // detailCode explizit (statt später aus dem Text geraten, siehe classifyDetailCode
+        // in lib/health-report.js) — Klassifizierung darf nicht von der Anzeigesprache
+        // abhängen.
         if (availPct < MEM_ERROR_PCT || (swapFull && availPct < MEM_WARN_PCT)) {
-            return { status: 'error', latency_ms: null, metric,
-                detail: `Nur noch ${availPct.toFixed(1)} % Arbeitsspeicher verfügbar (${fmtBytes(avail)} von ${fmtBytes(total)}).${swapNote} `
-                      + `In diesem Zustand beendet das Betriebssystem Prozesse, um Speicher freizugeben. `
-                      + `Nicht benötigte Programme auf diesem Server beenden; hält es an, reicht der Arbeitsspeicher für den Betrieb nicht aus.` };
+            return { status: 'error', latency_ms: null, metric, detailCode: 'mem_low',
+                detail: t('health_check.mem_error', { pct: availPct.toFixed(1), avail: fmtBytes(avail), total: fmtBytes(total), swapNote }) };
         }
         if (availPct < MEM_WARN_PCT) {
-            return { status: 'warn', latency_ms: null, metric,
-                detail: `Noch ${availPct.toFixed(1)} % Arbeitsspeicher verfügbar (${fmtBytes(avail)} von ${fmtBytes(total)}).${swapNote} `
-                      + `Noch kein Engpass, aber wenig Reserve – laufende Programme auf diesem Server im Blick behalten.` };
+            return { status: 'warn', latency_ms: null, metric, detailCode: 'mem_low',
+                detail: t('health_check.mem_warn', { pct: availPct.toFixed(1), avail: fmtBytes(avail), total: fmtBytes(total), swapNote }) };
         }
         return { status: 'ok', latency_ms: null, metric,
-                 detail: `${fmtBytes(avail)} von ${fmtBytes(total)} verfügbar (${availPct.toFixed(1)} %)`
-                       + (swapTotal > 0 ? `, Auslagerung zu ${swapPct.toFixed(0)} % belegt` : '') };
+                 detail: t('health_check.mem_ok', { avail: fmtBytes(avail), total: fmtBytes(total), pct: availPct.toFixed(1) })
+                       + (swapTotal > 0 ? t('health_check.mem_ok_swap_suffix', { swapPct: swapPct.toFixed(0) }) : '') };
     } catch (e) {
-        return { status: 'unknown', latency_ms: null, detail: `/proc/meminfo nicht lesbar: ${e.message?.slice(0, 60)}` };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.mem_unreadable', { msg: e.message?.slice(0, 60) }) };
     }
 }
 
@@ -432,11 +443,11 @@ function checkHostOom() {
         if (!m) {
             // Vor Kernel 4.13 gibt es das Feld nicht – kein Befund, aber auch keine
             // Zusicherung. 'unknown' sagt das ehrlich, statt Ruhe vorzutäuschen.
-            return { status: 'unknown', latency_ms: null, detail: 'Dieser Kernel führt keinen OOM-Zähler (/proc/vmstat: oom_kill fehlt)' };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.oom_no_counter') };
         }
         count = Number(m[1]);
     } catch (e) {
-        return { status: 'unknown', latency_ms: null, detail: `/proc/vmstat nicht lesbar: ${e.message?.slice(0, 60)}` };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.oom_unreadable', { msg: e.message?.slice(0, 60) }) };
     }
 
     const prev  = readHostState('oom_kill_count');
@@ -446,27 +457,24 @@ function checkHostOom() {
     // Erster Lauf: nur Ausgangswert merken. Ein bereits vor Einführung dieser Prüfung
     // hochgezählter Stand ist keine Neuigkeit und darf nicht rückwirkend alarmieren.
     if (prevN === null) {
-        return { status: 'ok', latency_ms: null, metric: `${count} seit Systemstart`,
-                 detail: `Ausgangswert erfasst: ${count} Vorkommnisse seit dem Systemstart. Ab jetzt wird jedes weitere gemeldet.` };
+        return { status: 'ok', latency_ms: null, metric: t('health_check.oom_metric_total', { count }),
+                 detail: t('health_check.oom_baseline', { count }) };
     }
 
     // Der Zähler wird beim Systemstart zurückgesetzt; ein kleinerer Wert als zuvor
     // bedeutet Neustart, nicht "negative Vorkommnisse".
     if (count < prevN) {
-        return { status: 'ok', latency_ms: null, metric: `${count} seit Systemstart`,
-                 detail: `Der Server wurde neu gestartet (Zähler zurückgesetzt). Seither ${count} Vorkommnisse.` };
+        return { status: 'ok', latency_ms: null, metric: t('health_check.oom_metric_total', { count }),
+                 detail: t('health_check.oom_reset', { count }) };
     }
 
     const delta = count - prevN;
     if (delta > 0) {
-        return { status: 'error', latency_ms: null, metric: `${delta} neu · ${count} seit Systemstart`,
-                 detail: `Das Betriebssystem hat in den letzten 5 Minuten ${delta} Prozess(e) wegen Speichermangels beendet `
-                       + `(insgesamt ${count} seit dem Systemstart). Getroffen wird dabei nicht zwingend der Verursacher. `
-                       + `Speicherverbrauch auf diesem Server prüfen und nicht benötigte Programme beenden; `
-                       + `wiederholt sich das, reicht der Arbeitsspeicher für den Betrieb nicht aus.` };
+        return { status: 'error', latency_ms: null, metric: t('health_check.oom_metric_delta', { delta, count }),
+                 detail: t('health_check.oom_delta', { delta, count }) };
     }
-    return { status: 'ok', latency_ms: null, metric: `${count} seit Systemstart`,
-             detail: `Keine neuen Vorkommnisse. Insgesamt ${count} seit dem Systemstart.` };
+    return { status: 'ok', latency_ms: null, metric: t('health_check.oom_metric_total', { count }),
+             detail: t('health_check.oom_none', { count }) };
 }
 
 // ── Nostr-Relay-Status ────────────────────────────────────────────────────────
@@ -491,14 +499,17 @@ async function checkNostrRelay(relayUrl) {
     const stats = await fetchNostrRelayStats();
     const s = stats[relayUrl.replace(/\/+$/, '')];
     if (!s) {
-        return { status: 'unknown', latency_ms: null, detail: 'Keine Daten von forge-premium (Dienst down oder gerade erst gestartet)' };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.nostr_no_data') };
     }
+    // detailCode nur im getrennt-Fall (siehe classifyDetailCode in lib/health-report.js)
+    // — Klassifizierung darf nicht von der Anzeigesprache abhängen.
     return {
         status:     s.currentlyConnected ? 'ok' : 'error',
         latency_ms: null,
+        detailCode: s.currentlyConnected ? undefined : 'relay_disconnected',
         detail:     s.currentlyConnected
-            ? `Verbunden (Uptime 7 Tage: ${s.uptimePct ?? '–'}%)`
-            : `Getrennt (${s.disconnectCount} Abbrüche seit Beobachtungsbeginn)`,
+            ? t('health_check.nostr_connected', { uptimePct: s.uptimePct ?? '–' })
+            : t('health_check.nostr_disconnected', { count: s.disconnectCount }),
     };
 }
 
@@ -514,19 +525,21 @@ function checkPremiumHostStatus(hostKey) {
         const row = pdb.prepare(`SELECT ok, checked_at, detail FROM premium_host_status WHERE host = ?`).get(hostKey);
         pdb.close();
         if (!row) {
-            return { status: 'unknown', latency_ms: null, detail: 'Noch kein Upload-Versuch protokolliert' };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.host_status_none') };
         }
         const ageMin = Math.round((Date.now() - row.checked_at) / 60000);
         if (Date.now() - row.checked_at > HOST_STATUS_STALE_MS) {
-            return { status: 'unknown', latency_ms: null, detail: `Letzter Versuch vor ${ageMin} Min – Publish-Loop läuft vermutlich nicht` };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.host_status_stale', { ageMin }) };
         }
+        // row.detail (Fehlschlag-Fall) kommt aus lib/blob-storage.js/publish-blob.js —
+        // eigene Quelle außerhalb dieser Datei, hier nicht mit übersetzt.
         return {
             status: row.ok ? 'ok' : 'error',
             latency_ms: null,
-            detail: row.ok ? `Letzter Upload erfolgreich (vor ${ageMin} Min)` : (row.detail ?? 'Upload fehlgeschlagen'),
+            detail: row.ok ? t('health_check.host_status_ok', { ageMin }) : (row.detail ?? t('health_check.host_status_failed')),
         };
     } catch (e) {
-        return { status: 'unknown', latency_ms: null, detail: `premium.db nicht lesbar: ${e.message?.slice(0, 60)}` };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.premium_db_unreadable', { msg: e.message?.slice(0, 60) }) };
     }
 }
 
@@ -653,14 +666,14 @@ function checkPremiumIngestStatus() {
             // der Nutzer einen Fehler, den es nicht gibt.
             const { autoPayEnabled } = readPaymentState(Math.floor(Date.now() / 3_600_000));
             if (autoPayEnabled === false) {
-                return { status: 'disabled', latency_ms: null, detail: 'Premium ist nicht eingeschaltet – es wurden noch nie Daten empfangen. Einschalten unter Liquidity → Premium → Verwalten.' };
+                return { status: 'disabled', latency_ms: null, detail: t('health_check.premium_never_enabled') };
             }
-            return { status: 'unknown', latency_ms: null, detail: 'Noch kein Premium-Blob integriert' };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.premium_never_ingested') };
         }
         const ageMs  = Date.now() - row.last_ingested_at;
         const ageMin = Math.round(ageMs / 60000);
         if (ageMs <= INGEST_STALE_MS) {
-            return { status: 'ok', latency_ms: null, detail: `Letzter Ingest erfolgreich (vor ${ageMin} Min)` };
+            return { status: 'ok', latency_ms: null, detail: t('health_check.premium_ingest_ok', { ageMin }) };
         }
 
         // Ab hier: Daten sind veraltet – die Ursache entscheidet über den Status.
@@ -676,15 +689,12 @@ function checkPremiumIngestStatus() {
             const escalate = ageMs > INGEST_ESCALATE_MS;
             return {
                 status: escalate ? 'error' : 'warn', latency_ms: null,
-                detail: `Letzter Empfang vor ${ageMin} Min – dieser Zugang läuft über die Systemdaten-Freigabe, `
-                      + `nicht über eine Zahlung. Jeder gesendete Report verlängert ihn um eine Stunde; `
-                      + `bleiben Reports aus, endet er von selbst. Prüfen, ob die Freigabe im Health Monitor `
-                      + `noch aktiv ist und Reports den Master erreichen.`,
+                detail: t('health_check.premium_shared_coverage', { ageMin }),
             };
         }
 
         if (outagePaused) {
-            return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – der Premium-Dienst des Anbieters gilt seit über 2h als nicht erreichbar, die Zahlung wurde automatisch pausiert. Nichts zu tun: sie läuft von selbst wieder an, sobald Daten ankommen.` };
+            return { status: 'error', latency_ms: null, detail: t('health_check.premium_outage_paused', { ageMin }) };
         }
         if (autoPayEnabled === false) {
             // Ausgeschaltetes Premium ist kein eingeschränkt antwortender Dienst, sondern
@@ -699,9 +709,9 @@ function checkPremiumIngestStatus() {
             // abgeschaltet, weil das USDC-Guthaben nicht mehr für eine Stunde reichte –
             // ohne Nachfüllen scheitert die nächste Zahlung sofort wieder.
             if (payFailure) {
-                return { status: 'disabled', latency_ms: null, detail: `Premium ist abgeschaltet, letzter Empfang vor ${ageMin} Min – die letzte Zahlung scheiterte am zu geringen USDC-Guthaben, daraufhin hat sich die automatische Zahlung abgeschaltet. USDC nachfüllen und unter Liquidity → Premium → Verwalten wieder einschalten.` };
+                return { status: 'disabled', latency_ms: null, detail: t('health_check.premium_disabled_pay_failure', { ageMin }) };
             }
-            return { status: 'disabled', latency_ms: null, detail: `Premium ist abgeschaltet, letzter Empfang vor ${ageMin} Min – ohne die automatische Zahlung liefert der Anbieter keine Premium-Daten. Einschalten unter Liquidity → Premium → Verwalten.` };
+            return { status: 'disabled', latency_ms: null, detail: t('health_check.premium_disabled', { ageMin }) };
         }
         if (!paidThisHour) {
             // Auto-Pay ist eingeschaltet (sonst hätte der Zweig darüber gegriffen), die
@@ -709,14 +719,57 @@ function checkPremiumIngestStatus() {
             // verpasster Slot holt sich in derselben Stunde selbst wieder ein), ab
             // INGEST_ESCALATE_MS aber ein echter Störungszustand – siehe Konstante oben.
             if (autoPayEnabled === true && ageMs > INGEST_ESCALATE_MS) {
-                return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – die automatische Zahlung ist eingeschaltet, kommt seit über ${Math.round(INGEST_ESCALATE_MS / 60000)} Min aber nicht durch, deshalb liefert der Anbieter keine Daten. Wallet-Guthaben (SOL für Gebühren, USDC für die Stundenzahlung) und das Protokoll von premium-pay prüfen.` };
+                return { status: 'error', latency_ms: null, detail: t('health_check.premium_pay_not_through', { ageMin, escalateMin: Math.round(INGEST_ESCALATE_MS / 60000) }) };
             }
-            return { status: 'warn', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min – für die laufende Stunde liegt keine Zahlung vor, deshalb liefert der Anbieter keine Daten. Premium-Guthaben prüfen und ggf. USDC nachfüllen (Liquidity → Premium → Verwalten).` };
+            return { status: 'warn', latency_ms: null, detail: t('health_check.premium_not_paid_this_hour', { ageMin }) };
         }
-        return { status: 'error', latency_ms: null, detail: `Letzter Ingest vor ${ageMin} Min, obwohl die laufende Stunde bezahlt ist – der Zustellweg ist gestört. Log von forge-premium prüfen (Nostr-Empfang).` };
+        return { status: 'error', latency_ms: null, detail: t('health_check.premium_delivery_broken', { ageMin }) };
     } catch (e) {
-        return { status: 'unknown', latency_ms: null, detail: `liquiditybot.db nicht lesbar: ${e.message?.slice(0, 60)}` };
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.liquiditybot_db_unreadable', { msg: e.message?.slice(0, 60) }) };
     }
+}
+
+// ── GitHub-Update-Status (Fork-Seite) ────────────────────────────────────────────
+// GitHub wird für die automatischen Updates gebraucht (bin/update-check.js, läuft
+// täglich per Cron im Fork). Kein eigener Request an GitHub: der bestehende
+// Rate-Limit-Vorfall vom 2026-08-05 (60 Requests/h unauthentifiziert, PRO
+// QUELL-IP – forge-pub1/pub2 teilen sich eine öffentliche IP) verbietet einen
+// zusätzlichen periodischen Ping. Stattdessen reines Auslesen der beiden Dateien,
+// die update-check.js bei jedem Lauf ohnehin schreibt: release-list-cache.json
+// (Zeitpunkt des letzten ERFOLGREICHEN Abrufs) und update-fetch-failures.json
+// (Fehlschlag-Zähler, siehe FETCH_FAILURE_NOTIFY_THRESHOLD dort). Bildet damit
+// exakt den echten Pfad ab, der für Auto-Updates zählt – gleicher Token, gleiches
+// Rate-Limit-Budget – statt eine zweite, unabhängige Prüfung zu erfinden.
+//
+// Schwelle bewusst identisch zu update-check.js gehalten (dort löst sie den
+// einmaligen Alarm aus): ein einzelner Fehlschlag ist erwartbar (Netzwerk-
+// Ausrutscher, kurzzeitig ausgeschöpftes Limit) und bleibt 'warn', kein Alarm.
+const GITHUB_FETCH_FAILURE_ALERT_THRESHOLD = 3; // siehe FETCH_FAILURE_NOTIFY_THRESHOLD in bin/update-check.js
+
+function checkGithubUpdateStatus() {
+    let failures = null;
+    let cache = null;
+    try { failures = JSON.parse(readFileSync(join(PATHS.data, 'update-fetch-failures.json'), 'utf8')); } catch { /* kein Fehlschlag protokolliert – Normalfall */ }
+    try { cache = JSON.parse(readFileSync(join(PATHS.data, 'release-list-cache.json'), 'utf8')); } catch { /* noch kein erfolgreicher Abruf */ }
+
+    if (!failures && !cache) {
+        return { status: 'unknown', latency_ms: null, detail: t('health_check.github_never_checked') };
+    }
+
+    const ageMin = cache ? Math.round((Date.now() - cache.fetchedAt) / 60000) : null;
+    const count  = failures?.count ?? 0;
+    // "Nie erfolgreich" nur möglich, wenn schon der allererste Abruf nach der
+    // Installation scheitert (kein cache, aber ein Fehlschlag-Zähler) – daher
+    // eigener Textbaustein statt "vor null Min" in die Übersetzung zu reichen.
+    const lastOk = ageMin != null ? t('health_check.github_last_ok_suffix', { ageMin }) : t('health_check.github_never_ok_suffix');
+
+    if (count === 0) {
+        return { status: 'ok', latency_ms: null, detail: t('health_check.github_ok', { lastOk }) };
+    }
+    if (count < GITHUB_FETCH_FAILURE_ALERT_THRESHOLD) {
+        return { status: 'warn', latency_ms: null, detail: t('health_check.github_warn', { count, threshold: GITHUB_FETCH_FAILURE_ALERT_THRESHOLD, lastOk }) };
+    }
+    return { status: 'error', latency_ms: null, detail: t('health_check.github_error', { count, lastOk }) };
 }
 
 async function checkService(svc) {
@@ -731,8 +784,9 @@ async function checkService(svc) {
         case 'host_oom':    return checkHostOom();
         case 'premium_host_status': return checkPremiumHostStatus(svc.hostKey);
         case 'premium_ingest_status': return checkPremiumIngestStatus();
+        case 'github_update_status': return checkGithubUpdateStatus();
         default:
-            return { status: 'unknown', latency_ms: null, detail: `Unbekannter Typ: ${svc.type}` };
+            return { status: 'unknown', latency_ms: null, detail: t('health_check.unknown_type', { type: svc.type }) };
     }
 }
 
@@ -768,6 +822,22 @@ async function fetchNexusStats() {
 // schlicht falsch (es gibt nichts zum Neustarten, der Job läuft beim nächsten
 // Intervall ohnehin wieder). Zusätzlich stand statt eines Namens die rohe ID
 // im Titel ("cron:pool-offers-sync") – für den Adressaten unbrauchbar.
+// msgKey statt fertigem Text (Schritt 5 der Mehrsprachigkeit) — lief bisher
+// unabhängig von der Installationssprache immer auf Deutsch, siehe
+// lib/notify-render.js.
+const ALERT_MSG_KEY = {
+    cron:     'notify.health.cron_failed',
+    host:     'notify.health.host_exceeded',
+    external: 'notify.health.external_unreachable',
+    service:  'notify.health.service_unreachable',
+};
+const ALERT_DEFAULT_DETAIL = {
+    cron: () => t('health_check.no_reason_logged'),
+    host: () => t('health_check.no_metric_logged'),
+    external: () => 'Timeout',
+    service:  () => 'Timeout',
+};
+
 async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) {
     try {
         // 'external' getrennt von 'service' (2026-08-13): "den betroffenen Dienst neu
@@ -775,30 +845,12 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
         // sinnlos für Jupiter, Helius, Telegram oder Orca — die laufen nicht auf diesem
         // Server und es gibt dort nichts zum Neustarten. Genau dieser Text schickte am
         // 2026-08-13 die Fehlersuche in die falsche Richtung (siehe classifyTimeout oben).
-        const msg = kind === 'cron'
-            ? `🚨 *Wartungsjob „${svcName}" schlägt seit ~10 Min. fehl*\n`
-              + `Detail: ${detail ?? 'kein Grund protokolliert'}\n`
-              + `Der Job versucht es im nächsten Intervall automatisch erneut. Hält der Fehler an, `
-              + `im Dashboard unter Health das Protokoll des Jobs prüfen.`
-            // 'host' ist kein Dienst und kein Anbieter, sondern ein Zustand dieses
-            // Servers. Die konkrete Handlungsanweisung steckt bereits im detail-Text
-            // der jeweiligen Prüfung (Platz schaffen / Programme beenden), deshalb hier
-            // kein zweiter, allgemeinerer Rat, der dem widersprechen könnte.
-            : kind === 'host'
-            ? `🚨 *${svcName}: Grenzwert überschritten*\n`
-              + `Detail: ${detail ?? 'kein Messwert protokolliert'}\n`
-              + `Betroffen ist der Server selbst, auf dem FORGE läuft – nicht ein einzelner Bot. `
-              + `Der Verlauf steht im Dashboard unter Health → System.`
-            : kind === 'external'
-            ? `🚨 *${svcName} seit ~10 Min. nicht erreichbar*\n`
-              + `Detail: ${detail ?? 'Timeout'}\n`
-              + `Der Dienst läuft nicht auf diesem Server – ein Neustart hilft hier nicht. FORGE prüft `
-              + `alle 5 Min. weiter. Hält es an, im Dashboard unter Health den Verlauf ansehen und die `
-              + `Statusseite des Anbieters prüfen.`
-            : `🚨 *${svcName} seit ~10 Min. nicht erreichbar*\n`
-              + `Detail: ${detail ?? 'Timeout'}\n`
-              + `Der Dienst antwortet nicht mehr. Bitte im Dashboard unter Health prüfen und `
-              + `den betroffenen Dienst neu starten.`;
+        const msgKey = ALERT_MSG_KEY[kind] ?? ALERT_MSG_KEY.service;
+        const params = { svcName, detail: detail ?? ALERT_DEFAULT_DETAIL[kind]?.() ?? ALERT_DEFAULT_DETAIL.service() };
+        const msg = renderNotification(
+            { msgKey, params, displayName: 'Monitoring', timestamp: Date.now() },
+            getLang(),
+        );
         const res = await fetch('http://127.0.0.1:3100/notify', {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -810,7 +862,7 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
                 displayName: 'Monitoring',
                 level:       'error',
                 category:    'system',
-                message:     msg,
+                message:     msg, msgKey, params,
             }),
             signal:  AbortSignal.timeout(5000),
         });
@@ -852,10 +904,47 @@ function checkCronJobs() {
     const results = {};
     for (const [jobId, s] of Object.entries(state)) {
         if (!s || typeof s.lastExitCode !== 'number') continue;
-        results[`cron:${jobId}`] = s.lastExitCode === 0
-            ? { status: 'ok', latency_ms: s.lastDurationMs ?? null, detail: null, jobId }
+        const svcId = `cron:${jobId}`;
+
+        // 🔒 Nur werten, wenn seit der letzten Aufzeichnung TATSÄCHLICH ein neuer
+        // Job-Lauf stattfand (Ticket [Core#0308], Fund 2026-08-20 auf forge-pub1).
+        //
+        // cron-state.json hält `lastExitCode` bis zum nächsten Lauf des Jobs — bei
+        // `lmb3-cleanup` (stündlich) also eine volle Stunde. Dieser Check läuft aber
+        // alle 5 Minuten und schrieb denselben eingefrorenen Zustand jedes Mal als
+        // neue Messung in `health_checks`. isSecondConsecutiveError() sah dadurch
+        // nach 10 Minuten "zwei Fehlschläge in Folge", obwohl der Job real genau
+        // EINMAL gelaufen war — aus einem einzelnen transienten RPC-Aussetzer wurde
+        // ein Alarm. Konkret unterlief das den bewussten Schutz in cleanup.js, das
+        // per fail-streak.js erst beim 3. Fehlschlag meldet und im selben Lauf noch
+        // "Alert unterdrückt (Streak 1/3) – vermutlich transienter Fehler" ins Log
+        // schrieb. Dieser Satz stand dann wörtlich in der Alarm-Meldung.
+        //
+        // Vergleich gegen den Zeitpunkt der letzten eigenen Aufzeichnung: liegt der
+        // Job-Lauf davor, haben wir ihn bereits verbucht. Bewusst ohne Schema-
+        // Änderung — `timestamp_ms` der letzten Zeile genügt als Wasserstandsmarke.
+        // `isNewRun` trennt AUFZEICHNEN von ANZEIGEN — beides darf hier nicht
+        // zusammenfallen: der Status wird immer zurückgegeben (sonst stünde ein
+        // gesunder stündlicher Job im Dashboard als 'unknown', weil er zwischen
+        // zwei Läufen 11 Mal nicht "neu" ist, siehe Export weiter unten), aber nur
+        // ein echter neuer Lauf wird als Messpunkt in `health_checks` geschrieben.
+        // Genau diese Messpunkte zählt isSecondConsecutiveError().
+        const lastRunMs = s.lastRun ? Date.parse(s.lastRun) : NaN;
+        let isNewRun = true;
+        if (Number.isFinite(lastRunMs)) {
+            const prev = db.prepare(
+                'SELECT MAX(timestamp_ms) AS t FROM health_checks WHERE service_id = ?'
+            ).get(svcId);
+            // Liegt der Job-Lauf vor unserer letzten Aufzeichnung, haben wir ihn
+            // bereits verbucht. Ein anhaltender Fehler wird beim NÄCHSTEN echten
+            // Lauf erneut als error geschrieben und löst dann korrekt aus.
+            if (prev?.t != null && lastRunMs <= prev.t) isNewRun = false;
+        }
+
+        results[svcId] = s.lastExitCode === 0
+            ? { status: 'ok', latency_ms: s.lastDurationMs ?? null, detail: null, jobId, isNewRun }
             : { status: 'error', latency_ms: s.lastDurationMs ?? null,
-                detail: s.lastError ?? `Exit ${s.lastExitCode}`, jobId };
+                detail: s.lastError ?? `Exit ${s.lastExitCode}`, jobId, isNewRun };
     }
     return results;
 }
@@ -869,7 +958,8 @@ for (const chain of chains) {
     for (const svc of chain.services) {
         const result = await checkService(svc);
         INSERT.run(svc.id, now, result.status, result.latency_ms ?? null, result.detail ?? null,
-                   result.memBytes ?? null, result.restarts ?? null, result.uptimeSec ?? null);
+                   result.memBytes ?? null, result.restarts ?? null, result.uptimeSec ?? null,
+                   result.detailCode ?? null);
         latest[svc.id] = result;
 
         const latStr = result.latency_ms != null ? `${result.latency_ms}ms` : '    –';
@@ -878,10 +968,15 @@ for (const chain of chains) {
 }
 
 for (const [svcId, result] of Object.entries(checkCronJobs())) {
-    INSERT.run(svcId, now, result.status, result.latency_ms ?? null, result.detail ?? null, null, null, null);
+    // Nur echte neue Job-Läufe werden zu Messpunkten (siehe checkCronJobs).
+    // `latest` bekommt den Zustand IMMER, sonst fiele ein gesunder Job im
+    // Dashboard-Export auf 'unknown' zurück, solange er nicht neu gelaufen ist.
+    if (result.isNewRun) {
+        INSERT.run(svcId, now, result.status, result.latency_ms ?? null, result.detail ?? null, null, null, null, null);
+    }
     latest[svcId] = result;
     const latStr = result.latency_ms != null ? `${result.latency_ms}ms` : '    –';
-    console.log(`[health] ${svcId.padEnd(26)} ${result.status.padEnd(7)} ${latStr}`);
+    console.log(`[health] ${svcId.padEnd(26)} ${result.status.padEnd(7)} ${latStr}${result.isNewRun ? '' : '  (unverändert)'}`);
 }
 
 // ── Persistenz-Alerts prüfen ──────────────────────────────────────────────────
@@ -957,9 +1052,19 @@ for (const chain of chains) {
     }
 }
 
-// Cron-Jobs laufen typischerweise alle 5-10 Min – "2 Fehlschläge in Folge" fällt
-// hier je nach Job-Intervall zusammen mit denselben ~10-20 Min wie bei den
-// regulären Diensten oben.
+// "2 Fehlschläge in Folge" = zwei tatsächliche Job-Läufe, nicht zwei Durchläufe
+// dieses Checks (siehe die lastRun-Wasserstandsmarke in checkCronJobs).
+//
+// 🔒 Die frühere Annahme hier — "Cron-Jobs laufen typischerweise alle 5-10 Min,
+// also ~10-20 Min bis zum Alarm" — war schlicht falsch: von 31 aktiven Jobs läuft
+// nur `health-check` selbst im 5-Minuten-Takt, alle übrigen stündlich bis monatlich.
+// Aus ihr folgte der Fehlalarm aus [Core#0308].
+//
+// Die Vorwarnzeit hängt damit am Job-Intervall: stündlich → ~2 h, täglich → ~2 Tage.
+// Das ist beabsichtigt und die einzige ehrliche Aussage — ein täglicher Job KANN
+// nicht schneller zweimal scheitern. Wer früher alarmieren will, braucht eine
+// job-eigene Schwelle (Muster: fail-streak.js in cleanup.js), nicht eine kürzere
+// Frist hier.
 //
 // description statt roher jobId im Alertext (Fund 2026-08-09): "cron:pool-offers-sync"
 // sagt einem Endnutzer nichts, config/cron-jobs.json hat für jeden Job längst einen
@@ -969,6 +1074,13 @@ for (const chain of chains) {
 const cronDescriptions = Object.fromEntries(listJobs().map(j => [j.id, j.description ?? j.id]));
 for (const [svcId, result] of Object.entries(latest)) {
     if (!svcId.startsWith('cron:') || result.status !== 'error') continue;
+    // 🔒 Nur bei einem neuen Lauf auswerten. Ohne diese Zeile bliebe das
+    // Auswertungsfenster von isSecondConsecutiveError() zwischen zwei Job-Läufen
+    // unverändert stehen (es werden ja keine Messpunkte mehr nachgeschoben) — der
+    // Alarm wäre damit bei jedem 5-Minuten-Durchlauf erneut wahr und würde bis zum
+    // nächsten Job-Lauf im Takt wiederholt. Vorher verschob sich das Fenster durch
+    // die pausenlos geschriebenen Zeilen von selbst; diese Nebenwirkung entfällt.
+    if (!result.isNewRun) continue;
     if (isSecondConsecutiveError(svcId)) {
         const jobId = result.jobId ?? svcId.slice('cron:'.length);
         await sendPersistenceAlert(cronDescriptions[jobId] ?? jobId, result.detail, { kind: 'cron' });

@@ -6,7 +6,7 @@
     <title data-i18n="len.page_title">FORGE Lending Bot – Dashboard</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260323t">
-    <link rel="stylesheet" href="css/layout.css?v=20260615a">
+    <link rel="stylesheet" href="css/layout.css?v=20260818b">
     <link rel="stylesheet" href="../css/shared.css?v=20260809b">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
     <link rel="stylesheet" href="css/components.css?v=20260602a">
@@ -106,6 +106,7 @@
                     <div class="value-group" id="renditeGroup" data-type="neutral">
                         <span class="value" id="renditeValue">—</span>
                         <span class="unit">%</span>
+                        <span id="renditeEstimateIcon"></span>
                     </div>
                 </div>
             </section>
@@ -316,6 +317,21 @@
         </div>
     </div>
 
+    <!-- Pool-Liquiditäts-Modal -->
+    <div id="poolLiqModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="poolLiqModalTitle">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="poolLiqModalTitle" data-i18n="len.liq_history">Liquiditäts-Verlauf</h3>
+                <button class="modal-close" id="poolLiqModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
+            </div>
+            <div class="chart-range-btns" id="poolLiqRangeBtns"></div>
+            <div class="chart-wrapper">
+                <svg id="poolLiqChartSvg" class="portfolio-chart" height="200"></svg>
+                <p class="chart-empty-msg" id="poolLiqChartEmptyMsg" data-i18n="len.no_liq_history_pool">Noch keine Liquiditäts-Verlaufsdaten für diesen Pool.</p>
+            </div>
+        </div>
+    </div>
+
     <!-- Gebunden-Detail-Modal -->
     <div class="chart-modal-overlay" id="gebundenModal" style="display:none"
          role="dialog" aria-modal="true" aria-labelledby="gebundenModalTitle">
@@ -411,6 +427,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260813"></script>
+    <script type="module" src="js/app.js?v=20260820a"></script>
 </body>
 </html>
