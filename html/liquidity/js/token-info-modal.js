@@ -1,4 +1,4 @@
-// token-info-modal.js v20260727a
+// token-info-modal.js v20260823b
 // Zeigt statische Kurzinfos (Kategorie, Beschreibung, Projekt-Link) zu den beiden
 // Tokens eines Pools in einem Modal mit zwei Tabs. Daten aus token-info-data.json über
 // token-info-store.js (JSON-Fetch statt Modul-Import, siehe dort). Lazy-geladen analog
@@ -37,19 +37,34 @@ function ensureModal() {
     });
 }
 
-// Ordnet displayPair-Namen ("HYPE"/"SOL") den richtigen Mint-Adressen zu —
-// gleiche Logik wie buildTabs() in pool-chart-modal.js, da displayPair und das
-// interne pair-Feld unterschiedlich sortiert sein koennen.
+// Ordnet die Namen aus dem Anzeige-Pair ("SPX"/"USDC") den richtigen Mint-Adressen zu.
+//
+// Fuer Pools mit `usdcIsTokenA` (SPX/USDC, EURC/USDC, seit bin/export.js:319 exportiert)
+// steht USDC on-chain als tokenA, das Pair wird aber in Orca-Reihenfolge geschrieben
+// (Nicht-USDC-Seite zuerst) — siehe lib/btc-correlation/index.js, lib/sol-topup.js,
+// bin/cleanup.js. Ein Namensvergleich gegen `pool.pair` geht dabei von der falschen
+// Reihenfolge aus und dreht die Zuordnung um (historischer Bug: im SPX-Tab stand die
+// USDC-Beschreibung). Deshalb hier das maßgebliche Feld direkt auswerten.
+//
+// Fuer alle anderen Pools (keine USDC-Seite, z.B. SOL/HYPE) gilt weiterhin der
+// Namensvergleich gegen pool.pair, gleiche Logik wie buildTabs() in pool-chart-modal.js.
 function resolveTabTokens(pool) {
     const dp = pool.displayPair ?? pool.pair ?? '/';
     const [dpA, dpB] = dp.split('/').map(s => s.trim());
+
+    if (pool.usdcIsTokenA) {
+        const usdcIsDpA = dpA?.toUpperCase() === 'USDC';
+        return [
+            { name: dpA ?? '?', mint: usdcIsDpA ? pool.tokenA : pool.tokenB },
+            { name: dpB ?? '?', mint: usdcIsDpA ? pool.tokenB : pool.tokenA },
+        ];
+    }
+
     const [pA] = (pool.pair ?? '/').split('/').map(s => s.trim());
     const dpAisTokenA = dpA?.toUpperCase() === pA?.toUpperCase();
-    const mintA = dpAisTokenA ? pool.tokenA : pool.tokenB;
-    const mintB = dpAisTokenA ? pool.tokenB : pool.tokenA;
     return [
-        { name: dpA ?? '?', mint: mintA },
-        { name: dpB ?? '?', mint: mintB },
+        { name: dpA ?? '?', mint: dpAisTokenA ? pool.tokenA : pool.tokenB },
+        { name: dpB ?? '?', mint: dpAisTokenA ? pool.tokenB : pool.tokenA },
     ];
 }
 

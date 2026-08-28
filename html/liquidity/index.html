@@ -6,8 +6,8 @@
     <title data-i18n="liq.page_title">FORGE - public: Liquidity Bot</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260329a">
-    <link rel="stylesheet" href="css/layout.css?v=20260720a">
-    <link rel="stylesheet" href="../css/shared.css?v=20260809b">
+    <link rel="stylesheet" href="css/layout.css?v=20260824a">
+    <link rel="stylesheet" href="../css/shared.css?v=20260822a">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
     <link rel="stylesheet" href="css/components.css?v=20260805a">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
@@ -78,6 +78,7 @@
                           data-tooltip-content="Kompletter Wallet-Bestand inklusive der SOL-Reserve für Transaktionsgebühren – siehe Gesamt für den tatsächlich für Trading verfügbaren Wert." data-i18n-attr="data-tooltip-title:liq.tip.wallet.title,data-tooltip-content:liq.tip.wallet" data-i18n="liq.wallet">Wallet</span>
                     <div class="value-group">
                         <span class="value clickable-value" id="walletValue" title="Details anzeigen" data-i18n-attr="title:liq.details_show">—</span>
+                        <span class="has-tooltip" id="walletSolWarnIcon" data-tooltip-title="Warnung" data-tooltip-content="" data-tooltip-type="text" style="display:none;color:#f59e0b;cursor:default;margin-left:0.3em">⚠</span>
                         <span class="unit">USDC</span>
                     </div>
                 </div>
@@ -540,6 +541,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260820b"></script>
+    <script type="module" src="js/app.js?v=20260826b"></script>
 </body>
 </html>

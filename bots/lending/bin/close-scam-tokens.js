@@ -2,9 +2,18 @@
  * close-scam-tokens.js
  *
  * Erkennt unbekannte SPL-Token-Konten im Lending-Wallet, bewertet sie anhand von
- * Jupiter-Preis, GeckoTerminal-TVL, Token-Alter (älteste on-chain-Signatur) und
- * Name-Kollision mit bekannten Token, und verbrennt Scam-/Dust-Token auf Wunsch
- * (burn + closeAccount), um die SOL-Miet-Reserve (~0,002 SOL/Token) zurückzuholen.
+ * Jupiter-Preis, Jupiter-Liquidität, Token-Alter (älteste on-chain-Signatur) und
+ * Name-/Jupiter-Verdacht, und verbrennt Scam-/Dust-Token auf Wunsch (burn +
+ * closeAccount), um die SOL-Miet-Reserve (~0,002 SOL/Token) zurückzuholen.
+ *
+ * 🔒 Liquidität kommt MINT-genau aus derselben tokens/v2/search-Antwort wie der
+ * Preis (siehe fetchTokenSignals() in lib/scam-classify.js) — bewusst NICHT mehr aus
+ * GeckoTerminal. Deren tokens/{mint}/pools-Antwort matcht zwar ebenfalls auf den
+ * Mint, aber `reserve_in_usd` frisch erzeugter Pools kann einen manipulierten Preis
+ * widerspiegeln: bei einem Airdrop im Liquidity-Wallet zeigte GeckoTerminal 8,08
+ * Mrd. USDC TVL, während die tatsächliche, handelbare Liquidität bei ~1.041 USDC
+ * lag (Fund 2026-08-22). Nebeneffekt: ein ganzer Call gegen das scharf gedrosselte
+ * GeckoTerminal-Limit (3 req/min, geteilt mit allen anderen FORGE-Bots) entfällt.
  *
  * Analog zu bots/liquidity/bin/close-scam-tokens.js, aber mit einer dynamisch
  * aufgelösten Whitelist statt pools.json:
@@ -19,8 +28,7 @@
  * Position wäre hier ungleich teurer als ein Dust-Token, der einen Tag länger
  * liegen bleibt.
  *
- * Klassifizierung (TVL ist nur informativ, kein Signal — GeckoTerminal matcht
- * auf Symbol statt Mint und ist für Fakes unzuverlässig):
+ * Klassifizierung (Liquidität ist nur informativ, kein Signal):
  *   SKIP   – Preis bekannt + Wert ≥ VALUE_THRESHOLD (Default 5 USDC), keine
  *            Name-Kollision → unberührt
  *   REVIEW – Name-Kollision UND Wert ≥ VALUE_THRESHOLD → wird nie automatisch
@@ -63,7 +71,7 @@ import { loadKeypair, getConnection, assertSufficientSol } from '../lib/wallet.j
 import { RateLimiter }                         from '../lib/rate-limiter.js';
 import { createProtocolByName, JupiterLendProtocol, LoopscaleProtocol } from '../lib/lending-protocols.js';
 import { PATHS } from '../../../config/paths.js';
-import { classify, fetchJupiterPrices, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
+import { classify, fetchTokenSignals, verdictReason, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
 import { renderNotification } from '../../../lib/notify-render.js';
 import { getLang, numLocale } from '../../../lib/i18n.js';
 
@@ -263,7 +271,7 @@ async function scanTokenAccounts(keypair, conn) {
 // ─── Jupiter Preis-Batch ──────────────────────────────────────────────────────
 
 async function fetchPrices(mints) {
-    return fetchJupiterPrices(`${NEXUS}/jup/price/v3`, mints);
+    return fetchTokenSignals(`${NEXUS}/jup/tokens/v2/search`, mints);
 }
 
 // ─── Helius DAS getAsset (Name + Symbol) ─────────────────────────────────────
@@ -283,24 +291,6 @@ async function fetchAssetMeta(mint) {
         const json = await res.json();
         const meta = json.result?.content?.metadata;
         return meta ? { name: meta.name ?? null, symbol: meta.symbol ?? null } : null;
-    } catch { return null; }
-}
-
-// ─── GeckoTerminal TVL (top Pool des Tokens) ─────────────────────────────────
-
-async function fetchTvl(mint) {
-    try {
-        const res = await fetch(
-            `${NEXUS}/gecko/networks/solana/tokens/${mint}/pools?page=1`
-        );
-        if (!res.ok) return null;
-        const json = await res.json();
-        const pools = json.data ?? [];
-        if (pools.length === 0) return 0;
-        return pools.reduce((sum, p) => {
-            const r = parseFloat(p.attributes?.reserve_in_usd ?? '0');
-            return sum + (isNaN(r) ? 0 : r);
-        }, 0);
     } catch { return null; }
 }
 
@@ -347,8 +337,10 @@ function confirm(prompt) {
 // ─── Telegram-Report via Nexus (lifecycle-Level → immer zugestellt) ───────────
 
 async function sendReport(classified, walletAddr) {
-    const nameFlagged  = classified.filter(t => t.dupSymbol);
-    const otherFlagged = classified.filter(t => !t.dupSymbol && (t.tier === 'BURN' || t.tier === 'WARN'));
+    // Jupiter-Verdacht zählt wie eine Kollision — sonst fehlte genau die Klasse
+    // von Funden im Report, die die Kollisionsprüfung gerade NICHT erkennt.
+    const nameFlagged  = classified.filter(t => t.dupSymbol || t.susReason);
+    const otherFlagged = classified.filter(t => !t.dupSymbol && !t.susReason && (t.tier === 'BURN' || t.tier === 'WARN'));
 
     if (nameFlagged.length === 0 && otherFlagged.length === 0) {
         return true;
@@ -403,7 +395,8 @@ function tokenJson(t) {
         value:     t.value ?? null,
         tier:      t.tier,
         dupSymbol: t.dupSymbol ?? null,
-        tvl:       t.tvl ?? null,
+        susReason: t.susReason ?? null,
+        liquidity: t.liquidity ?? null,
         ageDays:   t.ageDays ?? null,
     };
 }
@@ -456,12 +449,13 @@ for (let i = 0; i < unknowns.length; i++) {
     }
     const a = unknowns[i];
     console.log(`[close-scam] (${i + 1}/${unknowns.length}) ${a.mint.slice(0, 12)}…`);
-    const [meta, tvl, ageDays] = await Promise.all([
+    // Liquidität steht schon in priceMap (fetchTokenSignals lief vor der Schleife) —
+    // kein separater Call mehr nötig.
+    const [meta, ageDays] = await Promise.all([
         fetchAssetMeta(a.mint),
-        fetchTvl(a.mint),
         fetchTokenAgeDays(a.mint, conn),
     ]);
-    tokens.push({ ...a, meta, tvl, ageDays });
+    tokens.push({ ...a, meta, liquidity: priceMap[a.mint]?.liquidity ?? null, ageDays });
 }
 
 // 5. Klassifizieren
@@ -479,7 +473,7 @@ console.log(
     'Mint'.padEnd(16) +
     'Balance'.padStart(10) +
     'Wert'.padStart(14) +
-    'TVL'.padStart(14) +
+    'Liquidität'.padStart(14) +
     'Alter'.padStart(10) +
     'Name-Flag'.padStart(12) +
     'Rent'.padStart(9) +
@@ -489,7 +483,7 @@ console.log('─'.repeat(110));
 
 for (const t of classified) {
     const symbol   = t.meta?.symbol ?? t.meta?.name ?? '?';
-    const nameFlag = t.dupSymbol ? `⚠ ${t.dupSymbol}` : '–';
+    const nameFlag = t.dupSymbol ? `⚠ ${t.dupSymbol}` : (t.susReason ? '⚠ Jupiter' : '–');
     const action   = t.tier === 'SKIP'             ? 'unberührt' :
                      t.tier === 'REVIEW'           ? '⚠ MANUELL PRÜFEN (kein Auto-Burn)' :
                      t.tier === 'BURN'             ? 'BURN' :
@@ -499,7 +493,7 @@ for (const t of classified) {
         shortMint(t.mint).padEnd(16) +
         String(t.uiAmount).padStart(10) +
         fmtUsdc(t.value).padStart(14) +
-        fmtTvl(t.tvl).padStart(14) +
+        fmtTvl(t.liquidity).padStart(14) +
         fmtAge(t.ageDays).padStart(10) +
         nameFlag.padStart(12) +
         `${RENT_SOL} SOL`.padStart(9) +
@@ -524,13 +518,13 @@ console.log(`\n${burnable.length} Token-Konto(en) schließbar, ~${totalRent.toFi
 const review = classified.filter(t => t.tier === 'REVIEW');
 if (review.length > 0) {
     console.log(
-        `\n⚠  ${review.length} Token mit Namens-Kollision UND Wert ≥ ${VALUE_THRESHOLD} USDC ` +
+        `\n⚠  ${review.length} auffällige(r) Token MIT Wert ≥ ${VALUE_THRESHOLD} USDC ` +
         `— NICHT automatisch verbrannt:`
     );
     for (const t of review) {
         console.log(
             `   • ${t.meta?.symbol ?? '?'} (${shortMint(t.mint)}) ` +
-            `imitiert "${t.dupSymbol}", Wert ${fmtUsdc(t.value)}`
+            `${verdictReason(t) ?? 'auffällig'}, Wert ${fmtUsdc(t.value)}`
         );
     }
     console.log(`   Prüfen und ggf. gezielt schließen: --mint <mint-prefix> --execute (fragt nochmal nach)`);
@@ -608,6 +602,24 @@ for (const t of burnable) {
         closedJson.push({ ...tokenJson(t), signature: sig, freedSol });
         closed++;
     } catch (err) {
+        // sendAndConfirmTransaction kann bei einem reinen Bestätigungs-Timeout werfen,
+        // obwohl die TX längst gelandet ist (Vorfall 2026-08-21, Liquidity-Wallet:
+        // Oberfläche meldete "fehlgeschlagen", das Konto war aber bereits geschlossen
+        // und die SOL-Miete zurück). Vor dem Melden eines Fehlschlags gegenprüfen, ob
+        // das Konto tatsächlich noch existiert.
+        let stillOpen = true;
+        try { stillOpen = (await conn.getAccountInfo(t.pubkey)) !== null; }
+        catch { /* Gegenprüfung selbst nicht möglich – beim ursprünglichen Fehler bleiben */ }
+
+        if (!stillOpen) {
+            const symbol = t.meta?.symbol ?? t.meta?.name ?? t.mint.slice(0, 8);
+            const freedSol = t.lamports != null ? t.lamports / LAMPORTS_PER_SOL : RENT_SOL;
+            console.log(`  ✅ ${symbol} (${shortMint(t.mint)}) geschlossen (Bestätigung kam als Fehler zurück, Konto ist aber weg) | ${freedSol.toFixed(6)} SOL frei`);
+            closedJson.push({ ...tokenJson(t), signature: null, freedSol });
+            closed++;
+            continue;
+        }
+
         console.error(`  ❌ Fehler bei ${t.mint}: ${err.message}`);
         failedJson.push({ ...tokenJson(t), error: err.message });
     }

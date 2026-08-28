@@ -10,14 +10,14 @@
  * live zu pollen (siehe runCheck()).
  */
 
-import { initNav, initFooter }        from '/forge/js/nav.js?v=20260816a';
+import { initNav, initFooter }        from '/forge/js/nav.js?v=20260826a';
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast }                  from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
-import { initMessageBell }            from '/forge/js/message-bell.js?v=20260818a';
+import { initMessageBell }            from '/forge/js/message-bell.js?v=20260825a';
 import { initForgeTooltip }           from './tooltip.js?v=20260811a';
 
-initNav({ current: 'updates' });
+initNav({ current: 'updates', logout: '/api/auth/logout' });
 // Bewusst ohne botName: die zweite Footer-Zeile ist für "<Name>: <Version>" gedacht
 // und wird per id="footerVersion" nachgefüllt (siehe initFooter() in nav.js). Diese
 // Seite hat keine eigene Bot-Version zu zeigen – übrig blieb ein nacktes "Settings:"
@@ -234,8 +234,15 @@ let _cachedVersion = null;
 async function currentVersion() {
     if (_cachedVersion) return _cachedVersion;
     try {
+        // /forge/version.json existiert NUR auf per setup.sh installierten FORGE.pub-Forks
+        // (siehe html/js/nav.js). Auf dem Master gibt's die Datei nicht (404) — dann auf
+        // /api/version ausweichen, das der Settings-Server immer liefert (server.js).
         const v = await fetch('/forge/version.json', { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
         _cachedVersion = v?.version ?? null;
+        if (!_cachedVersion) {
+            const av = await fetch('/api/version', { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
+            _cachedVersion = av?.version ?? null;
+        }
     } catch { /* bleibt null */ }
     return _cachedVersion;
 }
@@ -441,6 +448,52 @@ async function runCheck() {
     }
 }
 
+// Selbsttest: läuft synchron, unprivilegiert und in Sekunden — kein Task-Polling.
+// Zeigt jeden aktivierten Dienst als eigene Zeile und danach die Datenqualität der
+// Positions-Wertreihe. Letzteres ist der eigentliche Grund für den Knopf: Ob ein Dienst
+// läuft, sieht man ohnehin; ob eine Zahl im Dashboard auf einem fehlerhaften Messwert
+// beruht, konnte ein Nutzer bis dahin gar nicht feststellen.
+async function runSelfTest() {
+    $('upSelfTestBtn').disabled = true;
+    openLogModal();
+    renderChecklist([{ label: tr('upd.selftest_running', 'Selbsttest läuft …'), state: 'pending' }]);
+    try {
+        const res  = await fetch('/api/update/selftest', { method: 'POST' });
+        const body = await res.json();
+        if (body.error) {
+            renderChecklist([{ label: body.error, state: 'failed' }]);
+            showToast(body.error, 'error');
+            return;
+        }
+
+        const steps = (body.checked ?? []).map(c => ({
+            label: `${c.service}: ${c.enabled ? (c.active ? tr('upd.selftest_active', 'aktiv') : tr('upd.selftest_not_active', 'läuft NICHT')) : tr('upd.selftest_disabled', 'deaktiviert (übersprungen)')}`,
+            state: !c.enabled ? 'info' : (c.active ? 'done' : 'failed'),
+        }));
+
+        if (body.snapshots?.available) {
+            const bad = body.snapshots.badCount ?? 0;
+            steps.push({
+                label: bad === 0
+                    ? tr('upd.selftest_data_clean', 'Messwerte der Positionen: unauffällig.')
+                    : tr('upd.selftest_data_bad', 'Messwerte der Positionen: {count} fehlerhafte(r) Wert(e) in {pools}. Die PnL-Anzeige dieser Pools ist dadurch verfälscht — sie wird mit dem nächsten Update automatisch korrigiert.', { count: bad, pools: (body.snapshots.pools ?? []).join(', ') }),
+                state: bad === 0 ? 'done' : 'failed',
+            });
+        }
+
+        renderChecklist(steps);
+        showToast(body.ok
+            ? tr('upd.selftest_ok', 'Selbsttest ohne Befund.')
+            : tr('upd.selftest_problems', '{count} Problem(e) gefunden.', { count: body.problems?.length ?? 0 }),
+            body.ok ? 'success' : 'error');
+    } catch (err) {
+        renderChecklist([{ label: err.message, state: 'failed' }]);
+        showToast(`${tr('upd.selftest', 'Selbsttest')}: ${err.message}`, 'error');
+    } finally {
+        $('upSelfTestBtn').disabled = false;
+    }
+}
+
 // Eigenes Modal statt window.confirm() (keine nativen Browser-Dialoge – gleiches
 // Muster wie bot-liquidity.js _confirmSavePoolType()).
 function confirmAction({ id, title, body, confirmLabel, onConfirm }) {
@@ -454,6 +507,7 @@ function confirmAction({ id, title, body, confirmLabel, onConfirm }) {
 }
 
 $('upCheckBtn').addEventListener('click', runCheck);
+$('upSelfTestBtn').addEventListener('click', runSelfTest);
 $('upApplyBtn').addEventListener('click', () => {
     confirmAction({
         id: 'up-confirm-apply',
@@ -574,6 +628,89 @@ $('upTzInput').addEventListener('change', async () => {
     }
 });
 
+// ── Passwortschutz (Port 3200) ────────────────────────────────────────────────
+// Reine Zufallszugriff-Bremse fürs LAN (siehe siteAuthGate() in
+// bots/settings/lib/site-auth.js) – "aktiviert" heißt: Passwort ist gesetzt.
+// Ein neues Passwort ändert (statt setzt) einfach denselben Zustand; das
+// aktuelle Passwort wird nur abgefragt, wenn bereits eines aktiv ist.
+let _authEnabled = false;
+
+async function loadAuthStatus() {
+    try {
+        const d = await fetch('/api/auth/status', { cache: 'no-store' }).then(r => r.json());
+        _authEnabled = !!d.enabled;
+        const badge = $('authStatusBadge');
+        badge.textContent = _authEnabled ? tr('auth.status_enabled', 'Aktiv') : tr('auth.status_disabled', 'Nicht aktiv');
+        badge.className = `status-badge ${_authEnabled ? 'active' : 'inactive'}`;
+        $('authCurrentRow').style.display = _authEnabled ? '' : 'none';
+        $('authSaveBtn').textContent = _authEnabled ? tr('auth.change_password', 'Passwort ändern') : tr('auth.set_password', 'Passwort setzen');
+        $('authRemoveBtn').style.display = _authEnabled ? '' : 'none';
+    } catch (err) {
+        console.error('[updates] Auth-Status konnte nicht geladen werden:', err);
+    }
+}
+
+$('authSaveBtn').addEventListener('click', async () => {
+    const feedback = $('authFeedback');
+    const currentPassword = $('authCurrentPw').value;
+    const newPassword     = $('authNewPw').value;
+    const repeat           = $('authNewPwRepeat').value;
+
+    if (newPassword.length < 8) {
+        feedback.textContent = tr('auth.password_too_short', 'Das Passwort muss mindestens 8 Zeichen lang sein.');
+        feedback.className = 'task-status failed';
+        return;
+    }
+    if (newPassword !== repeat) {
+        feedback.textContent = tr('auth.password_mismatch', 'Die Passwörter stimmen nicht überein.');
+        feedback.className = 'task-status failed';
+        return;
+    }
+
+    $('authSaveBtn').disabled = true;
+    try {
+        const res = await fetch('/api/auth/password', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ currentPassword, newPassword }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+
+        $('authCurrentPw').value = '';
+        $('authNewPw').value = '';
+        $('authNewPwRepeat').value = '';
+        feedback.textContent = '';
+        showToast(_authEnabled ? tr('auth.password_changed', 'Passwort geändert.') : tr('auth.password_set', 'Passwort gesetzt – ab jetzt ist ein Login nötig.'), 'success');
+        await loadAuthStatus();
+    } catch (err) {
+        feedback.textContent = tr('auth.save_failed', 'Speichern fehlgeschlagen: {error}', { error: err.message });
+        feedback.className = 'task-status failed';
+    } finally {
+        $('authSaveBtn').disabled = false;
+    }
+});
+
+$('authRemoveBtn').addEventListener('click', () => {
+    confirmAction({
+        id: 'auth-confirm-remove',
+        title: tr('auth.remove_confirm_title', 'Passwortschutz wirklich entfernen?'),
+        body: '<p style="margin:0;">' + tr('auth.remove_confirm_body', 'Diese Seite ist danach ohne Passwort für jeden im LAN erreichbar.') + '</p>',
+        confirmLabel: tr('auth.remove_password', 'Passwortschutz entfernen'),
+        onConfirm: async () => {
+            try {
+                const res = await fetch('/api/auth/password', { method: 'DELETE' });
+                const body = await res.json();
+                if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+                showToast(tr('auth.password_removed', 'Passwortschutz entfernt.'), 'success');
+                await loadAuthStatus();
+            } catch (err) {
+                showToast(tr('auth.save_failed', 'Speichern fehlgeschlagen: {error}', { error: err.message }), 'error');
+            }
+        },
+    });
+});
+
 setLastUpdate();
 loadStatus();
 loadPolicy();
@@ -581,3 +718,4 @@ loadRollbackAvailability();
 loadLanguage();
 loadTimezone();
 populateTimezoneList();
+loadAuthStatus();

@@ -112,7 +112,12 @@ export const LOG_ONLY = new Set([
     'notify.liq.reinvest_error',      // Gebühren bleiben in der Position, nächster Lauf holt sie
     'notify.liq.open_position_error', // Eskalation läuft über open_position_gave_up (ACTION.manual)
     'notify.liq.score_limit_error',
-    'notify.liq.trailing_stop_error', // Auslöser dieser Änderung: Slippage-Fehler beim Exit-Versuch
+    // 🔒 Nur der FOLGENLOSE Abbruch (Auslöser dieser Änderung: Slippage-Fehler beim
+    // Exit-Versuch — es wurde nichts bewegt, das Kapital steht unverändert in der
+    // Position). Der Teilfehlschlag, bei dem die Liquidität bereits entnommen ist und
+    // ungeschützt in der Wallet liegt, hat seit LIQ#0312 einen eigenen Schlüssel
+    // ('notify.liq.trailing_stop_partial') und gehört ausdrücklich NICHT hierher.
+    'notify.liq.trailing_stop_error',
     'notify.liq.premium_exit_error',
 
     // ── LendingBot ───────────────────────────────────────────────────────────

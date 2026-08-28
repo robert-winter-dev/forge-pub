@@ -187,12 +187,17 @@ export function deleteNotifications(ids) {
 }
 
 // 'bots' kam am 18.08.2026 mit der eigenen Rubrik für Bot-Meldungen dazu.
-const NOTIFY_TYPES = ['system', 'bots', 'support', 'premium'];
+// 'risk' kam am 2026-08-25 dazu – anders als die anderen vier KEINE eigene
+// Rubrik, sondern ein Unterfilter INNERHALB von 'bots' (Risk-Management-
+// Kategorien wie Trailing Stop, TVL-Schutz, Score-Limit, siehe RISK_CATEGORIES
+// in bots/settings/routes/messages.js, wo der Toggle tatsächlich ausgewertet
+// wird – hier nur Ablage/Lese-/Schreibzugriff wie bei den anderen Typen).
+const NOTIFY_TYPES = ['system', 'bots', 'support', 'premium', 'risk'];
 
 /**
- * Liest die Benachrichtigungs-Toggles (System/Bots/Support/Premium). Default AN
- * (kein gespeicherter Wert = true), wie zuvor bei den localStorage-Keys.
- * @returns {{system: boolean, bots: boolean, support: boolean, premium: boolean}}
+ * Liest die Benachrichtigungs-Toggles (System/Bots/Support/Premium/Risk). Default
+ * AN (kein gespeicherter Wert = true), wie zuvor bei den localStorage-Keys.
+ * @returns {{system: boolean, bots: boolean, support: boolean, premium: boolean, risk: boolean}}
  */
 export function getNotifySettings() {
     const db = getDb();
@@ -201,7 +206,7 @@ export function getNotifySettings() {
     return Object.fromEntries(NOTIFY_TYPES.map(t => [t, stored[t] ?? true]));
 }
 
-/** @param {string} type – 'system' | 'bots' | 'support' | 'premium' */
+/** @param {string} type – 'system' | 'bots' | 'support' | 'premium' | 'risk' */
 export function setNotifySetting(type, enabled) {
     if (!NOTIFY_TYPES.includes(type)) return;
     const db = getDb();
@@ -209,4 +214,32 @@ export function setNotifySetting(type, enabled) {
         INSERT INTO settings (key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(`notify_${type}`, enabled ? '1' : '0');
+}
+
+// feature_* (2026-08-25): generische Ein/Aus-Flags für Features, die NICHT nur die
+// Badge-Sichtbarkeit steuern (wie notify_*), sondern ob eine Meldung überhaupt
+// erzeugt wird. Erster Nutzer: der Liquidity-Tagesbericht. Default AN, damit das
+// Freischalten für alle Nutzer ohne Zusatzschritt wirkt — Settings dient zum
+// Abschalten, nicht zum Anschalten.
+const FEATURE_TYPES = ['daily_report'];
+
+/**
+ * @param {string} feature – z.B. 'daily_report'
+ * @returns {boolean}
+ */
+export function getFeatureFlag(feature) {
+    if (!FEATURE_TYPES.includes(feature)) return true;
+    const db = getDb();
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(`feature_${feature}`);
+    return row ? row.value === '1' : true;
+}
+
+/** @param {string} feature – z.B. 'daily_report' */
+export function setFeatureFlag(feature, enabled) {
+    if (!FEATURE_TYPES.includes(feature)) return;
+    const db = getDb();
+    db.prepare(`
+        INSERT INTO settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(`feature_${feature}`, enabled ? '1' : '0');
 }

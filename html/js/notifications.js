@@ -25,6 +25,27 @@ function escHtml(s) {
 }
 
 /**
+ * Wandelt ```-Abschnitte im Meldungstext in einen Monospace-Block.
+ *
+ * 🔒 Wird IMMER auf bereits escapten Text angewendet — der einzige eingefügte Tag ist
+ * `<pre>`, alles andere bleibt escaped. Kein Markdown-Parser, keine Attribute, keine
+ * Möglichkeit, aus dem Meldungstext heraus Markup einzuschleusen.
+ *
+ * Hintergrund: Meldungen benutzen ```-Blöcke für Tabellen (Telegram rendert sie als
+ * Monospace). Im Message Center kamen sie bis 2026-08-22 als Fließtext an, weil weder die
+ * Zeilenumbrüche noch eine feste Schriftbreite erhalten blieben — Spalten waren damit
+ * unlesbar.
+ */
+function fenceToPre(escaped) {
+    const parts = String(escaped).split('```');
+    // Gerade Indizes = normaler Text, ungerade = Inhalt zwischen zwei Zäunen.
+    return parts.map((p, i) => {
+        if (i % 2 === 0) return p;
+        return `<pre>${p.replace(/^\n/, '').replace(/\n$/, '')}</pre>`;
+    }).join('');
+}
+
+/**
  * Rendert eine einzelne Notification als HTML-String.
  *
  * @param {Object}  n
@@ -43,7 +64,7 @@ export function renderNotifItem(n, { dismissible = false } = {}) {
     const bot     = n.bot ?? n.botLabel ?? n.pair ?? '';
     const level   = n.level ?? 'info';
     const idAttr  = n.id != null ? ` data-id="${n.id}"` : '';
-    const msg     = escHtml(n.message ?? '');
+    const msg     = fenceToPre(escHtml(n.message ?? ''));
     const meta    = [time, escHtml(bot)].filter(Boolean).join(': ');
     const dismiss = dismissible
         ? '<button class="notif-item-dismiss" title="Gelesen">✕</button>'

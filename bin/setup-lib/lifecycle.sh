@@ -59,6 +59,11 @@ do_install() {
     do_services
     do_cron
     do_logrotate
+    # Neuinstallation: alle Migrationen als erledigt verbuchen, ohne sie auszufuehren —
+    # der frisch installierte Code bringt den Zielzustand bereits mit. Ohne diesen Schritt
+    # liefen historische Korrekturen auf einer leeren Installation an und stellten teils
+    # Zustaende her, die spaetere Migrationen laengst abgeloest haben.
+    baseline_migrations
     fix_ownership
     do_start
     write_getting_started
@@ -151,6 +156,7 @@ do_update() {
         # vor dem allerersten Bot-Start ohnehin der einzig korrekte Zustand.
         sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR/bots/liquidity' && node bin/export.js" >/dev/null 2>&1 || true
         sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR/bots/lending'   && node bin/export.js" >/dev/null 2>&1 || true
+        run_migrations
         do_services
         do_cron
         do_logrotate
@@ -278,6 +284,8 @@ do_uninstall() {
     say "    - $(t LIFECYCLE_UNINSTALL_DELETE_GETTING_STARTED "$GETTING_STARTED")"
     say "    - $(t LIFECYCLE_UNINSTALL_DELETE_SYSUSER "$INSTALL_USER")"
     say ""
+    c_warn "$(t LIFECYCLE_UNINSTALL_PASSWORD_WARNING)"
+    say ""
     if confirm "$(t LIFECYCLE_UNINSTALL_CONFIRM)"; then
         c_warn "$(t LIFECYCLE_UNINSTALL_BACKUP_EXISTS_WARNING "$BACKUP_DIR")"
         rm -rf "${APP_DIR:?}" "${DATA_DIR:?}" "${ENV_DIR:?}" "${SECRETS_DIR:?}" "${TRUST_DIR:?}" \
@@ -291,6 +299,26 @@ do_uninstall() {
     else
         c_warn "$(t LIFECYCLE_UNINSTALL_KEPT_NOTHING_DELETED)"
     fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Passwortschutz zurücksetzen (Notausgang bei vergessenem Passwort)
+# ═════════════════════════════════════════════════════════════════════════════
+# Der gezielte Reset lief bisher ausschließlich über
+# "node bin/reset-settings-password.js" (siehe dort für die Begründung, warum
+# das bewusst NICHT über die Web-API läuft) — hier nur als regulärer
+# setup.sh-Befehl verdrahtet, damit der Notausgang nicht an einer Doku-Fußnote
+# hängt, sondern über dieselbe Oberfläche wie jede andere Lifecycle-Aktion
+# erreichbar ist. Wirkung unverändert: löscht ausschließlich die eine Zeile in
+# site_auth (settings.db), keine Bot-Daten/-Konfiguration, kein Voll-Wipe.
+do_reset_password() {
+    step "$(t LIFECYCLE_RESET_PASSWORD_STEP)"
+    [[ -f "$INSTALL_MARKER" ]] && die "$(t LIFECYCLE_INCOMPLETE_BLOCKS_ACTION "$0")"
+    [[ -d "$APP_DIR" ]] || die "$(t LIFECYCLE_REPAIR_NOT_INSTALLED "$APP_DIR")"
+    confirm "$(t LIFECYCLE_RESET_PASSWORD_CONFIRM)" || { say "  $(t LIFECYCLE_ABORTED)"; return 0; }
+    local out
+    out=$(sudo -u "$INSTALL_USER" node "$APP_DIR/bin/reset-settings-password.js" 2>&1) || die "$out"
+    say "  $out"
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -316,4 +344,36 @@ do_repair() {
     fix_ownership
     c_ok "$(t LIFECYCLE_REPAIR_DONE)"
     do_status
+}
+
+# ─── Migrationen ──────────────────────────────────────────────────────────────
+#
+# Datenkorrekturen, die eine neue Programmversion voraussetzt (bin/migrate.js).
+# Läuft nach dem Deploy und VOR dem Start der Dienste: Die Bots sollen bereits mit
+# den korrigierten Werten hochkommen.
+#
+# 🔒 Bewusst OHNE --financial. Migrationen, die eine Position schließen oder Kapital
+#    bewegen können, laufen nie automatisch — sie werden hier nur gemeldet und warten
+#    auf eine bewusste Entscheidung (node bin/migrate.js --apply --financial).
+#    Ein Update darf niemals ungefragt Kapital bewegen.
+run_migrations() {
+    [[ -f "$APP_DIR/bin/migrate.js" ]] || return 0
+
+    local out
+    out=$(sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR' && node bin/migrate.js --apply" 2>&1) || true
+
+    if grep -q "Zurückgestellt" <<< "$out"; then
+        c_warn "$(t LIFECYCLE_MIGRATIONS_DEFERRED)"
+        sed -n '/Zurückgestellt/,$p' <<< "$out" | sed 's/^/    /'
+        say "$(t LIFECYCLE_MIGRATIONS_DEFERRED_HINT)"
+    elif grep -qE "^\s+✓ [0-9]{4}-" <<< "$out"; then
+        say "  $(t LIFECYCLE_MIGRATIONS_APPLIED)"
+        grep -E "^\s+✓ [0-9]{4}-" <<< "$out" | sed 's/^/  /'
+    fi
+}
+
+# Verbucht alle bekannten Migrationen als erledigt, ohne sie auszuführen (Neuinstallation).
+baseline_migrations() {
+    [[ -f "$APP_DIR/bin/migrate.js" ]] || return 0
+    sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR' && node bin/migrate.js --baseline" >/dev/null 2>&1 || true
 }

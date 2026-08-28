@@ -337,6 +337,34 @@ export function updatePoolRangeOverride(poolId, newFixedPct) {
     return changed;
 }
 
+/**
+ * Setzt `poolType` eines Pools in der Bot-DB (Single Source of Truth seit LIQ#0332,
+ * Festlegung). Schreibt nicht in pools.json — der JSON-Wert dient nur als Seed
+ * (siehe setPoolActive-Kommentar). Aufrufer: der tägliche Vola-Drift-Check in bot.js
+ * (lib/pool-type-drift.js), bei nachhaltig verschobener Tagesvola. Bewusst still
+ * (kein Telegram/Dashboard-Hinweis) — nur ein Log-Eintrag für Support-Diagnose.
+ * Gibt true zurück wenn geändert.
+ *
+ * @param {string} poolId
+ * @param {string} newType
+ * @returns {boolean}
+ */
+export function setPoolType(poolId, newType) {
+    let changed;
+    const bdb = openBotDbRW();
+    try {
+        const row = bdb.prepare(`SELECT pool_type FROM pools WHERE id = ?`).get(poolId);
+        if (!row) throw new Error(`Pool ${poolId} nicht in DB-Tabelle pools gefunden (syncPools ausstehend?)`);
+        changed = (row.pool_type !== newType);
+        if (changed) bdb.prepare(`UPDATE pools SET pool_type = ? WHERE id = ?`).run(newType, poolId);
+    } finally {
+        bdb.close();
+    }
+    if (!changed) return false;
+    console.log(`[config] Pool ${poolId}: poolType automatisch korrigiert → ${newType} (Vola-Drift-Check)`);
+    return true;
+}
+
 // ─── Range-Modus validieren ───────────────────────────────────────────────────
 
 function loadRangeConfig() {
@@ -407,6 +435,17 @@ function loadConfig() {
 
         // Überwachung
         checkIntervalMs: optionalPositiveInt('CHECK_INTERVAL_MS', 300_000),
+
+        // Trailing-Stop-Schnellprüfung zwischen zwei Zyklen (lib/fast-stop-check.js):
+        // alle FAST_TS_CHECK_MS je Pool mit offener Position nur den Pool-Preis lesen und
+        // gegen den Höchststand prüfen. Grund: Fartcoin/SOL am 2026-08-22 verlor 9 % in
+        // einem einzigen 5-Min-Intervall — ein 0,75-%-Stop löste bei −8,7 % aus, weil
+        // dazwischen niemand hinsah. Eine Zusage, die feiner ist als die Abtastung, ist
+        // keine (KB Core/wirkungsnachweis.md).
+        fastTsCheck: {
+            enabled:    optionalEnv('FAST_TS_CHECK_ENABLED', 'true') === 'true',
+            intervalMs: optionalPositiveInt('FAST_TS_CHECK_MS', 30_000),
+        },
 
         // Rebalancing
         rebalance: {
@@ -512,6 +551,24 @@ export function getCleanupMinDepositFromEnv() {
     }
     const v = parseFloat(raw ?? '0');
     return v >= 1 ? v : 0;
+}
+
+/**
+ * Liest CLEANUP_TREND_GATE (Komma-Liste geforderter Trend-Zeitebenen, z.B. '4h,1d')
+ * frisch aus der .env-Datei — analog zu getCleanupModeFromEnv(). Leer/fehlend =
+ * Gate aus, also unverändertes Verhalten.
+ *
+ * Der Bot-Langläufer muss frisch lesen, weil ForgeSettings die .env zur Laufzeit
+ * ändert und bin/export.js den Gate-Zustand jede Minute ins Dashboard schreibt —
+ * eine im Prozess eingefrorene Einstellung würde dort eine andere Wahrheit zeigen
+ * als der stündliche Cleanup anwendet.
+ * @returns {string|null} Rohwert, Parsing über lib/trend-indicators.js parseTrendGate()
+ */
+export function getCleanupTrendGateFromEnv() {
+    const envPath = path.join(__dirname, '..', '.env');
+    if (!existsSync(envPath)) return process.env.CLEANUP_TREND_GATE ?? null;
+    const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_TREND_GATE\s*=\s*(.*)$/m);
+    return m ? m[1].trim() : (process.env.CLEANUP_TREND_GATE ?? null);
 }
 
 /**

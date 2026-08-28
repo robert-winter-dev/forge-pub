@@ -26,12 +26,15 @@ import { Transaction, SystemProgram, PublicKey, TransactionInstruction } from '@
 import { swapTokens, quoteTokens } from './swap.js';
 import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT, getTxFee } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
-import { insertTransaction } from './db.js';
+import { insertTransaction, insertCapitalFlow, setCloseProceeds } from './db.js';
 import { logChainTx } from './chain-tx-log.js';
+// Nur für die Entnahmeprüfung unten. notify.js importiert exit-finalizer.js nicht — kein Zyklus.
+import * as notify from './notify.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
 import { settle } from './settle-promise.js';
 import { config } from './config.js';
 import { pnlForPeriod } from '../../../lib/pnl.js';
+import { resolvePnlAnchorMs } from './pnl-anchor.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
 const USDC_DECIMALS  = 6;
@@ -56,6 +59,15 @@ const MIN_SWAP_RAW_ABSOLUTE      = 100;
 // Pool liq-spcx-usdc). Ab hier deshalb per Quote den tatsächlichen USD-Wert prüfen.
 const MIN_SWAP_RAW                = 1_000_000; // ≙ 0,001 SOL / 0,001 ORE (je nach Decimals)
 const MIN_SWAP_USDC               = 0.5;       // Dust-Schwelle in USD, analog cleanup.js DUST_SWAP_MIN_USDC
+// Spielraum, den der Exit-Deckel über die von der Position freigegebene Menge hinaus zulässt.
+// Begründung: siehe capToPosition().
+const EXIT_CAP_TOLERANCE_PCT      = 0.5;
+// Ab welchem Fehlbetrag auf BEIDEN Token die Entnahme als unplausibel gilt (Anteil, nicht %).
+// 0,3 % liegt klar über Rundung/Messrauschen und klar unter dem Fehler, der die Prüfung
+// veranlasst hat (0,990 % = tokenEst × 100/101). Begründung: siehe
+// checkExitAmountsAgainstLastMeasurement().
+const EXIT_AMOUNT_TOLERANCE         = 0.003;
+const EXIT_AMOUNT_CHECK_MAX_AGE_MS  = 15 * 60 * 1000;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -291,7 +303,7 @@ export function computeExitPnl(db, pool, position) {
         SELECT MAX(created_at) AS t FROM capital_flows
          WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
     `).get(pool.id, position.opened_at);
-    const fromMs = lastDeposit?.t ?? position.opened_at;
+    const fromMs = resolvePnlAnchorMs(lastDeposit?.t, position.pnl_anchor_reset_at, position.opened_at);
     return pnlForPeriod(db, { flavor: config.botId, scope: pool.id, fromMs });
 }
 
@@ -397,6 +409,12 @@ export async function prepareExitAndClaimFees(adapter, pool, position, db, { log
  * @param {Object} pool
  * @param {Object} position  Zeile aus getOpenPosition() (braucht nft_mint)
  * @param {Object} db
+ * 🔒 Teilfehlschlag (LIQ#0312): Wirft `adapter.closePosition` NACHDEM die Entnahme
+ * gelandet ist, traegt der Fehler `partialExit` (siehe pool-adapter/orca.js). Hier wird
+ * er um die bereits geclaimten Fees zu den ECHTEN Wallet-Mengen ergaenzt und
+ * weitergeworfen — der Aufrufer persistiert sie und darf den Withdraw NICHT wiederholen.
+ * Ohne das fand ein Resume on-chain 0 Liquiditaet und buchte den Erloes als ~0.
+ *
  * @param {Object} opts
  *   @param {number} opts.feesA      Im Withdraw-Step geclaimter Fee-Anteil Token A
  *   @param {number} opts.feesB      Im Withdraw-Step geclaimter Fee-Anteil Token B
@@ -404,12 +422,105 @@ export async function prepareExitAndClaimFees(adapter, pool, position, db, { log
  *   @param {string} opts.logPrefix  z.B. '[trailing-stop:liq-...]'
  * @returns {Promise<{closed: Object, coinsA: number, coinsB: number}>}
  */
+/**
+ * 🔒 Prüft die entnommenen Mengen gegen die letzte Messung derselben Position.
+ *
+ * Warum es das gibt: Bis 2026-08-23 meldete `closePosition()` die On-Chain-Schutzuntergrenze
+ * (`tokenMin`) statt des Ergebnisses — rund 1 % jeder Position blieb dadurch unverkauft und
+ * wurde zu niedrig gebucht. Der Fehler lief WOCHEN, weil jede vorhandene Prüfung den
+ * *Auslöser* kontrollierte und keine das *Ergebnis*. Genau diese Lücke schließt diese Funktion.
+ *
+ * Warum der Vergleich über Token-Mengen läuft und nicht über USD: Zwischen Auslösung und
+ * Entnahme vergehen ~10 s, in denen sich der Kurs bewegt — ein USD-Vergleich
+ * (`current_usd` gegen `swapped_usdc`) trüge diese Bewegung mit und müsste so tolerant
+ * gestellt werden, dass er einen 1-%-Versatz nicht mehr sieht. Genau daran ist meine erste
+ * Analyse gescheitert: Über 43 Exits gemittelt verschwand der konstante Versatz im Rauschen.
+ *
+ * 🔒 Die Invariante nutzt den Fingerabdruck des Fehlers: Eine Kursbewegung verschiebt in einer
+ * CLMM-Position den Token-MIX — die eine Menge steigt, die andere fällt, immer gegenläufig.
+ * Ein systematischer Abschlag senkt dagegen BEIDE Mengen um denselben Faktor. Deshalb schlägt
+ * nur an, was **beide** Legs gleichzeitig unter die letzte Messung drückt. Kursbewegung kann
+ * das nicht auslösen, ein Mengenabschlag immer.
+ *
+ * Zusätzlich in der sicheren Richtung: `coinsA/coinsB` enthalten die vorher geclaimten Fees,
+ * liegen also normalerweise ÜBER den gemessenen Positionsmengen.
+ *
+ * Blockiert nie einen Exit — ein Diagnosewert darf den Schutzmechanismus nicht aufhalten.
+ *
+ * @returns {{ ok: boolean, shortfallA: number, shortfallB: number, reason: string|null }}
+ *          `shortfall*` als Anteil (0,01 = 1 % zu wenig), negativ = mehr als gemessen.
+ */
+export function checkExitAmountsAgainstLastMeasurement(db, pool, coinsA, coinsB, { maxAgeMs = EXIT_AMOUNT_CHECK_MAX_AGE_MS } = {}) {
+    const skip = reason => ({ ok: true, shortfallA: 0, shortfallB: 0, reason });
+
+    let row;
+    try {
+        row = db.prepare(
+            `SELECT amount_a, amount_b, recorded_at FROM position_snapshots
+             WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
+        ).get(pool.id);
+    } catch (err) {
+        return skip(`Snapshot nicht lesbar: ${err.message}`);
+    }
+
+    if (!row) return skip('keine Messung vorhanden');
+    if (!(row.amount_a > 0) || !(row.amount_b > 0)) return skip('Messung ohne Mengen (Alt-Snapshot)');
+    // Eine alte Messung sagt nichts über diese Entnahme — z.B. wenn ein Resume Stunden
+    // später läuft. Lieber nicht prüfen als falsch alarmieren.
+    if (Date.now() - row.recorded_at > maxAgeMs) return skip('letzte Messung zu alt');
+
+    const shortfallA = (row.amount_a - coinsA) / row.amount_a;
+    const shortfallB = (row.amount_b - coinsB) / row.amount_b;
+
+    if (shortfallA > EXIT_AMOUNT_TOLERANCE && shortfallB > EXIT_AMOUNT_TOLERANCE) {
+        return {
+            ok: false, shortfallA, shortfallB,
+            reason: `beide Token-Mengen unter der letzten Messung `
+                + `(A −${(shortfallA * 100).toFixed(2)} %, B −${(shortfallB * 100).toFixed(2)} %)`,
+        };
+    }
+    return { ok: true, shortfallA, shortfallB, reason: null };
+}
 export async function finalizeClosePosition(adapter, pool, position, db, { feesA, feesB, note, logPrefix }) {
-    const closed = await adapter.closePosition(pool, position.nft_mint);
+    let closed;
+    try {
+        closed = await adapter.closePosition(pool, position.nft_mint);
+    } catch (err) {
+        if (err.partialExit) {
+            // Fees sind vor der Entnahme geclaimed worden und liegen ebenfalls im Wallet.
+            err.partialExit.coinsA = feesA + (err.partialExit.amountA ?? 0);
+            err.partialExit.coinsB = feesB + (err.partialExit.amountB ?? 0);
+            console.error(
+                `${logPrefix} 🔒 TEILFEHLSCHLAG: Liquidität entnommen (TX=${err.partialExit.decreaseTxHash}), `
+                + `Position-NFT NICHT geschlossen. ${err.partialExit.coinsA.toFixed(6)} A + `
+                + `${err.partialExit.coinsB.toFixed(6)} B liegen im Wallet.`
+            );
+        }
+        throw err;
+    }
+
     const coinsA = feesA + (closed.amountA ?? 0);
     const coinsB = feesB + (closed.amountB ?? 0);
 
     console.log(`${logPrefix} Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
+
+    // Ergebnis gegen die letzte Messung prüfen. Best-effort und niemals blockierend:
+    // ein Diagnosewert darf den schützenden Exit nicht aufhalten.
+    try {
+        const check = checkExitAmountsAgainstLastMeasurement(db, pool, coinsA, coinsB);
+        if (!check.ok) {
+            const msg = `Entnahme unplausibel: ${check.reason}. `
+                + `Eine Kursbewegung verschiebt den Token-Mix gegenläufig und kann beide Mengen `
+                + `nicht gleichzeitig senken — das deutet auf einen systematischen Mengenabschlag `
+                + `(z.B. tokenMin statt tokenEst) hin. Kapital ist entnommen, der Exit läuft weiter; `
+                + `die Differenz bleibt im Wallet und wird zu niedrig gebucht.`;
+            console.error(`${logPrefix} 🔒 ${msg} TX=${closed.txHash}`);
+            notify.warn(`Exit ${pool.displayPair ?? pool.pair}`, new Error(msg))
+                .catch(e => console.warn(`${logPrefix} Meldung zur Entnahmeprüfung fehlgeschlagen: ${e.message}`));
+        }
+    } catch (err) {
+        console.warn(`${logPrefix} Entnahmeprüfung übersprungen: ${err.message}`);
+    }
 
     const closeFee = await getTxFee(closed.txHash).catch(() => null);
     insertTransaction(db, {
@@ -424,6 +535,113 @@ export async function finalizeClosePosition(adapter, pool, position, db, { feesA
     });
 
     return { closed, coinsA, coinsB };
+}
+
+/**
+ * Schließt die Position — und rettet das Kapital, wenn NUR der NFT-Burn scheitert.
+ *
+ * 🔒 Der gemeinsame Ausstiegspfad aller vier Exit-Module (Trailing Stop, Score-Limit,
+ * TVL-Schutz, Retirement). Der Ausstieg besteht aus zwei on-chain-Legs: `decreaseLiquidity`
+ * holt das Kapital heraus, `closePositionIx` verbrennt danach das leere NFT. Nur das erste
+ * bewegt Geld — das zweite holt ~0,002 SOL Rent zurück.
+ *
+ * Bis 23.08.2026 hing der schützende Verkauf am Gelingen des zweiten: scheiterte der Burn,
+ * brach der ganze Exit ab und das Kapital lag bis zum nächsten Wiederanlauf ungetauscht im
+ * Wallet — mit vollem Kursrisiko, obwohl der Exit genau das beenden soll. 0,002 SOL Rent
+ * blockierten den Schutz dreistelliger Beträge.
+ *
+ * Jetzt gilt Kapital zuerst: Ist die Entnahme gelandet, wird die `close_position`-Zeile
+ * sofort geschrieben (Anker der späteren Erlösbuchung, siehe `recordDrainedClose()`) und
+ * der Aufrufer kann mit Swap und Transfer weitermachen. Das leere NFT übernimmt der
+ * tägliche Zombie-Cron (`bin/run-zombie-check.sh`).
+ *
+ * 🔒 Ohne `err.partialExit` hat die Entnahme NICHT stattgefunden — dann steht das Kapital
+ * unverändert in der Position, der Fehler wird durchgereicht und darf niemals als
+ * entnommen gebucht werden. Diese Unterscheidung trägt die Sicherheit des Verfahrens.
+ *
+ * @returns {Promise<{coinsA: number, coinsB: number, closeTxHash: string,
+ *                    closePending: {decreaseTxHash: string, reason: string}|null}>}
+ *          `closePending` beschreibt ein liegengebliebenes NFT (sonst null). `closeTxHash`
+ *          ist dann die Signatur der Entnahme — die TX, die das Kapital bewegt hat.
+ */
+export async function closePositionOrRescue(adapter, pool, position, db, { feesA, feesB, note, logPrefix }) {
+    try {
+        const { closed, coinsA, coinsB } = await finalizeClosePosition(adapter, pool, position, db, {
+            feesA, feesB, note, logPrefix,
+        });
+        return { coinsA, coinsB, closeTxHash: closed.txHash, closePending: null };
+    } catch (err) {
+        if (!err.partialExit) throw err;
+
+        const { coinsA, coinsB, decreaseTxHash } = err.partialExit;
+        recordDrainedClose(db, pool, {
+            coinsA, coinsB, txHash: decreaseTxHash, note: `${note} (NFT offen)`,
+        });
+        console.warn(
+            `${logPrefix} 🔒 Position-Close gescheitert, Kapital wird trotzdem gesichert: `
+            + `${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B im Wallet, Exit läuft weiter. `
+            + `Das leere NFT räumt der Zombie-Cron ab. Grund: ${err.message}`
+        );
+        return {
+            coinsA, coinsB,
+            closeTxHash:  decreaseTxHash,
+            closePending: { decreaseTxHash, reason: err.message },
+        };
+    }
+}
+
+/**
+ * Schreibt die `close_position`-Zeile für Kapital, das die Position über ein gelandetes
+ * `decreaseLiquidity` verlassen hat, OBWOHL der NFT-Burn danach scheiterte (LIQ#0312).
+ *
+ * 🔒 Warum das gebucht werden MUSS, obwohl die Position on-chain formal noch existiert:
+ * `recordExitProceeds()` trägt den Verkaufserlös über `setCloseProceeds()` in genau diese
+ * Zeile nach. Fehlt sie, sucht der Nachtrag im Zeitfenster — und trifft dort im
+ * schlimmsten Fall die close_position-Zeile eines FREMDEN Exits. Die leere Zeile ist also
+ * kein Schönheitsfehler, sondern der Anker der gesamten Erlösbuchung.
+ *
+ * `txHash` ist bewusst die Signatur der Entnahme, nicht die eines Burns — sie ist die
+ * Transaktion, die das Kapital tatsächlich bewegt hat.
+ *
+ * Das leere Position-NFT bleibt liegen und wird vom täglichen Zombie-Cron
+ * (`bin/run-zombie-check.sh` → `burn-zombie-nfts.js --full-close --execute`) abgeräumt.
+ * Es bindet nur die Rent von ~0,002 SOL.
+ */
+export function recordDrainedClose(db, pool, { coinsA, coinsB, txHash, note }) {
+    insertTransaction(db, {
+        poolId:   pool.id,
+        type:     'close_position',
+        amountA:  coinsA,
+        amountB:  coinsB,
+        usdValue: null,          // wird von setCloseProceeds() nach dem Swap nachgetragen
+        txHash,
+        txFeeSol: null,
+        note,
+    });
+}
+
+/**
+ * Bucht den realisierten Erlös eines Auto-Exits — an EINER Stelle für alle Exit-Module.
+ *
+ * Zwei Schreibvorgänge, die zusammengehören und deshalb nicht mehr getrennt aufgerufen
+ * werden sollten:
+ *   1. capital_flows: der Kapitalabgang aus der Position (unverändert zum bisherigen
+ *      Verhalten der Module, is_external = 1).
+ *   2. transactions.close_position.usd_value: derselbe Betrag als Wert des Closes —
+ *      bis 22.08.2026 blieb das NULL und zwang jede Auswertung zu einer Schätzung.
+ *
+ * `isFullClose` muss false sein, wenn der Erlös aus einem TEIL-Abzug stammt
+ * (decreaseLiquidity, Position bleibt offen — TVL-Schutz Level 1). Dort gehört der
+ * Betrag ausschließlich in die eigene withdraw-Zeile; eine close_position-Zeile
+ * gibt es nicht, und ein Nachtrag könnte im Fenster nur eine FREMDE Zeile treffen.
+ *
+ * @param {Object} db
+ * @param {Object} opts  { poolId, swappedUsdc, note, isFullClose }
+ *                       note = capital_flows-Notiz, z.B. 'trailing-stop-exit'
+ */
+export function recordExitProceeds(db, { poolId, swappedUsdc, note, isFullClose = true }) {
+    insertCapitalFlow(db, { poolId, usdcAmount: -swappedUsdc, note, isExternal: 1 });
+    if (isFullClose) setCloseProceeds(db, { poolId, usdValue: swappedUsdc });
 }
 
 /**
@@ -446,15 +664,47 @@ export async function finalizeClosePosition(adapter, pool, position, db, { feesA
  * verkauft deshalb nur noch das Positionskapital; der Wallet-Puffer bleibt dem nächsten
  * Öffnen erhalten.
  *
- * Die Kappung greift bewusst NUR für SOL. Bei allen anderen Tokens ist ein Wallet-Rest
- * echter Rest (Dust aus früheren Swaps) und soll weiterhin mit abfließen.
+ * 🔴 Bis 2026-08-22 griff die Kappung nur für SOL; bei jedem anderen Token wurde der
+ * komplette Wallet-Bestand geswappt, mit der impliziten Annahme „ein Wallet-Rest dieses
+ * Mints ist immer Dust aus früheren Swaps derselben Position". Die Annahme bricht, sobald
+ * zwei aktive Pools denselben Nicht-USDC-Mint halten (`liq-sol-zec` und `liq-zec-usdc`
+ * teilen sich ZEC; `liq-btc-usdc`/`liq-cbtc-wbtc` teilen sich cbBTC; `liq-cbtc-wbtc`/
+ * `liq-wbtc-sol` teilen sich WBTC).
  *
- * @param {number} usableSol   Wallet-SOL abzüglich Reserve
- * @param {number} fromPosition SOL, das die Position gerade freigegeben hat
- * @returns {number} zu swappende Menge (nie negativ)
+ * Vorfall: Ein Cleanup-Deposit in `liq-zec-usdc` deployte nur 0,0596 von 0,3884 gekauften
+ * ZEC — die restlichen 0,328 ZEC (≈264 USD) blieben als Wallet-Guthaben dieser Position
+ * liegen. 41 Minuten später riss ein völlig unabhängiger Trailing-Stop-Exit von
+ * `liq-sol-zec` (das ebenfalls ZEC hält) diesen Rest mit, weil der Fetch für die
+ * Nicht-SOL-Seite ungedeckelt war. Zwei Folgen: die Exit-Meldung von `liq-sol-zec` zeigte
+ * „Exit-Kosten: −264,94 USDC" (`lpValueUsd − swappedUsdc`, siehe `notify.js
+ * exitMetricsParams`) — rechnerisch korrekt, aber sinnlos, weil `swappedUsdc` fremdes
+ * Kapital enthielt; und `insertCapitalFlow()` (siehe `stepSwap()` in `trailing-stop.js`)
+ * hat diesen kompletten Betrag als Abfluss von `liq-sol-zec` gebucht — die PnL-Historie
+ * beider Pools war damit verfälscht, nicht nur die Anzeige.
+ *
+ * Die Kappung gilt jetzt für **jedes** Token gleich: Ein Exit swappt nie mehr, als die
+ * eigene Position gerade freigegeben hat. Echter Dust aus früheren Swaps derselben
+ * Position bleibt dabei im Wallet liegen, statt undeterministisch beim nächsten Exit
+ * irgendeines Pools mit demselben Mint aufzutauchen — das ist der sichere Tausch.
+ *
+ * Kleiner Spielraum auf `fromPosition` (EXIT_CAP_TOLERANCE_PCT): Die Menge stammt aus
+ * `tokenEst` der Orca-Quote — einer Schätzung zum Preis im Moment der Quote. Bewegt sich der
+ * Preis in den ~3 s bis zur Ausführung, liegt die tatsächlich erhaltene Menge minimal darüber.
+ * Ohne Spielraum bliebe genau diese Differenz wieder liegen, also derselbe Fehlertyp, den der
+ * Fix vom 23.08.2026 beseitigt hat — nur kleiner. Beobachtete Drift über ~3 s: < 0,1 %.
+ *
+ * Warum der Spielraum trotzdem eng bleibt: Der Deckel schützt fremde Bestände desselben Mints
+ * (SOL steckt in jedem volatilePair-Pool, cbBTC in zwei). 0,5 % liegt weit über der Drift und
+ * weit unter allem, was einem anderen Pool spürbar wehtun könnte. Die SOL-Seite ist zusätzlich
+ * durch getUsableSolBalanceFresh() begrenzt, das die Reserve ohnehin zurückhält.
+ *
+ * @param {number} usableAmount  Wallet-Bestand (SOL: abzüglich Reserve)
+ * @param {number} fromPosition  Menge, die die Position gerade freigegeben hat
+ * @returns {number} zu swappende Menge (nie negativ, nie mehr als fromPosition + Toleranz)
  */
-function capSolToPosition(usableSol, fromPosition) {
-    return Math.max(0, Math.min(usableSol, fromPosition));
+function capToPosition(usableAmount, fromPosition) {
+    const cap = fromPosition * (1 + EXIT_CAP_TOLERANCE_PCT / 100);
+    return Math.max(0, Math.min(usableAmount, cap));
 }
 
 /**
@@ -492,13 +742,20 @@ export async function executeSwapStep(pool, opts) {
 
     // volatilePair (HYPE/SOL, cbBTC/WBTC etc.): beide Tokens swappen
     if (pool.volatilePair) {
-        const fetchBal = async (mint, decimals, fromPosition) => mint === WSOL_MINT
-            ? capSolToPosition(await getUsableSolBalanceFresh(keypair.publicKey), fromPosition)
-            : getTokenBalanceFresh(keypair.publicKey, mint, decimals);
+        // Fresh statt der von stepWithdraw zurückgegebenen Menge, weil zwischen Withdraw und
+        // Swap noch etwas dazukommen kann (z.B. ein claimter Fee-Rest) — aber immer gedeckelt
+        // auf das, was DIESE Position freigegeben hat (siehe capToPosition oben).
+        const fetchBal = async (mint, decimals, fromPosition) => capToPosition(
+            mint === WSOL_MINT
+                ? await getUsableSolBalanceFresh(keypair.publicKey)
+                : await getTokenBalanceFresh(keypair.publicKey, mint, decimals),
+            fromPosition,
+        );
 
         if (coinsA > 0) {
             // Mit sendTo/forceCoins: nur die aus Pool entnommenen Coins (keine pre-existing
-            // Wallet-Bestände). Sonst: gesamter Wallet-Bestand (Cleanup reinvestiert Rest).
+            // Wallet-Bestände) — ergibt hier dasselbe wie fetchBal, weil beide auf coinsA
+            // gedeckelt sind, macht die Absicht aber explizit.
             const swapA = useCoinsOnly ? coinsA : await fetchBal(pool.tokenA, pool.decimalsA, coinsA);
             if (swapA > 0) {
                 const r = await adaptiveSwapToUsdc(
@@ -520,11 +777,16 @@ export async function executeSwapStep(pool, opts) {
             }
         }
     } else {
-        // Standard X/USDC: nur tokenA → USDC; tokenB ist bereits USDC
+        // Standard X/USDC: nur tokenA → USDC; tokenB ist bereits USDC.
+        // Gedeckelt auf coinsA wie im volatilePair-Zweig — betrifft z.B. cbBTC/USDC, das sich
+        // den Mint mit cbBTC/WBTC teilt.
         const swapAmount = useCoinsOnly ? coinsA
-            : pool.tokenA === WSOL_MINT
-                ? capSolToPosition(await getUsableSolBalanceFresh(keypair.publicKey), coinsA)
-                : await getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA);
+            : capToPosition(
+                pool.tokenA === WSOL_MINT
+                    ? await getUsableSolBalanceFresh(keypair.publicKey)
+                    : await getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA),
+                coinsA,
+              );
 
         if (swapAmount > 0) {
             const r = await adaptiveSwapToUsdc(

@@ -2,13 +2,20 @@
  * close-scam-tokens.js
  *
  * Erkennt unbekannte SPL-Token-Konten im Liquidity-Wallet, bewertet sie anhand von
- * Jupiter-Preis, GeckoTerminal-TVL, Token-Alter (älteste on-chain-Signatur) und
- * Name-Kollision mit bekannten Pool-Token, und verbrennt Scam-/Dust-Token auf
- * Wunsch (burn + closeAccount), um die SOL-Miet-Reserve (~0,002 SOL/Token)
- * zurückzuholen.
+ * Jupiter-Preis, Jupiter-Liquidität, Token-Alter (älteste on-chain-Signatur) und
+ * Name-/Jupiter-Verdacht, und verbrennt Scam-/Dust-Token auf Wunsch (burn +
+ * closeAccount), um die SOL-Miet-Reserve (~0,002 SOL/Token) zurückzuholen.
  *
- * Klassifizierung (TVL ist nur informativ, kein Signal — GeckoTerminal matcht
- * auf Symbol statt Mint und ist für Fakes unzuverlässig):
+ * 🔒 Liquidität kommt MINT-genau aus derselben tokens/v2/search-Antwort wie der
+ * Preis (siehe fetchTokenSignals() in lib/scam-classify.js) — bewusst NICHT mehr aus
+ * GeckoTerminal. Deren tokens/{mint}/pools-Antwort matcht zwar ebenfalls auf den
+ * Mint, aber `reserve_in_usd` frisch erzeugter Pools kann einen manipulierten
+ * Preis widerspiegeln: Bei diesem Token zeigte GeckoTerminal 8,08 Mrd. USDC TVL,
+ * während die tatsächliche, handelbare Liquidität bei ~1.041 USDC lag (Fund
+ * 2026-08-22). Nebeneffekt: ein ganzer Call gegen das scharf gedrosselte
+ * GeckoTerminal-Limit (3 req/min, geteilt mit allen anderen FORGE-Bots) entfällt.
+ *
+ * Klassifizierung (Liquidität ist nur informativ, kein Signal):
  *   SKIP   – Preis bekannt + Wert ≥ VALUE_THRESHOLD (Default 5 USDC), keine
  *            Name-Kollision → unberührt
  *   REVIEW – Name-Kollision UND Wert ≥ VALUE_THRESHOLD → wird nie automatisch
@@ -32,6 +39,7 @@ import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { createInterface }       from 'readline';
 import { fileURLToPath }         from 'url';
 import path                      from 'path';
+import { spawn }                 from 'child_process';
 import {
     PublicKey,
     Transaction,
@@ -51,7 +59,7 @@ import { loadPools }            from '../lib/config.js';
 import { getKeypair, getConnection, assertSufficientSol } from '../lib/wallet.js';
 import { rpcLimiter }           from '../lib/rate-limiter.js';
 import { PATHS } from '../../../config/paths.js';
-import { classify, fetchJupiterPrices, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
+import { classify, fetchTokenSignals, verdictReason, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
 import { settle } from '../lib/settle-promise.js';
 import { renderNotification } from '../../../lib/notify-render.js';
 import { getLang, numLocale } from '../../../lib/i18n.js';
@@ -103,6 +111,42 @@ function emitJson(obj) {
     if (!JSON_OUT || _jsonEmitted) return;
     _jsonEmitted = true;
     process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+// ─── Wallet-Monitor-Refresh nach einem Burn ──────────────────────────────────
+// Die Auffälligkeits-Liste im Dashboard/Settings kommt aus wallet-monitor.db
+// (unknown_tokens), nicht aus einem Live-Scan. Egal ob dieses Skript über die
+// Settings-Oberfläche oder direkt im Terminal ausgeführt wird — ohne diesen
+// Refresh zeigt die Liste den gerade verbrannten Token noch bis zum nächsten
+// 10-Min-Cron-Lauf an. War früher nur im API-Pfad angebunden (routes/wallet.js);
+// der Terminal-Pfad blieb dabei unbehandelt und das gemeldete Symptom kam über
+// diesen Weg immer wieder zurück. Jetzt zentral hier, gilt für beide Aufrufer.
+const WALLET_MONITOR_TIMEOUT_MS = 30_000;
+
+function refreshWalletMonitor() {
+    return new Promise(resolve => {
+        if (!existsSync(PATHS.walletMonitor)) {
+            return resolve({ ok: false, error: 'monitor_not_found' });
+        }
+        const child = spawn('node', [PATHS.walletMonitor], {
+            cwd: path.dirname(PATHS.walletMonitor),
+        });
+        let stderr = '';
+        const killTimer = setTimeout(() => {
+            try { child.kill('SIGTERM'); } catch { /* schon beendet */ }
+            resolve({ ok: false, error: 'timeout' });
+        }, WALLET_MONITOR_TIMEOUT_MS);
+        child.stderr?.on('data', c => { stderr += c.toString(); });
+        child.on('error', err => {
+            clearTimeout(killTimer);
+            resolve({ ok: false, error: err.message });
+        });
+        child.on('exit', code => {
+            clearTimeout(killTimer);
+            if (code === 0) resolve({ ok: true });
+            else resolve({ ok: false, error: `exit_${code}: ${stderr.slice(-300)}` });
+        });
+    });
 }
 
 // ─── Single-Instance-Lock ─────────────────────────────────────────────────────
@@ -216,7 +260,7 @@ async function scanTokenAccounts(keypair, conn) {
 // ─── Jupiter Preis-Batch ──────────────────────────────────────────────────────
 
 async function fetchPrices(mints) {
-    return fetchJupiterPrices(`${NEXUS}/jup/price/v3`, mints);
+    return fetchTokenSignals(`${NEXUS}/jup/tokens/v2/search`, mints);
 }
 
 // ─── Helius DAS getAsset (Name + Symbol) ─────────────────────────────────────
@@ -236,25 +280,6 @@ async function fetchAssetMeta(mint) {
         const json = await res.json();
         const meta = json.result?.content?.metadata;
         return meta ? { name: meta.name ?? null, symbol: meta.symbol ?? null } : null;
-    } catch { return null; }
-}
-
-// ─── GeckoTerminal TVL (top Pool des Tokens) ─────────────────────────────────
-
-async function fetchTvl(mint) {
-    try {
-        const res = await fetch(
-            `${NEXUS}/gecko/networks/solana/tokens/${mint}/pools?page=1`
-        );
-        if (!res.ok) return null;
-        const json = await res.json();
-        const pools = json.data ?? [];
-        if (pools.length === 0) return 0;
-        // Summe der reserve_in_usd aller geladenen Pools
-        return pools.reduce((sum, p) => {
-            const r = parseFloat(p.attributes?.reserve_in_usd ?? '0');
-            return sum + (isNaN(r) ? 0 : r);
-        }, 0);
     } catch { return null; }
 }
 
@@ -304,8 +329,10 @@ function confirm(prompt) {
 // kein Subprozess. Verschickt nur eine Übersicht; Löschen passiert weiterhin manuell.
 
 async function sendReport(classified, walletAddr) {
-    const nameFlagged  = classified.filter(t => t.dupSymbol);
-    const otherFlagged = classified.filter(t => !t.dupSymbol && (t.tier === 'BURN' || t.tier === 'WARN'));
+    // Jupiter-Verdacht zählt wie eine Kollision — sonst fehlte genau die Klasse
+    // von Funden im Report, die die Kollisionsprüfung gerade NICHT erkennt.
+    const nameFlagged  = classified.filter(t => t.dupSymbol || t.susReason);
+    const otherFlagged = classified.filter(t => !t.dupSymbol && !t.susReason && (t.tier === 'BURN' || t.tier === 'WARN'));
 
     if (nameFlagged.length === 0 && otherFlagged.length === 0) {
         return true;
@@ -360,7 +387,8 @@ function tokenJson(t) {
         value:     t.value ?? null,
         tier:      t.tier,
         dupSymbol: t.dupSymbol ?? null,
-        tvl:       t.tvl ?? null,
+        susReason: t.susReason ?? null,
+        liquidity: t.liquidity ?? null,
         ageDays:   t.ageDays ?? null,
     };
 }
@@ -413,12 +441,13 @@ for (let i = 0; i < unknowns.length; i++) {
     }
     const a = unknowns[i];
     console.log(`[close-scam] (${i + 1}/${unknowns.length}) ${a.mint.slice(0, 12)}…`);
-    const [meta, tvl, ageDays] = await Promise.all([
+    // Liquidität steht schon in priceMap (fetchTokenSignals lief vor der Schleife) —
+    // kein separater Call mehr nötig.
+    const [meta, ageDays] = await Promise.all([
         settle(fetchAssetMeta(a.mint)),
-        settle(fetchTvl(a.mint)),
         settle(fetchTokenAgeDays(a.mint, conn)),
     ]);
-    tokens.push({ ...a, meta, tvl, ageDays });
+    tokens.push({ ...a, meta, liquidity: priceMap[a.mint]?.liquidity ?? null, ageDays });
 }
 
 // 5. Klassifizieren
@@ -436,7 +465,7 @@ console.log(
     'Mint'.padEnd(16) +
     'Balance'.padStart(10) +
     'Wert'.padStart(14) +
-    'TVL'.padStart(14) +
+    'Liquidität'.padStart(14) +
     'Alter'.padStart(10) +
     'Name-Flag'.padStart(12) +
     'Rent'.padStart(9) +
@@ -446,7 +475,7 @@ console.log('─'.repeat(110));
 
 for (const t of classified) {
     const symbol   = t.meta?.symbol ?? t.meta?.name ?? '?';
-    const nameFlag = t.dupSymbol ? `⚠ ${t.dupSymbol}` : '–';
+    const nameFlag = t.dupSymbol ? `⚠ ${t.dupSymbol}` : (t.susReason ? '⚠ Jupiter' : '–');
     const action   = t.tier === 'SKIP'             ? 'unberührt' :
                      t.tier === 'REVIEW'           ? '⚠ MANUELL PRÜFEN (kein Auto-Burn)' :
                      t.tier === 'BURN'             ? 'BURN' :
@@ -456,7 +485,7 @@ for (const t of classified) {
         shortMint(t.mint).padEnd(16) +
         String(t.uiAmount).padStart(10) +
         fmtUsdc(t.value).padStart(14) +
-        fmtTvl(t.tvl).padStart(14) +
+        fmtTvl(t.liquidity).padStart(14) +
         fmtAge(t.ageDays).padStart(10) +
         nameFlag.padStart(12) +
         `${RENT_SOL} SOL`.padStart(9) +
@@ -481,13 +510,13 @@ console.log(`\n${burnable.length} Token-Konto(en) schließbar, ~${totalRent.toFi
 const review = classified.filter(t => t.tier === 'REVIEW');
 if (review.length > 0) {
     console.log(
-        `\n⚠  ${review.length} Token mit Namens-Kollision UND Wert ≥ ${VALUE_THRESHOLD} USDC ` +
+        `\n⚠  ${review.length} auffällige(r) Token MIT Wert ≥ ${VALUE_THRESHOLD} USDC ` +
         `— NICHT automatisch verbrannt:`
     );
     for (const t of review) {
         console.log(
             `   • ${t.meta?.symbol ?? '?'} (${shortMint(t.mint)}) ` +
-            `imitiert "${t.dupSymbol}", Wert ${fmtUsdc(t.value)}`
+            `${verdictReason(t) ?? 'auffällig'}, Wert ${fmtUsdc(t.value)}`
         );
     }
     console.log(`   Prüfen und ggf. gezielt schließen: --mint <mint-prefix> --execute (fragt nochmal nach)`);
@@ -512,7 +541,21 @@ if (!EXECUTE) {
 
 if (burnable.length === 0) {
     console.log('[close-scam] Nichts zu tun.');
-    emitJson({ ok: true, result: { tokens: classified.map(tokenJson), closed: [], failed: [] } });
+    // War ein --mint angegeben, das nicht mehr im Wallet liegt (z.B. ein vorheriger
+    // Burn, dessen Bestätigung als Fehler ankam): genau dieser Karteileichen-Eintrag
+    // muss trotzdem aus unknown_tokens verschwinden, sonst zeigt die Liste ihn weiter an.
+    let staleRefresh = null;
+    if (MINT_PREFIXES.length > 0) {
+        staleRefresh = await refreshWalletMonitor();
+        if (!staleRefresh.ok) {
+            console.warn(`[close-scam] Wallet-Monitor-Refresh fehlgeschlagen: ${staleRefresh.error}`);
+        }
+    }
+    emitJson({
+        ok: true,
+        result: { tokens: classified.map(tokenJson), closed: [], failed: [] },
+        ...(staleRefresh && !staleRefresh.ok ? { scamListStale: true } : {}),
+    });
     process.exit(0);
 }
 
@@ -566,8 +609,39 @@ for (const t of burnable) {
         closedJson.push({ ...tokenJson(t), signature: sig, freedSol });
         closed++;
     } catch (err) {
+        // sendAndConfirmTransaction kann bei einem reinen Bestätigungs-Timeout werfen,
+        // obwohl die TX längst gelandet ist (Vorfall 2026-08-21: Oberfläche meldete
+        // "fehlgeschlagen", das Konto war aber bereits geschlossen und die SOL-Miete
+        // zurück). Vor dem Melden eines Fehlschlags gegenprüfen, ob das Konto
+        // tatsächlich noch existiert.
+        let stillOpen = true;
+        try { stillOpen = (await conn.getAccountInfo(t.pubkey)) !== null; }
+        catch { /* Gegenprüfung selbst nicht möglich – beim ursprünglichen Fehler bleiben */ }
+
+        if (!stillOpen) {
+            const symbol = t.meta?.symbol ?? t.meta?.name ?? t.mint.slice(0, 8);
+            const freedSol = t.lamports != null ? t.lamports / LAMPORTS_PER_SOL : RENT_SOL;
+            console.log(`  ✅ ${symbol} (${shortMint(t.mint)}) geschlossen (Bestätigung kam als Fehler zurück, Konto ist aber weg) | ${freedSol.toFixed(6)} SOL frei`);
+            closedJson.push({ ...tokenJson(t), signature: null, freedSol });
+            closed++;
+            continue;
+        }
+
         console.error(`  ❌ Fehler bei ${t.mint}: ${err.message}`);
         failedJson.push({ ...tokenJson(t), error: err.message });
+    }
+}
+
+// Egal ob per UI oder Terminal ausgelöst: nach mindestens einem erfolgreichen
+// Close muss die Auffälligkeits-Liste neu eingelesen werden, sonst zeigt sie
+// den gerade verbrannten Token bis zum nächsten Cron-Lauf weiterhin an.
+let walletRefresh = null;
+if (closedJson.length > 0) {
+    console.log('\n[close-scam] Aktualisiere Wallet-Monitor (Auffälligkeits-Liste)…');
+    walletRefresh = await refreshWalletMonitor();
+    if (!walletRefresh.ok) {
+        console.warn(`[close-scam] Wallet-Monitor-Refresh fehlgeschlagen: ${walletRefresh.error}`);
+        console.warn('[close-scam] Die Auffälligkeits-Liste kann bis zum nächsten automatischen Lauf noch den alten Stand zeigen.');
     }
 }
 
@@ -579,6 +653,7 @@ emitJson({
         failed:   failedJson,
         freedSol: closedJson.reduce((sum, c) => sum + c.freedSol, 0),
     },
+    ...(walletRefresh && !walletRefresh.ok ? { scamListStale: true } : {}),
 });
 
 console.log(`\n[close-scam] Fertig: ${closed}/${burnable.length} Token-Konten geschlossen.`);

@@ -41,6 +41,21 @@ function isLanAccess() {
         || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
 }
 
+// forge.js/health.js/liquidity+lending app.js sind EIN Dateibaum für zwei
+// Auslieferungsorte: die öffentliche Seite (PHP läuft, logout.php ist die echte
+// Session-Auflösung) UND der /forge/-Spiegel des Settings-Admin-Servers (Port
+// 3200, server.js liefert .php nur noch als reinen Text aus, kein Interpreter –
+// logout.php existiert dort schlicht nicht). Callers übergeben weiterhin
+// 'logout.php'/'../logout.php', initNav() biegt das unter Port 3200 automatisch
+// auf den echten Endpunkt (/api/auth/logout, siehe bots/settings/lib/site-auth.js)
+// um – absoluter Pfad, funktioniert unabhängig von der aktuellen Seitentiefe.
+function resolveLogoutHref(logout) {
+    if (logout && window.location.port === '3200' && /logout\.php$/.test(logout)) {
+        return '/api/auth/logout';
+    }
+    return logout;
+}
+
 /** Baut den Nav-Baum. LAN-only-Zweige/-Items werden nur im lokalen Netz erzeugt. */
 function buildNavTree() {
     const lan = isLanAccess();
@@ -90,7 +105,7 @@ function buildNavTree() {
             // War früher forkOnly (Updates nur auf FORGE public sinnvoll) – die Seite heißt jetzt
             // "Settings" und zeigt auch auf dem Master Sprache/Zeitzone/Update-Status an,
             // ist also für beide Installationsarten sichtbar.
-            { id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/updates.html` },
+            { id: 'updates', label: t('nav.settings', 'Settings'), href: `https://${ip}:3200/settings.html` },
         ],
     } : null;
 
@@ -514,7 +529,7 @@ export function initNav({ current = '', logout = '' } = {}) {
 
     const logoutHtml = logout
         ? `<div class="nav-panel-footer">
-               <a href="${logout}" class="nav-logout">${t('nav.logout', 'Logout')}</a>
+               <a href="${resolveLogoutHref(logout)}" class="nav-logout">${t('nav.logout', 'Logout')}</a>
            </div>`
         : '';
 

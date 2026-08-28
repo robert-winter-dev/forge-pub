@@ -158,6 +158,7 @@ do_restore() {
         neuestes=$(ls -1t "$BACKUP_DIR/local"/*-local.tgz 2>/dev/null | head -1 || true)
         [[ -n "$neuestes" ]] || die "$(t DEPLOY_RESTORE_NO_BACKUP "$BACKUP_DIR/local")"
         say "$(t DEPLOY_RESTORE_LATEST "$neuestes")"
+        c_warn "$(t DEPLOY_RESTORE_REPLACES_WARNING)"
         confirm "$(t DEPLOY_RESTORE_CONFIRM)" || { say "$(t DEPLOY_ABORTED)"; return 0; }
         src="$neuestes"
     fi

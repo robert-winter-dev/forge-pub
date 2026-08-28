@@ -21,16 +21,14 @@ export function effectiveThreshold(levelCfg, fallback) {
 }
 
 /**
- * Löst beide Stufen eines Pools in konkrete Schwellen auf.
+ * Löst die TVL-Schutz-Schwelle eines Pools auf.
  *
  * @param {object} pool  Pool aus pools.json (tvlWarnThreshold / tvlExitThreshold)
  * @param {object} cfg   tvlProtection-Objekt aus den Pool-Settings
- * @returns {{l1:{enabled:boolean,threshold:number|null,withdrawPct:number},
- *            l2:{enabled:boolean,threshold:number|null,withdrawPct:number}}}
+ * @returns {{l1:{enabled:boolean,threshold:number|null,withdrawPct:number}}}
  */
 export function resolveTvlThresholds(pool, cfg) {
     const l1 = cfg?.level1 ?? {};
-    const l2 = cfg?.level2 ?? {};
 
     // Fallback-Schwelle für Stufe 1: normalerweise die Warn-Schwelle aus pools.json.
     // Zieht Stufe 1 aber 100 % (seit 2026-08-15 der Default — der Voll-Exit läuft über
@@ -46,11 +44,6 @@ export function resolveTvlThresholds(pool, cfg) {
             enabled:     l1.enabled === true,
             threshold:   effectiveThreshold(l1, l1Fallback),
             withdrawPct: Number(l1.withdrawPct) || 0,
-        },
-        l2: {
-            enabled:     l2.enabled === true,
-            threshold:   effectiveThreshold(l2, pool?.tvlExitThreshold),
-            withdrawPct: Number(l2.withdrawPct) || 0,
         },
     };
 }

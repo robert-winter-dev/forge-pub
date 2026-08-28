@@ -39,6 +39,7 @@ const NO_RESTART_KEYS = new Set([
     'CLEANUP_DUST_ENABLED',
     'CLEANUP_DUST_MIN_USDC',
     'CLEANUP_DUST_MAX_USDC',
+    'CLEANUP_TREND_GATE',
     // LendingBot – Auto-Deploy: werden per loadAutoDeployConfig() pro Zyklus frisch gelesen
     'AUTO_DEPLOY_MODE',
     'AUTO_DEPLOY_MIN_DEPOSIT',

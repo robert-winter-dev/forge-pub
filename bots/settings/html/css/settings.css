@@ -102,6 +102,7 @@ body {
     cursor: pointer;
 }
 .cleanup-radio-option input[type="radio"] { accent-color: var(--accent); cursor: pointer; }
+.cleanup-radio-option input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 
 /* ── Cleanup-Modals (Manuell / Bester Pool / Dust) ──────────────────
    Drei eigenständige Modals statt Tabs (Feature 2026-07-27) – über .cu-panel-body
@@ -951,6 +952,26 @@ body {
 }
 .info-tip-label:hover { opacity: 1; }
 
+/* Auffälligkeits-Badge direkt vor "Verwalten" (Wallet-Zeile) — deutlich sichtbarer
+   Zähler an der Stelle, an der der Blick tatsächlich hinfällt, ergänzt das dezente
+   ⓘ neben dem Wallet-Namen (Fund 2026-08-21: dort leicht übersehen). */
+.wat-scam-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.1rem;
+    height: 1.1rem;
+    padding: 0 0.3rem;
+    margin-right: 0.4rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--bg, #0f172a);
+    background: var(--warn);
+    cursor: help;
+}
+
 /* Pool manuell/automatisch gesperrt (enabled=false) – Aktivieren-Button + Info-Icon
    deutlich hervorheben, damit ein gesperrter Pool nicht wie ein stiller Bug aussieht
    (Fund 2026-08-06: forge-pub1 PUMP/SOL ohne erkennbaren Grund deaktiviert). Farbe ist
@@ -1167,6 +1188,10 @@ body {
 #forge-modal-liquidity-wallet-modal .forge-modal,
 #forge-modal-premium-wallet-modal   .forge-modal,
 #forge-modal-lb-wallet-modal        .forge-modal { max-width: 600px; }
+
+/* Gleiche Farbe wie .wat-scam-badge (Wallet-Zeile) — macht sichtbar, dass die Zahl
+   im Reiter dieselbe Auffälligkeit meint wie die Badge vor "Verwalten". */
+.scam-tab-count { color: var(--warn); }
 
 .scam-intro { margin-bottom: 0.8rem; }
 

@@ -129,8 +129,19 @@ export async function submitAndConfirm(serializedTx, { skipPreflight = false } =
                     result.signature ?? lastKnownSignature,
                 );
 
-            case 'failed':
-                throw new Error(`tx-queue: Transaction failed – ${result.error ?? 'unknown error'}`);
+            case 'failed': {
+                // Signatur bewusst mitgeben, auch bei einem endgültigen On-Chain-Fehlschlag:
+                // ohne sie lässt sich ein unbekannter Custom-Error (z.B. eines Jupiter-Routing-
+                // Hops durch ein DEX-Programm, das lib/error-messages.js nicht kennt) im
+                // Nachhinein nicht mehr per Solscan/getTransaction aufklären — der Fehlercode
+                // allein ist mehrdeutig, weil er je nach durchlaufenem Programm etwas anderes
+                // bedeutet (Fund 2026-08-23: PUMP/SOL Auto-Swap, Custom:14 blieb unklärbar,
+                // weil keine Signatur im Fehlertext stand).
+                const sig = result.signature ?? lastKnownSignature;
+                const err = new Error(`tx-queue: Transaction failed – ${result.error ?? 'unknown error'}${sig ? ` (Signatur: ${sig})` : ''}`);
+                if (sig) err.signature = sig;
+                throw err;
+            }
 
             case 'queued':
             case 'sending':

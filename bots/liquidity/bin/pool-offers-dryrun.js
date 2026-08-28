@@ -1,28 +1,43 @@
 #!/usr/bin/env node
 /**
- * FORGE public Premium – Dry-Run-Gate vor der Kapitalfreigabe (pool-offers.md Schritt 6/6)
+ * FORGE public Premium – Deposit-Probelauf für übernommene Pools
  *
- * Ein übernommener Pool-Offer ist gesperrt (enabled:false, cleanup.rankingEligible:false,
- * siehe bots/settings/routes/pool-offers.js „Drei getrennte Zustände"). Bevor der Nutzer
- * die Kapitalfreigabe (Pool aktivieren, enabled:true) anstoßen kann, prüft dieses Script
- * automatisch per `deposit.js --dry-run`, ob ein echter Deposit technisch durchginge –
- * ohne dass dabei Kapital bewegt wird (deposit.js hält im Dry-Run-Modus keinen Lock und
- * führt keine On-Chain-TX aus).
+ * Prüft per `deposit.js --dry-run`, ob ein echter Deposit in einen aus einem Pool-Offer
+ * stammenden Pool technisch durchginge – ohne dass dabei Kapital bewegt wird (deposit.js
+ * hält im Dry-Run-Modus keinen Lock und führt keine On-Chain-TX aus). Läuft automatisch
+ * als Cron (config/cron-jobs.json), kein manueller Button.
  *
- * Läuft automatisch als Cron (config/cron-jobs.json) – sobald ein neuer Pool erscheint
- * und es technisch möglich ist (pool_stats liegt vor), wird getestet, kein manueller
- * Button. Voraussetzung: pool_stats existiert bereits – der laufende Bot schreibt sie
- * auch für inaktive Pools mit jedem Stats-Intervall (siehe bot.js), typischerweise
- * ~1 Zyklus nach der Übernahme.
+ * ── Zwei Rollen, je nach Herkunft des Pools ──────────────────────────────────
+ *
+ *   SPERRE (Altbestand). Pools, die vor 2026-08-21 über den damaligen Klickpfad
+ *   übernommen wurden, tragen `cleanup.rankingEligible:false` und sind gesperrt. Für sie
+ *   ist der Probelauf weiterhin ein echtes Gate: erst ein `passed` lässt
+ *   `POST .../toggle-enabled` (pools-actions.js) die Kapitalfreigabe zu. Verhalten
+ *   unverändert.
+ *
+ *   DIAGNOSE (Automatik-Bestand). Seit 2026-08-21 importierte Pools sind sofort
+ *   freigegeben; über Kapital entscheidet allein das Score-Ranking (Begründung in
+ *   lib/pool-offer-adopt.js). Hier sperrt der Probelauf nichts – er meldet nur, wenn
+ *   eine Einzahlung technisch scheitern würde. Ohne diese Meldung bliebe ein kaputter
+ *   Deposit-Pfad (der Klassiker: fehlendes `volatilePair`, IL-Check blockt mit ~99 %,
+ *   Bug-Fund 2026-06-02) unsichtbar, bis der Cleanup den Pool erstmals wählt und
+ *   scheitert – also womöglich wochenlang.
+ *
+ * Beide Rollen teilen sich denselben Lauf, dieselbe `dryRunGate`-Zeile in settings.db
+ * ({status, checkedAt, error}) und dieselbe Retry-Regel. Sie unterscheiden sich nur
+ * darin, WER auf das Ergebnis reagiert: dort die Freigabe-Route, hier der Nutzer.
+ *
+ * Voraussetzung in beiden Fällen: pool_stats existiert bereits – der laufende Bot
+ * schreibt sie auch für inaktive Pools mit jedem Stats-Intervall (siehe bot.js),
+ * typischerweise ~1 Zyklus nach der Übernahme.
  *
  * Testbetrag: fester Nominalbetrag PROBE_USDC – deckt sowohl die --new-Mindestsumme
  * (5 USDC) als auch volatilePair-Pools (10 USDC) ab.
  *
- * Ergebnis landet in settings.db pool_settings als `dryRunGate` ({status, checkedAt,
- * error}) – gelesen vom Freigabe-Gate in bots/settings/routes/pools-actions.js
- * (toggle-enabled) und von der UI. Ein fehlgeschlagenes Gate wird nach RETRY_COOLDOWN_MS
- * automatisch erneut versucht (z.B. transiente RPC-Fehler, noch fehlendes SOL) – ein
- * bestandenes Gate ist dagegen final (kein erneuter Dry-Run nötig).
+ * Ein fehlgeschlagener Probelauf wird nach RETRY_COOLDOWN_MS automatisch erneut versucht
+ * (z.B. transiente RPC-Fehler, noch fehlendes SOL). Ein bestandener ist für Altpools
+ * final; für Automatik-Pools wird er weiter beobachtet, damit ein später auftretender
+ * Fehler nicht unbemerkt bleibt.
  *
  *   node bin/pool-offers-dryrun.js [--json]
  */
@@ -107,11 +122,28 @@ try {
     for (const pool of config.pools.all) {
         const settings = loadPoolSettings(sdb, pool.id);
 
-        // Nur Pools, die über den Pool-Offer-Übernahmepfad kamen (zweite Sperre gesetzt).
-        if (settings.cleanup?.rankingEligible !== false) continue;
+        // Zuständig ausschließlich für Pools aus dem Offer-Pfad. Die Herkunft ist das
+        // Kriterium, nicht die Cleanup-Sperre.
+        //
+        // Korrigiert 2026-08-21: vorher lautete die Bedingung
+        // `settings.cleanup?.rankingEligible !== false → continue`. Diese Sperre wird
+        // aber auch für REFERENZPOOLS gesetzt (ihr ursprünglicher Zweck, siehe
+        // lib/config.js) — der Job hat dadurch `liq-jitosol-ref` mitgeprüft und ihm ein
+        // `dryRunGate: passed` samt Meldung „kann jetzt über Pool aktivieren freigegeben
+        // werden" verpasst. Folgenlos geblieben, aber sachlich falsch: in einen
+        // Referenzpool soll nie Kapital, für ihn gibt es nichts freizugeben.
+        if (!pool.premiumOffer) continue;
+
+        // Welche der beiden Rollen greift? (siehe Kopfkommentar) Gesperrt = Altbestand,
+        // das Ergebnis schaltet eine Freigabe. Sonst = Automatik, reine Diagnose.
+        const locked = settings.cleanup?.rankingEligible === false;
 
         const prevGate = settings.dryRunGate;
-        if (prevGate?.status === 'passed') continue; // final, kein erneuter Lauf nötig
+        // Bestanden bleibt bestanden – auch für Automatik-Pools. Ein stündlicher
+        // Wiederholungslauf über alle laufenden Pools wäre dauerhafte RPC-Grundlast
+        // ohne Erkenntnisgewinn; ein später auftretender Fehler zeigt sich ohnehin
+        // beim echten Deposit-Versuch.
+        if (prevGate?.status === 'passed') continue;
         if (prevGate?.status === 'failed' && Date.now() - prevGate.checkedAt < RETRY_COOLDOWN_MS) continue;
 
         const stats = getPoolStats(db, pool.id, 1);
@@ -125,10 +157,14 @@ try {
         };
         settings.dryRunGate = gate;
         writePoolSettings(sdb, pool.id, settings);
-        results.push({ poolId: pool.id, pair: pool.pair, ...gate });
+        results.push({ poolId: pool.id, pair: pool.pair, role: locked ? 'gate' : 'diagnose', ...gate });
 
         // Nur bei tatsächlichem Statuswechsel benachrichtigen (kein Spam bei jedem Retry).
-        if (prevGate?.status !== gate.status) {
+        if (prevGate?.status === gate.status) continue;
+
+        if (locked) {
+            // Altbestand: das Ergebnis schaltet eine Sperre – der Nutzer muss danach
+            // selbst handeln, deshalb die Meldung in beide Richtungen.
             if (gate.status === 'passed') {
                 await notify.info(pool.displayPair ?? pool.pair,
                     'Dry-Run-Gate bestanden – der Pool kann jetzt über „Pool aktivieren" mit Kapital freigegeben werden.');
@@ -136,6 +172,14 @@ try {
                 await notify.errorRaw(pool.displayPair ?? pool.pair,
                     `Dry-Run-Gate fehlgeschlagen – Kapitalfreigabe noch nicht möglich: ${gate.error}`);
             }
+        } else if (gate.status === 'failed') {
+            await notify.poolDepositCheckFailed(pool, gate.error);
+        } else if (prevGate) {
+            // Entwarnung nur, wenn vorher wirklich gewarnt wurde. Der Normalfall –
+            // erster Probelauf nach dem Import geht durch – bleibt still: eine
+            // Erfolgsmeldung für etwas, das niemand angestoßen hat und das nichts
+            // ändert, ist genau die Sorte Nachricht, die den Rest entwertet.
+            await notify.poolDepositCheckRecovered(pool);
         }
     }
 } finally {
@@ -147,8 +191,8 @@ if (jsonOutput) {
     console.log(JSON.stringify({ checked: results.length, results }, null, 2));
 } else if (results.length > 0) {
     for (const r of results) {
-        console.log(`${r.status === 'passed' ? '✅' : '❌'} ${r.pair}: ${r.status}${r.error ? ` (${r.error})` : ''}`);
+        console.log(`${r.status === 'passed' ? '✅' : '❌'} ${r.pair} [${r.role}]: ${r.status}${r.error ? ` (${r.error})` : ''}`);
     }
 } else {
-    console.log('[pool-offers-dryrun] keine offenen Gates.');
+    console.log('[pool-offers-dryrun] nichts zu prüfen.');
 }

@@ -45,7 +45,7 @@ import {
 
 import { FORGE_ROOT } from '../../../config/paths.js';
 import { loadPremiumKeypair, walletExists } from '../../../lib/premium-wallet.js';
-import { classify, fetchJupiterPrices, buildKnownTokens, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
+import { classify, fetchTokenSignals, buildKnownTokens, verdictReason, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
 
 const NEXUS = 'http://127.0.0.1:3100';
 
@@ -97,6 +97,7 @@ function tokenJson(t) {
         value:     t.value ?? null,
         tier:      t.tier,
         dupSymbol: t.dupSymbol ?? null,
+        susReason: t.susReason ?? null,
         tvl:       null,
         ageDays:   null,
     };
@@ -174,7 +175,7 @@ if (unknowns.length === 0) {
     process.exit(0);
 }
 
-const priceMap = await fetchJupiterPrices(`${NEXUS}/jup/price/v3`, unknowns.map(a => a.mint));
+const priceMap = await fetchTokenSignals(`${NEXUS}/jup/tokens/v2/search`, unknowns.map(a => a.mint));
 
 const classified = [];
 for (const a of unknowns) {
@@ -189,7 +190,7 @@ for (const t of classified) {
         `${shortMint(t.mint).padEnd(14)}` +
         `${String(t.uiAmount).padStart(12)}` +
         `${fmtUsdc(t.value).padStart(14)}` +
-        `  ${t.tier}${t.dupSymbol ? ` (imitiert "${t.dupSymbol}")` : ''}`
+        `  ${t.tier}${verdictReason(t) ? ` (${verdictReason(t)})` : ''}`
     );
 }
 
@@ -241,6 +242,22 @@ for (const t of burnable) {
         console.log(`  ✅ ${t.meta?.symbol ?? shortMint(t.mint)} geschlossen | TX=${sig} | ${freedSol.toFixed(6)} SOL frei`);
         closedJson.push({ ...tokenJson(t), signature: sig, freedSol });
     } catch (err) {
+        // sendAndConfirmTransaction kann bei einem reinen Bestätigungs-Timeout werfen,
+        // obwohl die TX längst gelandet ist (Vorfall 2026-08-21, Liquidity-Wallet:
+        // Oberfläche meldete "fehlgeschlagen", das Konto war aber bereits geschlossen
+        // und die SOL-Miete zurück). Vor dem Melden eines Fehlschlags gegenprüfen, ob
+        // das Konto tatsächlich noch existiert.
+        let stillOpen = true;
+        try { stillOpen = (await conn.getAccountInfo(t.pubkey)) !== null; }
+        catch { /* Gegenprüfung selbst nicht möglich – beim ursprünglichen Fehler bleiben */ }
+
+        if (!stillOpen) {
+            const freedSol = t.lamports != null ? t.lamports / LAMPORTS_PER_SOL : 0.002;
+            console.log(`  ✅ ${t.meta?.symbol ?? shortMint(t.mint)} geschlossen (Bestätigung kam als Fehler zurück, Konto ist aber weg) | ${freedSol.toFixed(6)} SOL frei`);
+            closedJson.push({ ...tokenJson(t), signature: null, freedSol });
+            continue;
+        }
+
         console.error(`  ❌ Fehler bei ${t.mint}: ${err.message}`);
         failedJson.push({ ...tokenJson(t), error: err.message });
     }

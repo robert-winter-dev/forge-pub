@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FORGE Settings – Anmeldung</title>
+<link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: linear-gradient(135deg, #020617 0%, #0f172a 100%);
+    background-attachment: fixed;
+    color: #f1f5f9;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 1.5rem;
+  }
+  .card {
+    background: #1e293b; border: 1px solid #475569; border-radius: 12px;
+    padding: 2rem 2.25rem; max-width: 380px; width: 100%;
+  }
+  .logo-row { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.5rem; }
+  .logo-row img { height: 40px; width: auto; border-radius: 6px; }
+  .logo-row h1 { font-size: 1.15rem; font-weight: 700; color: #00d4ff; text-shadow: 0 0 24px rgba(0,212,255,0.35); }
+  label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.35rem; }
+  input[type="password"] {
+    width: 100%; padding: 0.6rem 0.75rem; margin-bottom: 1rem;
+    background: #0f172a; border: 1px solid #475569; border-radius: 8px;
+    color: #f1f5f9; font-size: 0.95rem;
+  }
+  input[type="password"]:focus { outline: none; border-color: #00d4ff; }
+  .remember-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.25rem; }
+  .remember-row input { accent-color: #00d4ff; cursor: pointer; }
+  .remember-row label { margin: 0; color: #cbd5e1; cursor: pointer; }
+  button {
+    width: 100%; padding: 0.75rem; background: #00d4ff; color: #0f172a;
+    border: none; border-radius: 9px; font-size: 0.95rem; font-weight: 700;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { opacity: 0.88; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .error {
+    margin-top: 0.9rem; padding: 0.6rem 0.75rem; border-radius: 8px;
+    background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35);
+    color: #fca5a5; font-size: 0.82rem; display: none;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo-row">
+    <img src="/forge/img/forge-logo.png" alt="FORGE Logo">
+    <h1>FORGE public</h1>
+  </div>
+  <form id="loginForm">
+    <label for="pw">Passwort</label>
+    <input type="password" id="pw" autocomplete="current-password" autofocus required>
+    <div class="remember-row">
+      <input type="checkbox" id="remember">
+      <label for="remember">Angemeldet bleiben</label>
+    </div>
+    <button type="submit" id="submitBtn">Anmelden</button>
+    <div class="error" id="error"></div>
+  </form>
+</div>
+<script>
+  const form   = document.getElementById('loginForm');
+  const pwEl   = document.getElementById('pw');
+  const errEl  = document.getElementById('error');
+  const btnEl  = document.getElementById('submitBtn');
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    btnEl.disabled = true;
+    errEl.style.display = 'none';
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          password: pwEl.value,
+          remember: document.getElementById('remember').checked,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      location.href = '/forge/';
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+      pwEl.value = '';
+      pwEl.focus();
+    } finally {
+      btnEl.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

@@ -31,12 +31,13 @@ import keysRouter      from './routes/keys.js';
 import walletRouter    from './routes/wallet.js';
 import poolsRouter           from './routes/pools.js';
 import poolsActionsRouter    from './routes/pools-actions.js';
-import poolOffersRouter      from './routes/pool-offers.js';
 import lendingActionsRouter  from './routes/lending-actions.js';
 import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
 import updateRouter   from './routes/update.js';
+import authRouter     from './routes/auth.js';
+import { siteAuthGate } from './lib/site-auth.js';
 import healthShareRouter from './routes/health-share.js';
 import i18nRouter     from './routes/i18n.js';
 import timezoneRouter from './routes/timezone.js';
@@ -69,6 +70,13 @@ if (!fs.existsSync(CERT_FILE) || !fs.existsSync(KEY_FILE)) {
 const app = express();
 app.use(express.json());
 
+// Passwortschutz (System > Settings, optional, per Ticket 2026-08-26) – VOR allen
+// anderen Mounts, damit wirklich jede Anfrage auf Port 3200 durchläuft (statische
+// Dateien, /forge/-Dashboards, alle API-Routen). Nur /login.html + die drei
+// Auth-Endpunkte selbst kommen ohne Session durch, siehe EXEMPT_PATHS dort.
+app.use(siteAuthGate);
+app.use('/api/auth', authRouter);
+
 // API
 app.get('/api/version', (_req, res) => res.json({ version: APP_VERSION }));
 app.use('/api/i18n',      i18nRouter);
@@ -77,11 +85,9 @@ app.use('/api/bots',      botsRouter);
 app.use('/api/config',    configRouter);
 app.use('/api/keys',      keysRouter);
 app.use('/api/wallet',    walletRouter);
-// poolOffersRouter MUSS vor poolsRouter registriert werden: Express matcht
-// Routen in Registrierungsreihenfolge, und pools.js' GET/POST /liquidity/:poolId
-// würde sonst "/liquidity/pool-offers" fälschlich als poolId="pool-offers" fangen
-// (Fund 2026-07-28, live reproduziert: "Pool nicht gefunden" statt Offers-Liste).
-app.use('/api/pools',     poolOffersRouter);
+// Hier lag bis 2026-08-21 poolOffersRouter (/api/pools/liquidity/pool-offers).
+// Pool-Angebote werden nicht mehr per UI-Klick übernommen, sondern automatisch —
+// bots/liquidity/bin/pool-offers-sync.js, Begründung in lib/pool-offer-adopt.js.
 app.use('/api/pools',     poolsRouter);
 app.use('/api/pools',     poolsActionsRouter);
 app.use('/api/lending',   lendingActionsRouter);

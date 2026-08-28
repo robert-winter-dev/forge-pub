@@ -60,6 +60,14 @@
       "schedule": "1 0 * * *",
       "command": "bin/run-zombie-check.sh",
       "enabled": true
+    },
+    {
+      "id": "liquidity-daily-report",
+      "description": "Liquidity Tagesbericht: alle am Vortag geschlossenen Positionen mit Ergebnis und Exit-Grund. Nur an Tagen mit mindestens einem Ausstieg.",
+      "schedule": "1 0 * * *",
+      "command": "node bin/daily-report.js --notify",
+      "cwd": "bots/liquidity",
+      "enabled": true
     }
   ]
 }

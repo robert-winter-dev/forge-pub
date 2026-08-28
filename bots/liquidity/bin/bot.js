@@ -20,16 +20,19 @@
  *   - Zielkapital wird aus der letzten DB-Position gelesen (capital_usdc); Fallback: Wallet-Balance
  */
 
-import { config, loadPools, updatePoolRangeOverride, getCleanupMaxDepositFromEnv, getCleanupMinDepositFromEnv, isPoolEnabled, setPoolActive, setPoolEnabled, resetPoolSessionState } from '../lib/config.js';
+import { config, loadPools, updatePoolRangeOverride, getCleanupMaxDepositFromEnv, getCleanupMinDepositFromEnv, isPoolEnabled, setPoolActive, setPoolEnabled, setPoolType, resetPoolSessionState } from '../lib/config.js';
+import { computeVolaDrift } from '../lib/pool-type-drift.js';
+import { VOLA_BOUNDARY_DRIFT_DAYS } from '../lib/pool-type-boundaries.js';
 import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition,
          insertPoolStats, getPoolStats, insertFeeHistory, insertRebalanceHistory,
          getMinutesSinceLastRebalance,
          insertTransaction, insertNotification, insertVolumeCandles,
-         prunePortfolioHistory, prunePositionSnapshots, pruneRebalanceHistory,
-         updatePositionCapital, updatePositionHodl, setPositionHwmBaseAdjustment,
+         prunePortfolioHistory, prunePositionSnapshots, pruneRebalanceHistory, pruneTsFastChecks,
+         updatePositionCapital, updatePositionHodl, carryHwmToRebalancedPosition,
          carryEntryToRebalancedPosition,
          insertCapitalFlow, clearPositionSnapshots,
-         insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet } from '../lib/db.js';
+         insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet,
+         getIncompleteTsExecutions } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
 import { calculateRange }  from '../lib/range.js';
 import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
@@ -41,15 +44,16 @@ import { ensureWalletSol, ensureInvestCapableSol, INVEST_SOL_COMFORT, SOL_TOPUP_
 import { shouldTriggerScoreLimit, checkScoreLimitWarning, executeScoreLimit, resumePendingScoreLimitExecutions } from '../lib/score-limit.js';
 import { executeSwapStep, executeTransferStep } from '../lib/exit-finalizer.js';
 import { shouldTriggerTs, executeTs, resumePendingTsExecutions, updateHwm, processHwmResetIfRequested, readMinimumValue, clearMinimumValue } from '../lib/trailing-stop.js';
+import { runFastStopRound } from '../lib/fast-stop-check.js';
 import { shouldTriggerTvlProtection, executeTvlProtection, resumePendingTvlExecutions } from '../lib/tvl-protection.js';
 import { processPoolRetirements, resumePendingRetireExecutions } from '../lib/pool-retirement.js';
 import { checkClmmRatio, CLMM_RATIO_MAX_PCT, getTokenUsdPrice } from '../lib/deposit-lib.js';
+import { foreignExitBlock } from '../lib/exit-reservation.js';
 import { assertTypeInvariants } from '../lib/invariants.js';
-import { getLatestWalletBalance } from '../lib/wallet-monitor-client.js';
 import { syncDashboard }   from '../lib/sync.js';
 import {
     writePositionSnapshotFromState, writePortfolioSnapshot, writeFreshWalletSnapshot,
-    refreshAfterAction,
+    refreshAfterAction, establishPositionBaseline, settleCapitalFlow,
 } from '../lib/refresh-state.js';
 import { todayTz, midnightTzMs, FORGE_TZ } from '../../../core/config.js';
 // PnL ausschließlich über die zentrale FORGE-Lib (Single Source of Truth).
@@ -67,7 +71,7 @@ import Database            from 'better-sqlite3';
 import { resolve, dirname, join } from 'path';
 import { fileURLToPath }   from 'url';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
-import { refreshPythPrices } from '../lib/pyth-prices.js';
+import { refreshReferencePrices } from '../lib/reference-prices.js';
 import { settle } from '../lib/settle-promise.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
@@ -137,11 +141,11 @@ function isAutoCompoundEnabled(poolId) {
  * @returns {Promise<boolean>} true wenn der Exit lief oder der Pool übersprungen
  *          werden soll (Fehlerfall) — der Aufrufer bricht die Pool-Iteration dann ab.
  */
-async function _trailingStopCheck(pool) {
+async function _trailingStopCheck(pool, { source = 'tick' } = {}) {
     try {
         if (!shouldTriggerTs(pool, db)) return false;
-        console.log(`[bot:${pool.id}] Trailing-Stop-Trigger erkannt – starte Exit`);
-        await executeTs(pool, db);
+        console.log(`[bot:${pool.id}] Trailing-Stop-Trigger erkannt (${source === 'fast' ? 'Schnellprüfung' : 'Zyklus'}) – starte Exit`);
+        await executeTs(pool, db, { source });
         // Pool wurde deaktiviert – Dashboard sofort aktualisieren.
         await refreshAfterAction(db, { log: msg => console.log(`[bot:${pool.id}] ${msg}`) });
         lastExport.ts = Date.now();
@@ -212,7 +216,8 @@ function writeCentralPrice(pool, price, ts) {
 }
 
 /** In-Memory-Timestamps für Intervall-Checks (pro Pool-ID) */
-const lastStatsFetch    = new Map();   // pool_id → timestamp
+const lastStatsFetch    = new Map();   // pool_id → timestamp (Preis/TVL/APR via RPC + Orca v2)
+const lastVolumeFetch   = new Map();   // pool_id → timestamp (Volume-Candles via GeckoTerminal)
 const lastFeeClaim      = new Map();   // pool_id → timestamp
 const lastSnapshot      = new Map();   // pool_id → timestamp
 const lastAprAlert      = new Map();   // pool_id → timestamp
@@ -220,8 +225,14 @@ const lastExport        = { ts: 0 };
 const outOfRangeSince   = new Map();   // pool_id → timestamp (oder null)
 const wasOutOfRange     = new Map();   // pool_id → boolean (für backInRange-Alert)
 
-// Stündliches Pool-Stats-Intervall
-const STATS_INTERVAL_MS = 60 * 60 * 1000;
+// Pool-Stats-Intervalle: Preis/TVL/APR (RPC + Orca v2) haben reichlich Rate-Limit-
+// Spielraum und laufen alle 10 Minuten — Grundlage für Opportunity-Score und
+// Chart-Trend-Icon, die bei volatilen Pools sonst dem aktuellen Stand hinterherhinken
+// (LIQ, 2026-08-23). Die Volume-Candles hängen am knappen, undokumentierten
+// GeckoTerminal-Limit (Nexus: 1 req/20s zentral für alle Pools) und bleiben deshalb
+// beim bisherigen stündlichen Rhythmus — siehe getPoolStats() in pool-adapter/orca.js.
+const STATS_INTERVAL_MS  = 10 * 60 * 1000;
+const VOLUME_INTERVAL_MS = 60 * 60 * 1000;
 
 // ─── Startup-Reconciliation ───────────────────────────────────────────────────
 
@@ -402,7 +413,8 @@ async function fetchInactivePoolStats(pools) {
         if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
             try {
                 const adapter = getAdapter(pool);
-                const stats   = await adapter.getPoolStats(pool);
+                const includeVolumeCandles = now - (lastVolumeFetch.get(pool.id) ?? 0) >= VOLUME_INTERVAL_MS;
+                const stats   = await adapter.getPoolStats(pool, { includeVolumeCandles });
                 const geckoNull = stats.tvlUsd == null || stats.volume24hUsd == null || stats.apr24h == null;
                 const lastKnown = geckoNull
                     ? db.prepare(`SELECT tvl_usd, volume_24h_usd, apr_24h FROM pool_stats
@@ -419,7 +431,10 @@ async function fetchInactivePoolStats(pools) {
                     liquidityInRange: stats.liquidityInRange ?? null,
                     fees24hUsd:       stats.fees24hUsd       ?? null,
                 });
-                insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
+                if (includeVolumeCandles) {
+                    insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
+                    lastVolumeFetch.set(pool.id, now);
+                }
                 lastStatsFetch.set(pool.id, now);
                 console.log(`[bot:${pool.id}] Stats (inaktiv): Preis ${stats.price?.toFixed(2)}, APR ${stats.apr24h?.toFixed(2)}%`);
             } catch (err) {
@@ -517,6 +532,11 @@ async function startup() {
             `SELECT recorded_at FROM pool_stats WHERE pool_id = ? AND tvl_usd > 0 ORDER BY recorded_at DESC LIMIT 1`
         ).get(pool.id);
         lastStatsFetch.set(pool.id, row?.recorded_at ?? 0);
+
+        const volRow = db.prepare(
+            `SELECT MAX(ts) as ts FROM volume_hourly WHERE pool_id = ?`
+        ).get(pool.id);
+        lastVolumeFetch.set(pool.id, volRow?.ts ?? 0);
 
         const lastClaim = db.prepare(
             `SELECT MAX(claimed_at) as ts FROM fee_history WHERE pool_id = ?`
@@ -617,10 +637,11 @@ async function _yieldToManualAction(poolId, label) {
 async function processPool(pool, adapter, preloadedState = null) {
     const now = Date.now();
 
-    // ── 1. Pool-Stats (stündlich) ────────────────────────────────────────────
+    // ── 1. Pool-Stats (Preis/TVL/APR alle 10 Min, Volume-Candles stündlich) ──────
     if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
         try {
-            const stats = await adapter.getPoolStats(pool);
+            const includeVolumeCandles = now - (lastVolumeFetch.get(pool.id) ?? 0) >= VOLUME_INTERVAL_MS;
+            const stats = await adapter.getPoolStats(pool, { includeVolumeCandles });
             const geckoNull = stats.tvlUsd == null || stats.volume24hUsd == null || stats.apr24h == null;
             const lastKnown = geckoNull
                 ? db.prepare(`SELECT tvl_usd, volume_24h_usd, apr_24h FROM pool_stats
@@ -637,7 +658,10 @@ async function processPool(pool, adapter, preloadedState = null) {
                 liquidityInRange: stats.liquidityInRange ?? null,
                 fees24hUsd:       stats.fees24hUsd       ?? null,
             });
-            insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
+            if (includeVolumeCandles) {
+                insertVolumeCandles(db, pool.id, stats.volumeCandles ?? []);
+                lastVolumeFetch.set(pool.id, now);
+            }
             writeCentralPrice(pool, stats.price, now);
             lastStatsFetch.set(pool.id, now);
 
@@ -872,6 +896,14 @@ async function processPool(pool, adapter, preloadedState = null) {
 async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA = 0, baseB = 0) {
     if (pool.usdcIsTokenA || pool.volatilePair) return;
 
+    // 🔒 LIQ#0316: Gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool
+    // (geteilter Mint), kein Pre-Swap — sonst würde fremdes Exit-Kapital hier verswapt.
+    const block = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (block.blocked) {
+        console.log(`[bot:${pool.id}] Pre-Swap übersprungen: ${block.reason}`);
+        return;
+    }
+
     const SOL_MINT    = 'So11111111111111111111111111111111111111112';
     // SOL-Reserve die beim Pre-Swap SOL→USDC im Wallet verbleibt.
     // Stellt sicher dass nach dem Rebalancing genug SOL für TX-Fees und Deposits übrig ist.
@@ -906,9 +938,17 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
             `SELECT capital_usdc FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1`
         ).get(pool.id);
         const MIN_REOPEN_CAPITAL = 5.0;
-        const _histCapPre  = lastPos?.capital_usdc ?? availB;
-        halfCapital = ((_histCapPre < MIN_REOPEN_CAPITAL && availB > _histCapPre)
-            ? availB : _histCapPre) / 2;
+        const _histCapPre   = lastPos?.capital_usdc ?? availB;
+        // LIQ#0341: _histCapPre kann aus einer längst geschlossenen Position stammen,
+        // deren Kapital der Cleanup inzwischen in andere Pools verteilt hat (Wallet hat
+        // dann viel weniger als _histCapPre). Ohne Deckel auf das real verfügbare Kapital
+        // versucht der Pre-Swap, das gesamte Wallet auf ein 50/50-Ziel bezogen auf den
+        // stale Wert zu bringen und verswapt praktisch die komplette verfügbare Seite.
+        const totalAvailUsd = availB + availA * currentPrice;
+        const effectiveCapPre = (_histCapPre < MIN_REOPEN_CAPITAL && availB > _histCapPre)
+            ? availB
+            : Math.min(_histCapPre, totalAvailUsd);
+        halfCapital = effectiveCapPre / 2;
     }
     if (!halfCapital) return;
 
@@ -1024,6 +1064,14 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
 // Rückgabe: total in USDC eingezahltes Kapital (für Pre-Flight-Guard im Caller).
 
 async function _reconcileWalletIntoPosition(pool, adapter, newPosition, currentPrice, opts = {}) {
+    // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool,
+    // kein Reconcile — sonst würde fremdes Exit-Kapital hier nachinvestiert.
+    const block = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (block.blocked) {
+        console.log(`[bot:${pool.id}] Reconcile übersprungen: ${block.reason}`);
+        return 0;
+    }
+
     const MAX_ITERATIONS    = opts.maxIterations ?? 3;
     const MIN_IDLE_USDC     = opts.minIdle ?? 5;
     const SLIPPAGE_FACTOR   = 1 + 1.5 / 100;   // Orca-interner 1% Slippage + 0.5% Puffer
@@ -1205,10 +1253,14 @@ async function _reconcileWalletIntoPosition(pool, adapter, newPosition, currentP
                 console.log(`[bot:${pool.id}] Reconcile: increaseLiquidity ergab 0 Liquidität — Abbruch`);
                 break;
             }
-            const dep = _calcUsdValue(pool, db, currentPrice, result.tokenEstA, result.tokenEstB);
+            // tokenEstA/B = on-chain Ist-Mengen der bestätigten TX (siehe orca.js), bewertet
+            // zum Ausführungspreis. Legs für settleCapitalFlow() sammeln, falls der Aufrufer
+            // die Trailing-Stop-Referenz nach dem Top-up nachziehen muss.
+            const dep = _calcUsdValue(pool, db, result.priceExec ?? currentPrice, result.tokenEstA, result.tokenEstB);
             depositedTotal += dep;
+            if (Array.isArray(opts.legs)) opts.legs.push(result);
             updatePositionHodl(db, newPosition.id, result.tokenEstA, result.tokenEstB);
-            const fee = await getTxFee(result.txHash);
+            const fee = result.txFeeSol ?? await getTxFee(result.txHash);
             insertTransaction(db, {
                 poolId: pool.id, type: 'deposit',
                 amountA: result.tokenEstA, amountB: result.tokenEstB,
@@ -1942,6 +1994,14 @@ async function _ensureSolForInvest(poolId, context) {
 async function _openNewPosition(pool, adapter) {
     console.log(`[bot:${pool.id}] Öffne neue Position...`);
 
+    // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool,
+    // keine neue Position öffnen — sonst würde fremdes Exit-Kapital hier investiert.
+    const openBlock = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (openBlock.blocked) {
+        console.log(`[bot:${pool.id}] Öffnen übersprungen: ${openBlock.reason}`);
+        return null;
+    }
+
     // Pre-Flight: SOL-Reserve prüfen (symmetrisch zu _reinvest)
     // Verhindert "insufficient funds (0x1)"-Simulation-Fail bei zu wenig SOL für Fees.
     if (await _ensureSolForInvest(pool.id, 'Öffnen') == null) return null;
@@ -1965,7 +2025,11 @@ async function _openNewPosition(pool, adapter) {
     const lastPosForCheck = db.prepare(
         `SELECT capital_usdc FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1`
     ).get(pool.id);
-    const checkTargetUsdc = lastPosForCheck?.capital_usdc ?? pool.capitalUSDC ?? 1000;
+    // Kein Fallback mehr auf einen erfundenen Wert (früher: `?? 1000`) – ein Pool ohne
+    // Vorposition und ohne konfiguriertes capitalUSDC hat schlicht kein Ziel. Spiegelt den
+    // Reaktivierungs-Guard in cleanup.js (Fix 2026-08-25, KB `Liquidity Bot/cleanup-invest.md`).
+    const configuredCapitalTarget = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
+    const checkTargetUsdc = lastPosForCheck?.capital_usdc ?? configuredCapitalTarget;
     const [preCheckABal, preCheckBBal] = await Promise.all([
         settle(pool.tokenA === SOL_MINT
             ? getUsableSolBalanceFresh(getKeypair().publicKey)
@@ -1977,13 +2041,20 @@ async function _openNewPosition(pool, adapter) {
     // CLEANUP_MIN_DEPOSIT-Floor (frisch aus .env, da ForgeSettings ihn zur Laufzeit ändert).
     // Der Floor verhindert, dass ein zu kleines/korruptes capital_usdc der Vorposition die
     // relative Schranke unterläuft und so eine wirtschaftlich unsinnige Mini-Position öffnet
-    // (TX-Fees > Ertrag). Spiegelt exakt den Reaktivierungs-Guard in cleanup.js.
+    // (TX-Fees > Ertrag). Spiegelt exakt den Reaktivierungs-Guard in cleanup.js. Ohne echtes
+    // Ziel (checkTargetUsdc === null, z.B. Erstinvestment auf einer Neuinstallation) gilt nur
+    // noch dieser reale Floor statt einer 30-%-Schranke gegen ein Phantom-Ziel.
     const minDepositFloor  = getCleanupMinDepositFromEnv();
-    const minAcceptableUsd = Math.max(checkTargetUsdc * 0.30, minDepositFloor);
+    const minAcceptableUsd = checkTargetUsdc != null
+        ? Math.max(checkTargetUsdc * 0.30, minDepositFloor)
+        : minDepositFloor;
     if (walletUsdValue < minAcceptableUsd) {
         const floorNote = minDepositFloor > 0 ? `, Min-Floor ${minDepositFloor.toFixed(2)}` : '';
-        const reason = `Wallet-Kapital ${walletUsdValue.toFixed(2)} USDC < ${minAcceptableUsd.toFixed(2)} USDC ` +
-            `(30 % von Ziel ${checkTargetUsdc.toFixed(2)}${floorNote}) – kein Pre-Swap, Kapital reicht nicht für sinnvolle Position.`;
+        const reason = checkTargetUsdc != null
+            ? `Wallet-Kapital ${walletUsdValue.toFixed(2)} USDC < ${minAcceptableUsd.toFixed(2)} USDC ` +
+              `(30 % von Ziel ${checkTargetUsdc.toFixed(2)}${floorNote}) – kein Pre-Swap, Kapital reicht nicht für sinnvolle Position.`
+            : `Wallet-Kapital ${walletUsdValue.toFixed(2)} USDC < ${minAcceptableUsd.toFixed(2)} USDC ` +
+              `(kein Ziel bekannt${floorNote}) – kein Pre-Swap, Kapital reicht nicht für sinnvolle Position.`;
         console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: ${reason}`);
         await notify.error(pool.displayPair ?? pool.pair, new Error(`Position öffnen: ${reason}`));
         return null;
@@ -1999,7 +2070,9 @@ async function _openNewPosition(pool, adapter) {
     const lastPos  = lastPosForCheck;
 
     const effectiveRange = pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range;
-    const range = (await _getAdvisedRange(pool, currentPrice, lastPos?.capital_usdc ?? pool.capitalUSDC ?? 1000))
+    // checkTargetUsdc wurde oben bereits ohne Phantom-Fallback ermittelt (null statt 1000
+    // ohne echte Basis) – hier nur noch auf 0 normalisiert, der Advisor braucht eine Zahl.
+    const range = (await _getAdvisedRange(pool, currentPrice, checkTargetUsdc ?? 0))
                ?? calculateRange(pool, currentPrice, effectiveRange, db);
     let amountA, amountB;
 
@@ -2012,7 +2085,9 @@ async function _openNewPosition(pool, adapter) {
         // volatilePair: beide Tokens müssen vor openPosition befüllt sein.
         // _balanceWalletForPair bringt den Wallet-Mix mit Retry auf 50/50-USD; bei
         // Fehler bricht _openNewPosition ab (kein Tiny-Position-Lock-in).
-        const targetUsdc = lastPos?.capital_usdc ?? pool.capitalUSDC ?? 1000;
+        // 0 statt erfundenem 1000er-Fallback: ohne Vorposition/Config greift unten
+        // bewusst der "echter Erststart" Zweig (volles Wallet), kein Phantom-Ziel.
+        const targetUsdc = lastPos?.capital_usdc ?? pool.capitalUSDC ?? 0;
         const balanceRes = await _balanceWalletForPair(pool, currentPrice, targetUsdc);
         if (!balanceRes.success) {
             console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: Wallet-Balance fehlgeschlagen — ${balanceRes.reason}`);
@@ -2042,8 +2117,14 @@ async function _openNewPosition(pool, adapter) {
         const tokenABal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA);
         const tokenBBal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB);
         const _histCapA   = lastPos?.capital_usdc ?? tokenABal;
-        const halfCapital = ((_histCapA < MIN_REOPEN_CAPITAL && tokenABal > _histCapA)
-            ? tokenABal : _histCapA) / 2;
+        // LIQ#0341: _histCapA gedeckelt auf real verfügbares Wallet-Kapital (siehe
+        // _preSwapIfNeeded) — sonst reißt der Split ein Ziel an, das größer ist als das,
+        // was seit dem letzten Close noch im Wallet liegt.
+        const totalAvailUsdA = tokenABal + tokenBBal / currentPrice;
+        const effectiveCapA = (_histCapA < MIN_REOPEN_CAPITAL && tokenABal > _histCapA)
+            ? tokenABal
+            : Math.min(_histCapA, totalAvailUsdA);
+        const halfCapital = effectiveCapA / 2;
         amountA = Math.min(halfCapital, tokenABal * WALLET_CAP);
         amountB = Math.min(halfCapital * currentPrice, tokenBBal * WALLET_CAP);
     } else {
@@ -2053,8 +2134,15 @@ async function _openNewPosition(pool, adapter) {
             : await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA);
         const tokenBBal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB);
         const _histCapB   = lastPos?.capital_usdc ?? tokenBBal;
-        const halfCapital = ((_histCapB < MIN_REOPEN_CAPITAL && tokenBBal > _histCapB)
-            ? tokenBBal : _histCapB) / 2;
+        // LIQ#0341: _histCapB gedeckelt auf real verfügbares Wallet-Kapital (siehe
+        // _preSwapIfNeeded) — sonst reißt der Split ein Ziel an, das größer ist als das,
+        // was seit dem letzten Close noch im Wallet liegt (Vorfall pub1 27.08.2026,
+        // SOL/USDC: 217 USDC stale Ziel vs. 93 USDC real verfügbar → 0,89 USDC Mini-Position).
+        const totalAvailUsdB = tokenABal * currentPrice + tokenBBal;
+        const effectiveCapB = (_histCapB < MIN_REOPEN_CAPITAL && tokenBBal > _histCapB)
+            ? tokenBBal
+            : Math.min(_histCapB, totalAvailUsdB);
+        const halfCapital = effectiveCapB / 2;
         amountA = Math.min(halfCapital / currentPrice, tokenABal * WALLET_CAP);
         amountB = Math.min(halfCapital, tokenBBal * WALLET_CAP);
     }
@@ -2106,11 +2194,19 @@ async function _openNewPosition(pool, adapter) {
     // als „zu winzig" (< 30 % vom konfigurierten capitalUSDC) ablehnen.
     const guardTargetUsdc = depositCapApplied > 0
         ? depositCapApplied
-        : (lastPos?.capital_usdc ?? pool.capitalUSDC ?? 1000);
+        : checkTargetUsdc;
     const guardOpen = _preFlightOpenGuard(pool, currentPrice, amountA, amountB, guardTargetUsdc);
     if (!guardOpen.ok) {
         console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: ${guardOpen.reason}`);
         await notify.error(pool.displayPair ?? pool.pair, new Error(`Position öffnen: ${guardOpen.reason}`));
+        return null;
+    }
+
+    // 🔒 LIQ#0316: zwischen dem Check oben und hier lag ggf. ein Pre-Swap (Zeit
+    // vergangen, ein fremder Exit kann seitdem gestartet sein) — erneut prüfen.
+    const openBlock2 = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (openBlock2.blocked) {
+        console.log(`[bot:${pool.id}] Öffnen abgebrochen: ${openBlock2.reason}`);
         return null;
     }
 
@@ -2185,6 +2281,12 @@ async function _openNewPosition(pool, adapter) {
 
         _resetPoolSettings(pool.id);
 
+        // Referenz des Trailing Stops sofort messen. Nach _resetPoolSettings, damit die
+        // Stufe-2-Prüfung in updateHwm die frische Pool-Konfiguration sieht.
+        await establishPositionBaseline(
+            db, pool, adapter, result.nftMint, currentPrice, { logPrefix: '[bot:open]' },
+        );
+
         await notify.positionOpened(pool, {
             priceLower: range.priceLower,
             priceUpper: range.priceUpper,
@@ -2218,13 +2320,32 @@ async function _openNewPosition(pool, adapter) {
                 if (vBefore > realCapitalUsdc * 1.03) {
                     const shortfall = vBefore - realCapitalUsdc;
                     console.log(`[bot:${pool.id}] Kapitalerhalt: V_before=${vBefore.toFixed(2)} > deployed=${realCapitalUsdc.toFixed(2)} USDC → Top-up bis ${shortfall.toFixed(2)} USDC (gekappt).`);
+                    const topUpLegs = [];
                     const toppedUp = await _reconcileWalletIntoPosition(pool, adapter, {
                         id:          posId,
                         nftMint:     result.nftMint,
                         capitalUsdc: realCapitalUsdc,
                         priceLower:  range.priceLower,
                         priceUpper:  range.priceUpper,
-                    }, currentPrice, { maxReconcileUsdc: shortfall });
+                    }, currentPrice, { maxReconcileUsdc: shortfall, legs: topUpLegs });
+
+                    // Die Referenz steht seit establishPositionBaseline() oben auf dem Wert VOR dem
+                    // Top-up. Ohne Nachziehen übernähme die monotone HWM den erhöhten Wert und ein
+                    // Kursrutsch während der Top-up-Swaps bliebe unsichtbar (Befund 2026-08-22,
+                    // Top-up nach close-and-reopen).
+                    if (topUpLegs.length > 0) {
+                        const posRow = getOpenPosition(db, pool.id);
+                        if (posRow) {
+                            settleCapitalFlow(db, pool, posRow, {
+                                liquidityBefore: result.liquidity, legs: topUpLegs,
+                                fallback: {
+                                    lpBefore: db.prepare(`SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.lp_value_usd ?? 0,
+                                    deltaA: 0, deltaB: 0, price: 0,
+                                },
+                                logPrefix: '[bot:open]',
+                            });
+                        }
+                    }
 
                     const totalAfter = realCapitalUsdc + toppedUp;
                     const ratio      = vBefore > 0 ? totalAfter / vBefore : 1;
@@ -2261,7 +2382,7 @@ async function _openNewPosition(pool, adapter) {
             msg.includes('Blockhash not found');
         console.error(`[bot:${pool.id}] openPosition Fehler: ${err.message}`);
         if (err.solBalance !== undefined) {
-            await notify.solLow(err.solBalance);
+            await notify.solLow(db, err.solBalance);
         } else if (isTransient) {
             console.warn(`[bot:${pool.id}] openPosition transient – wird im nächsten Zyklus wiederholt`);
         } else {
@@ -2294,6 +2415,16 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
             `[bot:${pool.id}] Cooldown aktiv (letztes Rebalance vor ${minutesSince.toFixed(0)} Min, ` +
             `min. ${cooldownMin} Min). Überspringe – erneut möglich in ${waitMin} Min.`
         );
+        return;
+    }
+
+    // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool,
+    // kein Rebalance — sonst würde fremdes Exit-Kapital hier redeployed. Pool-selbst-
+    // Check entfällt: _doRebalance ist der Range-Rebalancer, keine der sechs
+    // Exit-State-Machines, kann also nicht sich selbst reservieren.
+    const rebalanceBlock = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (rebalanceBlock.blocked) {
+        console.log(`[bot:${pool.id}] Rebalance übersprungen: ${rebalanceBlock.reason}`);
         return;
     }
 
@@ -2657,6 +2788,14 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         return;
     }
 
+    // 🔒 LIQ#0316: seit dem Check am Funktionsanfang liefen Preis-/Balance-Reads und
+    // ggf. ein Pre-Swap — erneut prüfen, bevor tatsächlich geöffnet wird.
+    const rebalanceBlock2 = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (rebalanceBlock2.blocked) {
+        console.log(`[bot:${pool.id}] Rebalance-Open abgebrochen: ${rebalanceBlock2.reason}`);
+        return;
+    }
+
     let openResult;
     try {
         openResult = await adapter.openPosition(pool, newRange.tickLower, newRange.tickUpper, amountA, amountB);
@@ -2775,21 +2914,27 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         console.log(`[bot:${pool.id}] Deployment-Ratio OK: ${(deploymentRatio * 100).toFixed(1)}% (${totalDeployed.toFixed(2)} / ${newCapital.toFixed(2)} USDC)`);
     }
 
-    // 7b. HWM-Adjustment speichern: (preHwm − preValue) − residual.
-    //     residual = Kapital, das nach dem Rebalance nicht in die neue Position geflossen ist
-    //     (Wallet-Rest nach Reconcile). Ohne diesen Abzug wäre der erste adjustedHwm zu hoch:
-    //     die neue Position kann den alten HWM nicht erreichen, wenn weniger Kapital deployed ist.
-    //     Formel: adjustedHwm = max(snapshot, snapshot + adj) beim ersten _takeSnapshot.
-    const residualUsdc  = Math.max(0, (preValue ?? 0) - totalDeployed);
-    const hwmBaseAdj    = (preHwm != null && preValue != null && preValue > 0)
-        ? preHwm - preValue - residualUsdc
-        : -residualUsdc;
-    setPositionHwmBaseAdjustment(db, newPosId, hwmBaseAdj);
-    console.log(`[bot:${pool.id}] HWM-Adjustment gespeichert: preHwm=${(preHwm ?? 0).toFixed(2)}, preValue=${(preValue ?? 0).toFixed(2)}, totalDeployed=${totalDeployed.toFixed(2)}, residual=${residualUsdc.toFixed(2)}, adj=${hwmBaseAdj >= 0 ? '+' : ''}${hwmBaseAdj.toFixed(2)} USDC → wird beim ersten Snapshot angewendet`);
+    // 7b. Höchststand übertragen — relativ (`hwm_flow_ratio`), nicht als absoluter
+    //     USDC-Abstand. Bis 2026-08-22 lief hier `preHwm − preValue − residual`; verlor das
+    //     Rebalancing Kapital ins Wallet, wurde der Übertrag negativ und das
+    //     `Math.max(currentUsd, …)` in updatePositionHwm() verschluckte ihn komplett — der
+    //     Höchststand landete auf dem neuen Positionswert, der aufgelaufene Abstand war weg.
+    //     Ein Residual braucht hier keinen Sonderfall mehr: schrumpft die Position, schrumpft
+    //     die Referenz im selben Verhältnis mit, der prozentuale Abstand bleibt.
+    //     Nachweis: bin/test-trailing-stop-sim.js, Gruppe D.
+    const hwmRatio = carryHwmToRebalancedPosition(db, newPosId, preValue, preHwm);
+    console.log(`[bot:${pool.id}] Höchststand übertragen: preHwm=${(preHwm ?? 0).toFixed(2)}, preValue=${(preValue ?? 0).toFixed(2)}, totalDeployed=${totalDeployed.toFixed(2)}, Abstand ${hwmRatio != null ? `${((1 - hwmRatio) * 100).toFixed(2)} %` : 'nicht übertragbar (harter Reset)'} → wird beim ersten Snapshot angewendet`);
 
     // 7c. Zweistufiger Trailing Stop: Einstiegsreferenz + Stufe-2-Scharfschaltung mitnehmen.
     carryEntryToRebalancedPosition(db, newPosId, preValue, preEntry, preD2Armed);
     console.log(`[bot:${pool.id}] Trailing-Stop-Stufe übertragen: entry=${preEntry != null ? preEntry.toFixed(2) : 'n/a'} USDC, Stufe 2 ${preD2Armed ? 'scharf (bleibt scharf)' : 'noch nicht scharf'}`);
+
+    // 7d. Referenz sofort messen, statt bis zum nächsten Snapshot zu warten. Muss NACH 7b/7c
+    //     stehen: die Baseline etabliert die HWM und verbraucht dabei den gerade gesetzten
+    //     Übertrag — läge sie davor, ginge der Abstand zum alten Höchststand verloren.
+    await establishPositionBaseline(
+        db, pool, adapter, openResult.nftMint, newStats.price, { logPrefix: '[bot:rebalance]' },
+    );
 
     // 7. Rebalancing-Ereignis dokumentieren (nach Reconcile, damit lp_value_after bekannt ist).
     insertRebalanceHistory(db, {
@@ -3064,6 +3209,14 @@ const _positionStateFailCount = new Map();
 async function _reinvest(pool, position, amountA, amountB, adapter, price = null, state = null) {
     if (amountA <= 0 && amountB <= 0) return;
 
+    // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool,
+    // kein Reinvest — sonst würde fremdes Exit-Kapital hier reinvestiert.
+    const reinvestBlock = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (reinvestBlock.blocked) {
+        console.log(`[bot:${pool.id}] Reinvest übersprungen: ${reinvestBlock.reason}`);
+        return;
+    }
+
     // Reinvest nur wenn SOL-Reserve erfüllt ist – bei niedrigem SOL wird geclaimed aber nicht reinvestiert
     // (zweistufig mit Topup-Versuch seit 2026-07-30, siehe _ensureSolForInvest)
     if (await _ensureSolForInvest(pool.id, 'Reinvest') == null) return;
@@ -3244,6 +3397,11 @@ async function _balanceWalletForPair(pool, currentPrice, targetUsdc) {
     const IMBALANCE_THRESHOLD = 0.5;  // unter 50% des Ziel-Anteils → swappen
     const keypair        = getKeypair();
     const pub            = keypair.publicKey;
+    // 🔒 LIQ#0316: wird nur über _openNewPosition/_doRebalance erreicht, die den
+    // Exit-Reservation-Check bereits am Funktionsanfang UND direkt vor openPosition
+    // machen (letzterer Check läuft NACH diesem Aufruf) — kein weiterer Check hier
+    // nötig, sonst würde ein länger laufender Exit hier über success:false in
+    // notify.error laufen und pro Bot-Zyklus (alle paar Minuten) spammen.
 
     const readBal = async (mint, dec) => mint === SOL_MINT
         ? getUsableSolBalanceFresh(pub)
@@ -3348,14 +3506,23 @@ async function _balanceWalletForPair(pool, currentPrice, targetUsdc) {
  */
 function _preFlightOpenGuard(pool, currentPrice, amountA, amountB, targetUsdc) {
     const actualUsdc = _calcUsdValue(pool, db, currentPrice, amountA, amountB);
-    const minAcceptable = targetUsdc * 0.30;
+    // targetUsdc kann null sein (kein lastPos, kein konfiguriertes capitalUSDC – z.B.
+    // Erstinvestment auf einer Neuinstallation). Ohne echtes Ziel gilt nur der reale
+    // CLEANUP_MIN_DEPOSIT-Floor statt 30 % von einem erfundenen Wert.
+    const minDepositFloor = getCleanupMinDepositFromEnv();
+    const minAcceptable = targetUsdc != null
+        ? Math.max(targetUsdc * 0.30, minDepositFloor)
+        : minDepositFloor;
     if (actualUsdc < minAcceptable) {
         return {
             ok: false,
             actualUsdc,
             targetUsdc,
-            reason: `Geplantes Deposit ${actualUsdc.toFixed(2)} USDC < ${minAcceptable.toFixed(2)} USDC (30 % von Ziel ${targetUsdc.toFixed(2)}). ` +
-                    `Vermutlich fehlgeschlagener Pre-Swap → Position würde winzig werden.`,
+            reason: targetUsdc != null
+                ? `Geplantes Deposit ${actualUsdc.toFixed(2)} USDC < ${minAcceptable.toFixed(2)} USDC (30 % von Ziel ${targetUsdc.toFixed(2)}). ` +
+                  `Vermutlich fehlgeschlagener Pre-Swap → Position würde winzig werden.`
+                : `Geplantes Deposit ${actualUsdc.toFixed(2)} USDC < ${minAcceptable.toFixed(2)} USDC (kein Ziel bekannt, Min-Floor). ` +
+                  `Vermutlich fehlgeschlagener Pre-Swap → Position würde winzig werden.`,
         };
     }
     return { ok: true, actualUsdc };
@@ -3384,6 +3551,22 @@ async function mainLoop() {
     let lastResumeRetry   = 0;
     const RANGE_HINT_INTERVAL_MS = 60 * 60 * 1000;  // stündlich prüfen; Spam-Schutz über Backoff/Stabilität intern
     const RESUME_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+
+    // 🔒 Schneller Wiederanlauf für hängende Trailing-Stop-Exits (Fix 2026-08-23).
+    //
+    // Ein abgebrochener Exit lag bis dahin bis zu RESUME_RETRY_INTERVAL_MS (15 Min) still —
+    // und der Gate wird nur einmal je Zyklus (~5 Min) geprüft, also real bis zu 20 Min.
+    // Genau darin entsteht der große Schaden: Exit #41 (PUMP/SOL, 19.08.) scheiterte bei
+    // −2,03 %, wurde nach 10 und nochmals 15 Min Leerlauf wiederholt und realisierte am Ende
+    // −11,89 %. Jeder EINZELNE Versuch dauerte dabei nur 5–9 Sekunden — es war reine Wartezeit.
+    // Ein hängender Schutz-Exit ist ein Notfall, kein Hintergrundjob.
+    //
+    // Deshalb: die ersten Versuche in der Wartephase (30-s-Takt, wie die Schnellprüfung),
+    // mit ansteigendem Abstand. Danach übernimmt wieder der reguläre 15-Min-Pfad — greift ein
+    // Exit nach vier Anläufen nicht, ist die Ursache nicht transient und schnelles Nachfassen
+    // kostet nur RPC-Budget.
+    const TS_FAST_RESUME_BACKOFF_MS = [30_000, 60_000, 120_000];
+    let   tsResume = { attempts: 0, lastAt: 0 };
     while (running) {
         const cycleStart = Date.now();
 
@@ -3423,7 +3606,7 @@ async function mainLoop() {
         }
 
         // Pyth-Preise für Quote-Tokens einmal pro Zyklus aktualisieren
-        await refreshPythPrices(db);
+        await refreshReferencePrices(db);
 
         // Periodischer Retry unvollständiger Exit-Ausführungen (Score-Limit/Ranking/
         // Trailing-Stop). Diese Resume-Funktionen liefen bisher NUR beim Bot-Start –
@@ -3473,6 +3656,12 @@ async function mainLoop() {
                     `SELECT recorded_at FROM pool_stats WHERE pool_id = ? AND tvl_usd > 0 ORDER BY recorded_at DESC LIMIT 1`
                 ).get(pool.id);
                 lastStatsFetch.set(pool.id, row?.recorded_at ?? 0);
+            }
+            if (!lastVolumeFetch.has(pool.id)) {
+                const volRow = db.prepare(
+                    `SELECT MAX(ts) as ts FROM volume_hourly WHERE pool_id = ?`
+                ).get(pool.id);
+                lastVolumeFetch.set(pool.id, volRow?.ts ?? 0);
             }
             if (!lastFeeClaim.has(pool.id)) {
                 const lastClaim = db.prepare(
@@ -3609,10 +3798,18 @@ async function mainLoop() {
 
         // SOL-Low-Alert (Cooldown 1×/h lebt jetzt zentral in notify.solLow() selbst,
         // 2026-07-29 — greift dadurch auch für alle anderen solLow()-Aufrufer, siehe dort)
-        {
-            const wallet = getLatestWalletBalance(config.botId);
-            const solNow = wallet?.sol ?? null;
-            if (solNow !== null) await notify.solLow(solNow).catch(() => {});
+        //
+        // Live-Check statt wallet-monitor-Snapshot (2026-08-23, Befund): getLatestWalletBalance()
+        // liest einen bis zu 10 Min alten bzw. von deposit.js/withdraw.js manuell geschriebenen
+        // Snapshot. Das Proaktive SOL-Self-Heal weiter oben in diesem Zyklus (Zeile ~3645) prüft
+        // dagegen bereits live per RPC und heilt selbst — meldete der Alert trotzdem den alten
+        // Snapshot-Wert, kam die Nachricht auch dann, wenn das Self-Heal die Reserve im selben
+        // Zyklus längst wiederhergestellt hatte (Fehlalarm nach manuellem Deposit, 23.08.2026).
+        try {
+            const solNow = await getSolBalanceFresh(getKeypair().publicKey);
+            await notify.solLow(db, solNow).catch(() => {});
+        } catch (err) {
+            console.warn(`[bot] SOL-Low-Alert-Check fehlgeschlagen: ${err.message}`);
         }
 
         // Dashboard exportieren (innerhalb des Loops, aber eigenes Intervall)
@@ -3637,6 +3834,7 @@ async function mainLoop() {
         if (todayStr !== lastPruneDay) {
             prunePortfolioHistory(db, 90);    // Portfolio-Verlauf: 90 Tage
             prunePositionSnapshots(db, 90);   // Per-Pool-Snapshots: 90 Tage
+            pruneTsFastChecks(db, 14);        // Trailing-Stop-Schnellprüfungen: 14 Tage
             pruneRebalanceHistory(db, 730);   // Rebalancing-Events: 2 Jahre
             pruneAdvisorDecisions(db, 730);   // Advisor-Entscheidungen: 2 Jahre
 
@@ -3649,14 +3847,18 @@ async function mainLoop() {
                 const dayStr     = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ }).format(new Date(dayEndMs - 1));
                 if (db.prepare(`SELECT id FROM pnl_daily WHERE date = ?`).get(dayStr)) continue;
 
-                const lpClose = lpValueAt(db, { flavor: config.botId, ts: dayEndMs - 1 });
-                if (lpClose == null) continue;
-
-                // Kalendertag-PnL über die zentrale Lib (Portfolio, Kurven-Methodik).
+                // Kalendertag-PnL über die zentrale Lib (Portfolio, Kurven-Methodik) — das ist
+                // die maßgebliche "Daten vorhanden?"-Prüfung, session-übergreifend und ohne
+                // Abhängigkeit von einer exakt zum Tagesende offenen Position.
                 const pnlValue = pnlForPeriod(db, { flavor: config.botId, fromMs: dayStartMs, toMs: dayEndMs });
+                if (pnlValue == null) continue;
+
+                // lp_close ist nur der Anzeigewert; 0 falls exakt zum Tagesende keine Position
+                // offen war (z.B. zwischen zwei Sessions) — blockiert dann nicht mehr den Eintrag.
+                const lpClose = lpValueAt(db, { flavor: config.botId, ts: dayEndMs - 1 }) ?? 0;
                 db.prepare(`INSERT OR IGNORE INTO pnl_daily (date, lp_close, pnl_value, created_at) VALUES (?, ?, ?, ?)`)
                   .run(dayStr, lpClose, pnlValue, Date.now());
-                console.log(`[bot] pnl_daily: ${dayStr} nachgeführt (lp_close=${lpClose.toFixed(2)}, pnl=${pnlValue?.toFixed(2)} USDC)`);
+                console.log(`[bot] pnl_daily: ${dayStr} nachgeführt (lp_close=${lpClose.toFixed(2)}, pnl=${pnlValue.toFixed(2)} USDC)`);
             }
             // Einträge älter als 90 Tage löschen
             db.prepare(`DELETE FROM pnl_daily WHERE date < date('now', '-90 days')`).run();
@@ -3677,24 +3879,92 @@ async function mainLoop() {
                 }
             }
 
+            // Pool-Typ-Drift: automatische Neuzuordnung bei nachhaltig verschobener
+            // Tagesvola (LIQ#0332, Festlegung 2026-08-26). Reine Vola-Klassifizierung,
+            // KEINE PnL-/APR-Gewichtsfrage (die bleibt Master-only, bin/pool-type-advisor.js).
+            // `rwa` hat keine Vola-Grenze und wird von computeVolaDrift() automatisch
+            // übersprungen (applicable: false). Bewusst still — kein Telegram/Dashboard-
+            // Hinweis, nur ein Log-Eintrag; betrifft laut Beobachtung praktisch nur neue,
+            // noch unklassifizierte Pools mit den ersten Wochen Preishistorie.
+            for (const pool of freshPools.all) {
+                try {
+                    const stats = db.prepare(
+                        `SELECT recorded_at, price FROM pool_stats WHERE pool_id = ? AND recorded_at >= ? ORDER BY recorded_at ASC`
+                    ).all(pool.id, Date.now() - VOLA_BOUNDARY_DRIFT_DAYS * 86_400_000);
+                    const drift = computeVolaDrift(stats, pool);
+                    if (drift.reassignmentCandidate && drift.suggestedType) {
+                        setPoolType(pool.id, drift.suggestedType);
+                    }
+                } catch (err) {
+                    console.error(`[bot] Pool-Typ-Drift-Check für ${pool.id} fehlgeschlagen: ${err.message}`);
+                }
+            }
+
             lastPruneDay = todayStr;
         }
 
         if (!running) break;
 
-        // In kurzen Schritten warten, damit der Export zwischendurch laufen kann
-        const elapsed = Date.now() - cycleStart;
-        const totalWait = Math.max(0, config.checkIntervalMs - elapsed);
-        const waited = { ms: 0 };
-        while (waited.ms < totalWait && running) {
-            const step = Math.min(totalWait - waited.ms, config.exportIntervalMs);
-            await new Promise(r => setTimeout(r, step));
-            waited.ms += step;
+        // In kurzen Schritten warten, damit Export und Trailing-Stop-Schnellprüfung
+        // zwischendurch laufen können. Wanduhr-basiert: Die Schnellprüfung braucht selbst
+        // Zeit (RPC-Reads), die darf den nächsten Zyklus nicht nach hinten schieben.
+        const cycleDeadline = cycleStart + config.checkIntervalMs;
+        const fast          = config.fastTsCheck;
+        let   lastFastCheck = Date.now();   // der Zyklus selbst hat gerade gemessen
+        while (running && Date.now() < cycleDeadline) {
+            const remaining = cycleDeadline - Date.now();
+            const candidates = [remaining, config.exportIntervalMs];
+            if (fast.enabled) candidates.push(Math.max(1_000, fast.intervalMs - (Date.now() - lastFastCheck)));
+            await new Promise(r => setTimeout(r, Math.max(0, Math.min(...candidates))));
+            if (!running) break;
 
             // Export zwischendurch prüfen
             if (Date.now() - lastExport.ts >= config.exportIntervalMs) {
                 await syncDashboard();
                 lastExport.ts = Date.now();
+            }
+
+            // Trailing-Stop-Schnellprüfung: zwischen zwei Zyklen nur den Pool-Preis lesen
+            // und gegen den Höchststand prüfen; Exit erst nach bestätigender Vollmessung.
+            // Läuft bewusst NUR hier, in der Wartephase — nie parallel zu processPool.
+            // Hintergrund: Fartcoin/SOL 2026-08-22, −9 % in einem 5-Min-Intervall.
+            if (fast.enabled && Date.now() - lastFastCheck >= fast.intervalMs) {
+                lastFastCheck = Date.now();
+                try {
+                    await runFastStopRound(db, freshPools.active, {
+                        getAdapter,
+                        onConfirmedTrigger: pool => _trailingStopCheck(pool, { source: 'fast' }),
+                    });
+                } catch (err) {
+                    console.warn(`[bot] Trailing-Stop-Schnellprüfung fehlgeschlagen (nicht kritisch): ${err.message}`);
+                }
+            }
+
+            // Hängenden Trailing-Stop-Exit schnell erneut versuchen (siehe
+            // TS_FAST_RESUME_BACKOFF_MS oben). Läuft wie die Schnellprüfung ausschließlich
+            // hier in der Wartephase — nie parallel zu processPool; resumePendingTsExecutions
+            // holt sich zusätzlich den SL-Lock.
+            try {
+                const pending = getIncompleteTsExecutions(db);
+                if (!pending.length) {
+                    tsResume = { attempts: 0, lastAt: 0 };
+                } else if (tsResume.attempts < TS_FAST_RESUME_BACKOFF_MS.length) {
+                    const waitMs = TS_FAST_RESUME_BACKOFF_MS[tsResume.attempts];
+                    // lastAt = 0 → erster Anlauf direkt nach dem Fehlschlag: trotzdem den
+                    // ersten Backoff abwarten, damit ein transienter RPC-Fehler Zeit zum
+                    // Abklingen hat statt sofort erneut in dieselbe Wand zu laufen.
+                    if (!tsResume.lastAt) tsResume.lastAt = Date.now();
+                    else if (Date.now() - tsResume.lastAt >= waitMs) {
+                        tsResume = { attempts: tsResume.attempts + 1, lastAt: Date.now() };
+                        console.warn(
+                            `[bot] ${pending.length} hängende(r) Trailing-Stop-Exit(s) – schneller Wiederanlauf `
+                            + `${tsResume.attempts}/${TS_FAST_RESUME_BACKOFF_MS.length} (nach ${waitMs / 1000}s)`
+                        );
+                        await resumePendingTsExecutions(db);
+                    }
+                }
+            } catch (err) {
+                console.warn(`[bot] Schneller Trailing-Stop-Wiederanlauf fehlgeschlagen (nicht kritisch): ${err.message}`);
             }
         }
     }

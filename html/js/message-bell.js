@@ -91,6 +91,41 @@ export async function setNotifyEnabled(type, enabled) {
     } catch { /* Server nicht erreichbar – Toggle bleibt bis Reload lokal wirksam */ }
 }
 
+// ── Feature-Toggles (Einstellungen im Message Center) ─────────────────────────
+// Anders als die notify_*-Toggles oben steuern diese, ob eine Meldung überhaupt
+// erzeugt wird, nicht nur ihre Badge-Sichtbarkeit. Erster Nutzer: der Liquidity-
+// Tagesbericht (feature = 'daily_report'). Default AN, server-seitig in
+// nexus.db (Tabelle settings, siehe notify-db.js getFeatureFlag/setFeatureFlag).
+const _featureFlags = {};
+const _featureFlagPromises = {};
+
+/** Lädt ein Feature-Toggle vom Server (einmalig pro feature, danach aus dem Cache). */
+export function loadFeatureFlag(feature) {
+    if (!_featureFlagPromises[feature]) {
+        _featureFlagPromises[feature] = fetch(`/api/messages/features/${encodeURIComponent(feature)}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data) _featureFlags[feature] = data.enabled !== false; })
+            .catch(() => { /* Server nicht erreichbar → Default (an) bleibt aktiv */ });
+    }
+    return _featureFlagPromises[feature];
+}
+
+export function isFeatureEnabled(feature) {
+    return _featureFlags[feature] !== false;
+}
+
+/** Toggle setzen – aktualisiert den Cache sofort (optimistic) und persistiert am Server. */
+export async function setFeatureEnabled(feature, enabled) {
+    _featureFlags[feature] = enabled;
+    try {
+        await fetch(`/api/messages/features/${encodeURIComponent(feature)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+    } catch { /* Server nicht erreichbar – Toggle bleibt bis Reload lokal wirksam */ }
+}
+
 /**
  * Initialisiert das Brief-Icon.
  * @param {object}   [opts]

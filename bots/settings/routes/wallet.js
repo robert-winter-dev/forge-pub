@@ -33,6 +33,7 @@ import {
 } from '../../../lib/premium-wallet.js';
 import { t } from '../../../lib/i18n.js';
 import { classify, buildKnownTokens } from '../../../lib/scam-classify.js';
+import { visibleLabel } from '../../../lib/token-symbol.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -342,7 +343,7 @@ async function fetchLiquidityBalanceFresh(res) {
     if (!kp) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Liquidity' }) });
 
     try {
-        const conn   = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+        const conn   = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
         const pubkey = new PublicKey(kp.pubkey);
 
         // SOL + SPL-Token-Konten (TOKEN_PROGRAM + TOKEN_2022 parallel)
@@ -520,6 +521,17 @@ function loadTokenRegistry() {
 const SOL_RESERVE_LAMPORTS = 0.1 * LAMPORTS_PER_SOL;
 const NEXUS_RPC_FRESH       = 'http://127.0.0.1:3100/rpc/fresh';
 
+// Ohne explizites wsEndpoint leitet @solana/web3.js es automatisch vom RPC-Port ab
+// (Port+1, hier ws://127.0.0.1:3101) — dort läuft aber nichts, Nexus proxied bewusst
+// nur HTTP-RPC (siehe core/nexus/server.js). Gleicher Bug wie am 2026-07-27 bei
+// bots/liquidity/lib/wallet.js gefunden und dort per HELIUS_WS_URL gefixt; hier nie
+// nachgezogen, siehe doc/CHANGELOG/2026-07-27.md. HELIUS_WS_URL steht nur in
+// bots/liquidity/.env, deshalb über readEnvField gelesen statt dupliziert.
+const RPC_CONN_OPTS = {
+    commitment: 'confirmed',
+    wsEndpoint: readEnvField(LIQUIDITYBOT_ENV, 'HELIUS_WS_URL') || undefined,
+};
+
 const SPL_PROGRAM_ID   = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOC_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
@@ -571,7 +583,7 @@ router.post('/liquidity/send', async (req, res) => {
         return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Liquidity' }) });
     }
     const wallet     = Keypair.fromSecretKey(kpData.bytes);
-    const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+    const connection = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
 
     try {
         if (sym === 'SOL') {
@@ -764,7 +776,7 @@ async function fetchLendingBalanceFresh(res) {
     if (!kp) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Lending' }) });
 
     try {
-        const conn   = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+        const conn   = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
         const pubkey = new PublicKey(kp.pubkey);
 
         const [lamports, tokenAccounts, token22Accounts] = await Promise.all([
@@ -859,7 +871,7 @@ router.post('/lending/send', async (req, res) => {
         return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Lending' }) });
     }
     const wallet     = Keypair.fromSecretKey(kpData.bytes);
-    const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+    const connection = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
 
     try {
         if (sym === 'SOL') {
@@ -1019,6 +1031,7 @@ function readScamTokens(flavor) {
     try {
         rows = db.prepare(
             `SELECT u.mint, u.balance, u.price_usd, u.created_at, u.liquidity,
+                    u.holder_count, u.organic_score_label, u.is_verified, u.is_sus,
                     u.received_sig, u.received_at,
                     u.first_seen, u.last_seen, m.symbol, m.name
              FROM unknown_tokens u
@@ -1040,9 +1053,25 @@ function readScamTokens(flavor) {
         // Positions-NFTs landen dort deshalb als "unbekannt" — hier fallen sie raus.
         .filter(r => !knownMints.has(r.mint))
         .map(r => {
+            // Der Name gehört zwingend mit hinein: am 2026-08-21 steckte die
+            // Imitation ausschliesslich dort ("‮nioctraF" rendert als "Fartcoin"),
+            // das Symbol war Tarnrauschen.
+            //
+            // Ebenso die Jupiter-Signale — und zwar auch dann, wenn kein Preis
+            // vorliegt: `is_sus` ist unabhängig vom Preis das entscheidende Feld.
+            // Ein Objekt wird nur gebaut, wenn Jupiter den Mint überhaupt kennt
+            // (is_sus IS NULL heisst "nicht gelistet"), denn "nicht gelistet" darf
+            // nie als Urteil zählen — das ist der Normalfall für Positions-NFTs.
+            const jup = r.is_sus == null ? null : {
+                price:             r.price_usd,
+                holderCount:       r.holder_count,
+                organicScoreLabel: r.organic_score_label,
+                isVerified:        r.is_verified === 1,
+                isSus:             r.is_sus === 1,
+            };
             const cl = classify(
-                { uiAmount: r.balance, meta: { symbol: r.symbol } },
-                r.price_usd != null ? { price: r.price_usd } : null,
+                { uiAmount: r.balance, meta: { symbol: r.symbol, name: r.name } },
+                jup ?? (r.price_usd != null ? { price: r.price_usd } : null),
                 knownSymbols,
             );
             return {
@@ -1059,9 +1088,16 @@ function readScamTokens(flavor) {
                 // einer unbekannten Adresse geschickt bekommen" statt einer Kennzahl.
                 receivedSig: r.received_sig ?? null,
                 receivedAt:  r.received_at ?? null,
+                // Holder-Zahl bewusst NUR zur Anzeige — sie ist für den Nutzer die
+                // greifbarste Evidenz, taugt aber nicht als Entscheidungsgrundlage
+                // (Begründung in lib/scam-classify.js, jupiterScamVerdict()).
+                holderCount: r.holder_count ?? null,
+                organicScoreLabel: r.organic_score_label ?? null,
+                isVerified:  r.is_verified === 1,
                 value:      cl.value,
                 tier:       cl.tier,
                 dupSymbol:  cl.dupSymbol,
+                susReason:  cl.susReason,
                 first_seen: r.first_seen,
                 last_seen:  r.last_seen,
                 // Nur diese beiden Stufen bekommen in der Oberfläche einen
@@ -1069,8 +1105,14 @@ function readScamTokens(flavor) {
                 // Evidenz, und genau diese Klasse hat am 2026-08-12 LP-Token im Wert
                 // von ~70 USDC vernichtet.
                 burnable:   cl.tier === 'BURN' || cl.tier === 'REVIEW',
-                // REVIEW = Imitat MIT Wert: zusätzliche Abtipp-Hürde im Browser.
+                // REVIEW = Verdacht MIT Wert: zusätzliche Abtipp-Hürde im Browser.
                 needsTyping: cl.tier === 'REVIEW',
+                // Was der Nutzer bei dieser Hürde abtippen muss — und wogegen der
+                // Server prüft. Explizit statt "nimm halt das Symbol", weil ein
+                // Token ohne Symbol sonst UNMÖGLICH zu bestätigen wäre: der
+                // Vergleich liefe gegen den leeren String und schlüge immer fehl.
+                // Seit dem Jupiter-Urteil kann REVIEW auch ohne Symbol entstehen.
+                confirmLabel: visibleLabel(r.symbol) ?? visibleLabel(r.name) ?? r.mint.slice(0, 8),
             };
         })
         // SKIP ist ein bekannter, wertvoller Token ohne Kollision — kein Befund.
@@ -1134,7 +1176,7 @@ router.post('/:flavor/scam/move', async (req, res) => {
     const keypair = loadScamKeypair(flavor);
     if (!keypair) return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: flavor }) });
 
-    const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+    const connection = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
 
     try {
         const mintPubkey = new PublicKey(mint);
@@ -1238,8 +1280,10 @@ router.post('/:flavor/scam/burn', async (req, res) => {
     // REVIEW: nennenswerter Wert auf dem Konto. Der Nutzer muss das Symbol
     // abgetippt haben — sonst reicht ein Fehlklick für einen echten Verlust.
     if (target.needsTyping) {
+        // Gegen confirmLabel, nicht gegen das Rohsymbol: unsichtbare Steuerzeichen
+        // kann niemand abtippen, und ohne Symbol gäbe es gar nichts zu treffen.
         const typed = String(req.body?.confirmSymbol ?? '').trim().toLowerCase();
-        if (!typed || typed !== String(target.symbol ?? '').trim().toLowerCase()) {
+        if (!typed || typed !== String(target.confirmLabel).trim().toLowerCase()) {
             return res.status(400).json({ error: 'confirm_symbol_mismatch' });
         }
     }
@@ -1278,10 +1322,21 @@ router.post('/:flavor/scam/burn', async (req, res) => {
     // ein Zustand — die Oberfläche sagt "läuft gerade" statt etwas Rotes zu zeigen.
     if (result.busy) return res.status(409).json(result);
 
-    // Nach einem erfolgreichen Burn ist der gespeicherte Stand veraltet: der Token
-    // liegt nicht mehr im Wallet, stünde aber bis zum nächsten Monitor-Lauf (bis zu
-    // 10 Min) weiter in der Liste.
-    if (result.ok && result.result?.closed?.length) runWalletMonitorRefresh().catch(() => {});
+    // Den Wallet-Monitor-Refresh nach dem Burn triggert das Skript (close-scam-tokens.js)
+    // seit 23.08.2026 selbst — zentral für BEIDE Aufrufer (UI-Route hier UND direkter
+    // Terminal-Aufruf). Vorher lief der Refresh nur hier in der Route; wer den Burn im
+    // Terminal auslöste, sah die Auffälligkeits-Liste nie sofort korrigiert. Ein zweiter
+    // Refresh hier wäre nur redundante Wartezeit (bis zu weitere 30s) ohne Zusatznutzen.
+    // result.scamListStale kommt bereits vom Skript, falls sein interner Refresh
+    // scheiterte (Timeout/RPC-Fehler) — die Oberfläche zeigt dann einen Hinweis statt
+    // stillschweigend einen frischen Stand zu behaupten.
+
+    // Das Skript trägt einen Fehlergrund nur je Token in result.failed[].error, nicht
+    // auf oberster Ebene — die Oberfläche zeigt bislang nur json.error und fiel dadurch
+    // auf "unbekannt" zurück (Vorfall 2026-08-21). Ersten Fund als Fallback hochreichen.
+    if (!result.ok && !result.error && result.result?.failed?.length) {
+        result.error = result.result.failed[0].error ?? 'unbekannt';
+    }
 
     res.json(result);
 });
@@ -1454,7 +1509,7 @@ router.post('/premium/send', async (req, res) => {
     if (!wallet) {
         return res.status(500).json({ error: t('api.wallet.keypair_missing', { wallet: 'Premium' }) });
     }
-    const connection = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+    const connection = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
 
     try {
         if (sym === 'SOL') {
@@ -1557,4 +1612,4 @@ router.post('/premium/send', async (req, res) => {
 });
 
 export default router;
-export { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH };
+export { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH, RPC_CONN_OPTS };

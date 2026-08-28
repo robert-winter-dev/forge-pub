@@ -29,7 +29,11 @@ import {
     PoolUtil,
     WhirlpoolIx,
     increaseLiquidityQuoteByInputToken,
-    decreaseLiquidityQuoteByLiquidityWithParams,
+    // Preisband- statt Mengenabschlag-Variante: begrenzt, wie weit sich der PREIS zwischen
+    // Quote und Ausführung bewegen darf, statt pauschal 1 % von beiden Mengen abzuziehen.
+    // Begründung an der Haupt-Quote in closePosition(). Die Standard-Variante
+    // (…WithParams) wird bewusst nirgends mehr verwendet.
+    decreaseLiquidityQuoteByLiquidityWithParamsUsingPriceSlippage as decreaseLiquidityQuoteUsingPriceSlippage,
     swapQuoteByInputToken,
     collectFeesQuote,
     TickArrayUtil,
@@ -38,6 +42,9 @@ import {
     MAX_SQRT_PRICE,
     IGNORE_CACHE,
     TokenType,
+    ParsableWhirlpool,
+    ParsablePosition,
+    ParsableTickArray,
 } from '@orca-so/whirlpools-sdk';
 import { Percentage, TransactionBuilder } from '@orca-so/common-sdk';
 import { getAssociatedTokenAddressSync }  from '@solana/spl-token';
@@ -45,7 +52,7 @@ import { Wallet }            from '@coral-xyz/anchor';
 import { PublicKey }         from '@solana/web3.js';
 import Decimal               from 'decimal.js';
 import BN                    from 'bn.js';
-import { getConnection, getKeypair, assertSufficientSol, assertSufficientSolForExit, getTxFee, getSolBalance, getSolBalanceFresh, getTokenBalance, getTokenBalanceFresh } from '../wallet.js';
+import { getConnection, getConnectionFresh, getKeypair, assertSufficientSol, assertSufficientSolForExit, getTxFee, getSolBalance, getSolBalanceFresh, getTokenBalance, getTokenBalanceFresh } from '../wallet.js';
 import { rpcLimiter, geckoLimiter } from '../rate-limiter.js';
 import { settle } from '../settle-promise.js';
 import { emitChainTxLeg } from '../chain-tx-log.js';
@@ -152,6 +159,116 @@ function fromRawAmount(bn, decimals) {
     return new Decimal(bn.toString()).div(Math.pow(10, decimals)).toNumber();
 }
 
+// ─── Ist-Werte einer Liquiditäts-Transaktion ─────────────────────────────────
+//
+// Die Orca-Quote (`tokenEstA/B`, `liquidityAmount`) ist eine Vorhersage zum Pool-Preis im
+// Moment der Quote-Berechnung. Liegen zwischen Quote und Ausführung eigene Swaps im selben
+// Pool oder ein Cache-Read, weicht der on-chain tatsächlich bewegte Mix ab — in einer engen
+// Range um mehrere Prozent einer Seite (Befund 2026-08-22, forge-pub1, ZEC/USDC: Quote
+// 0,0701 ZEC, tatsächlich 0,0653 ZEC; 3,5 USDC „Einzahlung" blieben im Wallet, wurden aber
+// als Kapital gebucht). Deshalb liest der Adapter nach jeder Liquiditäts-Transaktion die
+// **Ist-Werte aus der bestätigten Transaktion**: die Token-Deltas der Pool-Vaults (Konten mit
+// owner === Whirlpool) sind exakt die Mengen, die in die Position geflossen sind — unabhängig
+// von WSOL-Temp-Konten auf Wallet-Seite, die in pre/post-Balances nicht auftauchen.
+//
+// Aus den beiden Mengen und der Range folgt die hinzugefügte Liquidität und der
+// Ausführungs-Sqrt-Preis eindeutig (zwei Gleichungen, zwei Unbekannte):
+//     a = L · (√Pb − √P) / (√P · √Pb)        b = L · (√P − √Pa)
+// Das ist das Maß, mit dem `scaleReferencesForLiquidityChange()` den Trailing Stop
+// nachzieht — kein Quote-Wert, kein zweiter RPC-Read hinter dem 10-s-Proxy-Cache.
+
+/**
+ * Liquidität und Ausführungs-√Preis aus den tatsächlich bewegten Token-Mengen einer Range.
+ * @param {BN|string|number} rawA  tokenA in kleinster Einheit
+ * @param {BN|string|number} rawB  tokenB in kleinster Einheit
+ * @returns {{ liquidity: BN, sqrtPriceX64: BN, oneSided: boolean }|null}
+ */
+export function liquidityFromTokenAmounts(rawA, rawB, tickLower, tickUpper) {
+    const a   = Number(rawA.toString());
+    const b   = Number(rawB.toString());
+    const Q64 = 2 ** 64;
+    const spa = Number(PriceMath.tickIndexToSqrtPriceX64(tickLower).toString()) / Q64;
+    const spb = Number(PriceMath.tickIndexToSqrtPriceX64(tickUpper).toString()) / Q64;
+    if (!(spb > spa) || !(a >= 0) || !(b >= 0) || (a === 0 && b === 0)) return null;
+
+    let sp, L, oneSided = false;
+    if (a === 0) {                      // Preis auf/über der Obergrenze: nur tokenB
+        sp = spb; L = b / (spb - spa); oneSided = true;
+    } else if (b === 0) {               // Preis auf/unter der Untergrenze: nur tokenA
+        sp = spa; L = a * spa * spb / (spb - spa); oneSided = true;
+    } else {
+        const A = a * spb, B = b - a * spa * spb, C = -b * spb;
+        const disc = B * B - 4 * A * C;
+        if (!(disc >= 0)) return null;
+        sp = (-B + Math.sqrt(disc)) / (2 * A);
+        if (!(sp > spa && sp < spb)) {
+            // Rundung an der Range-Grenze: auf die Grenze klemmen, L aus der vorhandenen Seite
+            sp = Math.min(Math.max(sp, spa), spb);
+            oneSided = true;
+        }
+        L = sp > spa ? b / (sp - spa) : a * spa * spb / (spb - spa);
+    }
+    if (!(L > 0) || !Number.isFinite(L)) return null;
+    return {
+        liquidity:    new BN(new Decimal(L).toFixed(0)),
+        sqrtPriceX64: new BN(new Decimal(sp).mul(new Decimal(2).pow(64)).toFixed(0)),
+        oneSided,
+    };
+}
+
+/**
+ * Ist-Werte einer bestätigten openPosition-/increaseLiquidity-Transaktion.
+ *
+ * Liest die Transaktion (mit kurzem Retry — direkt nach der Bestätigung kann der RPC sie noch
+ * nicht indexiert haben) und bestimmt aus den Vault-Deltas des Whirlpools die tatsächlich in die
+ * Position geflossenen Mengen, daraus Liquidität und Ausführungspreis. Liefert `null`, wenn die
+ * Transaktion nicht lesbar ist oder keine Vault-Bewegung enthält — der Aufrufer fällt dann auf
+ * die Quote zurück und kennzeichnet das (`measured: false`).
+ *
+ * @returns {Promise<{amountA:number, amountB:number, liquidity:string, sqrtPriceX64:string,
+ *                    priceExec:number, txFeeSol:number, measured:true}|null>}
+ */
+export async function readLiquidityLegsFromTx(connection, txHash, pool, tickLower, tickUpper) {
+    let tx = null;
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        await rpcLimiter.wait();
+        try {
+            tx = await connection.getTransaction(txHash, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
+        } catch { tx = null; }
+        if (tx?.meta) break;
+        if (attempt < 4) await new Promise(r => setTimeout(r, 1500 * attempt));
+    }
+    if (!tx?.meta || tx.meta.err) return null;
+
+    const key  = b => `${b.owner}|${b.mint}`;
+    const pre  = new Map((tx.meta.preTokenBalances  ?? []).map(b => [key(b), b.uiTokenAmount.amount ?? '0']));
+    const post = new Map((tx.meta.postTokenBalances ?? []).map(b => [key(b), b.uiTokenAmount.amount ?? '0']));
+    let rawA = new BN(0), rawB = new BN(0), seen = false;
+    for (const k of new Set([...pre.keys(), ...post.keys()])) {
+        const [owner, mint] = k.split('|');
+        if (owner !== pool.address) continue;
+        const delta = new BN(post.get(k) ?? '0').sub(new BN(pre.get(k) ?? '0'));
+        if (mint === pool.tokenA) { rawA = delta; seen = true; }
+        if (mint === pool.tokenB) { rawB = delta; seen = true; }
+    }
+    // Zuflüsse sind positiv (Vault gewinnt). Negative Deltas wären Abflüsse (Fee-Collect im
+    // selben TX) — für eine Einzahlung nicht vorgesehen, dann lieber Quote als falsches Maß.
+    if (!seen || rawA.isNeg() || rawB.isNeg() || (rawA.isZero() && rawB.isZero())) return null;
+
+    const solved = liquidityFromTokenAmounts(rawA, rawB, tickLower, tickUpper);
+    if (!solved) return null;
+
+    return {
+        amountA:      fromRawAmount(rawA, pool.decimalsA),
+        amountB:      fromRawAmount(rawB, pool.decimalsB),
+        liquidity:    solved.liquidity.toString(),
+        sqrtPriceX64: solved.sqrtPriceX64.toString(),
+        priceExec:    PriceMath.sqrtPriceX64ToPrice(solved.sqrtPriceX64, pool.decimalsA, pool.decimalsB).toNumber(),
+        txFeeSol:     (tx.meta.fee ?? 0) / 1e9,
+        measured:     true,
+    };
+}
+
 // ─── OrcaAdapter ─────────────────────────────────────────────────────────────
 
 export class OrcaAdapter {
@@ -250,11 +367,16 @@ export class OrcaAdapter {
      *   volumeCandles: Array
      * }>}
      */
-    async getPoolStats(pool) {
+    // includeVolumeCandles = false überspringt den GeckoTerminal-Call: Preis (RPC) und
+    // TVL/APR/Fees (Orca v2) haben reichlich Rate-Limit-Spielraum (Nexus: 8 req/s bzw.
+    // 30 req/10s) und können deshalb häufiger abgefragt werden als die Volume-Candles,
+    // die am knappen, undokumentierten Gecko-Limit hängen (Nexus: 1 req/20s zentral für
+    // alle Pools). Aufrufer steuert die beiden Kadenzen getrennt (siehe bot.js).
+    async getPoolStats(pool, { includeVolumeCandles = true } = {}) {
         const [onChain, orcaStats, volumeCandles] = await Promise.all([
             settle(this._getPriceOnChain(pool)),
             settle(this._getOrcaV2Stats(pool.address)),
-            settle(this._getVolumeCandles(pool.address)),
+            includeVolumeCandles ? settle(this._getVolumeCandles(pool.address)) : Promise.resolve(null),
         ]);
 
         return {
@@ -264,7 +386,7 @@ export class OrcaAdapter {
             apr24h:           orcaStats?.apr24h            ?? null,
             liquidityInRange: orcaStats?.liquidityInRange  ?? null,
             fees24hUsd:       orcaStats?.fees24hUsd        ?? null,
-            volumeCandles,
+            volumeCandles:    includeVolumeCandles ? volumeCandles : null,
         };
     }
 
@@ -335,6 +457,16 @@ export class OrcaAdapter {
         }
     }
 
+    /**
+     * Aktueller Pool-Preis von der Chain — ein einzelner Account-Read (Whirlpool), kein
+     * Positions-/Tick-Array-Read. Bewusst so leicht: die Schnellprüfung des Trailing Stops
+     * (`lib/fast-stop-check.js`) ruft das alle ~30 s je kapitalhaltendem Pool auf.
+     * @returns {Promise<number>} Preis in tokenB je tokenA
+     */
+    async getPoolPrice(pool) {
+        return (await this._getPriceOnChain(pool)).price;
+    }
+
     /** Liest den aktuellen Preis direkt von der Chain (sqrtPrice → Preis). */
     async _getPriceOnChain(pool) {
         await rpcLimiter.wait();
@@ -369,37 +501,88 @@ export class OrcaAdapter {
      *   feesOwedB:    number,
      * }>}
      */
-    // positionHint: { tickLowerIndex, tickUpperIndex } – wenn gesetzt, wird der rpcLimiter.wait()
-    // vor dem Tick-Array-Fetch übersprungen, um das Slot-Split-Fenster zu minimieren.
-    async getPositionState(pool, positionNftMint, positionHint = null) {
-        const client     = this._getClient();
+    // positionHint: { tickLowerIndex, tickUpperIndex } – historischer Parameter aus der Zeit
+    // des zweistufigen Reads. Wird seit dem Slot-konsistenten Read (siehe unten) nicht mehr
+    // ausgewertet; die Signatur bleibt erhalten, damit die Aufrufer unverändert bleiben.
+    // fresh=true: umgeht den 10-s-Proxy-Cache (/rpc/fresh statt /rpc). Nötig für
+    // establishPositionBaseline() direkt nach einer Rest-Einzahlung/einem Sweep — der
+    // In-Range-Check in sweepResidualIntoPosition liest denselben Account (Pool + Position)
+    // bereits VOR der increaseLiquidity-TX und füllt den Cache mit der alten Liquidität.
+    // Ein normaler Re-Read Sekunden später bekäme exakt diesen stale Eintrag zurück (siehe
+    // Kommentar bei increaseLiquidity: "Kein client.getPosition() Re-Read: der liefe in den
+    // 10-s-Proxy-Cache"). Live beobachtet 2026-08-23, liq-pump-sol: Trailing-Stop-Referenz
+    // stand dadurch auf dem Wert VOR der Rest-Einzahlung (453,81 statt 490,16 USDC) und
+    // schaltete Stufe 2 fälschlich sofort scharf (+8 % "Gewinn" durch reinen Kapitalfluss).
+    async getPositionState(pool, positionNftMint, positionHint = null, { fresh = false } = {}) {  // eslint-disable-line no-unused-vars
+        this._getClient();  // ctx sicherstellen
+        const conn       = fresh ? getConnectionFresh() : this._ctx.connection;
         const mintPubkey = new PublicKey(positionNftMint);
         const posPda     = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, mintPubkey);
         const poolPubkey = new PublicKey(pool.address);
 
-        // Batch 1: Pool + Position (immer nötig – tickSpacing muss on-chain verifiziert werden)
+        // Schritt 1: Pool + Position lesen — nur, um tickSpacing und die Tick-Indizes zu
+        // erfahren, aus denen sich die Tick-Array-PDAs ableiten. Die hier gelesenen Daten
+        // gehen NICHT in den Fee-Quote ein (siehe Schritt 2).
         await rpcLimiter.wait();
-        const [whirlpool, position] = await Promise.all([
-            settle(client.getPool(poolPubkey, IGNORE_CACHE)),
-            settle(client.getPosition(posPda.publicKey, IGNORE_CACHE)),
-        ]);
-        const poolData = whirlpool.getData();
-        const posData  = position.getData();
+        const pre = await conn.getMultipleAccountsInfo([poolPubkey, posPda.publicKey]);
+        const prePool = ParsableWhirlpool.parse(poolPubkey, pre[0]);
+        const prePos  = ParsablePosition.parse(posPda.publicKey, pre[1]);
+        if (!prePool) throw new Error(`Whirlpool-Account ${pool.address} nicht lesbar`);
+        if (!prePos)  throw new Error(`Position-Account ${posPda.publicKey.toBase58()} nicht lesbar`);
 
-        const tickArrayLowerPda = PDAUtil.getTickArrayFromTickIndex(
-            posData.tickLowerIndex, poolData.tickSpacing, poolPubkey, ORCA_WHIRLPOOL_PROGRAM_ID
-        );
-        const tickArrayUpperPda = PDAUtil.getTickArrayFromTickIndex(
-            posData.tickUpperIndex, poolData.tickSpacing, poolPubkey, ORCA_WHIRLPOOL_PROGRAM_ID
-        );
+        // Schritt 2: 🔒 Slot-konsistenter Read. Whirlpool, Position und beide Tick-Arrays
+        // kommen aus EINEM getMultipleAccounts-Call und damit garantiert aus demselben Slot.
+        // Grund: collectFeesQuote() rechnet feeGrowthInside aus feeGrowthGlobal (Whirlpool),
+        // feeGrowthCheckpoint (Position) und feeGrowthOutside (Tick-Arrays). Stammen diese
+        // Accounts aus verschiedenen Slots und wird dazwischen eine Tick-Grenze gekreuzt,
+        // kippt feeGrowthOutside und der Quote liefert Phantom-Fees in der Größenordnung des
+        // Positionswerts (TRUMP/SOL am 2026-08-22, 19:29:06: 283,57 USDC „Pending Fees" auf
+        // 254,46 USDC Positionswert, on-chain tatsächlich 0,000026 SOL — die Position stand
+        // exakt auf ihrer unteren Tick-Grenze). Vorher liefen Pool/Position und Tick-Arrays
+        // in zwei getrennten Batches, im Bot-Betrieb (positionHint gesetzt) sogar ohne
+        // rpcLimiter.wait() dazwischen — das Fenster war klein, aber nie null.
+        let poolData = prePool;
+        let posData  = prePos;
+        let taLowerData = null;
+        let taUpperData = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const taLowerPda = PDAUtil.getTickArrayFromTickIndex(
+                posData.tickLowerIndex, poolData.tickSpacing, poolPubkey, ORCA_WHIRLPOOL_PROGRAM_ID
+            ).publicKey;
+            const taUpperPda = PDAUtil.getTickArrayFromTickIndex(
+                posData.tickUpperIndex, poolData.tickSpacing, poolPubkey, ORCA_WHIRLPOOL_PROGRAM_ID
+            ).publicKey;
 
-        // Batch 2: Tick-Arrays. Mit Hint (normaler Bot-Betrieb): kein rpcLimiter.wait() dazwischen
-        // → Fetch startet sofort nach Batch 1, minimiert den Slot-Split-Zeitraum erheblich.
-        if (!positionHint) await rpcLimiter.wait();
-        const [tickArrayLowerData, tickArrayUpperData] = await Promise.all([
-            settle(this._ctx.fetcher.getTickArray(tickArrayLowerPda.publicKey, IGNORE_CACHE)),
-            settle(this._ctx.fetcher.getTickArray(tickArrayUpperPda.publicKey, IGNORE_CACHE)),
-        ]);
+            await rpcLimiter.wait();
+            const infos = await conn.getMultipleAccountsInfo(
+                [poolPubkey, posPda.publicKey, taLowerPda, taUpperPda]
+            );
+            const nextPool = ParsableWhirlpool.parse(poolPubkey, infos[0]);
+            const nextPos  = ParsablePosition.parse(posPda.publicKey, infos[1]);
+            if (!nextPool || !nextPos) throw new Error(`Pool/Position ${pool.id} im Slot-konsistenten Read nicht lesbar`);
+
+            // Passen die PDAs noch zu den im selben Slot gelesenen Pool-/Positionsdaten?
+            // (tickSpacing oder Tick-Indizes zwischen Schritt 1 und 2 geändert → neu ableiten)
+            const stillValid = nextPool.tickSpacing     === poolData.tickSpacing &&
+                               nextPos.tickLowerIndex   === posData.tickLowerIndex &&
+                               nextPos.tickUpperIndex   === posData.tickUpperIndex;
+            poolData = nextPool;
+            posData  = nextPos;
+            if (!stillValid) {
+                console.warn(`[orca:${pool.id}] Tick-Array-PDAs veraltet (Range/tickSpacing geändert) – Read wird wiederholt`);
+                continue;
+            }
+
+            taLowerData = ParsableTickArray.parse(taLowerPda, infos[2]);
+            taUpperData = ParsableTickArray.parse(taUpperPda, infos[3]);
+            if (!taLowerData || !taUpperData) {
+                throw new Error(`Tick-Arrays für ${pool.id} nicht lesbar (lower=${!!taLowerData}, upper=${!!taUpperData})`);
+            }
+            break;
+        }
+        if (!taLowerData || !taUpperData) {
+            throw new Error(`Slot-konsistenter Read für ${pool.id} nach 2 Versuchen fehlgeschlagen`);
+        }
 
         const inRange = poolData.tickCurrentIndex >= posData.tickLowerIndex &&
                         poolData.tickCurrentIndex <  posData.tickUpperIndex;
@@ -412,10 +595,10 @@ export class OrcaAdapter {
         ).toNumber();
 
         const tickLowerData = TickArrayUtil.getTickFromArray(
-            tickArrayLowerData, posData.tickLowerIndex, poolData.tickSpacing
+            taLowerData, posData.tickLowerIndex, poolData.tickSpacing
         );
         const tickUpperData = TickArrayUtil.getTickFromArray(
-            tickArrayUpperData, posData.tickUpperIndex, poolData.tickSpacing
+            taUpperData, posData.tickUpperIndex, poolData.tickSpacing
         );
 
         const feesQuote = collectFeesQuote({
@@ -449,11 +632,16 @@ export class OrcaAdapter {
     // ─── getPositionStatesBulk ────────────────────────────────────────────────
 
     /**
-     * Liest den On-Chain-Zustand ALLER übergebenen Positionen in genau 3 RPC-Calls
+     * Liest den On-Chain-Zustand ALLER übergebenen Positionen in 3 RPC-Calls
      * (unabhängig von der Pool-Anzahl):
-     *   Batch 1a: getMultipleAccounts([poolPubkeys]) → WhirlpoolData    (parallel)
-     *   Batch 1b: getMultipleAccounts([posPdas])     → PositionData     (parallel)
-     *   Batch 2:  getMultipleAccounts([tickPdas])    → TickArrayData[]
+     *   Vorab-Batch a: getMultipleAccounts([poolPubkeys]) → WhirlpoolData  (parallel)
+     *   Vorab-Batch b: getMultipleAccounts([posPdas])     → PositionData   (parallel)
+     *   Haupt-Batch:   getMultipleAccounts([pool, pos, tickLower, tickUpper] je Position)
+     *
+     * 🔒 Der Haupt-Batch liest Pool, Position und beide Tick-Arrays einer Position in
+     * EINEM Call und damit garantiert aus demselben Slot — nur diese Daten gehen in den
+     * Fee-Quote ein. Die Vorab-Batches dienen ausschließlich der PDA-Ableitung
+     * (tickSpacing + Tick-Indizes). Begründung siehe getPositionState().
      *
      * @param {Array<{pool: Object, nftMint: string}>} items
      * @returns {Promise<Map<string, Object>>} poolId → state (fehlende Pools fehlen in der Map)
@@ -468,58 +656,82 @@ export class OrcaAdapter {
             PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, new PublicKey(it.nftMint)).publicKey
         );
 
-        // Batch 1: Pool-State + Position-Daten parallel (je 1 getMultipleAccounts = 2 Credits)
+        // Vorab-Batch: Pool-State + Position-Daten parallel (je 1 getMultipleAccounts = 2 Credits).
+        // Nur zur PDA-Ableitung — die Werte selbst werden im Haupt-Batch frisch gelesen.
         await rpcLimiter.wait();
         const [poolsMap, positionsMap] = await Promise.all([
             settle(ctx.fetcher.getPools(poolPubkeys, IGNORE_CACHE)),
             settle(ctx.fetcher.getPositions(posPdas, IGNORE_CACHE)),
         ]);
 
-        // Tick-Array-PDAs aus den geladenen Daten ableiten
-        // tickPdas[i*2] = lowerPda, tickPdas[i*2+1] = upperPda (null bei Fehler)
-        const tickPdas = [];
+        // Je Position ein 4er-Block [pool, position, tickArrayLower, tickArrayUpper].
+        // Positionen ohne lesbare Vorab-Daten fallen raus (Fallback auf Einzelabruf).
+        const blocks = [];
         for (let i = 0; i < items.length; i++) {
-            const poolData = poolsMap.get(poolPubkeys[i].toBase58());
-            const posData  = positionsMap.get(posPdas[i].toBase58());
-            if (!poolData || !posData) {
-                tickPdas.push(null, null);
+            const presPool = poolsMap.get(poolPubkeys[i].toBase58());
+            const prePos   = positionsMap.get(posPdas[i].toBase58());
+            if (!presPool || !prePos) {
+                console.warn(`[orca:bulk] Vorab-Daten unvollständig für ${items[i].pool.id} – Fallback auf Einzelabruf`);
                 continue;
             }
-            tickPdas.push(
-                PDAUtil.getTickArrayFromTickIndex(
-                    posData.tickLowerIndex, poolData.tickSpacing,
-                    poolPubkeys[i], ORCA_WHIRLPOOL_PROGRAM_ID
-                ).publicKey,
-                PDAUtil.getTickArrayFromTickIndex(
-                    posData.tickUpperIndex, poolData.tickSpacing,
-                    poolPubkeys[i], ORCA_WHIRLPOOL_PROGRAM_ID
-                ).publicKey,
-            );
+            blocks.push({
+                item:     items[i],
+                keys: [
+                    poolPubkeys[i],
+                    posPdas[i],
+                    PDAUtil.getTickArrayFromTickIndex(
+                        prePos.tickLowerIndex, presPool.tickSpacing,
+                        poolPubkeys[i], ORCA_WHIRLPOOL_PROGRAM_ID
+                    ).publicKey,
+                    PDAUtil.getTickArrayFromTickIndex(
+                        prePos.tickUpperIndex, presPool.tickSpacing,
+                        poolPubkeys[i], ORCA_WHIRLPOOL_PROGRAM_ID
+                    ).publicKey,
+                ],
+                expect: {
+                    tickSpacing: presPool.tickSpacing,
+                    tickLower:   prePos.tickLowerIndex,
+                    tickUpper:   prePos.tickUpperIndex,
+                },
+            });
         }
+        if (blocks.length === 0) return new Map();
 
-        // Batch 2: alle Tick-Arrays (1 getMultipleAccounts = 1 Credit)
-        const validPdas  = tickPdas.filter(Boolean);
-        const tickArrays = validPdas.length > 0
-            ? await ctx.fetcher.getTickArrays(validPdas, IGNORE_CACHE)
-            : [];
-
-        // Array zurück in Map überführen (PDA-String → TickArrayData)
-        const taMap = new Map();
-        validPdas.forEach((pda, i) => taMap.set(pda.toBase58(), tickArrays[i]));
+        // Haupt-Batch. getMultipleAccounts akzeptiert max. 100 Accounts pro Call → in
+        // Gruppen zu 25 Positionen (= 100 Accounts) chunken. Die Slot-Konsistenz, auf die
+        // es ankommt, gilt innerhalb eines 4er-Blocks und bleibt dabei erhalten.
+        const BLOCKS_PER_CALL = 25;
+        const infos = [];
+        for (let off = 0; off < blocks.length; off += BLOCKS_PER_CALL) {
+            const chunk = blocks.slice(off, off + BLOCKS_PER_CALL);
+            await rpcLimiter.wait();
+            const got = await ctx.connection.getMultipleAccountsInfo(chunk.flatMap(b => b.keys));
+            infos.push(...got);
+        }
 
         // States berechnen
         const results = new Map();
-        for (let i = 0; i < items.length; i++) {
-            const { pool } = items[i];
-            const poolData = poolsMap.get(poolPubkeys[i].toBase58());
-            const posData  = positionsMap.get(posPdas[i].toBase58());
-            const lowerPda = tickPdas[i * 2];
-            const upperPda = tickPdas[i * 2 + 1];
-            const taLower  = lowerPda ? taMap.get(lowerPda.toBase58()) : null;
-            const taUpper  = upperPda ? taMap.get(upperPda.toBase58()) : null;
+        for (let i = 0; i < blocks.length; i++) {
+            const { item, keys, expect } = blocks[i];
+            const { pool } = item;
+            const slice    = infos.slice(i * 4, i * 4 + 4);
+
+            const poolData = ParsableWhirlpool.parse(keys[0], slice[0]);
+            const posData  = ParsablePosition.parse(keys[1], slice[1]);
+            const taLower  = ParsableTickArray.parse(keys[2], slice[2]);
+            const taUpper  = ParsableTickArray.parse(keys[3], slice[3]);
 
             if (!poolData || !posData || !taLower || !taUpper) {
                 console.warn(`[orca:bulk] Daten unvollständig für ${pool.id} – Fallback auf Einzelabruf`);
+                continue;
+            }
+            // Range/tickSpacing zwischen Vorab- und Haupt-Batch geändert → die Tick-Array-PDAs
+            // gehören nicht mehr zu dieser Position. Lieber auslassen als falsch rechnen;
+            // der Einzelabruf (getPositionState) leitet sie frisch ab.
+            if (poolData.tickSpacing   !== expect.tickSpacing ||
+                posData.tickLowerIndex !== expect.tickLower   ||
+                posData.tickUpperIndex !== expect.tickUpper) {
+                console.warn(`[orca:bulk] Range/tickSpacing für ${pool.id} zwischenzeitlich geändert – Fallback auf Einzelabruf`);
                 continue;
             }
 
@@ -582,8 +794,10 @@ export class OrcaAdapter {
 
         const client = this._getClient();
 
+        // IGNORE_CACHE: die Quote rechnet mit poolData.sqrtPrice — ein gecachter Pool-Stand
+        // (z. B. von vor dem eigenen Pre-Swap im selben Pool) verschiebt den Token-Mix der Quote.
         await rpcLimiter.wait();
-        const whirlpool = await client.getPool(new PublicKey(pool.address));
+        const whirlpool = await client.getPool(new PublicKey(pool.address), IGNORE_CACHE);
 
         // TickArrays für die Ziel-Range müssen existieren, bevor increaseLiquidity darauf
         // zugreifen kann — sonst schlägt die On-Chain-Simulation mit 0xbbf
@@ -736,8 +950,22 @@ export class OrcaAdapter {
         const poolData = whirlpool.getData();
         const posData  = position.getData();
 
-        // Quote für vollständige Liquiditätsentnahme
-        const quote = decreaseLiquidityQuoteByLiquidityWithParams({
+        // Quote für vollständige Liquiditätsentnahme.
+        //
+        // 🔒 …UsingPriceSlippage, nicht die Standard-Variante (Fix 2026-08-23).
+        // Die Standard-Variante rechnet `tokenMin` als pauschalen Mengenabschlag
+        // (tokenEst × 100/101). Bewegt sich der Preis zwischen Quote und Ausführung, verschiebt
+        // sich der Token-MIX der Entnahme — eine der beiden Mengen rutscht unter ihr Minimum
+        // und die TX bricht mit 0x1782 (TokenMinSubceeded) ab. Seit dem 01.08. traf das ~14
+        // Exits, also rund jeden vierten.
+        //
+        // Für einen VOLL-Exit ist das der falsche Guard: Der Mix ist gleichgültig, es wird
+        // ohnehin alles nach USDC getauscht. Gefährlich ist nur ein manipulierter PREIS — und
+        // genau den begrenzt diese Variante, indem sie tokenMin als Minimum über das Preisband
+        // ±slippageTolerance bildet statt über einen Mengenabschlag. Toleranz bleibt bei 1 %:
+        // eine Mix-Verschiebung läuft jetzt durch, eine Preismanipulation bricht weiter ab.
+        // Dieselbe Preisband-Logik nutzt openPosition() über getSlippageBoundForSqrtPrice().
+        const quote = decreaseLiquidityQuoteUsingPriceSlippage({
             liquidity:        posData.liquidity,
             sqrtPrice:        poolData.sqrtPrice,
             tickCurrentIndex: poolData.tickCurrentIndex,
@@ -754,6 +982,11 @@ export class OrcaAdapter {
         // (IGNORE_CACHE ignoriert nur den SDK-Cache, nicht stale Validator-Slots). Drei
         // Richtungen des Stale-Read werden unten abgefangen.
         let decreaseTxHash = null;
+        // Welche Quote die tatsaechlich gesendete Entnahme beschreibt. Die Stale-Read-
+        // Pfade unten rechnen mit frischen Daten neu — fuer die Teilfehlschlag-Meldung
+        // (partialExit) muss die Menge aus DERSELBEN Quote stammen wie die gesendete TX,
+        // sonst buchte ein Resume erneut die verworfene Schaetzung.
+        let effectiveQuote = quote;
         if (!posData.liquidity.isZero()) {
             await rpcLimiter.wait();
             try {
@@ -774,7 +1007,9 @@ export class OrcaAdapter {
                     const freshPos  = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
                     const freshData = freshPos.getData();
                     if (!freshData.liquidity.isZero()) {
-                        const freshQuote = decreaseLiquidityQuoteByLiquidityWithParams({
+                        // Preisband-Variante wie die Haupt-Quote oben — sonst bräche der
+                        // Stale-Read-Retry an genau der Mix-Verschiebung ab, die ihn ausgelöst hat.
+                        const freshQuote = decreaseLiquidityQuoteUsingPriceSlippage({
                             liquidity:         freshData.liquidity,
                             sqrtPrice:         poolData.sqrtPrice,
                             tickCurrentIndex:  poolData.tickCurrentIndex,
@@ -783,6 +1018,7 @@ export class OrcaAdapter {
                             slippageTolerance: DEFAULT_SLIPPAGE,
                             tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
                         });
+                        effectiveQuote = freshQuote;
                         await rpcLimiter.wait();
                         const retryTx = await freshPos.decreaseLiquidity(freshQuote);
                         decreaseTxHash = await sendLeg('exit_decrease', retryTx, `retry decreaseLiquidity NFT=${positionNftMint}`);
@@ -798,6 +1034,28 @@ export class OrcaAdapter {
             console.log(`[orca] Liquidität bereits 0, überspringe decreaseLiquidity: NFT=${positionNftMint}`);
         }
 
+        // 🔒 Teilfehlschlag kenntlich machen (LIQ#0312).
+        //
+        // Ist decreaseLiquidity gelandet und scheitert danach der Burn, liegt echtes
+        // Kapital bereits im Wallet — die Position ist leer, das NFT aber noch da.
+        // Fuer den Aufrufer sah das bis 2026-08-22 aus wie jeder andere Exit-Fehler:
+        // gleiche Exception, gleiche Meldung, kein Hinweis darauf, dass Coins bewegt
+        // wurden. Ein Resume startete deshalb den Withdraw von vorn, fand on-chain 0
+        // Liquiditaet und buchte den Erloes als ~0 (Pos 336: 11,34 statt ~996 USDC).
+        //
+        // Deshalb: die Mengen der gesendeten Entnahme an den Fehler haengen, damit der
+        // Aufrufer sie persistieren kann statt sie beim naechsten Versuch neu zu raten.
+        const withPartialExit = (err) => {
+            if (!decreaseTxHash) return err;   // nichts gesendet → sauberer Abbruch
+            err.partialExit = {
+                decreaseTxHash,
+                // tokenEst, NICHT tokenMin — siehe Begründung am return unten.
+                amountA: fromRawAmount(effectiveQuote.tokenEstA, pool.decimalsA),
+                amountB: fromRawAmount(effectiveQuote.tokenEstB, pool.decimalsB),
+            };
+            return err;
+        };
+
         // Position-Account schließen und NFT verbrennen → gibt ~0.002 SOL Rent zurück
         const keypairClose         = getKeypair();
         const positionTokenAccount = getAssociatedTokenAddressSync(mintPubkey, keypairClose.publicKey);
@@ -810,46 +1068,75 @@ export class OrcaAdapter {
         });
         await rpcLimiter.wait();
         let burnTxHash;
+        // Aeusserer Rahmen nur fuer withPartialExit(): auch die Stale-Read-Retries
+        // im inneren catch senden ggf. noch ein decreaseLiquidity und koennen danach
+        // scheitern — dieser Fall muss denselben Teilfehlschlag-Marker tragen.
         try {
-            const burnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
-                .addInstruction(burnIx);
-            burnTxHash = await sendLeg('exit_burn', burnTx, `closePositionIx NFT=${positionNftMint}`);
-            console.log(`[orca] Position-NFT geburnt (Rent zurück): TX=${burnTxHash}`);
-        } catch (err) {
-            // Stale read (Fall 2): posData zeigte liquidity=0, on-chain hat sie noch Liquidität
-            if (/0x1775|ClosePositionNotEmpty/i.test(err.message)) {
-                console.log(`[orca] closePositionIx 0x1775 (stale read, on-chain noch Liquidität) – hole frische Daten: NFT=${positionNftMint}`);
-                await rpcLimiter.wait();
-                const freshPos  = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
-                const freshData = freshPos.getData();
-                if (!freshData.liquidity.isZero()) {
-                    const freshQuote = decreaseLiquidityQuoteByLiquidityWithParams({
-                        liquidity:         freshData.liquidity,
-                        sqrtPrice:         poolData.sqrtPrice,
-                        tickCurrentIndex:  poolData.tickCurrentIndex,
-                        tickLowerIndex:    freshData.tickLowerIndex,
-                        tickUpperIndex:    freshData.tickUpperIndex,
-                        slippageTolerance: DEFAULT_SLIPPAGE,
-                        tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
-                    });
-                    await rpcLimiter.wait();
-                    const retryTx = await freshPos.decreaseLiquidity(freshQuote);
-                    decreaseTxHash = await sendLeg('exit_decrease', retryTx, `retry decreaseLiquidity NFT=${positionNftMint}`);
-                    console.log(`[orca] Retry decreaseLiquidity OK: NFT=${positionNftMint} TX=${decreaseTxHash}`);
-                }
-                await rpcLimiter.wait();
-                const retryBurnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
+            try {
+                const burnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
                     .addInstruction(burnIx);
-                burnTxHash = await sendLeg('exit_burn', retryBurnTx, `retry closePositionIx NFT=${positionNftMint}`);
-                console.log(`[orca] Retry closePositionIx OK: TX=${burnTxHash}`);
-            } else {
-                throw err;
+                burnTxHash = await sendLeg('exit_burn', burnTx, `closePositionIx NFT=${positionNftMint}`);
+                console.log(`[orca] Position-NFT geburnt (Rent zurück): TX=${burnTxHash}`);
+            } catch (err) {
+                // Stale read (Fall 2): posData zeigte liquidity=0, on-chain hat sie noch Liquidität
+                if (/0x1775|ClosePositionNotEmpty/i.test(err.message)) {
+                    console.log(`[orca] closePositionIx 0x1775 (stale read, on-chain noch Liquidität) – hole frische Daten: NFT=${positionNftMint}`);
+                    await rpcLimiter.wait();
+                    const freshPos  = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
+                    const freshData = freshPos.getData();
+                    if (!freshData.liquidity.isZero()) {
+                        // Preisband-Variante wie die Haupt-Quote oben — sonst bräche der
+                        // Stale-Read-Retry an genau der Mix-Verschiebung ab, die ihn ausgelöst hat.
+                        const freshQuote = decreaseLiquidityQuoteUsingPriceSlippage({
+                            liquidity:         freshData.liquidity,
+                            sqrtPrice:         poolData.sqrtPrice,
+                            tickCurrentIndex:  poolData.tickCurrentIndex,
+                            tickLowerIndex:    freshData.tickLowerIndex,
+                            tickUpperIndex:    freshData.tickUpperIndex,
+                            slippageTolerance: DEFAULT_SLIPPAGE,
+                            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                        });
+                        effectiveQuote = freshQuote;
+                        await rpcLimiter.wait();
+                        const retryTx = await freshPos.decreaseLiquidity(freshQuote);
+                        decreaseTxHash = await sendLeg('exit_decrease', retryTx, `retry decreaseLiquidity NFT=${positionNftMint}`);
+                        console.log(`[orca] Retry decreaseLiquidity OK: NFT=${positionNftMint} TX=${decreaseTxHash}`);
+                    }
+                    await rpcLimiter.wait();
+                    const retryBurnTx = new TransactionBuilder(this._ctx.connection, this._ctx.wallet, this._ctx.txBuilderOpts)
+                        .addInstruction(burnIx);
+                    burnTxHash = await sendLeg('exit_burn', retryBurnTx, `retry closePositionIx NFT=${positionNftMint}`);
+                    console.log(`[orca] Retry closePositionIx OK: TX=${burnTxHash}`);
+                } else {
+                    throw err;
+                }
             }
+        } catch (err) {
+            throw withPartialExit(err);
         }
 
+        // 🔒 tokenEst, NICHT tokenMin (Fix 2026-08-23).
+        //
+        // `tokenMinA/B` ist der On-Chain-SCHUTZPARAMETER („mindestens so viel muss
+        // herauskommen, sonst brich ab") = tokenEst × 100/101 bei DEFAULT_SLIPPAGE = 1 %.
+        // Es ist NICHT das Ergebnis der Entnahme. Wer ihn als Ergebnis zurückgibt, meldet
+        // bei JEDEM Exit exakt 0,990 % zu wenig — auf beiden Token, unabhängig vom Markt.
+        //
+        // Folgekette bis zum Fund am 23.08.2026: exit-finalizer.js bildet daraus coinsA/coinsB,
+        // executeSwapStep() deckelt den Verkauf per capToPosition() auf genau diese Zahl →
+        // rund 1 % jeder Position wurde nie verkauft, blieb im volatilen Token liegen und
+        // wurde als Erlös zu niedrig gebucht. Ein Trailing Stop mit 0,5 % Drawdown realisierte
+        // dadurch ~1,5 %. Belegt an Exit #75 (PUMP/SOL) und #73 (Fartcoin/SOL): gemessene
+        // On-Chain-Mengen zu gemeldeten = 0,990100 bzw. 0,990098 — 100/101 auf sechs
+        // Nachkommastellen, auf beiden Legs. Die tatsächlichen Swap-Kosten lagen bei 0,015 %.
+        //
+        // `effectiveQuote` statt `quote`: Die Stale-Read-Pfade oben senden die Entnahme mit
+        // einer NEU berechneten Quote. Der Rückgabewert muss aus derselben Quote stammen wie
+        // die tatsächlich gesendete TX — sonst meldet ein 0x177f-Retry die Mengen der
+        // verworfenen (größeren) Quote. Dieselbe Regel gilt schon für withPartialExit() oben.
         return {
-            amountA: fromRawAmount(quote.tokenMinA, pool.decimalsA),
-            amountB: fromRawAmount(quote.tokenMinB, pool.decimalsB),
+            amountA: fromRawAmount(effectiveQuote.tokenEstA, pool.decimalsA),
+            amountB: fromRawAmount(effectiveQuote.tokenEstB, pool.decimalsB),
             txHash: decreaseTxHash ?? burnTxHash,
             // Beide Legs einzeln: gebucht wird nur `txHash`, aber der Abgleich in
             // lib/capital-reconcile.js muss auch das andere Leg zuordnen können
@@ -988,14 +1275,17 @@ export class OrcaAdapter {
         const mintPubkey = new PublicKey(positionNftMint);
         const posPda     = PDAUtil.getPosition(ORCA_WHIRLPOOL_PROGRAM_ID, mintPubkey);
 
+        // IGNORE_CACHE an beiden Reads: Position (Liquidität vor dem Fluss) und Pool-Preis
+        // müssen den Stand *jetzt* zeigen. Ohne das rechnete die Quote hier mit dem Pool-Stand
+        // von vor dem eigenen Pre-Swap — Befund 2026-08-22 (siehe readLiquidityLegsFromTx).
         await rpcLimiter.wait();
-        const position = await client.getPosition(posPda.publicKey);
+        const position = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
         const posData  = position.getData();
 
         // Whirlpool-Daten laden für Quote-Berechnung
         await rpcLimiter.wait();
         const whirlpoolPubkey = posData.whirlpool;
-        const whirlpool       = await client.getPool(whirlpoolPubkey);
+        const whirlpool       = await client.getPool(whirlpoolPubkey, IGNORE_CACHE);
         const poolData        = whirlpool.getData();
 
         // Fix 2: Dynamischer Anker-Token — beide Quotes berechnen, bindenden Engpass wählen.
@@ -1053,22 +1343,39 @@ export class OrcaAdapter {
         await rpcLimiter.wait();
         const txHash = await execTx(increaseTx, this._ctx.connection, `${pool.pair} increaseLiquidity`);
 
-        // Neue Gesamt-Liquidität direkt aus posData + Quote-Delta berechnen.
-        // Kein client.getPosition() Re-Read: der würde durch den 30 s Proxy-Cache
-        // stale Daten liefern, dadurch wäre state.liquidity nach Reinvest weiterhin
-        // der alte Wert und "Mein Anteil" im Dashboard würde sich erst ~5 Min später
-        // (beim nächsten regulären Snapshot mit frischem Read) aktualisieren.
-        const addedLiquidity = posData.liquidity.add(quote.liquidityAmount).toString();
-
-        const actualA = fromRawAmount(quote.tokenEstA, pool.decimalsA);
-        const actualB = fromRawAmount(quote.tokenEstB, pool.decimalsB);
+        // Ist-Werte aus der bestätigten Transaktion (Vault-Deltas), Quote nur als Fallback.
+        // Kein client.getPosition() Re-Read: der liefe in den 10-s-Proxy-Cache und zeigte die
+        // alte Liquidität — genau der Wert, der hier *nicht* als Referenz dienen darf.
+        const quoteEstA = fromRawAmount(quote.tokenEstA, pool.decimalsA);
+        const quoteEstB = fromRawAmount(quote.tokenEstB, pool.decimalsB);
+        const legs   = await readLiquidityLegsFromTx(
+            this._ctx.connection, txHash, pool, posData.tickLowerIndex, posData.tickUpperIndex,
+        );
+        const actualA       = legs?.amountA ?? quoteEstA;
+        const actualB       = legs?.amountB ?? quoteEstB;
+        const liquidityAdd  = legs ? new BN(legs.liquidity) : quote.liquidityAmount;
+        const addedLiquidity = posData.liquidity.add(liquidityAdd).toString();
 
         console.log(
             `[orca] Liquidität erhöht: +${actualA.toFixed(6)} TokenA / +${actualB.toFixed(2)} TokenB` +
+            (legs
+                ? ` (on-chain; Quote war ${quoteEstA.toFixed(6)} / ${quoteEstB.toFixed(2)}, Ausführungspreis ${legs.priceExec.toFixed(6)})`
+                : ' (⚠ Quote-Werte – Transaktion nicht lesbar, Ist-Mengen unbekannt)') +
             ` TX=${txHash}`
         );
 
-        return { addedLiquidity, txHash, tokenEstA: actualA, tokenEstB: actualB };
+        return {
+            addedLiquidity, txHash,
+            tokenEstA: actualA, tokenEstB: actualB,           // = Ist-Mengen, Name aus Kompatibilität
+            quoteA: quoteEstA, quoteB: quoteEstB,
+            liquidityBefore: posData.liquidity.toString(),
+            liquidityAdded:  liquidityAdd.toString(),
+            tickLower:       posData.tickLowerIndex,
+            tickUpper:       posData.tickUpperIndex,
+            priceExec:       legs?.priceExec ?? null,
+            txFeeSol:        legs?.txFeeSol ?? null,
+            measured:        !!legs,
+        };
     }
 
     // ─── decreaseLiquidity ────────────────────────────────────────────────────
@@ -1142,7 +1449,13 @@ export class OrcaAdapter {
             new Decimal(posData.liquidity.toString()).mul(fraction).toFixed(0)
         );
 
-        const quote = decreaseLiquidityQuoteByLiquidityWithParams({
+        // Preisband-Variante + tokenEst statt tokenMin — dieselbe Begründung wie in
+        // closePosition() (Fix 2026-08-23). Hier wiegt der Mengenabschlag sogar schwerer:
+        // Die zurückgegebenen Mengen sind für bin/withdraw.js die Grundlage von
+        // insertCapitalFlow(), updatePositionHodl(), dem Snapshot-Delta und der
+        // Transaktionsbuchung. Ein um 1 % zu niedriger Abfluss verfälscht damit den PnL und
+        // skaliert über rebaseHwmForCapitalFlow() sogar die Trailing-Stop-Referenz falsch.
+        const quote = decreaseLiquidityQuoteUsingPriceSlippage({
             liquidity:         liquidityToRemove,
             sqrtPrice:         poolData.sqrtPrice,
             tickCurrentIndex:  poolData.tickCurrentIndex,
@@ -1152,12 +1465,14 @@ export class OrcaAdapter {
             tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
         });
 
-        const estA = fromRawAmount(quote.tokenMinA, pool.decimalsA);
-        const estB = fromRawAmount(quote.tokenMinB, pool.decimalsB);
+        // Welche Quote die tatsächlich gesendete TX beschreibt (analog closePosition()):
+        // der 0x1782-Retry unten rechnet mit frischen Pool-Daten neu, und die gemeldeten
+        // Mengen müssen aus DERSELBEN Quote stammen wie die gesendete Entnahme.
+        let effectiveQuote = quote;
 
         console.log(
-            `[orca] decreaseLiquidity Quote: tokenEstA=${estA.toFixed(6)}` +
-            ` tokenEstB=${estB.toFixed(6)}` +
+            `[orca] decreaseLiquidity Quote: tokenEstA=${fromRawAmount(quote.tokenEstA, pool.decimalsA).toFixed(6)}` +
+            ` tokenEstB=${fromRawAmount(quote.tokenEstB, pool.decimalsB).toFixed(6)}` +
             ` (${(fraction * 100).toFixed(2)}% der Position)`
         );
 
@@ -1180,7 +1495,7 @@ export class OrcaAdapter {
             const freshPoolData  = freshWhirlpool.getData();
 
             const retrySlippage = Percentage.fromFraction(1, 100); // 1 %
-            const retryQuote    = decreaseLiquidityQuoteByLiquidityWithParams({
+            const retryQuote    = decreaseLiquidityQuoteUsingPriceSlippage({
                 liquidity:         liquidityToRemove,
                 sqrtPrice:         freshPoolData.sqrtPrice,
                 tickCurrentIndex:  freshPoolData.tickCurrentIndex,
@@ -1189,12 +1504,16 @@ export class OrcaAdapter {
                 slippageTolerance: retrySlippage,
                 tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
             });
+            effectiveQuote   = retryQuote;
             const freshPos   = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
             const retryTx    = await freshPos.decreaseLiquidity(retryQuote);
             await rpcLimiter.wait();
             txHash = await execTx(retryTx, this._ctx.connection, `retry decreaseLiquidity NFT=${positionNftMint}`);
             console.log(`[orca] Retry decreaseLiquidity OK: NFT=${positionNftMint} TX=${txHash}`);
         }
+
+        const estA = fromRawAmount(effectiveQuote.tokenEstA, pool.decimalsA);
+        const estB = fromRawAmount(effectiveQuote.tokenEstB, pool.decimalsB);
 
         console.log(
             `[orca] Liquidität reduziert: -${estA.toFixed(6)} TokenA / -${estB.toFixed(6)} TokenB TX=${txHash}`

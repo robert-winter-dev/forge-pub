@@ -36,11 +36,10 @@
 
 import { setPoolActive, setPoolEnabled, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
-import { getTxFee } from './wallet.js';
 import { getAdapter } from './pool-adapter/index.js';
 import { fetchOnChainPool } from './pool-offers-validator.js';
 import {
-    insertTransaction, getOpenPosition,
+    getOpenPosition,
     closePosition as markPositionClosedInDb,
     createRetireExecution, updateRetireExecution, getIncompleteRetireExecutions,
     hasCompletedRetireExecution, getPoolOfferState,
@@ -49,7 +48,7 @@ import {
 import { loadPoolOffers } from './premium-offers-store.js';
 import { detectRetirementSignals, resolveRetirementAction, CONFIRM_MS } from './pool-offer-sync.js';
 import * as notify from './notify.js';
-import { executeSwapStep, prepareExitAndClaimFees } from './exit-finalizer.js';
+import { executeSwapStep, prepareExitAndClaimFees, closePositionOrRescue } from './exit-finalizer.js';
 
 const LOG = poolId => `[pool-retirement:${poolId}]`;
 
@@ -115,25 +114,26 @@ async function stepWithdraw(pool, db, execId) {
         console.log(`${LOG(pool.id)} Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
     }
 
-    const closed = await adapter.closePosition(pool, position.nft_mint);
-    const coinsA = feesA + (closed.amountA ?? 0);
-    const coinsB = feesB + (closed.amountB ?? 0);
-    console.log(`${LOG(pool.id)} Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
+    // Gemeinsamer Ausstiegspfad (LIQ#0312). Zwei Änderungen gegenüber dem früheren
+    // Eigenbau hier:
+    //   • Ein gescheiterter NFT-Burn hält den schützenden Verkauf nicht mehr auf — geworfen
+    //     wird nur, wenn die Entnahme selbst nicht stattgefunden hat.
+    //   • Die close_position-Zeile bucht jetzt Fees + Close-Betrag. Der Fee-Claim bekommt
+    //     bewusst KEINE eigene Zeile (siehe prepareExitAndClaimFees); hier stand bisher nur
+    //     closed.amountA/B, wodurch der im selben Schritt geclaimte Anteil aus der
+    //     Transaktionshistorie verschwand.
+    const { coinsA, coinsB, closeTxHash, closePending } = await closePositionOrRescue(
+        adapter, pool, position, db, {
+            feesA, feesB, note: 'premium-retirement', logPrefix: LOG(pool.id),
+        },
+    );
 
-    const closeFee = await getTxFee(closed.txHash).catch(() => null);
-    insertTransaction(db, {
-        poolId:   pool.id,
-        type:     'close_position',
-        amountA:  closed.amountA ?? 0,
-        amountB:  closed.amountB ?? 0,
-        usdValue: null,
-        txHash:   closed.txHash,
-        txFeeSol: closeFee,
-        note:     'premium-retirement',
+    markPositionClosedInDb(db, position.id, closeTxHash);
+
+    updateRetireExecution(db, execId, {
+        step: 'withdrawn', coins_a: coinsA, coins_b: coinsB,
+        ...(closePending && { close_error: closePending.reason }),
     });
-    markPositionClosedInDb(db, position.id, closed.txHash);
-
-    updateRetireExecution(db, execId, { step: 'withdrawn', coins_a: coinsA, coins_b: coinsB });
     return { coinsA, coinsB };
 }
 
@@ -336,7 +336,9 @@ export async function resumePendingRetireExecutions(db) {
                 swappedUsdc = await stepSwap(pool, db, exec.id, coinsA, coinsB);
             }
 
-            updateRetireExecution(db, exec.id, { step: 'complete', completed_at: Date.now() });
+            // error_msg mit löschen: 'complete' und eine stehende Fehlermeldung schließen
+            // sich aus. Ein liegengebliebenes NFT steht getrennt davon in close_error.
+            updateRetireExecution(db, exec.id, { step: 'complete', completed_at: Date.now(), error_msg: null });
             console.log(`${LOG(exec.pool_id)} Fortgesetzt und abgeschlossen.`);
         } catch (err) {
             console.error(`${LOG(exec.pool_id)} Fehler beim Fortsetzen: ${err.message}`);

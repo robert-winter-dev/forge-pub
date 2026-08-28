@@ -289,11 +289,6 @@ router.get('/config', (req, res) => {
         }
     }
 
-    // Qualifiziert = Pool freigegeben (enabled) + APY-Schwelle erfüllt.
-    // Der frühere hartcodierte TVL-Mindestwert wurde durch die nutzergesteuerte
-    // Pool-Freigabe (enabled) ersetzt, siehe lib/tvl-guard.js.
-    const apyThreshold = parseFloat(env.APY_THRESHOLD_PERCENT ?? '5') || 5;
-
     // TVL bei Aktivierung pro Protokoll (poolTvl der offenen Position, falls vorhanden)
     const activationTvl = new Map();
     for (const pos of positions) {
@@ -311,21 +306,15 @@ router.get('/config', (req, res) => {
         const amount    = activeAmounts.get(id) ?? 0;
         const active    = amount > 0;
         const enabled   = loadPoolEnabled(sdb, id);
-        const qualified = enabled && apy != null && apy >= apyThreshold;
 
-        // Nutzbar = qualifiziert (Einzahlen möglich) ODER aktive Position vorhanden.
-        // Sonst: Pool ist nur informativ gelistet → Grund für die Anzeige ableiten.
-        let disabledReason = null;
-        if (!qualified && !active) {
-            const reasons = [];
-            if (!enabled)                  reasons.push(t('api.lending.reason_pool_disabled'));
-            if (apy == null)               reasons.push(t('api.lending.reason_no_apy'));
-            else if (apy < apyThreshold)   reasons.push(t('api.lending.reason_apy_below', { apy: apy.toFixed(2), threshold: apyThreshold }));
-            disabledReason = reasons.length ? reasons.join(' · ') : t('api.lending.reason_criteria');
-        }
+        // Nutzbar = Pool freigegeben (Einzahlen manuell immer möglich) ODER aktive
+        // Position vorhanden. Nur die Pool-Freigabe selbst sperrt hier noch —
+        // APY-Schwelle/Datenbasis sind seit 2026-08-21 reine Auto-Deploy-Kriterien
+        // (siehe lib/rebalancer.js), manuelles Investieren bleibt uneingeschränkt.
+        const disabledReason = (!enabled && !active) ? t('api.lending.reason_pool_disabled') : null;
 
         return {
-            id, label, active, enabled, qualified, apy, amount, disabledReason,
+            id, label, active, enabled, apy, amount, disabledReason,
             currentTvl:      tvl || null,
             currentLiquidity: liquidity,
             tvlGuard:        loadTvlGuard(sdb, id),

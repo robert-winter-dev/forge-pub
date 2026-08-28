@@ -10,6 +10,7 @@
  *   node FORGE/bin/estimate-costs.js --action deposit   --pool "cbBTC/USDC" --amount-a 0.00254253
  *   node FORGE/bin/estimate-costs.js --action open      --pool "SOL/USDC"   --amount 250
  *   node FORGE/bin/estimate-costs.js --action close     --pool "cbBTC/USDC"
+ *   node FORGE/bin/estimate-costs.js --action close     --pool "ZBCN/SOL" --swap-to-usdc
  *   node FORGE/bin/estimate-costs.js --action close-reopen --pool "SOL/USDC"
  *   node FORGE/bin/estimate-costs.js --action rebalance (alle Liquidity-Pools)
  *   node FORGE/bin/estimate-costs.js --action swap --from EURC --to USDC --amount 47.50
@@ -23,11 +24,18 @@
  *
  * LendingBot-Protokolle: kamino | kamino-figure | kamino-onre | kamino-huma | jupiter | loopscale-onre | loopscale-genesis
  *
+ * Pools: alle aus bots/liquidity/config/pools.json — handgepflegte Einträge unten haben
+ * Vorrang, der Rest wird beim Start automatisch daraus ergänzt.
+ *
  * Aktionen:
  *   rebalance          CLMM-Rebalancing: Position out-of-range → close + swap + open
  *   deposit       Kapital zu bestehender Position hinzufügen (kein Swap)
  *   open          Neue Position eröffnen (inkl. ~50%-Swap für Token-Split)
  *   close         Position schließen (Fees claimen + Liquidität entfernen)
+ *                 --swap-to-usdc: Voll-Exit inkl. Swap beider Seiten nach USDC —
+ *                 so laufen Trailing Stop, TVL-Schutz und Score-Limit (autoSwapToUSDC).
+ *                 Ohne den Schalter fehlt der Swap-Anteil, der bei dünnen Token den
+ *                 Großteil der Kosten ausmacht.
  *   withdraw      Teilentnahme aus bestehender Position
  *   close-reopen  Manuelles Schließen + Neueröffnen (z.B. für Range-Änderung)
  *   swap          Jupiter-Swap zwischen zwei Tokens (direkt oder via USDC)
@@ -224,6 +232,125 @@ function routeKey(fromToken, toToken) {
     return [fromToken, toToken].sort().join('/');
 }
 
+/**
+ * Hops, über die ein Token nach USDC geswappt wird — für Pools ohne verifizierte
+ * Route in SWAP_ROUTES.
+ *
+ * Sucht einen Pool, der das Token führt, und setzt über dessen Partner-Token fort
+ * (ZBCN → SOL über den eigenen Pool, dann SOL → USDC). Das entspricht dem Weg, den
+ * Jupiter für dünne Token faktisch nimmt; die tatsächliche Route kann günstiger sein,
+ * die Schätzung liegt damit auf der sicheren Seite.
+ *
+ * @returns {Array|null} Hop-Liste oder null, wenn kein Weg gefunden wurde
+ */
+function resolveHopsToUsdc(symbol, depth = 0, seen = new Set()) {
+    if (symbol === 'USDC') return [];
+    if (depth >= 3 || seen.has(symbol)) return null;   // Zyklen- und Tiefenschutz
+
+    const known = SWAP_ROUTES[routeKey(symbol, 'USDC')];
+    if (known) return known.hops;
+
+    seen.add(symbol);
+    for (const p of Object.values(POOLS)) {
+        if (p.bot !== 'liquidity' || !p.address) continue;
+        const partner = p.tokenA === symbol ? p.tokenB
+                      : p.tokenB === symbol ? p.tokenA
+                      : null;
+        if (!partner) continue;
+
+        const rest = resolveHopsToUsdc(partner, depth + 1, seen);
+        if (rest == null) continue;
+        return [{ poolId: p.id, address: p.address, feeTier: p.feeTier, correlated: p.correlated }, ...rest];
+    }
+    return null;
+}
+
+/**
+ * Protokoll-Fee und Slippage entlang einer Hop-Kette. Gemeinsame Grundlage für
+ * `--action swap` und den Swap-Anteil eines Exits.
+ */
+async function costHops(hops, amount, db) {
+    let remaining   = amount ?? 0;
+    let protocolFee = 0;
+    let slippageUsd = 0;
+    let confidence  = 'live';
+    const details   = [];
+
+    for (const hop of hops) {
+        let tvl       = await fetchLiveTvl(hop.address);
+        let tvlSource = 'live';
+        if (tvl == null) {
+            tvl       = getCachedTvl(db, hop.poolId);
+            tvlSource = tvl != null ? 'cached' : 'none';
+        }
+        if (tvlSource === 'cached' && confidence === 'live') confidence = 'cached';
+        if (tvlSource === 'none') confidence = 'none';
+
+        const fee  = Math.round(remaining * (hop.feeTier / 100) * 10_000) / 10_000;
+        const slip = tvl ? estimateSlippage(remaining, tvl, hop.correlated) : null;
+
+        protocolFee += fee;
+        slippageUsd += slip?.usd ?? 0;
+        details.push({ label: hop.poolId, feeTier: hop.feeTier, fee, slip, tvl, tvlSource, amount: remaining });
+
+        remaining = Math.round((remaining - fee) * 10_000) / 10_000;
+    }
+
+    return { protocolFee, slippageUsd, details, confidence };
+}
+
+/**
+ * Swap-Kosten eines Voll-Exits mit `autoSwapToUSDC` — beide Seiten der Position
+ * werden nach USDC getauscht.
+ *
+ * Warum das eine eigene Rechnung braucht: `close` allein ist fast kostenlos
+ * (`decreaseLiquidity` ist proportional, kein Swap). Der Trailing Stop, der TVL-Schutz
+ * und das Score-Limit laufen aber standardmäßig mit `autoSwapToUSDC: true` — dort ist
+ * die Slippage der eigentliche Kostenblock, besonders bei dünnen Token. Bei ZBCN/SOL
+ * am 2026-08-22 lagen die realen Exit-Kosten bei 7,34 USDC (0,49 %), während `close`
+ * ohne diesen Schalter 0,0014 USDC auswies.
+ *
+ * Aufteilung 50/50: Eine CLMM-Position in Range hält beide Seiten näherungsweise
+ * gleich; am Rand verschiebt sich das, dann ist die Schätzung entsprechend grob.
+ */
+async function calcExitSwapLegs(pool, capital, db) {
+    if (!(capital > 0)) return null;
+
+    const perSide = capital / 2;
+    const legs    = [];
+    let confidence = 'live';
+
+    for (const symbol of [pool.tokenA, pool.tokenB]) {
+        if (symbol === 'USDC') {
+            legs.push({ symbol, amount: perSide, skipped: true });
+            continue;
+        }
+        const hops = resolveHopsToUsdc(symbol);
+        if (!hops) {
+            legs.push({ symbol, amount: perSide, unresolved: true });
+            confidence = 'none';
+            continue;
+        }
+        const res = await costHops(hops, perSide, db);
+        if (res.confidence === 'none') confidence = 'none';
+        else if (res.confidence === 'cached' && confidence === 'live') confidence = 'cached';
+
+        legs.push({ symbol, amount: perSide, hops: hops.length, ...res });
+    }
+
+    const protocolFee = legs.reduce((s, l) => s + (l.protocolFee ?? 0), 0);
+    const slippageUsd = legs.reduce((s, l) => s + (l.slippageUsd ?? 0), 0);
+    const swapTxs     = legs.filter(l => !l.skipped && !l.unresolved).length;
+
+    return {
+        legs,
+        protocolFee: Math.round(protocolFee * 10_000) / 10_000,
+        slippageUsd: Math.round(slippageUsd * 10_000) / 10_000,
+        swapTxs,
+        confidence,
+    };
+}
+
 // ─── Pool-Konfiguration ────────────────────────────────────────────────────────
 //
 // Alle bekannten Pools mit ihren Eigenschaften.
@@ -297,6 +424,69 @@ const POOLS = {
         volatilePair: true,
     },
 };
+
+// ─── Pools aus der Bot-Konfiguration nachziehen ───────────────────────────────
+//
+// Die Einträge oben sind handgepflegt: dort ist `correlated` bewusst gesetzt und die
+// Swap-Route in SWAP_ROUTES verifiziert. Sie haben deshalb immer Vorrang.
+//
+// Alles Übrige kommt aus `bots/liquidity/config/pools.json`. Vorher endete die Schätzung
+// für jeden nicht eingetragenen Pool mit „Unbekannter Pool" — bei ZBCN/SOL am 2026-08-22
+// genau vor einem Trailing-Stop-Exit über 1500 USDC, obwohl alle nötigen Angaben
+// (Adresse, Fee-Tier, volatilePair) in pools.json standen. Eine Kostenschätzung, die
+// ausgerechnet bei neuen Pools schweigt, schützt dort nicht, wo das Risiko am höchsten ist.
+
+/** Token-Familien für die Korrelations-Heuristik (konzentrierte Liquidität). */
+const CORRELATED_FAMILIES = [
+    new Set(['USDC', 'EURC', 'USDG', 'USDT', 'syrupUSDC', 'jlUSDC', 'PYUSD']),
+    new Set(['cbBTC', 'WBTC', 'BTC']),
+    new Set(['SOL', 'JitoSOL', 'mSOL', 'bSOL', 'jupSOL']),
+    new Set(['ETH', 'whETH', 'WETH']),
+];
+
+/**
+ * Korreliert = beide Tokens aus derselben Familie (Stables, BTC-Varianten, SOL-LSTs).
+ * Im Zweifel `false` — das ist die konservative Richtung: depthFactor 2 statt 10 ergibt
+ * die höhere Slippage-Schätzung, eine Kostenwarnung also eher zu früh als zu spät.
+ */
+function inferCorrelated(symA, symB) {
+    return CORRELATED_FAMILIES.some(f => f.has(symA) && f.has(symB));
+}
+
+function augmentPoolsFromConfig() {
+    let raw;
+    try {
+        const fs = require('node:fs');
+        raw = JSON.parse(fs.readFileSync(join(FORGE_ROOT, 'bots', 'liquidity', 'config', 'pools.json'), 'utf8'));
+    } catch {
+        return;   // ohne pools.json bleibt es bei den handgepflegten Einträgen
+    }
+    if (!Array.isArray(raw)) return;
+
+    for (const p of raw) {
+        // `pair` trägt die interne Reihenfolge (tokenA/tokenB), `displayPair` die von Orca.
+        const [symA, symB] = String(p.pair ?? '').split('/');
+        if (!symA || !symB) continue;
+
+        const name = p.displayPair ?? p.pair;
+        if (POOLS[name]) continue;        // handgepflegt → Vorrang, nie überschreiben
+
+        POOLS[name] = {
+            bot:          'liquidity',
+            id:           p.id,
+            address:      p.address,
+            feeTier:      Number(p.feeTier) || 0,
+            correlated:   inferCorrelated(symA, symB),
+            tokenA:       symA,
+            tokenB:       symB,
+            volatilePair: p.volatilePair === true,
+            quotePoolId:  p.quotePricePoolId ?? null,
+            fromConfig:   true,           // senkt die Konfidenz in der Ausgabe
+        };
+    }
+}
+
+augmentPoolsFromConfig();
 
 // ─── Datenbankzugriff ─────────────────────────────────────────────────────────
 
@@ -475,7 +665,7 @@ function estimateSlippage(swapAmount, tvl, correlated) {
 
 // ─── Kostenberechnung pro Aktion ─────────────────────────────────────────────
 
-function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl }) {
+function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap = null }) {
     // Wenn --amount-a angegeben: Ratio berechnen und effectiveCapital daraus ableiten
     let ratioInfo = null;
     if (amountA != null && action === 'deposit' && currentPrice != null && position?.price_lower != null) {
@@ -571,9 +761,40 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
 
         case 'close':
         case 'withdraw':
-            // Kein Swap: Tokens kommen unkonvertiert zurück
-            notes.push(t('cli.est.note_no_swap_return'));
-            notes.push(t('cli.est.note_slip_negligible'));
+            if (exitSwap) {
+                // Voll-Exit mit Swap→USDC (Trailing Stop, TVL-Schutz, Score-Limit).
+                // Zusätzlich zu den 3 Close-TXs kommt je ein Jupiter-Swap pro Seite.
+                txCount  = TX_COUNT[action] + exitSwap.swapTxs;
+                txFeeUsd = Math.round(txCount * SOL_PER_TX * solPrice * 10_000) / 10_000;
+
+                swapAmount  = effectiveCapital ?? 0;
+                protocolFee = exitSwap.protocolFee;
+                slippage    = { pct: swapAmount > 0 ? Math.round(exitSwap.slippageUsd / swapAmount * 100 * 10_000) / 10_000 : 0,
+                                usd: exitSwap.slippageUsd };
+
+                notes.push(t('cli.est.note_exit_swap'));
+                for (const leg of exitSwap.legs) {
+                    if (leg.skipped) {
+                        notes.push(t('cli.est.note_exit_leg_usdc', { token: leg.symbol, usd: leg.amount.toFixed(2) }));
+                    } else if (leg.unresolved) {
+                        unknown.push(t('cli.est.note_exit_leg_unknown', { token: leg.symbol }));
+                    } else {
+                        notes.push(t('cli.est.note_exit_leg', {
+                            token: leg.symbol,
+                            usd:   leg.amount.toFixed(2),
+                            hops:  leg.hops,
+                            fee:   leg.protocolFee.toFixed(2),
+                            slip:  leg.slippageUsd.toFixed(2),
+                        }));
+                    }
+                }
+                if (!effectiveCapital) unknown.push(t('cli.est.unknown_capital_swap'));
+            } else {
+                // Kein Swap: Tokens kommen unkonvertiert zurück
+                notes.push(t('cli.est.note_no_swap_return'));
+                notes.push(t('cli.est.note_slip_negligible'));
+                if (action === 'close') notes.push(t('cli.est.note_exit_swap_hint'));
+            }
             break;
 
         case 'close-reopen':
@@ -590,7 +811,8 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
 
     const total = Math.round((txFeeUsd + protocolFee + (slippage?.usd ?? 0)) * 10_000) / 10_000;
 
-    return { txFeeUsd, txCount, swapAmount, protocolFee, slippage, total, notes, unknown, ratioInfo };
+    return { txFeeUsd, txCount, swapAmount, protocolFee, slippage, total, notes, unknown, ratioInfo,
+             exitSwapLegs: exitSwap?.legs ?? null };
 }
 
 // ─── Swap-Kostenberechnung ────────────────────────────────────────────────────
@@ -846,10 +1068,13 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
     ));
 
     if (costs.swapAmount > 0) {
-        console.log(row(
-            `Swap     ($${costs.swapAmount.toFixed(2)} × ${pool.feeTier}% Fee)`,
-            `$${costs.protocolFee.toFixed(4)} USDC`
-        ));
+        // Bei einem Exit über mehrere Hops ist `pool.feeTier` nicht die ganze Wahrheit —
+        // die Protokoll-Fee summiert alle Hops beider Seiten. Ein Label „× 0,01 % Fee"
+        // neben einem Betrag, der sich daraus nicht ergibt, liest sich wie ein Rechenfehler.
+        const swapLabel = costs.exitSwapLegs
+            ? `Swap     ($${costs.swapAmount.toFixed(2)}, beide Seiten → USDC)`
+            : `Swap     ($${costs.swapAmount.toFixed(2)} × ${pool.feeTier}% Fee)`;
+        console.log(row(swapLabel, `$${costs.protocolFee.toFixed(4)} USDC`));
         if (costs.slippage) {
             console.log(row(
                 `Slippage (est. ${costs.slippage.pct.toFixed(4)}%)`,
@@ -1079,6 +1304,10 @@ const { values: args } = parseArgs({
         to:       { type: 'string' },
         bot:      { type: 'string' },
         json:     { type: 'boolean', default: false },
+        // Voll-Exit mit Swap nach USDC — so laufen Trailing Stop, TVL-Schutz und
+        // Score-Limit standardmaessig (autoSwapToUSDC). Ohne den Schalter zeigt
+        // `close` nur den reinen decreaseLiquidity-Pfad ohne Swap-Kosten.
+        'swap-to-usdc': { type: 'boolean', default: false },
     },
     strict: false,
 });
@@ -1238,7 +1467,12 @@ for (const [poolName, pool] of poolEntries) {
         tvlSource = tvl != null ? 'cached' : 'none';
     }
 
-    const costs = calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl });
+    // Swap-Beine eines Voll-Exits vorab (async) berechnen — calcCosts selbst ist synchron.
+    const exitSwap = (action === 'close' && args['swap-to-usdc'])
+        ? await calcExitSwapLegs(pool, amount ?? capital, db)
+        : null;
+
+    const costs = calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap });
 
     if (jsonMode) {
         jsonResults.push({

@@ -1,21 +1,16 @@
 /**
- * FORGE Liquidity – TVL-Schutz (zweistufiger Pool-Exit bei TVL-Einbruch)
+ * FORGE Liquidity – TVL-Schutz (Pool-Exit bei TVL-Einbruch)
  *
  * Fällt der Pool-TVL unter eine konfigurierte Schwelle, wird Kapital aus dem
  * Pool gezogen — optional in USDC getauscht und an eine Adresse gesendet.
  *
- * Zwei Eskalationsstufen (Config aus settings.db → pool_settings.tvlProtection,
- * gepflegt im ForgeSettings-„Risk-Management"-Modal, Tab TVL):
- *   - L1 (Stufe 1, default aktiv, höhere Schwelle): zieht withdrawPct % der Position
- *     per decreaseLiquidity. Position bleibt offen, Pool bleibt aktiv — außer bei
- *     withdrawPct = 100, dann ist es ein Voll-Exit wie L2 (`isFull`, s.u.). Genau so
- *     ist der Default seit 2026-08-15 belegt: eine Stufe, eine Schwelle, 100 % raus.
- *   - L2 (Stufe 2, default aus, tiefere Schwelle): schließt den Rest komplett
- *     (closePosition) und deaktiviert den Pool. Egal ob L1 vorher lief — L2 zieht
- *     immer alles Verbliebene, sodass L1+L2 zusammen 100 % ergeben.
+ * Eine Stufe (Config aus settings.db → pool_settings.tvlProtection, gepflegt im
+ * ForgeSettings-„Risk-Management"-Modal, Tab TVL): zieht withdrawPct % der Position
+ * per decreaseLiquidity. Position bleibt offen, Pool bleibt aktiv — außer bei
+ * withdrawPct = 100, dann ist es ein Voll-Exit (`isFull`, s.u. — closePosition,
+ * Pool wird deaktiviert). Default seit 2026-08-15: 100 % raus.
  *
- * Priorität: L2 wird vor L1 geprüft (tiefere Schwelle = gravierender).
- * Jede Stufe feuert pro Position maximal einmal (tvl_executions.position_id+level) —
+ * Die Stufe feuert pro Position maximal einmal (tvl_executions.position_id+level) —
  * das ist der einzige Schutz gegen Mehrfach-Auslösung. Der konfigurierte
  * `cooldownHours` wirkt bewusst NICHT hier, sondern ausschließlich im Cleanup
  * (bin/cleanup.js): er verhindert das sofortige Wiederbefüllen eines gerade
@@ -42,7 +37,7 @@ import { getTokenUsdPrice } from './deposit-lib.js';
 import { writePositionSnapshotFromDelta } from './refresh-state.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
-    insertTransaction, insertCapitalFlow, getOpenPosition,
+    insertTransaction, getOpenPosition,
     closePosition as markPositionClosedInDb,
     updatePositionCapital, updatePositionHodl,
     createTvlExecution, updateTvlExecution, getIncompleteTvlExecutions,
@@ -50,7 +45,7 @@ import {
     rebaseHwmForCapitalFlow,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, computeExitPnl } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, closePositionOrRescue, computeExitPnl, recordExitProceeds } from './exit-finalizer.js';
 import { Percentage } from '@orca-so/common-sdk';
 import { PATHS } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
@@ -69,8 +64,8 @@ const PARTIAL_SLIPPAGE = Percentage.fromFraction(1, 200); // 0,5 % für decrease
  * ohne mehrfach täglich dieselbe Meldung zu bekommen. Die Aktion selbst (Teil-Abzug)
  * läuft unabhängig davon weiter — gedrosselt wird nur die Benachrichtigung.
  *
- * Gilt ausdrücklich NICHT für Stufe 2 und nicht für einen L1-Abzug von 100 %: beides
- * ist ein Voll-Exit und wird immer gemeldet.
+ * Gilt ausdrücklich NICHT für einen Abzug von 100 %: das ist ein Voll-Exit und wird
+ * immer gemeldet.
  */
 const WARN_NOTIFY_COOLDOWN_MS = 24 * 3_600_000;
 
@@ -109,8 +104,7 @@ function resolveTrigger(pool, db) {
     if (!cfg) return null;
 
     const l1 = cfg.level1 ?? {};
-    const l2 = cfg.level2 ?? {};
-    if (!l1.enabled && !l2.enabled) return null;
+    if (!l1.enabled) return null;
 
     const position = getOpenPosition(db, pool.id);
     if (!position) return null;
@@ -123,7 +117,7 @@ function resolveTrigger(pool, db) {
     // `cooldownHours` ist der *Cleanup*-Cooldown: er hält den Ranking-/Invest-Cleanup
     // davon ab, einen gerade verlassenen Pool sofort wieder zu befüllen (bin/cleanup.js,
     // _loadCleanupCooldownBlockedPools). Der Schutz selbst muss davon unberührt bleiben,
-    // sonst wäre bis zu `cooldownHours` lang kein L2-Notfall-Exit möglich, obwohl der TVL
+    // sonst wäre bis zu `cooldownHours` lang kein Notfall-Exit möglich, obwohl der TVL
     // weiter fällt — der Cooldown würde also ausgerechnet den Kapitalschutz aussperren,
     // den er nie gemeint hat (Klarstellung 2026-08-13).
     //
@@ -131,16 +125,10 @@ function resolveTrigger(pool, db) {
     // jede Stufe feuert pro Position genau einmal. Die Drosselung der *Meldung* sitzt
     // getrennt davon in executeTvlProtection() (WARN_NOTIFY_COOLDOWN_MS).
 
-    // Schwellen beider Stufen zentral auflösen (lib/tvl-thresholds.js) — dieselbe
-    // Auflösung nutzt der Invest-Guard, damit „darf hinein" und „muss heraus" nie
-    // auseinanderlaufen können.
+    // Schwelle zentral auflösen (lib/tvl-thresholds.js) — dieselbe Auflösung nutzt
+    // der Invest-Guard, damit „darf hinein" und „muss heraus" nie auseinanderlaufen
+    // können.
     const th = resolveTvlThresholds(pool, cfg);
-
-    // L2 zuerst prüfen (tiefere Schwelle, gravierender)
-    const t2 = th.l2.threshold;
-    if (l2.enabled && t2 && tvl < t2 && !isTvlLevelExecutedForPosition(db, position.id, 2)) {
-        return { level: 2, levelCfg: l2, threshold: t2, tvl, cfg, position };
-    }
 
     // Stufe-1-Schwelle: konfiguriert, sonst pools.json (Fallback-Wahl siehe
     // lib/tvl-thresholds.js). Greift nur als Netz — ensureTvlProtectionDefaults setzt
@@ -161,7 +149,7 @@ export function shouldTriggerTvlProtection(pool, db) {
 
 // ─── Withdraw-Steps ──────────────────────────────────────────────────────────
 
-/** Vollständiges Schließen (L2): Fees claimen + closePosition. */
+/** Vollständiges Schließen (Voll-Exit): Fees claimen + closePosition. */
 async function stepWithdrawFull(pool, db, execId) {
     const adapter  = getAdapter(pool);
     const position = getOpenPosition(db, pool.id);
@@ -183,25 +171,26 @@ async function stepWithdrawFull(pool, db, execId) {
         console.log(`[tvl-protection:${pool.id}] Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
     }
 
-    const closed = await adapter.closePosition(pool, position.nft_mint);
-    const coinsA = feesA + (closed.amountA ?? 0);
-    const coinsB = feesB + (closed.amountB ?? 0);
-    console.log(`[tvl-protection:${pool.id}] Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
+    // Gemeinsamer Ausstiegspfad (LIQ#0312). Zwei Änderungen gegenüber dem früheren
+    // Eigenbau hier:
+    //   • Ein gescheiterter NFT-Burn hält den schützenden Verkauf nicht mehr auf — geworfen
+    //     wird nur, wenn die Entnahme selbst nicht stattgefunden hat.
+    //   • Die close_position-Zeile bucht jetzt Fees + Close-Betrag. Der Fee-Claim bekommt
+    //     bewusst KEINE eigene Zeile (siehe prepareExitAndClaimFees); hier stand bisher nur
+    //     closed.amountA/B, wodurch der im selben Schritt geclaimte Anteil aus der
+    //     Transaktionshistorie verschwand.
+    const { coinsA, coinsB, closeTxHash, closePending } = await closePositionOrRescue(
+        adapter, pool, position, db, {
+            feesA, feesB, note: 'tvl-protection-l2', logPrefix: `[tvl-protection:${pool.id}]`,
+        },
+    );
 
-    const closeFee = await getTxFee(closed.txHash).catch(() => null);
-    insertTransaction(db, {
-        poolId:   pool.id,
-        type:     'close_position',
-        amountA:  closed.amountA ?? 0,
-        amountB:  closed.amountB ?? 0,
-        usdValue: null,
-        txHash:   closed.txHash,
-        txFeeSol: closeFee,
-        note:     'tvl-protection-l2',
+    markPositionClosedInDb(db, position.id, closeTxHash);
+
+    updateTvlExecution(db, execId, {
+        step: 'withdrawn', coins_a: coinsA, coins_b: coinsB,
+        ...(closePending && { close_error: closePending.reason }),
     });
-    markPositionClosedInDb(db, position.id, closed.txHash);
-
-    updateTvlExecution(db, execId, { step: 'withdrawn', coins_a: coinsA, coins_b: coinsB });
     return { coinsA, coinsB };
 }
 
@@ -305,7 +294,7 @@ async function stepWithdrawPartial(pool, db, execId, withdrawPct) {
 
 // ─── Swap- / Transfer-Steps (gemeinsam) ──────────────────────────────────────
 
-async function stepSwap(pool, db, execId, levelCfg, coinsA, coinsB) {
+async function stepSwap(pool, db, execId, levelCfg, coinsA, coinsB, isFullClose = false) {
     return executeSwapStep(pool, {
         coinsA, coinsB,
         sendTo:      levelCfg.sendTo,
@@ -313,7 +302,10 @@ async function stepSwap(pool, db, execId, levelCfg, coinsA, coinsB) {
         slippageBps: config.rm.swapSlippageBps,
         onSwapped:   (swappedUsdc) => {
             updateTvlExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
-            insertCapitalFlow(db, { poolId: pool.id, usdcAmount: -swappedUsdc, note: 'tvl-protection-exit', isExternal: 1 });
+            // isFullClose: nur der Voll-Close hat eine close_position-Zeile, die den
+            // realen Erlös aufnehmen kann. Der Teil-Abzug bucht seinen Betrag selbst
+            // in die withdraw-Zeile (stepWithdrawPartial).
+            recordExitProceeds(db, { poolId: pool.id, swappedUsdc, note: 'tvl-protection-exit', isFullClose });
             console.log(`[tvl-protection:${pool.id}] Kapitalabfluss erfasst: -${swappedUsdc.toFixed(2)} USDC`);
         },
     });
@@ -415,7 +407,7 @@ export async function executeTvlProtection(pool, db) {
         // Phase 3: Swap (optional)
         let swappedUsdc = null;
         if (actionCfg.swapToUsdc) {
-            swappedUsdc = await stepSwap(pool, db, execId, actionCfg, coinsA, coinsB);
+            swappedUsdc = await stepSwap(pool, db, execId, actionCfg, coinsA, coinsB, isFull);
         }
 
         // Phase 4: Transfer (optional)
@@ -486,13 +478,15 @@ export async function resumePendingTvlExecutions(db) {
                 coinsB = r.coinsB;
             }
             if ((exec.step === 'preparing' || exec.step === 'withdrawn') && levelCfg.swapToUsdc) {
-                swappedUsdc = await stepSwap(pool, db, exec.id, levelCfg, coinsA, coinsB);
+                swappedUsdc = await stepSwap(pool, db, exec.id, levelCfg, coinsA, coinsB, isFull);
             }
             if (['preparing', 'withdrawn', 'swapped'].includes(exec.step) && levelCfg.sendTo) {
                 await stepTransfer(pool, db, exec.id, levelCfg, coinsA, coinsB, swappedUsdc);
             }
 
-            updateTvlExecution(db, exec.id, { step: 'complete', completed_at: Date.now() });
+            // error_msg mit löschen: 'complete' und eine stehende Fehlermeldung schließen
+            // sich aus. Ein liegengebliebenes NFT steht getrennt davon in close_error.
+            updateTvlExecution(db, exec.id, { step: 'complete', completed_at: Date.now(), error_msg: null });
             console.log(`[tvl-protection:${exec.pool_id}] Fortgesetzt und abgeschlossen.`);
         } catch (err) {
             console.error(`[tvl-protection:${exec.pool_id}] Fehler beim Fortsetzen: ${err.message}`);

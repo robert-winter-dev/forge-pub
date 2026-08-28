@@ -2,24 +2,26 @@ import { PublicKey }  from '@solana/web3.js';
 import { Percentage } from '@orca-so/common-sdk';
 import {
     getUsableSolBalance, getUsableSolBalanceFresh, getTokenBalance, getTokenBalanceFresh,
-    getTxFee, getConnection, USDC_MINT,
+    getUsableUsdcBalanceFresh, getTxFee, getConnection, USDC_MINT,
 } from './wallet.js';
 import { swapTokens, isWhirlpoolMintOrderError } from './swap.js';
 import {
     getOpenPosition,
     updatePositionCapital, updatePositionHodl, insertTransaction,
     insertPosition, insertPositionSnapshot, insertCapitalFlow, clearPositionSnapshots,
-    rebaseHwmForCapitalFlow,
 } from './db.js';
-import { writePositionSnapshotFromDelta } from './refresh-state.js';
+import { establishPositionBaseline, settleCapitalFlow, getQuotePriceUsd } from './refresh-state.js';
 import { isRebalancePending } from './cleanup-lock.js';
 import { config, setPoolActive } from './config.js';
-import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset } from './settings-auto.js';
+import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
+         ensureTrailingStopDefaults } from './settings-auto.js';
 import { calculateRange } from './range.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import Decimal from 'decimal.js';
 import BN     from 'bn.js';
 import * as notify from './notify.js';
+import { t }       from '../../../lib/i18n.js';
+import { foreignExitBlock } from './exit-reservation.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -35,27 +37,14 @@ const PRESWAP_SLIPPAGE_BPS = 150; // höherer Slippage für Cleanup-Swaps (cbBTC
 // ─── Gemeinsame Hilfsfunktionen ───────────────────────────────────────────────
 
 /**
- * Zuletzt GEMESSENER Positionswert eines Pools (letzter position_snapshots-Eintrag).
- * Muss vor jedem Kapitalfluss gelesen werden — writePositionSnapshotFromDelta überschreibt
- * ihn danach mit einem schätzungsbasierten Wert.
+ * Zuletzt gemessener Positionswert eines Pools (letzter position_snapshots-Eintrag) — nur noch
+ * der **Fallback** für `settleCapitalFlow()`, wenn die Ist-Werte einer Einzahlung nicht aus der
+ * Transaktion lesbar sind. Im Normalfall zieht der Liquiditätsfaktor die Referenz nach.
  */
 function _lastMeasuredLpValue(db, poolId) {
     return db.prepare(
         `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
     ).get(poolId)?.lp_value_usd ?? 0;
-}
-
-/**
- * Schreibt den Kapitalfluss in der Trailing-Stop-Referenz nach (Details: rebaseHwmForCapitalFlow
- * in lib/db.js). Ohne diesen Aufruf übernimmt die monoton steigende HWM beim nächsten Snapshot
- * einfach den erhöhten Positionswert — der bis dahin aufgelaufene Drawdown-Abstand geht verloren
- * und der Trailing Stop startet bei jeder Cleanup-Einzahlung faktisch neu.
- */
-function _rebaseHwmAfterDeposit(db, pool, positionId, lpBefore) {
-    const { drawdownPct, applied } = rebaseHwmForCapitalFlow(db, positionId, lpBefore);
-    if (applied) {
-        console.log(`[deposit-lib] ${pool.pair}: Trailing-Stop-Referenz übertragen (Abstand zum Höchststand: ${drawdownPct.toFixed(2)} %)`);
-    }
 }
 
 /**
@@ -165,6 +154,225 @@ export function getTokenUsdPrice(mint, db) {
     return 0;
 }
 
+
+// ─── Rest-Einzahlung („Residual-Sweep") ───────────────────────────────────────
+//
+// Nach jedem Deposit bleibt etwas im Wallet liegen: Orca nimmt nur die bindende Seite
+// (min(quoteA, quoteB)), die Slippage-Puffer laufen konservativ und zwischen Pre-Swap und
+// Einzahlung bewegt sich der Preis. Bei volatilen Tokens sind das Prozente, nicht Promille
+// (ZEC/USDC am 22.08.2026: ~33 von 250 USDC blieben liegen). Liegenbleiben ist doppelt teuer,
+// weil der Dust-Sweep in bin/cleanup.js Reste unter CLEANUP_DUST_MAX_USDC wieder zurück nach
+// USDC tauscht — der Token wurde also gekauft und direkt wieder verkauft.
+//
+// Deshalb nachfassen: Reste frisch lesen, auf das noch offene Budget kappen, einen
+// einseitigen Rest per kleinem Swap nach dem CLMM-Ratio der echten Range ausgleichen, dann
+// ein weiteres increaseLiquidity — und das wiederholen, bis wirklich nichts Nennenswertes
+// mehr übrig ist (siehe RESIDUAL_SWEEP_MAX_ROUNDS unten). Ein einzelner Durchlauf lässt
+// zuverlässig einen Rest zweiter Ordnung übrig, weil der Ausgleichs-Swap selbst wieder
+// Slippage hat. Genutzt vom manuellen Pfad (bin/deposit.js) und von allen automatischen
+// Pfaden hier — eine Implementierung, damit beide nicht auseinanderlaufen.
+
+const RESIDUAL_MIN_USDC      = 1.00;   // darunter lohnt die zusätzliche TX nicht
+const RESIDUAL_SWAP_MIN_USDC = 1.00;   // darunter lohnt der Ausgleichs-Swap nicht
+const RESIDUAL_SOL_BUFFER    = 0.005;  // SOL-Puffer über solReserve hinaus (TX-Fee)
+
+/** USD-Wert je 1 Token der beiden Pool-Seiten — Spiegel von calcDepositedUsdc(). */
+function _usdPerSide(pool, currentPrice, quotePrice) {
+    if (pool.volatilePair) {
+        const quoteIsTokenA = pool.quoteTokenMint === pool.tokenA;
+        return quoteIsTokenA
+            ? { a: quotePrice, b: currentPrice > 0 ? quotePrice / currentPrice : 0 }
+            : { a: quotePrice * currentPrice, b: quotePrice };
+    }
+    if (pool.usdcIsTokenA) return { a: 1, b: currentPrice > 0 ? 1 / currentPrice : 0 };
+    return { a: currentPrice, b: 1 };
+}
+
+/** Frische Wallet-Bestände beider Pool-Seiten (SOL- und Premium-Reserve bereits abgezogen). */
+async function _freshSideBalances(pool, keypair) {
+    const read = async (mint, decimals) => {
+        if (mint === WSOL_MINT) {
+            return Math.max(0, await getUsableSolBalanceFresh(keypair.publicKey) - RESIDUAL_SOL_BUFFER);
+        }
+        if (mint === USDC_MINT) return getUsableUsdcBalanceFresh(keypair.publicKey);
+        return getTokenBalanceFresh(keypair.publicKey, new PublicKey(mint), decimals);
+    };
+    return {
+        a: await read(pool.tokenA, pool.decimalsA),
+        b: await read(pool.tokenB, pool.decimalsB),
+    };
+}
+
+// Ein einzelner Ausgleichs-Swap + increaseLiquidity gleicht die eigene Ausführung nicht
+// wieder aus (der Swap selbst hat wieder Slippage, die Ziel-Range-Rechnung nutzt den
+// zu Rundenbeginn gemessenen Preis) — ein Einzelversuch lässt deshalb regelmäßig einen
+// Rest zweiter Ordnung übrig (PUMP/SOL, 23.08.2026: 34,80 von ~46 USDC Rest nachgezahlt,
+// 13,86 USDC blieben als Dust liegen). `sweepResidualIntoPosition` wiederholt den Vorgang
+// deshalb, bis der verbleibende Rest unter RESIDUAL_MIN_USDC fällt oder keine Runde mehr
+// Fortschritt bringt — Ziel ist ein Rest von faktisch null, nicht nur „meistens klein".
+const RESIDUAL_SWEEP_MAX_ROUNDS = 4;
+
+/**
+ * Zahlt den nach einem Deposit im Wallet verbliebenen Rest in dieselbe Position nach.
+ * Wirft nie — die Haupteinzahlung ist beim Aufruf bereits erfolgt; scheitert der Sweep,
+ * bleibt der Rest schlicht liegen und der nächste Cleanup-Lauf verwertet ihn.
+ *
+ * @param {object} pool
+ * @param {string} nftMint                 Position, in die nachgezahlt wird
+ * @param {number} opts.currentPrice       Pool-Preis (tokenB je tokenA)
+ * @param {number} opts.priceLower/Upper   Range-Grenzen der Position
+ * @param {number} opts.budgetLeftUsdc     Noch offener Teil des vorgesehenen Budgets
+ *                                         (Infinity = alles, was im Wallet liegt)
+ * @param {number} opts.quotePrice         USD-Preis des Quote-Tokens (nur volatilePair)
+ * @param {number} opts.swapSlippageBps    Slippage für den Ausgleichs-Swap (null = Default)
+ * @returns {Promise<{txHash, tokenEstA, tokenEstB, usdc, addedLiquidity}|null>}
+ */
+export async function sweepResidualIntoPosition(pool, nftMint, opts) {
+    let budgetLeft = opts.budgetLeftUsdc ?? Infinity;
+    let combined   = null;
+    for (let round = 1; round <= RESIDUAL_SWEEP_MAX_ROUNDS; round++) {
+        const res = await _sweepResidualOnce(pool, nftMint, { ...opts, budgetLeftUsdc: budgetLeft, round });
+        if (!res) break;
+        combined = combined
+            ? {
+                ...res,
+                tokenEstA: combined.tokenEstA + res.tokenEstA,
+                tokenEstB: combined.tokenEstB + res.tokenEstB,
+                usdc:      combined.usdc + res.usdc,
+              }
+            : res;
+        if (Number.isFinite(budgetLeft)) budgetLeft = Math.max(0, budgetLeft - res.usdc);
+        // res.usdc < RESIDUAL_MIN_USDC bedeutet: die Runde hat kaum noch etwas bewegt
+        // (letzter Krümel oder kein Fortschritt mehr) — weitere Runden würden nur TX-Fees
+        // ohne nennenswerten Nutzen kosten.
+        if (res.usdc < RESIDUAL_MIN_USDC) break;
+    }
+    return combined;
+}
+
+async function _sweepResidualOnce(pool, nftMint, {
+    keypair, db, adapter, currentPrice, priceLower, priceUpper,
+    budgetLeftUsdc = Infinity, quotePrice = 0, swapSlippageBps = null,
+    logPrefix = '[deposit-lib]', round = 1,
+} = {}) {
+    const log = (msg) => console.log(`${logPrefix} ${pool.pair}: [Sweep ${round}/${RESIDUAL_SWEEP_MAX_ROUNDS}] ${msg}`);
+    try {
+        // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN
+        // Pool (geteilter Mint), kein Sweep — sonst würde fremdes Exit-Kapital
+        // nachinvestiert.
+        const sweepBlock = foreignExitBlock(db, pool, logPrefix);
+        if (sweepBlock.blocked) {
+            log(`Sweep übersprungen: ${sweepBlock.reason}`);
+            return null;
+        }
+
+        if (!(budgetLeftUsdc >= RESIDUAL_MIN_USDC)) return null;
+        if (!(currentPrice > 0)) return null;
+
+        const usd = _usdPerSide(pool, currentPrice, quotePrice);
+        if (!(usd.a > 0) || !(usd.b > 0)) return null;
+
+        const [symA, symB] = pool.usdcIsTokenA
+            ? [pool.pair.split('/')[1], pool.pair.split('/')[0]]
+            : pool.pair.split('/');
+
+        let bal   = await _freshSideBalances(pool, keypair);
+        let total = bal.a * usd.a + bal.b * usd.b;
+        if (total < RESIDUAL_MIN_USDC) {
+            log(t('cli.ld.sweep_skip_small', { usdc: total.toFixed(2) }));
+            return null;
+        }
+
+        // Nie mehr nachzahlen als vom vorgesehenen Budget übrig ist — im Wallet kann
+        // Kapital liegen, das gar nicht für diese Einzahlung gedacht war.
+        let capFactor = 1;
+        if (total > budgetLeftUsdc) {
+            capFactor = budgetLeftUsdc / total;
+            total     = budgetLeftUsdc;
+            log(t('cli.ld.sweep_budget_capped', { usdc: budgetLeftUsdc.toFixed(2) }));
+        }
+        let useA = bal.a * capFactor;
+        let useB = bal.b * capFactor;
+
+        // Position muss in Range liegen — sonst nimmt increaseLiquidity nur eine Seite an
+        // und der Rest bliebe trotz Extra-TX liegen.
+        try {
+            const st = await adapter.getPositionState(pool, nftMint);
+            if (!st.inRange) {
+                log(t('cli.ld.sweep_oor'));
+                return null;
+            }
+        } catch {
+            return null;   // Zustand nicht lesbar → lieber nichts tun
+        }
+
+        // Einseitigen Rest ausgleichen: Zielaufteilung aus dem CLMM-Ratio der echten Range.
+        // Ohne das könnte nur so viel eingezahlt werden, wie die knappere Seite hergibt.
+        const aPerB    = clmmTokenAForDeposit(1, currentPrice, priceLower, priceUpper);
+        const weightA  = (aPerB * usd.a) / (aPerB * usd.a + usd.b);
+        const surplusA = useA * usd.a - total * weightA;   // > 0: zu viel tokenA, < 0: zu wenig
+        if (Math.abs(surplusA) >= RESIDUAL_SWAP_MIN_USDC) {
+            const fromA    = surplusA > 0;
+            const valueIn  = Math.abs(surplusA);
+            const amountIn = fromA
+                ? Math.min(valueIn / usd.a, useA * 0.99)
+                : Math.min(valueIn / usd.b, useB * 0.99);
+            log(t('cli.ld.sweep_swap', {
+                amount: amountIn.toFixed(6), from: fromA ? symA : symB,
+                to: fromA ? symB : symA, usdc: valueIn.toFixed(2),
+            }));
+            try {
+                await swapTokens({
+                    inputMint:      fromA ? pool.tokenA    : pool.tokenB,
+                    outputMint:     fromA ? pool.tokenB    : pool.tokenA,
+                    inputDecimals:  fromA ? pool.decimalsA : pool.decimalsB,
+                    outputDecimals: fromA ? pool.decimalsB : pool.decimalsA,
+                    amount:         amountIn,
+                    wallet:         keypair,
+                    connection:     getConnection(),
+                    ...(swapSlippageBps ? { slippageBps: swapSlippageBps } : {}),
+                });
+                // Nach dem Swap frisch lesen und erneut auf das Budget kappen.
+                bal = await _freshSideBalances(pool, keypair);
+                const totalAfter = bal.a * usd.a + bal.b * usd.b;
+                const f = totalAfter > budgetLeftUsdc ? budgetLeftUsdc / totalAfter : 1;
+                useA = bal.a * f;
+                useB = bal.b * f;
+            } catch (err) {
+                console.warn(`${logPrefix} ${pool.pair}: ${t('cli.ld.sweep_swap_failed', { error: err.message })}`);
+            }
+        }
+
+        // Deckelung wie im Hauptpfad: tokenMax = amount × (1 + Slippage) muss unter der
+        // Wallet-Balance bleiben, sonst schlägt der On-Chain-TransferChecked fehl.
+        const WALLET_SAFETY = 0.999;
+        const amountA = useA / SLIPPAGE_FACTOR * WALLET_SAFETY;
+        const amountB = useB / SLIPPAGE_FACTOR * WALLET_SAFETY;
+        if (amountA <= 0 && amountB <= 0) return null;
+
+        log(t('cli.ld.sweep_start', {
+            a: amountA.toFixed(6), tokenA: symA,
+            b: amountB.toFixed(6), tokenB: symB,
+            usdc: (amountA * usd.a + amountB * usd.b).toFixed(2),
+        }));
+
+        const res = await adapter.increaseLiquidity(pool, nftMint, amountA, amountB, DEPOSIT_SLIPPAGE);
+        if (!res?.txHash) return null;   // Quote 0 → keine TX, nichts zu buchen
+
+        // res.tokenEstA/B sind seit 2026-08-22 die on-chain bewegten Ist-Mengen (Vault-Deltas
+        // der bestätigten TX), bewertet zum Ausführungspreis — nicht mehr die Quote.
+        const usdcAdded = calcDepositedUsdc(res.tokenEstA, res.tokenEstB, res.priceExec ?? currentPrice, pool, 0, quotePrice);
+        log(t('cli.ld.sweep_ok', { usdc: usdcAdded.toFixed(2), tx: res.txHash }));
+        return {
+            ...res,                       // liquidityAdded, priceExec, measured, tickLower/Upper …
+            usdc:           usdcAdded,
+        };
+    } catch (err) {
+        console.warn(`${logPrefix} ${pool.pair}: ${t('cli.ld.sweep_failed', { error: err?.message ?? String(err) })}`);
+        return null;
+    }
+}
+
 // ─── Deposit-Kernpfade ────────────────────────────────────────────────────────
 
 /**
@@ -238,24 +446,57 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
         return 0;
     }
 
-    const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool);
+    // Ist-Mengen (Vault-Deltas der TX) zum Ausführungspreis — siehe orca.js increaseLiquidity.
+    const depositedMain = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, result.priceExec ?? currentPrice, pool);
+
+    // Rest-Einzahlung. Budget = exakt das, was auch die Haupteinzahlung oben höchstens
+    // einsetzen durfte: das USDC-Budget (ggf. schon auf CLEANUP_MAX_DEPOSIT gedeckelt)
+    // plus die tokenA-Seite, gedeckelt wie amountA auf estTokenAFull × 1,1. Ein größeres
+    // Budget würde den Cleanup-Cap über die Hintertür aushebeln.
+    const sweepBudget = depositUsdc + Math.min(walletTokenA, estTokenAFull * 1.1) * currentPrice;
+    const sweep = await sweepResidualIntoPosition(pool, position.nft_mint, {
+        keypair, db, adapter, currentPrice,
+        priceLower: state.priceLower, priceUpper: state.priceUpper,
+        budgetLeftUsdc:  Math.max(0, sweepBudget - depositedMain),
+        swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+    });
+    const depositedUsdc = depositedMain + (sweep?.usdc ?? 0);
+    const addedTokenA   = result.tokenEstA + (sweep?.tokenEstA ?? 0);
+    const addedTokenB   = result.tokenEstB + (sweep?.tokenEstB ?? 0);
+
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
-    updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
-    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
-    const txFee = await getTxFee(result.txHash);
+    updatePositionHodl(db, position.id, addedTokenA, addedTokenB);
+    // Trailing-Stop-Referenz mit dem Liquiditätsfaktor nachziehen + ersten Messwert schreiben.
+    settleCapitalFlow(db, pool, position, {
+        liquidityBefore: state.liquidity, legs: [result, sweep],
+        fallback: { lpBefore, deltaA: addedTokenA, deltaB: addedTokenB, price: currentPrice },
+        logPrefix: '[deposit-lib]',
+    });
+    const txFee = result.txFeeSol ?? await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
         type:     'deposit',
         amountA:  result.tokenEstA,
         amountB:  result.tokenEstB,
-        usdValue: depositedUsdc,
+        usdValue: depositedMain,
         txHash:   result.txHash,
         txFeeSol: txFee,
         note,
     });
 
-    // Position-Snapshot via Delta → "Mein Anteil" sofort aktuell (kein Warten auf Bot-Tick).
-    writePositionSnapshotFromDelta(db, pool, result.tokenEstA, result.tokenEstB, currentPrice);
+    // Rest-Einzahlung als eigene Transaktion buchen (eigener TX-Hash, eigene Fee).
+    if (sweep) {
+        insertTransaction(db, {
+            poolId:   pool.id,
+            type:     'deposit',
+            amountA:  sweep.tokenEstA,
+            amountB:  sweep.tokenEstB,
+            usdValue: sweep.usdc,
+            txHash:   sweep.txHash,
+            txFeeSol: await getTxFee(sweep.txHash),
+            note:     `${note} rest`,
+        });
+    }
 
     console.log(`[deposit-lib] ${pool.pair}: ✓ +${depositedUsdc.toFixed(2)} USDC   TX: ${result.txHash}`);
     return depositedUsdc;
@@ -267,6 +508,14 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
  */
 export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapter, { note = 'deposit' } = {}) {
     const tokenBSymbol = pool.pair.split('/')[0]; // 'EURC' für EURC/USDC (tokenA=USDC, tokenB=EURC)
+
+    // 🔒 LIQ#0316: gehört tokenB gerade zu einem Exit auf einem ANDEREN Pool
+    // (geteilter Mint), kein Deposit — sonst würde fremdes Exit-Kapital investiert.
+    const depositBlock = foreignExitBlock(db, pool, '[deposit-lib]');
+    if (depositBlock.blocked) {
+        console.log(`[deposit-lib] ${pool.pair}: Deposit übersprungen: ${depositBlock.reason}`);
+        return 0;
+    }
 
     if (depositUsdc < MIN_USDC_AMOUNT) {
         console.log(`[deposit-lib] ${pool.pair}: Budget ${depositUsdc.toFixed(4)} USDC zu gering – skip.`);
@@ -301,6 +550,10 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
     let walletTokenB = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
     if (walletTokenB < targetB) {
         const deficitB        = targetB - walletTokenB;
+        // Puffer = die hier konfigurierte Swap-Slippage (PRESWAP_SLIPPAGE_BPS = 150 bps),
+        // nicht mehr. Im manuellen Pfad (bin/deposit.js) sind es aus demselben Grund nur
+        // 1,005 — dort läuft der Swap mit dem Default von 50 bps. Alles über der Slippage
+        // wäre Überschuss, der als Token-Rest im Wallet liegen bliebe.
         const swapAmountUsdc  = (deficitB / currentPrice) * 1.015;
         const swapAmountFinal = Math.min(swapAmountUsdc, depositUsdc * 0.99);
         if (swapAmountFinal >= 0.01) {
@@ -383,24 +636,52 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
         return 0;
     }
 
-    const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool);
+    const depositedMain = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, result.priceExec ?? currentPrice, pool);
+
+    // Rest-Einzahlung: Budget ist hier das USDC-Budget selbst (tokenA IST USDC).
+    const sweep = await sweepResidualIntoPosition(pool, position.nft_mint, {
+        keypair, db, adapter, currentPrice,
+        priceLower: state.priceLower, priceUpper: state.priceUpper,
+        budgetLeftUsdc:  Math.max(0, depositUsdc - depositedMain),
+        swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+    });
+    const depositedUsdc = depositedMain + (sweep?.usdc ?? 0);
+    const addedTokenA   = result.tokenEstA + (sweep?.tokenEstA ?? 0);
+    const addedTokenB   = result.tokenEstB + (sweep?.tokenEstB ?? 0);
+
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
-    updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
-    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
-    const txFee = await getTxFee(result.txHash);
+    updatePositionHodl(db, position.id, addedTokenA, addedTokenB);
+    // Trailing-Stop-Referenz mit dem Liquiditätsfaktor nachziehen + ersten Messwert schreiben.
+    settleCapitalFlow(db, pool, position, {
+        liquidityBefore: state.liquidity, legs: [result, sweep],
+        fallback: { lpBefore, deltaA: addedTokenA, deltaB: addedTokenB, price: currentPrice },
+        logPrefix: '[deposit-lib]',
+    });
+    const txFee = result.txFeeSol ?? await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
         type:     'deposit',
         amountA:  result.tokenEstA,
         amountB:  result.tokenEstB,
-        usdValue: depositedUsdc,
+        usdValue: depositedMain,
         txHash:   result.txHash,
         txFeeSol: txFee,
         note,
     });
 
-    // Position-Snapshot via Delta → "Mein Anteil" sofort aktuell.
-    writePositionSnapshotFromDelta(db, pool, result.tokenEstA, result.tokenEstB, currentPrice);
+    // Rest-Einzahlung als eigene Transaktion buchen (eigener TX-Hash, eigene Fee).
+    if (sweep) {
+        insertTransaction(db, {
+            poolId:   pool.id,
+            type:     'deposit',
+            amountA:  sweep.tokenEstA,
+            amountB:  sweep.tokenEstB,
+            usdValue: sweep.usdc,
+            txHash:   sweep.txHash,
+            txFeeSol: await getTxFee(sweep.txHash),
+            note:     `${note} rest`,
+        });
+    }
 
     console.log(`[deposit-lib] ${pool.pair}: ✓ +${depositedUsdc.toFixed(2)} USDC   TX: ${result.txHash}`);
     return depositedUsdc;
@@ -422,6 +703,15 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
  * Identischer Ablauf wie bin/deposit.js --new für volatilePair.
  */
 async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cleanup', quotePrice = 0 } = {}) {
+    // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool
+    // (geteilter Mint), keine neue Position öffnen — sonst würde fremdes
+    // Exit-Kapital investiert.
+    const openBlock = foreignExitBlock(db, pool, '[deposit-lib]');
+    if (openBlock.blocked) {
+        console.log(`[deposit-lib] ${pool.pair}: Öffnen übersprungen: ${openBlock.reason}`);
+        return 0;
+    }
+
     // ─── 1. Frische Preise ────────────────────────────────────────────────────
     let poolStats, resolvedQuotePrice;
     try {
@@ -429,7 +719,10 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
         if (quotePrice > 0) {
             resolvedQuotePrice = quotePrice;
         } else {
-            resolvedQuotePrice = getTokenUsdPrice(pool.quoteTokenMint, db);
+            // Gleiche Quelle wie jeder Snapshot (Pyth, max. 5 Min alt; pool_stats nur Fallback).
+            // Mit dem stündlichen pool_stats-Preis lag der Einstand von SOL/cbBTC am 2026-08-22
+            // 5,8 % über dem ersten Messwert — reine Bewertungsdifferenz, kein Verlust.
+            resolvedQuotePrice = getQuotePriceUsd(db, pool);
             if (resolvedQuotePrice <= 0) throw new Error(`Kein USD-Preis für quoteToken ${pool.quoteTokenMint} – bitte Bot starten`);
         }
     } catch (err) {
@@ -485,7 +778,22 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     const realAmounts = PoolUtil.getTokenAmountsFromLiquidity(liquidityBN, sqrtPrice, sqrtLower, sqrtUpper, false);
     const realTokenA  = new Decimal(realAmounts.tokenA.toString()).div(new Decimal(10).pow(pool.decimalsA)).toNumber();
     const realTokenB  = new Decimal(realAmounts.tokenB.toString()).div(new Decimal(10).pow(pool.decimalsB)).toNumber();
-    const capitalUsdc = calcDepositedUsdc(realTokenA, realTokenB, currentPrice, pool, 0, resolvedQuotePrice);
+    const openedCapital = calcDepositedUsdc(realTokenA, realTokenB, currentPrice, pool, 0, resolvedQuotePrice);
+
+    // ─── 5b. Rest-Einzahlung direkt in die frische Position ───────────────────
+    // Kein Budget-Deckel (siehe depositVolatilePair): dieser Pfad setzt bewusst den
+    // gesamten Wallet-Bestand ein, der Rest ist der Überschuss der nicht-bindenden Seite.
+    const sweep = await sweepResidualIntoPosition(pool, result.nftMint, {
+        keypair, db, adapter, currentPrice,
+        priceLower: range.priceLower, priceUpper: range.priceUpper,
+        budgetLeftUsdc:  Infinity,
+        quotePrice:      resolvedQuotePrice,
+        swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+        logPrefix:       '[deposit-lib:open]',
+    });
+    const totalTokenA = realTokenA + (sweep?.tokenEstA ?? 0);
+    const totalTokenB = realTokenB + (sweep?.tokenEstB ?? 0);
+    const capitalUsdc = openedCapital + (sweep?.usdc ?? 0);
 
     // ─── 6. DB-Einträge ───────────────────────────────────────────────────────
     clearPositionSnapshots(db, pool.id);
@@ -496,10 +804,10 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
         tickUpper:    range.tickUpper,
         priceLower:   range.priceLower,
         priceUpper:   range.priceUpper,
-        liquidity:    result.liquidity,
+        liquidity:    sweep?.addedLiquidity ?? result.liquidity,
         capitalUsdc,
-        hodlTokenA:   realTokenA,
-        hodlTokenB:   realTokenB,
+        hodlTokenA:   totalTokenA,
+        hodlTokenB:   totalTokenB,
         hodlPriceUsd: currentPrice,
         openTx:       result.txHash,
         openedAt:     Date.now(),
@@ -510,37 +818,69 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
         type:     'open_position',
         amountA:  realTokenA,
         amountB:  realTokenB,
-        usdValue: capitalUsdc,
+        usdValue: openedCapital,
         txHash:   result.txHash,
         txFeeSol: openFee,
         note:     `${note} (Tick ${range.tickLower} – ${range.tickUpper})`,
     });
-    insertPositionSnapshot(db, {
-        poolId:         pool.id,
-        lpValueUsd:     capitalUsdc,
-        feesPendingUsd: 0,
-        feesPendingA:   0,
-        feesPendingB:   0,
-        ilUsd:          0,
-        ilPct:          0,
-        amountA:        realTokenA,
-        amountB:        realTokenB,
-        price:          currentPrice,
-    });
+    if (sweep) {
+        insertTransaction(db, {
+            poolId:   pool.id,
+            type:     'deposit',
+            amountA:  sweep.tokenEstA,
+            amountB:  sweep.tokenEstB,
+            usdValue: sweep.usdc > 0 ? sweep.usdc : null,
+            txHash:   sweep.txHash,
+            txFeeSol: await getTxFee(sweep.txHash),
+            note:     `${note} rest`,
+        });
+    }
+    // Referenz des Trailing Stops sofort aus einem gemessenen On-Chain-Read setzen, statt
+    // sie dem nächsten Bot-Tick zu überlassen — sonst beginnt seine Wertreihe erst bis zu
+    // fünf Minuten nach dem Einstieg (siehe establishPositionBaseline). Nur wenn die Messung
+    // fehlschlägt, bleibt es beim bisherigen Quote-Snapshot.
+    const baselineOk = await establishPositionBaseline(
+        db, pool, adapter, result.nftMint, currentPrice, { logPrefix: '[deposit-lib:open]' },
+    );
+    if (!baselineOk) {
+        insertPositionSnapshot(db, {
+            poolId:         pool.id,
+            lpValueUsd:     capitalUsdc,
+            feesPendingUsd: 0,
+            feesPendingA:   0,
+            feesPendingB:   0,
+            ilUsd:          0,
+            ilPct:          0,
+            amountA:        totalTokenA,
+            amountB:        totalTokenB,
+            price:          currentPrice,
+        });
+    }
     insertCapitalFlow(db, {
         poolId:          pool.id,
-        usdcAmount:      capitalUsdc,
+        usdcAmount:      openedCapital,
         balanceSnapshot: null,
         txHash:          result.txHash,
         note:            `${note} openPosition`,
         isExternal:      0,  // cleanup-intern, kein externer Kapitalfluss
     });
+    if (sweep) {
+        insertCapitalFlow(db, {
+            poolId:          pool.id,
+            usdcAmount:      sweep.usdc,
+            balanceSnapshot: null,
+            txHash:          sweep.txHash,
+            note:            `${note} rest`,
+            isExternal:      0,
+        });
+    }
 
     // ─── 7. Pool aktivieren (DB ist Single Source of Truth) ───────────────────
     if (setPoolActive(pool.id, true)) {
         console.log(`[deposit-lib:open] Pool ${pool.pair} auf active=true gesetzt`);
     }
     ensureScoreLimitEnabled(pool.id);
+    ensureTrailingStopDefaults(pool.id, pool.poolType);
     {
         const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
         ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
@@ -548,7 +888,7 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     ensureTrailingStopMinimumReset(pool.id);
 
     // ─── 8. Notifications ────────────────────────────────────────────────────
-    await notify.depositAdded(pool, capitalUsdc, realTokenA, realTokenB, result.txHash, true);
+    await notify.depositAdded(pool, capitalUsdc, totalTokenA, totalTokenB, result.txHash, true);
     await notify.positionOpened(pool, {
         priceLower: range.priceLower,
         priceUpper: range.priceUpper,
@@ -616,25 +956,56 @@ export async function depositVolatilePair(pool, keypair, db, adapter, { note = '
 
     const resolvedQuotePrice = quotePrice > 0
         ? quotePrice
-        : getTokenUsdPrice(pool.quoteTokenMint, db);
+        : getQuotePriceUsd(db, pool);                 // Pyth wie die Snapshots, pool_stats nur Fallback
     const currentPrice  = state.currentPrice ?? 0;
-    const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool, 0, resolvedQuotePrice);
+    const depositedMain = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, result.priceExec ?? currentPrice, pool, 0, resolvedQuotePrice);
+
+    // Rest-Einzahlung: dieser Pfad zahlt bewusst den kompletten Wallet-Bestand beider
+    // Pool-Tokens ein, deshalb kein Budget-Deckel — was übrig bleibt, ist per Definition
+    // der von Orca nicht genutzte Überschuss der nicht-bindenden Seite.
+    const sweep = await sweepResidualIntoPosition(pool, position.nft_mint, {
+        keypair, db, adapter, currentPrice,
+        priceLower: state.priceLower, priceUpper: state.priceUpper,
+        budgetLeftUsdc:  Infinity,
+        quotePrice:      resolvedQuotePrice,
+        swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+    });
+    const depositedUsdc = depositedMain + (sweep?.usdc ?? 0);
+    const addedTokenA   = result.tokenEstA + (sweep?.tokenEstA ?? 0);
+    const addedTokenB   = result.tokenEstB + (sweep?.tokenEstB ?? 0);
+
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
-    updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
-    _rebaseHwmAfterDeposit(db, pool, position.id, lpBefore);
-    const txFee = await getTxFee(result.txHash);
+    updatePositionHodl(db, position.id, addedTokenA, addedTokenB);
+    settleCapitalFlow(db, pool, position, {
+        liquidityBefore: state.liquidity, legs: [result, sweep],
+        fallback: { lpBefore, deltaA: addedTokenA, deltaB: addedTokenB, price: currentPrice },
+        logPrefix: '[deposit-lib]',
+    });
+    const txFee = result.txFeeSol ?? await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
         type:     'deposit',
         amountA:  result.tokenEstA,
         amountB:  result.tokenEstB,
-        usdValue: depositedUsdc > 0 ? depositedUsdc : null,
+        usdValue: depositedMain > 0 ? depositedMain : null,
         txHash:   result.txHash,
         txFeeSol: txFee,
         note,
     });
 
-    writePositionSnapshotFromDelta(db, pool, result.tokenEstA, result.tokenEstB, currentPrice);
+    // Rest-Einzahlung als eigene Transaktion buchen (eigener TX-Hash, eigene Fee).
+    if (sweep) {
+        insertTransaction(db, {
+            poolId:   pool.id,
+            type:     'deposit',
+            amountA:  sweep.tokenEstA,
+            amountB:  sweep.tokenEstB,
+            usdValue: sweep.usdc > 0 ? sweep.usdc : null,
+            txHash:   sweep.txHash,
+            txFeeSol: await getTxFee(sweep.txHash),
+            note:     `${note} rest`,
+        });
+    }
 
     console.log(`[deposit-lib] ${pool.pair}: ✓ +${depositedUsdc.toFixed(2)} USDC   TX: ${result.txHash}`);
     return depositedUsdc;

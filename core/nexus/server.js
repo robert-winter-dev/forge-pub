@@ -10,7 +10,7 @@
  *   /kamino/*    →  https://api.kamino.finance/*
  *   /loopscale/* →  https://tars.loopscale.com/v1/*
  *   /gecko/*     →  https://api.geckoterminal.com/api/v2/*
- *   /pyth/price  →  https://hermes.pyth.network/ (SOL/BTC Preis-Oracle, 30s Cache)
+ *   (Pyth/Hermes entfernt 2026-08-27 — Referenzpreise laufen über /jup/price/v3)
  *   POST /rpc        →  Helius RPC (mit Cache)
  *   POST /rpc/fresh  →  Helius RPC (kein Cache)
  *   POST /notify     →  Zentrale Notification-Weiterleitung (DB + Telegram)
@@ -41,7 +41,7 @@ import { TxQueue }           from './tx-queue.js';
 import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
-import { insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting } from './notify-db.js';
+import { insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting, getFeatureFlag, setFeatureFlag } from './notify-db.js';
 import { checkDedup, setDedupRowId, checkRateLimit, fmtTime } from './dedup.js';
 import { visibility, checkLogOnlyKeys } from './notify-visibility.js';
 import { readMaintenanceFlag } from '../maintenance.js';
@@ -476,6 +476,11 @@ const TELEGRAM_WARN_CATEGORIES = new Set([
     'range-hint',
     'new-pool-alert',
 ]);
+// 🔒 'daily-report' steht hier bewusst NICHT: Der Tagesbericht ist eine Tabelle und gehört
+// ins Message Center. Telegram kann keine Tabellen — dort kam er als Textwust mit wilden
+// Zeilenumbrüchen an (Betreiber-Ansage 2026-08-22: „Bitte schalte das ab!!!"). Ohne Eintrag
+// hier landet er ausschließlich in der DB und damit im Message Center, das ihn als echte
+// Tabelle rendert. Telegram bleibt dem vorbehalten, was sofort auffallen muss.
 
 app.post('/notify', async (req, res) => {
     const { botId, displayName, level, category, message, context, telegramOnly, msgKey, params, timestamp } = req.body ?? {};
@@ -576,75 +581,23 @@ app.post('/notify', async (req, res) => {
     return res.json({ ok: true, sentTelegram });
 });
 
-// ─── Pyth / Hermes Preis-Oracle ──────────────────────────────────────────────
+// ─── Pyth / Hermes Preis-Oracle — ENTFERNT am 2026-08-27 (CORE#0334) ─────────
 //
-// GET /pyth/price?ids=sol,btc  →  Hermes API (Pyth price feeds)
+// Hermes verlangt seit dem 26.08.2026 einen API-Key und lieferte davor durchgehend
+// HTTP 401. Der Ausfall blieb acht Stunden unbemerkt, weil dieser Proxy bei jedem
+// Fehlschlag den letzten gecachten Preis als NORMALE Antwort zurückgab — der Aufrufer
+// konnte einen Notbehelf nicht von einem frischen Wert unterscheiden und schrieb ihn
+// mit aktuellem Zeitstempel weiter. Alle X/SOL-Pools wurden derweil ~6 % zu niedrig
+// bewertet (Bewertung, PnL, Trailing-Stop-Referenz).
 //
-// Gibt für jeden angeforderten Symbol den aktuellen Pyth-Preis zurück.
-// Unterstützte Symbole: sol, btc
-// Cache: 30s (Pyth aktualisiert ~1s, aber 30s Freshness reicht für USD-Bewertung)
+// Ersetzt durch Jupiter über die bestehende /jup/*-Route (bots/liquidity/lib/
+// reference-prices.js). Gründe: kein API-Key (FORGE.pub bleibt ohne Zusatzkonfiguration
+// lauffähig), kein Stale-Fallback (proxyToJupiter antwortet bei Störung mit 503 statt
+// mit einem alten Wert) und keine neue externe Abhängigkeit.
 //
-// Hermes API: https://hermes.pyth.network/v2/updates/price/latest
-// Kein API-Key nötig, öffentlicher Feed.
-
-const PYTH_FEED_IDS = {
-    sol: 'ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d',
-    btc: 'e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
-};
-const PYTH_CACHE_TTL_MS = 30_000;
-const pythCache = new Map(); // symbol → { price, ts }
-
-app.get('/pyth/price', async (req, res) => {
-    const requested = String(req.query.ids ?? 'sol').split(',').map(s => s.trim().toLowerCase());
-    const result = {};
-
-    const toFetch = [];
-    const now = Date.now();
-    for (const sym of requested) {
-        if (!PYTH_FEED_IDS[sym]) continue;
-        const cached = pythCache.get(sym);
-        if (cached && now - cached.ts < PYTH_CACHE_TTL_MS) {
-            result[sym] = cached.price;
-        } else {
-            toFetch.push(sym);
-        }
-    }
-
-    if (toFetch.length > 0) {
-        try {
-            const idsParam = toFetch.map(s => `ids[]=${PYTH_FEED_IDS[s]}`).join('&');
-            const url = `https://hermes.pyth.network/v2/updates/price/latest?${idsParam}`;
-            console.log(`[nexus:pyth] GET ${url}`);
-            const upstream = await fetchWithRetry(url, {
-                headers: { accept: 'application/json' },
-                signal: AbortSignal.timeout(8_000),
-            }, 'pyth/price');
-            if (!upstream.ok) throw new Error(`Hermes HTTP ${upstream.status}`);
-            const json = await upstream.json();
-            for (const entry of (json.parsed ?? [])) {
-                const sym = Object.keys(PYTH_FEED_IDS).find(k => PYTH_FEED_IDS[k] === entry.id);
-                if (!sym) continue;
-                const p = entry.price;
-                const price = parseFloat(p.price) * Math.pow(10, p.expo);
-                pythCache.set(sym, { price, ts: now });
-                result[sym] = price;
-                console.log(`[nexus:pyth] ${sym.toUpperCase()}/USD = ${price.toFixed(4)} (conf ±${(parseFloat(p.conf) * Math.pow(10, p.expo)).toFixed(4)})`);
-            }
-        } catch (err) {
-            console.error(`[nexus:pyth] Fehler: ${err.message}`);
-            // Stale Cache als Fallback
-            for (const sym of toFetch) {
-                const cached = pythCache.get(sym);
-                if (cached) result[sym] = cached.price;
-            }
-            if (Object.keys(result).length === 0) {
-                return res.status(502).json({ error: 'Pyth nicht erreichbar', message: err.message });
-            }
-        }
-    }
-
-    res.json(result);
-});
+// 🔒 Lehre für jeden künftigen Cache mit Fallback: Ein ausgelieferter Notbehelf MUSS
+// als solcher erkennbar sein. Sonst wird aus einer sichtbaren Störung ein unsichtbarer
+// Dauerzustand. Siehe doc/CHANGELOG/2026-08-27.md.
 
 // ─── Notifications: Gelesen-Status ────────────────────────────────────────────
 // Schreibzugriff auf nexus.db bleibt exklusiv beim Nexus-Prozess (Konvention),
@@ -679,10 +632,26 @@ app.get('/notifications/settings', (_req, res) => {
 
 app.post('/notifications/settings', (req, res) => {
     const { type, enabled } = req.body ?? {};
-    if (!['system', 'bots', 'support', 'premium'].includes(type) || typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'type muss system/bots/support/premium sein, enabled ein Boolean' });
+    if (!['system', 'bots', 'support', 'premium', 'risk'].includes(type) || typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'type muss system/bots/support/premium/risk sein, enabled ein Boolean' });
     }
     setNotifySetting(type, enabled);
+    res.json({ ok: true });
+});
+
+// Feature-Toggles (Message-Center-Einstellungen), die nicht nur die Badge-Sicht-
+// barkeit steuern, sondern ob eine Meldung überhaupt erzeugt wird. Erster Nutzer:
+// der Liquidity-Tagesbericht (bots/liquidity/bin/daily-report.js).
+app.get('/features/:feature', (req, res) => {
+    res.json({ enabled: getFeatureFlag(req.params.feature) });
+});
+
+app.post('/features/:feature', (req, res) => {
+    const { enabled } = req.body ?? {};
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'enabled muss ein Boolean sein' });
+    }
+    setFeatureFlag(req.params.feature, enabled);
     res.json({ ok: true });
 });
 

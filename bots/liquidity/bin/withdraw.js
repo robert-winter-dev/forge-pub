@@ -448,14 +448,14 @@ try {
         // Boden; landet die TX wirklich nicht, scheitert sie dort mit klarer Meldung.
         if (healedSol < config.solReserve) {
             console.warn(`[withdraw] ${t('cli.lw.topup_below_reserve', { sol: healedSol.toFixed(4) })}`);
-            await notify.solLow(healedSol).catch(() => {});
+            await notify.solLow(db, healedSol).catch(() => {});
         } else {
             console.log(`[withdraw] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'decreaseLiquidity' })}`);
         }
         try {
             result = await adapter.decreaseLiquidity(pool, position.nft_mint, withdrawUsdc, WITHDRAW_SLIPPAGE, refPriceUsdWd);
         } catch (err2) {
-            await notify.solLow(err2.solBalance ?? healedSol).catch(() => {});
+            await notify.solLow(db, err2.solBalance ?? healedSol).catch(() => {});
             db.close();
             abort(err2.message);
         }

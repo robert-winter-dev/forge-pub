@@ -14,50 +14,40 @@
    bloßen Lesen einer Nachricht.
    ══════════════════════════════════════════════════════════════════════════════ */
 
-/* ── Rubriken-Reiter (System/Support/Premium) ─────────────────────────────────
-   1:1 die Optik der Health-Monitor-Reiter (.health-tabs-band/.htab in
-   html/css/health.css) – bewusst als eigene Klassen dupliziert, weil message.html
-   health.css nicht einbindet und settings.css von Seiten ohne Reiter geteilt wird.
-   Ändert sich dort die Optik, gehört sie hier nachgezogen. */
-.header.mc-header { padding-bottom: 0; }
-.mc-tabs-band {
-    border-top: 1px solid rgba(71, 85, 105, 0.4);
-    margin-top: 12px;
-    overflow-x: auto;
-    scrollbar-width: none;
-}
-.mc-tabs-band::-webkit-scrollbar { display: none; }
+/* ── Rubriken-Pillen (System/Bots/Support/Premium) ────────────────────────────
+   Bis 2026-08-25 eigene Reiterzeile unter dem Header (Optik der Health-Monitor-
+   Reiter .health-tabs-band/.htab), seither Pillen rechts neben dem Suchfeld in
+   der Toolbar – kompakter, das Message Center rutscht dadurch weiter nach oben. */
 .mc-tabs-inner {
-    max-width: 1400px;
-    margin: 0 auto;
     display: flex;
-    gap: 2px;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 .mctab {
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
     color: var(--text-muted);
-    font-size: 0.875rem;
+    font-size: 0.8rem;
     font-weight: 500;
-    padding: 10px 18px;
+    padding: 0.45rem 0.75rem;
     cursor: pointer;
     white-space: nowrap;
     transition: color 0.15s, border-color 0.15s, background 0.15s;
-    border-radius: 6px 6px 0 0;
+    border-radius: 7px;
     display: flex;
     align-items: center;
-    gap: 7px;
-    margin-bottom: -1px;
+    justify-content: center;
+    gap: 6px;
+    width: 100px;
 }
-.mctab:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+.mctab:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
 .mctab.active {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
-    background: rgba(0, 212, 255, 0.05);
+    color: var(--bg);
+    border-color: var(--accent);
+    background: var(--accent);
 }
 /* Ungelesen-Zähler je Rubrik – stand bis 2026-08-16 im Hamburger-Menü, gehört mit
-   den Reitern aber dorthin, wo auch umgeschaltet wird. */
+   den Rubriken aber dorthin, wo auch umgeschaltet wird. */
 .mctab-count {
     font-size: 0.68rem;
     font-weight: 700;
@@ -67,6 +57,7 @@
     background: var(--accent);
     color: var(--bg);
 }
+.mctab.active .mctab-count { background: var(--bg); color: var(--accent); }
 .mctab-count[hidden] { display: none; }
 
 /* ── Grundlayout ─────────────────────────────────────────────────────────────
@@ -95,6 +86,13 @@
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
+}
+.mc-toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    min-width: 0;
 }
 .mc-toolbar-right {
     display: flex;
@@ -149,12 +147,32 @@
     width: 100%;
     padding: 9px 12px;
     border: 1px solid var(--border);
-    border-radius: var(--radius, 10px);
+    /* Fest auf denselben Wert wie .mctab (Rubriken-Pillen) statt des globalen
+       --radius (12px) – sonst wirken Listeneinträge sichtbar runder als die
+       Reiter direkt darüber, obwohl beides Kacheln derselben Ansicht sind. */
+    border-radius: 7px;
     background: var(--surface);
     color: inherit;
     font: inherit;
     text-align: left;
     cursor: pointer;
+    flex-shrink: 0;
+}
+/* Leerzustand der Liste (z.B. "Keine System-Benachrichtigungen.") – optisch
+   dieselbe Kachel wie ein echter Eintrag (.mcli), nur nicht klickbar und mit
+   zentriertem, gedämpftem Text statt Absender/Betreff. */
+.mcli-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 1.5rem 12px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface);
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-align: center;
     flex-shrink: 0;
 }
 .mcli:hover { background: rgba(255, 255, 255, 0.04); }
@@ -227,7 +245,7 @@
     flex-shrink: 0;
 }
 .mc-pane-title {
-    font-size: 1rem;
+    font-size: 1.15rem;
     font-weight: 700;
     color: var(--text);
     margin: 0;
@@ -279,6 +297,77 @@
     font-size: 0.9rem;
     line-height: 1.55;
     overflow-wrap: anywhere;
+}
+/* Inline-Code aus `` `text` `` (siehe inlineMarkdown() in js/message.js), z.B. Wallet-
+   Adressen oder Befehle mitten im Fließtext. */
+.mc-detail-text code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+}
+/* Echte Tabelle — aus einer Pipe-Tabelle im Meldungstext (pipeTableToHtml()) oder aus
+   riskExitHtml() (Risk-Management-Details). Bewusst NICHT an .mc-detail-text gebunden
+   (anders als bis 2026-08-24): riskExitHtml() liegt außerhalb dieses Containers, weil
+   dessen `white-space: pre-line` die Einrückung der Template-Strings als zusätzliche
+   Leerzeilen anzeigen würde. `white-space: normal` hier hebt das für den Pipe-Tabellen-
+   Fall auf, wo table.mc-table innerhalb eines .mc-detail-text-Blocks steht. */
+table.mc-table {
+    white-space: normal;
+    border-collapse: collapse;
+    margin: 0.7em 0;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    /* Schmale Tabellen sollen nicht über die volle Breite gezerrt werden, breite dürfen
+       innerhalb der Karte scrollen statt sie zu sprengen. */
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
+}
+table.mc-table th,
+table.mc-table td {
+    padding: 0.35em 0.7em;
+    border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+    text-align: left;
+    white-space: nowrap;
+}
+table.mc-table th {
+    background: var(--bg-alt, rgba(127, 127, 127, 0.14));
+    font-weight: 600;
+}
+/* Zahlenspalten rechtsbündig und mit Tabellenziffern — nur so stehen die Stellen
+   untereinander und lassen sich zeilenweise vergleichen. */
+table.mc-table .mc-num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+/* Pipe-Tabellen aus Fließtext-Meldungen (z.B. Tagesbericht, daily-report.js) auf
+   dieselbe Breitenobergrenze wie die Risk-Management-Details-Tabelle gedeckelt
+   (Vorgabe 2026-08-24: "ungefähr dieselbe Breite"). Bewusst nur max-width, keine
+   feste width wie bei .mc-risk-details — hier ist die Spaltenzahl variabel (Zeit/
+   Pool/PnL/Exit-Grund), eine Tabelle mit wenig Inhalt (z.B. nur 1 Exit) soll nicht
+   künstlich auf 640px aufgezogen werden. Bei viel Inhalt greift weiterhin das
+   horizontale Scrollen der Basis-Regel oben. */
+.mc-detail-text table.mc-table { max-width: 640px; }
+
+/* Monospace-Block aus einem ```-Abschnitt im Meldungstext (siehe fenceToPre() in
+   js/message.js). Fallback, wenn der Block keine Pipe-Tabelle ist.
+   `white-space: pre` ist der Punkt: Das umgebende `pre-line` kollabiert
+   mehrfache Leerzeichen, wodurch ausgerichtete Spalten zusammenrutschen. */
+.mc-detail-text pre.mc-pre {
+    margin: 0.6em 0;
+    padding: 0.6em 0.7em;
+    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.45;
+    white-space: pre;
+    overflow-x: auto;
+    overflow-wrap: normal;
 }
 
 /* ── Nachrichten-Verlauf (Support) ───────────────────────────────────────────
@@ -460,27 +549,69 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
 }
-/* ── Risk-Management-Exit-Details (strukturierte Zeilen statt Fließtext) ─────
-   Bewusst KEIN Label/Wert-Raster mit fester Spaltenbreite wie bei
-   .msg-pay-row/.msg-pay-label – die Labels sind teils lang ("Pool-Wert bei
-   Schließung") und würden dort hässlich umbrechen (Befund 2026-08-19, per
-   Screenshot gemeldet). Jede Zeile ist stattdessen ein normal fließender Satz. */
-.mc-risk-list {
-    list-style: none;
-    margin: 0.5rem 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    font-size: 0.88rem;
-    line-height: 1.5;
-    overflow-wrap: anywhere;
+/* ── Risk-Management-Exit-Details ─────────────────────────────────────────
+   riskExitHtml() in js/message.js: h1/h2-Abschnitte statt Fließtext (Vorgabe
+   2026-08-24) – eigene, moderate Größen statt der Browser-Defaults, sonst
+   sprengt ein <h1> die schmale Detailspalte. */
+/* Ein Wrapper-Div als einziges Flex-Item von .mc-pane-body — siehe Kommentar in
+   riskExitHtml(): lose Geschwister-Elemente würden dort sonst selbst zu
+   Flex-Items und Tabellen darunter können auf Null-Höhe schrumpfen. */
+.mc-risk-block { min-width: 0; }
+.mc-risk-heading {
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0.9rem 0 0.3rem;
 }
-.mc-risk-label { color: var(--text-muted); }
+.mc-risk-heading:first-child { margin-top: 0; }
+.mc-risk-h2 {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin: 0.9rem 0 0.3rem;
+}
+.mc-risk-result { margin: 0.2rem 0 0.6rem; font-size: 0.95rem; }
+/* Eine Details-Tabelle statt zwei nebeneinander (Vorgabe 2026-08-24, zurückgenommen —
+   zwei Spalten sahen nicht gut aus). ~80% der verfügbaren Breite, gedeckelt auf eine
+   klassische Notebook-Breite abzüglich der Nachrichtenliste links — auf einem großen
+   Monitor soll die Tabelle nicht über die volle Panel-Breite gezerrt werden.
+   table.mc-table ist sonst auf width:max-content + horizontales Scrollen ausgelegt
+   (Basis-Regel oben) — hier soll sie stattdessen die 80%-Breite exakt ausfüllen. */
+.mc-risk-details { width: 80%; max-width: 640px; margin-bottom: 1rem; }
+.mc-risk-details table.mc-table { display: table; width: 100%; margin: 0; }
+/* Zwei Tabellen-Abschnitte direkt hintereinander (z.B. Tagesbericht: geschlossene +
+   offene Trades) brauchen sichtbaren Abstand — ohne diese Regel klebt die zweite
+   Überschrift am vorherigen Block, weil .mc-risk-heading:first-child ihren eigenen
+   margin-top zurücksetzt (Vorgabe 2026-08-25). */
+.mc-risk-block + .mc-risk-block { margin-top: 1.2rem; }
+/* Handlungssatz braucht mehr Luft zur Tabelle darüber als der Standardabstand von
+   .mc-detail-text (Feedback 2026-08-24) — sonst wirkt er wie eine weitere
+   Tabellenzeile statt wie ein eigener, abschließender Satz. */
+.mc-risk-action { margin-top: 1.1rem; }
 /* PnL-Zeile: das Vorzeichen im Text (+/−) trägt die Bedeutung, die Farbe ist
    nur Verstärkung (siehe feedback_color_blindness). */
 .msg-pnl-positive { color: var(--success); font-weight: 600; }
 .msg-pnl-negative { color: var(--danger);  font-weight: 600; }
+/* Aufzählung im Tagesbericht (Ergebnis-Kurzfassung oberhalb der Tabelle, Vorgabe
+   2026-08-24) — bewusst MIT sichtbaren Aufzählungspunkten (Fund 2026-08-24, zweimal:
+   zuerst list-style:none entfernte sie ganz; display:flex auf dem <ul> "blockifiziert"
+   die <li>-Kinder aber selbst mit list-style:disc — Flex-Items verlieren ihre
+   Marker-Box laut Spec. Deshalb hier bewusst KEIN Flexbox, normaler Block-Fluss mit
+   margin-bottom statt gap für den Zeilenabstand). */
+.mc-risk-ul {
+    list-style: disc;
+    margin: 0.3rem 0 0.9rem;
+    padding-left: 1.3rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+.mc-risk-ul li + li { margin-top: 0.3rem; }
+/* Zeit/Pool im Tagesbericht zentriert (Vorgabe 2026-08-25) — Gegenstück zu .mc-num
+   (rechtsbündig für Zahlenspalten). */
+table.mc-table .mc-center { text-align: center; }
 
 /* ── Einstellungen-Panel ─────────────────────────────────────────────────────
    Grid: nutzt die volle Breite – auf breiten Bildschirmen stehen mehrere Zeilen

@@ -275,6 +275,8 @@ function initSchema(db) {
             ts_coins_a      REAL,
             ts_coins_b      REAL,
             swapped_usdc    REAL,
+            decrease_tx_hash TEXT,
+            close_error     TEXT,
             config_snapshot TEXT,
             completed_at    INTEGER,
             error_msg       TEXT
@@ -449,6 +451,38 @@ function initSchema(db) {
 
 /** Inkrementelle Schema-Migrationen für bestehende DBs. */
 function migrateSchema(db) {
+    // Wertreihen-Archiv (2026-08-22, Ticket #0313). `clearPositionSnapshots()` löschte die
+    // position_snapshots eines Pools bei jedem Reopen — bei stündlichem Cleanup also
+    // laufend. Folge: Von 102 in 30 Tagen geschlossenen Positionen waren nur 23 nachträglich
+    // auswertbar; 77 % aller Exits ließen sich nicht mehr überprüfen, auch der über Wochen
+    // gemeldete Fall „+1,5 % im Plus, geschlossen bei −2,1 %" nicht.
+    //
+    // 🔒 Bewusst ein Archiv statt „nicht mehr löschen": position_snapshots ist pool- und
+    // nicht positionsbezogen. Blieben alte Reihen liegen, läse `_openingSnapshotMax()` sie
+    // beim Etablieren des Höchststands mit und löste einen Sofort-Fehl-Exit aus. Das
+    // Leseverhalten des Bots bleibt damit exakt unverändert; nur die Historie überlebt.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS position_snapshots_archive (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_id           INTEGER UNIQUE,
+            position_id      INTEGER,
+            pool_id          TEXT NOT NULL,
+            lp_value_usd     REAL,
+            fees_pending_usd REAL,
+            il_usd           REAL,
+            il_pct           REAL,
+            recorded_at      INTEGER NOT NULL,
+            fees_pending_a   REAL,
+            fees_pending_b   REAL,
+            price            REAL,
+            amount_a         REAL,
+            amount_b         REAL,
+            archived_at      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_psa_position ON position_snapshots_archive (position_id);
+        CREATE INDEX IF NOT EXISTS idx_psa_pool_time ON position_snapshots_archive (pool_id, recorded_at);
+    `);
+
     const txCols = db.prepare(`PRAGMA table_info(transactions)`).all().map(c => c.name);
     if (!txCols.includes('tx_fee_sol')) {
         db.exec(`ALTER TABLE transactions ADD COLUMN tx_fee_sol REAL`);
@@ -655,6 +689,14 @@ function migrateSchema(db) {
         db.exec(`ALTER TABLE pools ADD COLUMN enabled_reason TEXT`);
         console.log('[db] Migration: pools.enabled_reason hinzugefügt.');
     }
+    // pool_type: seit LIQ#0332 ebenfalls DB-autoritativ (Festlegung) — der tägliche
+    // Vola-Drift-Check in bot.js korrigiert den Typ bei nachhaltiger Verschiebung, ohne
+    // die statische pools.json zu berühren (kein wiederkehrender Git-Diff, siehe setPoolActive
+    // in lib/config.js). NULL = "noch nie korrigiert" → Seed aus pools.json bleibt maßgeblich.
+    if (!poolCols.includes('pool_type')) {
+        db.exec(`ALTER TABLE pools ADD COLUMN pool_type TEXT`);
+        console.log('[db] Migration: pools.pool_type hinzugefügt.');
+    }
 
     const posCols = db.prepare(`PRAGMA table_info(positions)`).all().map(c => c.name);
     if (!posCols.includes('hwm_usd')) {
@@ -699,6 +741,24 @@ function migrateSchema(db) {
     if (!posCols.includes('d2_armed_at')) {
         db.exec(`ALTER TABLE positions ADD COLUMN d2_armed_at INTEGER`);
         console.log('[db] Migration: positions.d2_armed_at hinzugefügt.');
+    }
+    // pnl_anchor_reset_at — Zeitpunkt eines manuellen "Höchststand zurücksetzen"-Klicks
+    // im Risk-Management-UI. Ausschließlich von processHwmResetIfRequested() gesetzt,
+    // NIE von der routinemäßigen monotonen HWM-Fortschreibung (die läuft bei jedem
+    // Kursanstieg und würde als PnL-Anker sofort wieder falsch).
+    //
+    // Grund für die eigene Spalte statt Wiederverwendung von hwm_at: Der Reset-Klick sagt
+    // dem Trailing Stop "miss ab hier neu" — dieselbe Aussage gilt für "Anteil"/PnL-seit-
+    // Einstieg (bots/liquidity/bin/export.js, computeExitPnl() in exit-finalizer.js), die
+    // beide den PnL-Anker sonst nur bei einem ECHTEN externen Kapitalfluss verschieben
+    // (capital_flows, is_external=1) — ein Reset ist kein Geldfluss, würde also sonst nie
+    // ankommen. Ohne diese Spalte zeigte "Anteil" nach einem Reset weiterhin den Verlust
+    // seit dem echten Einstieg, während der Trailing Stop schon wieder bei 0 % stand
+    // (Befund 2026-08-22: der Menüpunkt "zurücksetzen" legt genau das nahe). Siehe
+    // resolvePnlAnchorMs() (lib/pnl-anchor.js) für die gemeinsame Logik.
+    if (!posCols.includes('pnl_anchor_reset_at')) {
+        db.exec(`ALTER TABLE positions ADD COLUMN pnl_anchor_reset_at INTEGER`);
+        console.log('[db] Migration: positions.pnl_anchor_reset_at hinzugefügt.');
     }
 
     // score_limit_executions: Score-Limit State-Machine
@@ -749,6 +809,8 @@ function migrateSchema(db) {
                 ts_coins_a      REAL,
                 ts_coins_b      REAL,
                 swapped_usdc    REAL,
+                decrease_tx_hash TEXT,
+                close_error     TEXT,
                 config_snapshot TEXT,
                 completed_at    INTEGER,
                 error_msg       TEXT
@@ -756,6 +818,81 @@ function migrateSchema(db) {
         `);
         console.log('[db] Migration: Tabelle ts_executions angelegt.');
     }
+
+    // ts_executions.trigger_source — woher der Auslöser kam: 'tick' (5-Min-Zyklus) oder
+    // 'fast' (Schnellprüfung zwischen zwei Zyklen, lib/fast-stop-check.js). Ohne diese
+    // Spalte ließe sich im Nachhinein nicht messen, ob die Schnellprüfung Exits früher
+    // fängt — und ein Schutzmechanismus ohne Messung ist per KB-Regel keiner
+    // (Core/wirkungsnachweis.md).
+    {
+        const tsCols = db.prepare(`PRAGMA table_info(ts_executions)`).all().map(c => c.name);
+        if (!tsCols.includes('trigger_source')) {
+            db.exec(`ALTER TABLE ts_executions ADD COLUMN trigger_source TEXT`);
+            console.log('[db] Migration: ts_executions.trigger_source hinzugefügt.');
+        }
+    }
+
+    // ts_executions.decrease_tx_hash — Signatur der Liquiditaets-Entnahme, sobald sie
+    // gelandet ist. Traegt den Zustand 'drained': Coins im Wallet, NFT noch nicht geburnt
+    // (LIQ#0312). Ohne diese Spalte war ein Teilfehlschlag von einem folgenlosen Abbruch
+    // nicht zu unterscheiden — der Resume buchte den Erloes dann als ~0.
+    {
+        const tsCols = db.prepare(`PRAGMA table_info(ts_executions)`).all().map(c => c.name);
+        if (!tsCols.includes('decrease_tx_hash')) {
+            db.exec(`ALTER TABLE ts_executions ADD COLUMN decrease_tx_hash TEXT`);
+            console.log('[db] Migration: ts_executions.decrease_tx_hash hinzugefügt.');
+        }
+    }
+
+    // close_error auch fuer die drei uebrigen Exit-State-Machines (LIQ#0312, Entkopplung
+    // 23.08.2026) — dieselbe Trennung wie bei ts_executions: error_msg = „diese Ausführung
+    // ist gescheitert", close_error = „es blieb ein leeres NFT übrig".
+    // Hinweis: tvl_executions wird weiter unten erst angelegt — bei einer NEUEN DB greift
+    // die Schleife dort nicht. Deshalb trägt deren CREATE TABLE die Spalte selbst.
+    for (const tbl of ['score_limit_executions', 'tvl_executions', 'retire_executions']) {
+        if (!tables.includes(tbl)) continue;
+        const cols = db.prepare(`PRAGMA table_info(${tbl})`).all().map(c => c.name);
+        if (!cols.includes('close_error')) {
+            db.exec(`ALTER TABLE ${tbl} ADD COLUMN close_error TEXT`);
+            console.log(`[db] Migration: ${tbl}.close_error hinzugefügt.`);
+        }
+    }
+
+    // ts_executions.close_error — der Position-Close (NFT-Burn) ist gescheitert, das
+    // Kapital wurde aber gerettet (LIQ#0312, Entkopplung 23.08.2026). BEWUSST getrennt von
+    // error_msg: dort steht „diese Ausführung ist gescheitert", hier „es blieb ein leeres
+    // NFT übrig". Eine abgeschlossene Ausführung darf ein close_error tragen — eine
+    // error_msg nicht.
+    {
+        const tsCols = db.prepare(`PRAGMA table_info(ts_executions)`).all().map(c => c.name);
+        if (!tsCols.includes('close_error')) {
+            db.exec(`ALTER TABLE ts_executions ADD COLUMN close_error TEXT`);
+            console.log('[db] Migration: ts_executions.close_error hinzugefügt.');
+        }
+    }
+
+    // ts_fast_checks — jede Schnellprüfung des Trailing Stops (alle ~30 s je Pool mit
+    // Kapital): Live-Preis, daraus gerechneter Positionswert, Abstand zum Höchststand,
+    // Urteil. Das ist die feinere Preis-/Wertreihe, die bisher fehlte (Fartcoin/SOL am
+    // 2026-08-22: −9 % in einem einzigen 5-Min-Intervall, nie belegbar, wie früh ein
+    // engerer Takt ausgelöst hätte). Aufbewahrung 14 Tage (pruneTsFastChecks).
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS ts_fast_checks (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_id       TEXT    NOT NULL,
+            position_id   INTEGER,
+            checked_at    INTEGER NOT NULL,
+            price         REAL,
+            lp_value_usd  REAL,
+            hwm_usd       REAL,
+            drawdown_pct  REAL,
+            threshold_pct REAL,
+            stage         INTEGER,
+            triggered     INTEGER NOT NULL DEFAULT 0,
+            confirmed     INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_ts_fast_checks_pool_time ON ts_fast_checks (pool_id, checked_at);
+    `);
 
     // tvl_executions: TVL-Schutz State-Machine (zweistufig, pro Position pro Stufe)
     if (!tables.includes('tvl_executions')) {
@@ -775,7 +912,8 @@ function migrateSchema(db) {
                 swapped_usdc    REAL,
                 config_snapshot TEXT,
                 completed_at    INTEGER,
-                error_msg       TEXT
+                error_msg       TEXT,
+                close_error     TEXT
             )
         `);
         console.log('[db] Migration: Tabelle tvl_executions angelegt.');
@@ -1322,6 +1460,22 @@ function migrateSchema(db) {
         `);
         console.log('[db] Migration: Tabelle dust_watch angelegt.');
     }
+
+    // sol_low_state: persistenter Zustand der SOL-Reserve-Unterschreitung, über
+    // Bot-Neustarts hinweg (notify.js solLow() hatte bisher nur den In-Memory-Cooldown
+    // `_lastSolLowNotifyAt`, der bei jedem Neustart verlorenging). Singleton-Zeile
+    // (id=1): `active` erlaubt zu erkennen, wann die Reserve sich erholt hat (→ Recovery-
+    // Meldung), `count` zählt die Warn-Wiederholungen für die Betreffzeile ("(1)", "(2)", …).
+    if (!tables.includes('sol_low_state')) {
+        db.exec(`
+            CREATE TABLE sol_low_state (
+                id     INTEGER PRIMARY KEY CHECK (id = 1),
+                active INTEGER NOT NULL DEFAULT 0,
+                count  INTEGER NOT NULL DEFAULT 0
+            );
+        `);
+        console.log('[db] Migration: Tabelle sol_low_state angelegt.');
+    }
 }
 
 // ─── Swap-Fail-Counter (cleanup.js, cross-run) ────────────────────────────────
@@ -1349,6 +1503,35 @@ export function noteSwapFail(db, swapKey, errorMsg) {
 /** Setzt den Fail-Counter für einen Swap-Key nach einem erfolgreichen Swap zurück. */
 export function resetSwapFail(db, swapKey) {
     db.prepare(`DELETE FROM swap_fail_state WHERE swap_key = ?`).run(swapKey);
+}
+
+// ─── SOL-Reserve-Zustand (notify.js solLow(), cross-run) ──────────────────────
+
+/** Markiert die SOL-Reserve als unterschritten, ohne den Warn-Zähler zu erhöhen. */
+export function markSolLowActive(db) {
+    db.prepare(`
+        INSERT INTO sol_low_state (id, active, count) VALUES (1, 1, 0)
+        ON CONFLICT(id) DO UPDATE SET active = 1
+    `).run();
+}
+
+/** Erhöht den Warn-Wiederholungszähler und gibt den neuen Stand zurück (für die Betreffzeile). */
+export function incrementSolLowCount(db) {
+    db.prepare(`
+        INSERT INTO sol_low_state (id, active, count) VALUES (1, 1, 1)
+        ON CONFLICT(id) DO UPDATE SET active = 1, count = sol_low_state.count + 1
+    `).run();
+    return db.prepare(`SELECT count FROM sol_low_state WHERE id = 1`).get().count;
+}
+
+/** True, wenn die SOL-Reserve laut letztem bekannten Zustand aktuell unterschritten ist. */
+export function isSolLowActive(db) {
+    return !!db.prepare(`SELECT active FROM sol_low_state WHERE id = 1`).get()?.active;
+}
+
+/** Setzt den SOL-Reserve-Zustand nach Erholung zurück (Zähler auf 0, inaktiv). */
+export function resetSolLow(db) {
+    db.prepare(`DELETE FROM sol_low_state WHERE id = 1`).run();
 }
 
 // ─── Dust-Watch (cleanup.js, cross-run) ───────────────────────────────────────
@@ -1392,8 +1575,8 @@ export function clearDustWatch(db, mint) {
  */
 export function syncPools(db, pools) {
     const upsert = db.prepare(`
-        INSERT INTO pools (id, protocol, address, pair, token_a, token_b, decimals_a, decimals_b, fee_tier, tick_spacing, active, enabled, range_override_fixed_pct)
-        VALUES (@id, @protocol, @address, @pair, @tokenA, @tokenB, @decimalsA, @decimalsB, @feeTier, @tickSpacing, @active, @enabled, @rangeFixedPct)
+        INSERT INTO pools (id, protocol, address, pair, token_a, token_b, decimals_a, decimals_b, fee_tier, tick_spacing, active, enabled, range_override_fixed_pct, pool_type)
+        VALUES (@id, @protocol, @address, @pair, @tokenA, @tokenB, @decimalsA, @decimalsB, @feeTier, @tickSpacing, @active, @enabled, @rangeFixedPct, @poolType)
         ON CONFLICT(id) DO UPDATE SET
             protocol     = excluded.protocol,
             address      = excluded.address,
@@ -1405,7 +1588,8 @@ export function syncPools(db, pools) {
             fee_tier     = excluded.fee_tier,
             tick_spacing = excluded.tick_spacing,
             enabled      = COALESCE(pools.enabled, excluded.enabled),
-            range_override_fixed_pct = COALESCE(pools.range_override_fixed_pct, excluded.range_override_fixed_pct)
+            range_override_fixed_pct = COALESCE(pools.range_override_fixed_pct, excluded.range_override_fixed_pct),
+            pool_type    = COALESCE(pools.pool_type, excluded.pool_type)
     `);
 
     const run = db.transaction((pools) => {
@@ -1427,6 +1611,7 @@ export function syncPools(db, pools) {
                 active:        p.active ? 1 : 0,
                 enabled:       p.enabled === false ? 0 : 1,
                 rangeFixedPct,
+                poolType:      p.poolType ?? null,
             });
         }
     });
@@ -1454,7 +1639,7 @@ export function syncPools(db, pools) {
 export function applyPoolDynamics(db, pools) {
     let rows;
     try {
-        rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct FROM pools`).all();
+        rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct, pool_type FROM pools`).all();
     } catch {
         return pools; // Tabelle/Spalten (noch) nicht vorhanden → reine pools.json-Semantik
     }
@@ -1469,6 +1654,9 @@ export function applyPoolDynamics(db, pools) {
         if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
             && p.rangeOverride && typeof p.rangeOverride === 'object') {
             p.rangeOverride.fixedPct = row.range_override_fixed_pct;
+        }
+        if (row.pool_type !== null && row.pool_type !== undefined) {
+            p.poolType = row.pool_type;
         }
     }
     return pools;
@@ -1555,12 +1743,39 @@ export function closePosition(db, positionId, closeTx) {
 }
 
 /**
- * Löscht position_snapshots eines Pools. Wird beim Öffnen einer neuen Position
- * aufgerufen, damit Charts der neuen Session sauber starten.
- * fee_history, rebalance_history und capital_flows bleiben dauerhaft erhalten.
+ * Archiviert die position_snapshots eines Pools und leert danach die Live-Tabelle.
+ * Wird beim Öffnen einer neuen Position aufgerufen, damit Charts der neuen Session
+ * sauber starten. fee_history, rebalance_history und capital_flows bleiben ohnehin erhalten.
+ *
+ * 🔒 Seit 2026-08-22 (#0313) werden die Zeilen NICHT mehr verworfen, sondern nach
+ * position_snapshots_archive kopiert. Ohne diese Historie ist im Nachhinein nicht mehr
+ * überprüfbar, ob ein Trailing-Stop-, TVL- oder Score-Limit-Exit richtig lag — genau daran
+ * scheiterte jede Untersuchung gemeldeter Fehlfunktionen. Das Leseverhalten des Bots bleibt
+ * unverändert: Alle Abfragen laufen weiter ausschließlich gegen position_snapshots.
+ *
+ * Die Zuordnung erfolgt über den Zeitstempel (die Position, die zum Zeitpunkt der Messung
+ * offen war) statt über „die zuletzt geschlossene Position" — das bleibt auch dann richtig,
+ * wenn der Aufrufer die Vorgängerposition noch nicht geschlossen hat.
  */
 export function clearPositionSnapshots(db, poolId) {
-    db.prepare(`DELETE FROM position_snapshots WHERE pool_id = ?`).run(poolId);
+    const archive = db.transaction(() => {
+        db.prepare(`
+            INSERT OR IGNORE INTO position_snapshots_archive
+                (src_id, position_id, pool_id, lp_value_usd, fees_pending_usd, il_usd, il_pct,
+                 recorded_at, fees_pending_a, fees_pending_b, price, amount_a, amount_b, archived_at)
+            SELECT s.id,
+                   (SELECT p.id FROM positions p
+                     WHERE p.pool_id = s.pool_id AND p.opened_at <= s.recorded_at
+                     ORDER BY p.opened_at DESC LIMIT 1),
+                   s.pool_id, s.lp_value_usd, s.fees_pending_usd, s.il_usd, s.il_pct,
+                   s.recorded_at, s.fees_pending_a, s.fees_pending_b, s.price, s.amount_a, s.amount_b, ?
+              FROM position_snapshots s
+             WHERE s.pool_id = ?
+        `).run(Date.now(), poolId);
+        return db.prepare(`DELETE FROM position_snapshots WHERE pool_id = ?`).run(poolId).changes;
+    });
+    const n = archive();
+    if (n) console.log(`[db:${poolId}] ${n} Snapshot(s) archiviert, Live-Reihe geleert.`);
 }
 
 // ─── Pool-Stats ───────────────────────────────────────────────────────────────
@@ -1979,6 +2194,41 @@ export function insertTransaction(db, tx) {
     .run({ txFeeSol: null, createdAt: Date.now(), ...tx });
 }
 
+/**
+ * Trägt den tatsächlich erzielten Verkaufserlös in die close_position-Zeile eines
+ * Auto-Exits nach.
+ *
+ * Warum nachträglich: `finalizeClosePosition()` schreibt die close_position-Zeile
+ * unmittelbar nach dem on-chain Close — zu diesem Zeitpunkt ist der Erlös noch
+ * unbekannt, weil der Verkaufs-Swap erst danach läuft. Die Zeile trägt deshalb
+ * zunächst usd_value = NULL. Ohne diesen Nachtrag müssen Auswertungen den Wert
+ * schätzen: `lib/pnl.js` wich auf den letzten Snapshot vor dem Close aus und fror
+ * dadurch die Swap-Slippage als Phantom-Gewinn ein (Befund 22.08.2026, liq-zec-usdc:
+ * 761,93 geschätzt gegen 754,91 real = 7,01 USDC zu viel), `bin/export.js` rechnet
+ * sich bis heute einen Fallback aus Token-Mengen zusammen.
+ *
+ * Zuordnung über das Zeitfenster statt über den TX-Hash: die Exits sind
+ * State-Machines mit Resume, nach einem Bot-Restart ist der Close-Hash im
+ * Swap-Schritt nicht mehr zur Hand. `usd_value IS NULL` macht den Aufruf zugleich
+ * idempotent — ein wiederholter Resume überschreibt keinen bereits gesetzten Wert.
+ *
+ * @param {Database} db
+ * @param {Object}   opts  { poolId, usdValue, withinMs? }
+ * @returns {boolean} true wenn eine Zeile aktualisiert wurde
+ */
+export function setCloseProceeds(db, { poolId, usdValue, withinMs = 30 * 60 * 1000 }) {
+    if (!Number.isFinite(usdValue) || usdValue <= 0) return false;
+    const row = db.prepare(`
+        SELECT id FROM transactions
+         WHERE pool_id = ? AND type = 'close_position' AND usd_value IS NULL
+           AND created_at >= ?
+         ORDER BY created_at DESC LIMIT 1
+    `).get(poolId, Date.now() - withinMs);
+    if (!row) return false;
+    db.prepare(`UPDATE transactions SET usd_value = ? WHERE id = ?`).run(usdValue, row.id);
+    return true;
+}
+
 // ─── Capital-Flows ────────────────────────────────────────────────────────────
 
 /**
@@ -2082,7 +2332,8 @@ export function createRetireExecution(db, { poolId, triggerKind, triggerReason, 
 }
 
 export function updateRetireExecution(db, id, fields) {
-    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at', 'error_msg'];
+    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at',
+                     'error_msg', 'close_error'];
     const sets    = Object.keys(fields).filter(k => allowed.includes(k));
     if (!sets.length) return;
     const sql = `UPDATE retire_executions SET ${sets.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;
@@ -2148,6 +2399,55 @@ export function recordOfferUpdate(db, poolId, sequence) {
 // ─── Trailing-Stop State-Machine + HWM ────────────────────────────────────────
 
 /**
+ * Höchster Positionswert, der zwischen dem Öffnen der Position und dem ersten HWM-Update
+ * bereits in `position_snapshots` steht — das Sicherheitsnetz gegen eine verlorene
+ * Eröffnungsreferenz.
+ *
+ * Hintergrund: `updateHwm()` läuft ausschließlich im Snapshot-Pfad des Bot-Loops und wertet
+ * dort nur den *neuesten* Snapshot aus. Die Öffnungspfade (Cleanup, Deposit) schreiben aber
+ * bereits beim Öffnen einen Sofort-Snapshot. Ohne diese Funktion begann die Wertreihe des
+ * Trailing Stops erst beim nächsten Bot-Tick — bis zu fünf Minuten nach dem Einstieg, und
+ * alles, was der Markt in diesem Fenster tat, blieb für ihn unsichtbar.
+ *
+ * Live beobachtet am 2026-08-22 auf forge-pub1 (SOL/ZEC): Position um 07:05:29 mit 66,03 USDC
+ * eröffnet, erster Bot-Snapshot um 07:10:20 bei 63,18 USDC (SOL −5,9 %, ZEC −4,2 % in dieser
+ * Stunde). Der Höchststand wurde auf 63,18 gesetzt, der Drawdown von 4,3 % lag davor — bei
+ * 2 % Schwelle hätte der Stop auslösen müssen und tat es nie.
+ *
+ * Zwei Einschränkungen halten das Netz sicher:
+ *
+ *  - 🔒 **Nur ohne aktiven Übertrag.** Liegt `hwm_base_adjustment` oder `hwm_flow_ratio` vor,
+ *    stammt die Position aus einem Rebalancing oder einem Kapitalfluss; dort trägt der
+ *    Übertrag den Abstand bereits korrekt, und ältere Snapshots stehen auf einem anderen
+ *    Kapitalniveau. Sie einzurechnen würde die Referenz zu hoch ansetzen → Sofort-Fehl-Exit.
+ *  - 🔒 **Nur ohne Kapitalfluss seit der Eröffnung.** Ein Withdraw, der die HWM hart
+ *    zurücksetzt (unplausibles Verhältnis → `hwm_flow_ratio = NULL`), hinterlässt beide
+ *    Spalten leer. Die Snapshots davor stehen dann auf einem höheren Kapitalniveau; sie
+ *    einzurechnen hieße, gegen eine Referenz zu messen, die es nicht mehr gibt. Sobald seit
+ *    der Eröffnung Kapital geflossen ist, bleibt das Netz deshalb ganz aus — dort regelt der
+ *    Rebase-Mechanismus, und dessen harter Reset ist die bewusst sichere Richtung. Die 60 s
+ *    Toleranz überspringen die Flüsse des Öffnungsvorgangs selbst (Open + Rest-Einzahlung).
+ */
+function _openingSnapshotMax(db, positionId, row) {
+    if (row?.hwm_base_adjustment != null || row?.hwm_flow_ratio != null) return 0;
+
+    const pos = db.prepare(`SELECT pool_id, opened_at FROM positions WHERE id = ?`).get(positionId);
+    if (!(pos?.opened_at > 0)) return 0;
+
+    const flow = db.prepare(
+        `SELECT 1 FROM capital_flows WHERE pool_id = ? AND created_at > ? LIMIT 1`
+    ).get(pos.pool_id, pos.opened_at + 60_000);
+    if (flow) return 0;
+
+    const seen = db.prepare(
+        `SELECT MAX(lp_value_usd) AS mx FROM position_snapshots
+          WHERE pool_id = ? AND recorded_at >= ?`
+    ).get(pos.pool_id, pos.opened_at);
+
+    return seen?.mx > 0 ? seen.mx : 0;
+}
+
+/**
  * Aktualisiert die High-Water-Mark der offenen Position eines Pools, wenn der
  * aktuelle lp_value_usd höher liegt als der bisher gespeicherte hwm_usd. HWM
  * läuft monoton nach oben; sie wird ausschließlich beim Öffnen einer neuen
@@ -2192,7 +2492,8 @@ export function updatePositionHwm(db, positionId, currentUsd) {
         const adj   = row?.hwm_base_adjustment ?? 0;
         const ratio = row?.hwm_flow_ratio;
         const fromRatio = (ratio > 0 && ratio <= 1) ? currentUsd / ratio : 0;
-        const adjustedHwm = Math.max(currentUsd, currentUsd + adj, fromRatio);
+        const openingHwm  = _openingSnapshotMax(db, positionId, row);
+        const adjustedHwm = Math.max(currentUsd, currentUsd + adj, fromRatio, openingHwm);
         // Übertrag mit dem Anwenden verbrauchen — er gilt genau für diese eine
         // Neu-Etablierung. Bliebe er stehen, würde ein späterer Kapitalfluss ihn erneut
         // aufschlagen und die Referenz Schritt für Schritt nach oben verschieben.
@@ -2211,9 +2512,14 @@ export function updatePositionHwm(db, positionId, currentUsd) {
 }
 
 /**
- * Speichert das HWM-Basisadjustment für die neue Position nach einem Rebalancing.
- * Wert: preHwm − preValue (wie weit die HWM über dem letzten Snapshot lag).
- * Wird beim ersten updatePositionHwm-Aufruf (erster echter Snapshot) angewendet.
+ * ⚠️ Veraltet seit 2026-08-22 — kein Aufrufer mehr. Der Rebalancing-Übertrag läuft über
+ * `carryHwmToRebalancedPosition()` (relativ). Das **Lesen** von `hwm_base_adjustment` in
+ * `updatePositionHwm()` bleibt bestehen, damit Positionen, die zum Zeitpunkt eines Deployments
+ * zwischen Rebalancing und erstem Snapshot stehen, ihren Übertrag noch sauber anwenden.
+ *
+ * Nicht für neuen Code verwenden: Ein absoluter USDC-Abstand gegen eine prozentuale Schwelle
+ * ist die Fehlerklasse, die den Schutz zweimal ausgehebelt hat (Kapitalflüsse 2026-08-13,
+ * Rebalancing 2026-08-22).
  */
 export function setPositionHwmBaseAdjustment(db, positionId, adjustment) {
     db.prepare(`UPDATE positions SET hwm_base_adjustment = ? WHERE id = ?`)
@@ -2273,6 +2579,43 @@ export function setPositionHwmBaseAdjustment(db, positionId, adjustment) {
  * @param {number} entryUsd       Einstiegsreferenz der alten Position
  * @param {number|null} d2ArmedAt Scharfschalt-Zeitpunkt der alten Position (Ratchet)
  */
+/**
+ * Überträgt den **Höchststand** auf die Position, die ein Rebalancing neu angelegt hat —
+ * relativ, nach demselben Muster wie `rebaseHwmForCapitalFlow()` und
+ * `carryEntryToRebalancedPosition()`.
+ *
+ * Ersetzt seit 2026-08-22 den absoluten Übertrag über `hwm_base_adjustment`
+ * (`preHwm − preValue − residual`). Der war aus demselben Grund falsch, aus dem die
+ * Kapitalfluss-Pfade am 2026-08-13 auf ein Verhältnis umgestellt wurden: Die Schwelle ist
+ * prozentual, die Referenz muss es auch sein. Schlimmer noch — verlor das Rebalancing
+ * Kapital (Wallet-Residual), wurde der Übertrag negativ und `Math.max(currentUsd, …)` in
+ * `updatePositionHwm()` verschluckte ihn vollständig: der Höchststand landete exakt auf dem
+ * neuen Positionswert, der aufgelaufene Abstand war auf null.
+ *
+ * Nachgewiesen mit `bin/test-trailing-stop-sim.js`: Position bei 105 Höchststand und 103,40
+ * aktuell (1,52 % Abstand), Rebalancing auf 100,00 → `adj = 105 − 103,40 − 3,40 = −1,80` →
+ * Höchststand 100,00 statt korrekt 101,55. Beim nächsten Wert von 99,00 sah der Bot 1,0 %
+ * Drawdown statt 2,51 % und löste bei 2 % Schwelle nicht aus. Bei regelmäßigem Rebalancing
+ * ließ sich der Auslösepunkt so beliebig weit nach unten schieben.
+ *
+ * @param {number} lpValueBefore  gemessener Positionswert vor dem Rebalancing
+ * @param {number} hwmBefore      Höchststand der alten Position
+ * @returns {number|null} das übertragene Verhältnis (null = harter Reset)
+ */
+export function carryHwmToRebalancedPosition(db, newPositionId, lpValueBefore, hwmBefore) {
+    // Plausibilitätsband wie in rebaseHwmForCapitalFlow: ein Abstand über 50 % bedeutet
+    // defekte Daten (ein echter 50-%-Drawdown hätte den Stop längst ausgelöst), und eine
+    // daraus abgeleitete, viel zu hohe Referenz würde einen sofortigen Fehl-Exit auslösen.
+    let ratio = (lpValueBefore > 0 && hwmBefore > 0) ? Math.min(1, lpValueBefore / hwmBefore) : null;
+    if (ratio != null && ratio < 0.5) ratio = null;
+
+    db.prepare(
+        `UPDATE positions SET hwm_usd = NULL, hwm_at = NULL, hwm_base_adjustment = NULL, hwm_flow_ratio = ? WHERE id = ?`
+    ).run(ratio, newPositionId);
+
+    return ratio;
+}
+
 export function carryEntryToRebalancedPosition(db, newPositionId, lpValueBefore, entryUsd, d2ArmedAt) {
     let ratio = (lpValueBefore > 0 && entryUsd > 0) ? lpValueBefore / entryUsd : null;
     if (ratio != null && (ratio < 0.5 || ratio > 2)) ratio = null;
@@ -2343,16 +2686,126 @@ export function rebaseHwmForCapitalFlow(db, positionId, lpValueBefore) {
     return { drawdownPct: ratio != null ? (1 - ratio) * 100 : 0, applied: true };
 }
 
-export function createTsExecution(db, { poolId, hwmUsd, currentUsd, drawdownPct, configSnapshot }) {
+/**
+ * Zieht Höchststand und Einstiegsreferenz über einen Kapitalfluss hinweg nach — mit dem
+ * **on-chain gemessenen Liquiditätsfaktor** statt mit dem zuletzt gemessenen Positionswert.
+ *
+ * Warum eine zweite Variante neben `rebaseHwmForCapitalFlow()`: Die Ratio-Variante merkt sich
+ * `lp_value_usd / hwm_usd` aus dem *letzten Snapshot* — der ist bis zu fünf Minuten alt. Alles,
+ * was der Markt zwischen diesem Snapshot und dem Kapitalfluss tat, liegt damit außerhalb der
+ * Messreihe: der erste Snapshot nach dem Fluss etabliert die Referenz neu und nimmt die
+ * Bewegung als gegeben hin (Befund 2026-08-22, forge-pub1, Position 81 — die Messlücke bei
+ * Aufstockungen; die Ist-Werte stammen seitdem aus der bestätigten Transaktion).
+ *
+ * Der Wert einer CLMM-Position ist bei festem Range-Paar exakt proportional zu ihrer
+ * Liquidität: V = L · g(P). Ein Kapitalfluss ändert L um den Faktor `L_nach / L_vor` — beides
+ * on-chain exakt bekannt (Liquidität der Position vor dem Fluss, Liquidität aus den
+ * Token-Deltas der bestätigten Transaktion). Skaliert man Höchststand und Einstiegsreferenz
+ * mit genau diesem Faktor, bleibt der prozentuale Abstand zum aktuellen Kurs erhalten, und die
+ * unmittelbar danach geschriebene **Messung** (Liquidität nach dem Fluss zum Ausführungspreis)
+ * zeigt jede Marktbewegung seit dem letzten Snapshot als Drawdown — ohne Quote, ohne Schätzwert.
+ *
+ * Zwei Dinge, die bewusst so sind:
+ *  - Nicht auf NULL setzen. Die Referenz ist sofort wieder gültig; es gibt kein Fenster, in dem
+ *    `evaluateTsTrigger()` wegen fehlender HWM „none" liefert.
+ *  - Ein noch offener Übertrag aus einem *vorigen* Fluss ohne Snapshot dazwischen (`hwm_flow_ratio`
+ *    / `entry_flow_ratio`, HWM dann NULL) bleibt stehen: ein Verhältnis ist dimensionslos und
+ *    überlebt eine Skalierung unverändert — der nächste Snapshot löst ihn wie gehabt auf.
+ *
+ * Plausibilitätsband: Faktor außerhalb [0,01; 100] gilt als defekte Eingabe → nichts anfassen,
+ * der Aufrufer fällt auf `rebaseHwmForCapitalFlow()` zurück.
+ *
+ * @param {number|string|bigint} liquidityBefore  Positions-Liquidität vor dem Fluss (u128 → String)
+ * @param {number|string|bigint} liquidityAfter   Positions-Liquidität nach dem Fluss
+ * @returns {{ applied: boolean, factor: number|null }}
+ */
+export function scaleReferencesForLiquidityChange(db, positionId, liquidityBefore, liquidityAfter) {
+    const lb = Number(liquidityBefore), la = Number(liquidityAfter);
+    if (!(lb > 0) || !(la > 0)) return { applied: false, factor: null };
+    const factor = la / lb;
+    if (!(factor >= 0.01 && factor <= 100)) return { applied: false, factor: null };
+
+    db.prepare(`
+        UPDATE positions
+           SET hwm_usd   = CASE WHEN hwm_usd   > 0 THEN hwm_usd   * ? ELSE hwm_usd   END,
+               entry_usd = CASE WHEN entry_usd > 0 THEN entry_usd * ? ELSE entry_usd END,
+               hwm_base_adjustment = NULL
+         WHERE id = ?
+    `).run(factor, factor, positionId);
+
+    return { applied: true, factor };
+}
+
+/**
+ * Skaliert Höchststand und Einstiegsreferenz einer Position bei einem Wechsel der
+ * Bewertungsquelle (z.B. Pool-Preis ↔ Referenzpreis-Fallback bei getQuotePriceUsd()).
+ *
+ * Gleiche Mathematik wie scaleReferencesForLiquidityChange() (Faktor auf hwm_usd und
+ * entry_usd, keine Zeitfenster) — bewusst eine eigene, unabhängige Funktion statt
+ * Wiederverwendung: Ein Bug hier darf niemals den bereits durch bin/test-trailing-stop-sim.js
+ * abgesicherten Kapitalfluss-Pfad mitreißen, und umgekehrt.
+ *
+ * 🔒 Der Grund, warum das hier existiert (CORE#0334/CORE#0337, 2026-08-27): Der Pool-Preis
+ * kann für kurze Zeit ausfallen (>30 Min alt), dann übernimmt der Referenzpreis (Jupiter) —
+ * und wenn der Pool-Preis zurückkommt, weicht er vom zuletzt genutzten Referenzpreis meist
+ * um ein, zwei Prozent ab. Ohne diese Funktion wandert diese Differenz ungebremst in
+ * `lp_value_usd`, `updateHwm()` zieht den Höchststand mit, und `armSecondStageIfReached()`
+ * kann eine ohnehin schon enge Stufe 2 scharf schalten — für eine Bewegung, die nie
+ * stattgefunden hat. Am 2026-08-27 geschah das durch den vollständigen Pyth-Ausfall
+ * ungebremst (Master +5,2 %, pub1 +4,5 % durch einen einzigen Nexus-Neustart).
+ *
+ * @param {number} priceBefore  Preis der bisher aktiven Quelle, gemessen zum Wechselzeitpunkt
+ * @param {number} priceAfter   Preis der neu aktiven Quelle, zum selben Zeitpunkt
+ * @returns {{ applied: boolean, factor: number|null }}
+ */
+export function scaleReferencesForQuotePriceChange(db, positionId, priceBefore, priceAfter) {
+    const pb = Number(priceBefore), pa = Number(priceAfter);
+    if (!(pb > 0) || !(pa > 0)) return { applied: false, factor: null };
+    const factor = pa / pb;
+    // Bewusst enger als bei Kapitalflüssen (0,01–100): Zwei Preisquellen für dasselbe Asset
+    // dürfen plausibel nur wenig auseinanderliegen. Eine Abweichung außerhalb dieser Bandbreite
+    // ist kein normaler Quellenwechsel mehr, sondern ein Datenfehler — dann lieber gar nicht
+    // skalieren (Referenz bleibt stehen) als eine grob falsche Zahl in HWM/Einstieg schreiben.
+    if (!(factor >= 0.5 && factor <= 2)) return { applied: false, factor: null };
+
+    db.prepare(`
+        UPDATE positions
+           SET hwm_usd   = CASE WHEN hwm_usd   > 0 THEN hwm_usd   * ? ELSE hwm_usd   END,
+               entry_usd = CASE WHEN entry_usd > 0 THEN entry_usd * ? ELSE entry_usd END,
+               hwm_base_adjustment = NULL
+         WHERE id = ?
+    `).run(factor, factor, positionId);
+
+    return { applied: true, factor };
+}
+
+export function createTsExecution(db, { poolId, hwmUsd, currentUsd, drawdownPct, configSnapshot, triggerSource = 'tick' }) {
     const result = db.prepare(`
-        INSERT INTO ts_executions (pool_id, triggered_at, hwm_usd, current_usd, drawdown_pct, config_snapshot)
-        VALUES (?, ?, ?, ?, ?, ?)
-    `).run(poolId, Date.now(), hwmUsd ?? null, currentUsd ?? null, drawdownPct ?? null, JSON.stringify(configSnapshot));
+        INSERT INTO ts_executions (pool_id, triggered_at, hwm_usd, current_usd, drawdown_pct, config_snapshot, trigger_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(poolId, Date.now(), hwmUsd ?? null, currentUsd ?? null, drawdownPct ?? null, JSON.stringify(configSnapshot), triggerSource);
     return result.lastInsertRowid;
 }
 
+/** Eine Schnellprüfung des Trailing Stops protokollieren (siehe Tabelle ts_fast_checks). */
+export function insertTsFastCheck(db, row) {
+    db.prepare(`
+        INSERT INTO ts_fast_checks
+            (pool_id, position_id, checked_at, price, lp_value_usd, hwm_usd, drawdown_pct, threshold_pct, stage, triggered, confirmed)
+        VALUES
+            (@poolId, @positionId, @checkedAt, @price, @lpValueUsd, @hwmUsd, @drawdownPct, @thresholdPct, @stage, @triggered, @confirmed)
+    `).run({ positionId: null, price: null, lpValueUsd: null, hwmUsd: null, drawdownPct: null,
+             thresholdPct: null, stage: null, triggered: 0, confirmed: null, ...row, checkedAt: Date.now() });
+}
+
+export function pruneTsFastChecks(db, days = 14) {
+    const cutoff = Date.now() - days * 86_400_000;
+    return db.prepare(`DELETE FROM ts_fast_checks WHERE checked_at < ?`).run(cutoff).changes;
+}
+
 export function updateTsExecution(db, id, fields) {
-    const allowed = ['step', 'ts_coins_a', 'ts_coins_b', 'swapped_usdc', 'completed_at', 'error_msg'];
+    const allowed = ['step', 'ts_coins_a', 'ts_coins_b', 'swapped_usdc', 'decrease_tx_hash',
+                     'completed_at', 'error_msg', 'close_error'];
     const sets    = Object.keys(fields).filter(k => allowed.includes(k));
     if (!sets.length) return;
     const sql = `UPDATE ts_executions SET ${sets.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;
@@ -2386,7 +2839,8 @@ export function createTvlExecution(db, { poolId, positionId, level, tvlUsd, thre
 }
 
 export function updateTvlExecution(db, id, fields) {
-    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at', 'error_msg'];
+    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at',
+                     'error_msg', 'close_error'];
     const sets    = Object.keys(fields).filter(k => allowed.includes(k));
     if (!sets.length) return;
     const sql = `UPDATE tvl_executions SET ${sets.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;
@@ -2448,7 +2902,8 @@ export function createScoreLimitExecution(db, { poolId, triggerScore, configSnap
 }
 
 export function updateScoreLimitExecution(db, id, fields) {
-    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at', 'error_msg'];
+    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at',
+                     'error_msg', 'close_error'];
     const sets    = Object.keys(fields).filter(k => allowed.includes(k));
     if (!sets.length) return;
     const sql = `UPDATE score_limit_executions SET ${sets.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;

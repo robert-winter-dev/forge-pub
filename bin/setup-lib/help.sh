@@ -103,6 +103,7 @@ show_help() {
     echo "  logrotate    $(t HELP_CMD_LOGROTATE)"
     echo "  backup       $(t HELP_CMD_BACKUP)"
     echo "  restore      $(t HELP_CMD_RESTORE)"
+    echo "  reset-password $(t HELP_CMD_RESET_PASSWORD)"
     echo "  status       $(t HELP_CMD_STATUS)"
     echo "  help         $(t HELP_CMD_HELP)"
     echo

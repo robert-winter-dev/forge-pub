@@ -1,6 +1,7 @@
 {
   "rpcUrl": "http://127.0.0.1:3100/rpc",
   "jupPriceUrl": "http://127.0.0.1:3100/jup/price/v3",
+  "jupTokenSearchUrl": "http://127.0.0.1:3100/jup/tokens/v2/search",
   "notifyUrl": "http://127.0.0.1:3100/notify",
   "wallets": [],
   "tokens": [
@@ -105,6 +106,21 @@
       "decimals": 6
     },
     {
+      "symbol": "JUP",
+      "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+      "decimals": 6
+    },
+    {
+      "symbol": "TRUMP",
+      "mint": "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN",
+      "decimals": 6
+    },
+    {
+      "symbol": "SPX",
+      "mint": "J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr",
+      "decimals": 8
+    },
+    {
       "symbol": "Fartcoin",
       "mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
       "decimals": 6
@@ -128,6 +144,11 @@
       "symbol": "BORG",
       "mint": "3dQTr7ror2QPKQ3GbBCokJUmjErGg8kTJzdnYjNfvi3Z",
       "decimals": 9
+    },
+    {
+      "symbol": "ZBCN",
+      "mint": "ZBCNpuD7YMXzTHB2fhGkGi78MNsHGLRXUhRewNRm9RU",
+      "decimals": 6
     }
   ],
   "retainDays": 30

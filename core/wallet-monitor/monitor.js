@@ -19,7 +19,7 @@
 
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync } from 'child_process';
@@ -28,7 +28,8 @@ import { isAutoPayEnabled } from '../../lib/premium-auto-pay-store.js';
 import { PATHS } from '../../config/paths.js';
 import { renderNotification } from '../../lib/notify-render.js';
 import { getLang } from '../../lib/i18n.js';
-import { fetchJupiterPrices } from '../../lib/scam-classify.js';
+import { fetchTokenSignals, classify, buildKnownTokens } from '../../lib/scam-classify.js';
+import { LOCAL_SERVER } from '../../config/health-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..', '..');
@@ -55,6 +56,23 @@ const TOKEN_2022_PROGRAM = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEp
 // 0,1) heben. Eine Warnung über der Reserve meldet Normalbetrieb als Störung.
 const SOL_LOW_THRESHOLD = 0.10;    // SOL – unter diesem Wert → Telegram-Alert
 const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 Stunde – max. 1 Alert pro Wallet
+
+// Bestätigungsfenster vor dem ersten Alert (Befund 2026-08-25): Ein einzelner
+// teurer Vorgang (Rebalancing/Open/Close) kann den SOL-Stand in einem Schritt
+// von "gesund" auf < SOL_LOW_THRESHOLD reißen — noch bevor der nächste
+// Bot-Zyklus (CHECK_INTERVAL_MS, Liquidity-Bot Default 5 Min) die eingebaute
+// Selbstheilung (ensureWalletSol(), lib/sol-topup.js) auslösen konnte. Traf der
+// 10-minütige wallet-monitor-Lauf genau dieses Fenster, meldete er einen Zustand,
+// der 1-2 Minuten später schon wieder behoben war (Master 25.08.2026: Alerts um
+// 04:05:48/13:05:48/19:05:47/20:05:51, jeweils gefolgt von einem Topup-Erfolg im
+// Bot-Log binnen einer Minute) — genau die Störung, die dieser Alert eigentlich
+// NICHT melden soll ("nur wenn keine Selbstheilung möglich ist").
+// Ein niedriger Stand muss deshalb über dieses Fenster hinweg bestehen bleiben,
+// bevor überhaupt in die Cooldown-Logik gegangen wird. 7 Minuten > 5-Minuten-
+// Bot-Zyklus mit Puffer; ein echtes "keine Selbstheilung möglich" bleibt über
+// den nächsten 10-Minuten-Lauf hinweg ohnehin low und wird weiterhin gemeldet,
+// nur um bis zu einem Zyklus (~10 Min) später als bisher.
+const SOL_LOW_CONFIRM_MS = 7 * 60 * 1000;
 
 // Premium-Wallet (FORGE public, wallet.id === 'premium') hat andere Regeln als die
 // Bot-Wallets (Betreiber-Vorgabe 2026-07-30, siehe interne Doku
@@ -131,6 +149,11 @@ db.exec(`
         last_alerted_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS sol_low_streak (
+        wallet_id  TEXT    PRIMARY KEY,
+        low_since  INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS snapshots (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
         wallet_id      TEXT    NOT NULL,
@@ -173,6 +196,15 @@ db.exec(`
         -- Airdrop, ein 2024er Mint mit dreistelliger Millionen-Liquidität nicht.
         created_at  TEXT,
         liquidity   REAL,
+        -- Ebenfalls aus derselben Antwort (tokens/v2/search), ebenfalls gratis.
+        -- holder_count ist reine ANZEIGE — die überzeugendste Zahl für den Menschen
+        -- (26 Holder gegen 168.748 beim echten Fartcoin), als Automatik-Kriterium
+        -- aber untauglich: der Angreifer treibt sie hoch, indem er weiter verteilt.
+        -- Die Entscheidung trifft jupiterScamVerdict() aus is_sus/organic/verified.
+        holder_count        INTEGER,
+        organic_score_label TEXT,
+        is_verified         INTEGER,
+        is_sus              INTEGER,
         -- Empfangs-Transaktion: die älteste Signatur des Token-KONTOS ist der Vorgang,
         -- mit dem der Token ins Wallet kam. Unveränderlich, deshalb genau einmal je
         -- Konto abgefragt und danach nie wieder. Für einen Laien ist "am 19.08. von
@@ -223,7 +255,9 @@ async function fetchPrices() {
 
 // Nachrüsten für DBs, die unknown_tokens vor created_at/liquidity angelegt haben.
 // Kein Migrationsskript nötig: ADD COLUMN ist billig und die Tabelle ist tagesjung.
-for (const col of [['created_at', 'TEXT'], ['liquidity', 'REAL'], ['received_sig', 'TEXT'], ['received_at', 'INTEGER']]) {
+for (const col of [['created_at', 'TEXT'], ['liquidity', 'REAL'], ['received_sig', 'TEXT'], ['received_at', 'INTEGER'],
+                   ['holder_count', 'INTEGER'], ['organic_score_label', 'TEXT'],
+                   ['is_verified', 'INTEGER'], ['is_sus', 'INTEGER']]) {
     const exists = db.prepare("SELECT 1 FROM pragma_table_info('unknown_tokens') WHERE name = ?").get(col[0]);
     if (!exists) db.exec(`ALTER TABLE unknown_tokens ADD COLUMN ${col[0]} ${col[1]}`);
 }
@@ -280,8 +314,16 @@ async function fetchReceiveTx(account) {
 }
 
 // ─── Wallet-Balances via RPC (durch forge-api-proxy) ─────────────────────────
-
-const connection = new Connection(config.rpcUrl, 'confirmed');
+//
+// /rpc/fresh statt /rpc: der Nexus-Proxy cached getParsedTokenAccountsByOwner
+// 60s (core/nexus/rpc-cache.js). close-scam-tokens.js scannt die Wallet über
+// denselben Endpunkt unmittelbar vor einem Burn (Kandidatensuche), füllt den
+// Cache also mit dem Vor-Burn-Zustand. Läuft dieser Refresh (der genau diesen
+// Snapshot nach dem Burn neu einliest) innerhalb der TTL, bekäme er sonst exakt
+// diesen veralteten Stand zurück — der verbrannte Token bliebe fälschlich in
+// unknown_tokens stehen, die Auffällig-Badge zeigt weiter (1). Analog zu
+// getConnectionFresh() in bots/liquidity/lib/wallet.js.
+const connection = new Connection(config.rpcUrl.replace(/\/rpc$/, '/rpc/fresh'), 'confirmed');
 
 async function fetchWalletSnapshot(walletAddress) {
     const pubkey = new PublicKey(walletAddress);
@@ -445,9 +487,32 @@ for (const wallet of config.wallets) {
         // (Zahlung an Liquidity-Bot-Status gekoppelt). Alles andere prüft weiter den
         // eigenen systemd-Service.
         const botActive = isPremiumWallet ? isAutoPayEnabled() : isBotServiceActive(wallet.id);
+        let confirmedLow = false;
         if (solBalance < solLowThreshold && !botActive) {
             console.log(`[wallet-monitor] SOL niedrig: ${wallet.label} (${solBalance.toFixed(4)} SOL) – Premium-Zahlung/Bot gestoppt, Alert unterdrückt`);
+            db.prepare('DELETE FROM sol_low_streak WHERE wallet_id = ?').run(wallet.id);
         } else if (solBalance < solLowThreshold) {
+            const streak = db.prepare(
+                'SELECT low_since FROM sol_low_streak WHERE wallet_id = ?'
+            ).get(wallet.id);
+            const lowSince = streak?.low_since ?? now;
+            if (!streak) {
+                db.prepare(`
+                    INSERT INTO sol_low_streak (wallet_id, low_since) VALUES (?, ?)
+                    ON CONFLICT(wallet_id) DO UPDATE SET low_since = excluded.low_since
+                `).run(wallet.id, now);
+            }
+            const lowElapsed = now - lowSince;
+            confirmedLow = lowElapsed >= SOL_LOW_CONFIRM_MS;
+            if (!confirmedLow) {
+                const remainSec = Math.ceil((SOL_LOW_CONFIRM_MS - lowElapsed) / 1000);
+                console.log(`[wallet-monitor] SOL niedrig: ${wallet.label} (${solBalance.toFixed(4)} SOL) – im Selbstheil-Bestätigungsfenster, Alert erst in ${remainSec}s falls weiter niedrig`);
+            }
+        } else {
+            db.prepare('DELETE FROM sol_low_streak WHERE wallet_id = ?').run(wallet.id);
+        }
+
+        if (confirmedLow) {
             const lastAlert = db.prepare(
                 'SELECT last_alerted_at FROM sol_low_alerts WHERE wallet_id = ?'
             ).get(wallet.id);
@@ -562,7 +627,12 @@ try {
             console.log(`[wallet-monitor]   neuer Mint ${mint.slice(0, 12)}… → ${meta?.symbol ?? '?'}`);
         }
 
-        const unknownPrices = await fetchJupiterPrices(config.jupPriceUrl, allUnknownMints);
+        // tokens/v2/search statt price/v3: derselbe eine Call, aber zusätzlich die
+        // Felder, mit denen sich ein Airdrop überhaupt beurteilen lässt.
+        const unknownPrices = await fetchTokenSignals(
+            config.jupTokenSearchUrl ?? 'http://127.0.0.1:3100/jup/tokens/v2/search',
+            allUnknownMints,
+        );
 
         // Empfangs-Transaktion nur für Paare holen, die wir noch nicht kennen.
         const receives = new Map(knownReceives);
@@ -575,16 +645,33 @@ try {
             }
         }
 
+        // Vor dem Upsert merken, welche (wallet_id, mint)-Paare schon bekannt sind —
+        // nur was hier fehlt, ist in diesem Lauf neu und potenziell eine System-
+        // Message wert (Datengrundlage für den Reiter "Auffällig", siehe oben).
+        const existingPairs = new Set(
+            db.prepare('SELECT wallet_id, mint FROM unknown_tokens').all()
+              .map(r => `${r.wallet_id}::${r.mint}`)
+        );
+        const metaByMint = new Map(
+            db.prepare('SELECT mint, symbol, name FROM token_meta').all()
+              .map(r => [r.mint, { symbol: r.symbol, name: r.name }])
+        );
+
         const stmtUnknown = db.prepare(`
             INSERT INTO unknown_tokens
                 (wallet_id, mint, balance, price_usd, created_at, liquidity,
+                 holder_count, organic_score_label, is_verified, is_sus,
                  received_sig, received_at, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(wallet_id, mint) DO UPDATE SET
                 balance      = excluded.balance,
                 price_usd    = excluded.price_usd,
                 created_at   = excluded.created_at,
                 liquidity    = excluded.liquidity,
+                holder_count        = excluded.holder_count,
+                organic_score_label = excluded.organic_score_label,
+                is_verified         = excluded.is_verified,
+                is_sus              = excluded.is_sus,
                 -- Nie überschreiben: der Empfang liegt in der Vergangenheit und ist
                 -- unveränderlich. Ein fehlgeschlagener Abruf darf einen bereits
                 -- gespeicherten Wert nicht auf NULL zurücksetzen.
@@ -607,12 +694,110 @@ try {
                     stmtUnknown.run(
                         walletId, mint, entry.balance,
                         jup?.price ?? null, jup?.createdAt ?? null, jup?.liquidity ?? null,
+                        jup?.holderCount ?? null, jup?.organicScoreLabel ?? null,
+                        // SQLite kennt kein BOOLEAN — und `null` heißt hier "Jupiter
+                        // kennt den Mint nicht", was etwas anderes ist als `false`.
+                        jup ? (jup.isVerified ? 1 : 0) : null,
+                        jup ? (jup.isSus ? 1 : 0) : null,
                         rcv?.signature ?? null, rcv?.at ?? null,
                         now, now,
                     );
                 }
             }
         })();
+
+        // Neu gefundene Scam-/Imitat-Token per System-Message melden — Ersatz für den
+        // früheren Weg über forge-check.js/anomaly-sync.js (Ticket pro Welle). Der
+        // Reiter "Auffällig" (Settings > Wallet) ist jetzt die eigentliche Anzeige;
+        // diese Meldung ist nur der aktive Hinweis, dass dort etwas Neues liegt.
+        //
+        // Dieselbe Einstufung wie die Oberfläche (lib/scam-classify.js) — nur BURN/
+        // REVIEW gelten als scam-artig genug für eine Meldung, WARN/SKIP nicht (siehe
+        // Doku dort). Pool-Token und Positions-NFTs fallen über die volle Whitelist
+        // (buildKnownTokens, inkl. Positions-DB) raus, nicht nur über config.json —
+        // sonst würde eine frisch eröffnete Position als Scam-Fund gemeldet.
+        try {
+            const whitelistByWallet = new Map();
+            const getWalletWhitelist = walletId => {
+                if (!whitelistByWallet.has(walletId)) {
+                    whitelistByWallet.set(walletId, buildKnownTokens({
+                        forgeRoot:   FORGE_ROOT,
+                        positionsDb: walletId === 'liquidity' ? PATHS.liquidityDb : null,
+                        deps:        { readFileSync, existsSync, Database },
+                    }));
+                }
+                return whitelistByWallet.get(walletId);
+            };
+
+            const findsByWallet = new Map(); // wallet_id → [{ label, dupSymbol, value }]
+            for (const [walletId, mints] of unknownByWallet) {
+                const { mints: knownMints, symbols: knownSymbols } = getWalletWhitelist(walletId);
+                for (const [mint, entry] of Object.entries(mints)) {
+                    if (existingPairs.has(`${walletId}::${mint}`)) continue; // schon bekannt
+                    if (knownMints.has(mint)) continue; // Pool-Token/Positions-NFT, kein Fund
+                    const meta = metaByMint.get(mint) ?? { symbol: null, name: null };
+                    // Volle Signale durchreichen, nicht nur den Preis: sonst sieht die
+                    // Meldung eine andere Stufe als die Oberfläche.
+                    const cl = classify(
+                        { uiAmount: entry.balance, meta },
+                        unknownPrices[mint] ?? null,
+                        knownSymbols,
+                    );
+                    if (cl.tier !== 'BURN' && cl.tier !== 'REVIEW') continue;
+                    if (!findsByWallet.has(walletId)) findsByWallet.set(walletId, []);
+                    findsByWallet.get(walletId).push({
+                        label: meta.symbol ?? meta.name ?? `${mint.slice(0, 8)}…`,
+                        dupSymbol: cl.dupSymbol,
+                        susReason: cl.susReason,
+                        value: cl.value,
+                    });
+                }
+            }
+
+            for (const [walletId, finds] of findsByWallet) {
+                const wallet = config.wallets.find(w => w.id === walletId);
+                if (!wallet) continue;
+                // Der Grund steht jetzt nicht mehr zwingend fest: seit dem
+                // Jupiter-Urteil kann ein Fund auffällig sein, OHNE ein bekanntes
+                // Token zu imitieren. „Imitat von null“ wäre die Folge gewesen.
+                const list = finds
+                    .map(f => {
+                        const why = f.dupSymbol
+                            ? `Imitat von „${f.dupSymbol}“`
+                            : 'von Jupiter als verdächtig eingestuft';
+                        return f.value != null
+                            ? `${f.label} (${why}, ~${f.value.toFixed(2)} USDC)`
+                            : `${f.label} (${why})`;
+                    })
+                    .join(' · ');
+                const msgKey      = 'notify.wm.scam_token_found';
+                const displayName = walletDisplayName(wallet);
+                const dashboardUrl = `https://${LOCAL_SERVER.ip}:3200/#${wallet.id}`;
+                const params      = { n: finds.length, list, dashboardUrl };
+                const message = renderNotification(
+                    { msgKey, params, displayName, timestamp: now },
+                    getLang(),
+                );
+                try {
+                    await fetch(config.notifyUrl, {
+                        method:  'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body:    JSON.stringify({
+                            botId: 'wallet-monitor',
+                            displayName,
+                            level:    'info',
+                            category: 'scam_token',
+                            message, msgKey, params,
+                        }),
+                    });
+                    console.log(`[wallet-monitor] Scam-Token-Meldung gesendet: ${wallet.label} (${finds.length} neu)`);
+                } catch (err) {
+                    console.error(`[wallet-monitor] Scam-Token-Meldung fehlgeschlagen: ${err.message}`);
+                }
+            }
+        } catch (err) {
+            console.error(`[wallet-monitor] Scam-Token-Erkennung fehlgeschlagen: ${err.message}`);
+        }
     } else {
         // Alle erfolgreich gelesenen Wallets sind sauber → Alteinträge entfernen.
         const stmtDropWallet = db.prepare('DELETE FROM unknown_tokens WHERE wallet_id = ?');

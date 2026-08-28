@@ -11,7 +11,7 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
-import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml } from '/forge/js/scam-tab.js?v=20260819f';
+import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml, scamManageBadgeHtml } from '/forge/js/scam-tab.js?v=20260823d';
 
 // 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
 // Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
@@ -838,7 +838,7 @@ function _walletRowHtml(label, balance, status = null, scam = null) {
             <td class="wat-label">${_esc(label)}${scamInfoIconHtml(scam?.tokens)}</td>
             <td class="wat-info">${infoHtml}</td>
             <td class="wat-action">
-                <button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
+                ${scamManageBadgeHtml(scam?.tokens)}<button class="btn btn-secondary btn-sm" data-wallet-manage-btn>${tr('sb.manage', 'Verwalten')}</button>
             </td>
         </tr>`;
 }
@@ -1010,7 +1010,7 @@ async function _openWalletManageModal(el, info, balance, addrs) {
                 <button class="wb-tab" data-wb="senden">${tr('msg.send', 'Senden')}</button>
                 <button class="wb-tab" data-wb="empfangen">${tr('sb.receive', 'Empfangen')}</button>
                 <button class="wb-tab" data-wb="key">${tr('sb.private_key', 'Private Key')}</button>
-                <button class="wb-tab" data-wb="scam">${tr('scam.tab', 'Auffällig')}${(scam.tokens ?? []).length ? ` (${scam.tokens.length})` : ''}</button>
+                <button class="wb-tab" data-wb="scam">${tr('scam.tab', 'Auffällig')}${(scam.tokens ?? []).length ? ` <span class="scam-tab-count">(${scam.tokens.length})</span>` : ''}</button>
             </div>
             <div id="wb-tab-guthaben">${buildWalletDetailHtml(_walletMonitorShape(balance))}</div>
             <div id="wb-tab-senden" hidden>
@@ -1586,7 +1586,7 @@ function _renderProtocolsTable(card, lending, cfg) {
         ? `<option disabled selected>${tr('slen.activate_bot_first', 'Bitte Lending Bot aktivieren')}</option>`
         : sorted.map(p => `
             <option value="${_esc(p.id)}" ${p.id === active?.id ? 'selected' : ''}${p.active ? '' : ' style="color:#888"'}>
-                [${_aprLabel(p.apy)}] ${_esc(p.label)}${p.active ? '' : p.qualified ? '' : ' ⊘'}${p.enabled ? '' : tr('sb.suffix_deactivated', ' (deaktiviert)')}
+                [${_aprLabel(p.apy)}] ${_esc(p.label)}${p.enabled ? '' : tr('sb.suffix_deactivated', ' (deaktiviert)')}
             </option>`).join('');
 
     card.innerHTML = `
@@ -1643,7 +1643,7 @@ function _renderProtocolsTable(card, lending, cfg) {
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-deposit-proto"
-                            ${noData ? 'disabled' : (active && !active.qualified ? 'disabled title="' + tr('slen.pool_disabled_or_apy', 'Pool deaktiviert oder erfüllt die APY-Schwelle nicht') + '"' : '')}>${tr('sb.deposit', 'Einzahlen')}</button>
+                            ${noData ? 'disabled' : (active && !active.enabled ? 'disabled title="' + tr('slen.deposit_disabled_pool', 'Pool deaktiviert') + '"' : '')}>${tr('sb.deposit', 'Einzahlen')}</button>
                     </td>
                 </tr>
                 <tr>
@@ -1744,8 +1744,8 @@ async function _togglePoolEnabled(proto, card, btn) {
 async function _openProtoDepositModal(proto, card) {
     const mid = 'lb-proto-deposit-modal';
 
-    if (!proto.qualified) {
-        _ctx.showToast?.(tr('slen.deposit_filter_fail', '{pool} besteht den internen Filter nicht – Einzahlen nicht möglich.', { pool: proto.label }), 'error');
+    if (!proto.enabled) {
+        _ctx.showToast?.(tr('slen.deposit_pool_disabled', '{pool} ist deaktiviert – Einzahlen nicht möglich.', { pool: proto.label }), 'error');
         return;
     }
 
@@ -1873,7 +1873,7 @@ async function _execWithdraw(modalId, proto, card) {
     const amount = parseFloat(raw ?? '0');
 
     if (!amount || amount <= 0) {
-        if (fb) { fb.textContent = tr('sb.enter_amount_or_all', 'Bitte Betrag eingeben oder „Alles" klicken.'); fb.className = 'modal-feedback error'; }
+        if (fb) { fb.textContent = tr('sb.enter_amount_or_all', 'Bitte Betrag eingeben oder „Alles“ klicken.'); fb.className = 'modal-feedback error'; }
         return;
     }
 

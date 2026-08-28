@@ -255,6 +255,24 @@
     font-size: 0.82rem;
     color: var(--text-primary);
     line-height: 1.4;
+    /* Zeilenumbrüche aus dem message-Text erhalten. Ohne das kollabiert HTML sie zu einem
+       Fließtext — eine mehrzeilige Meldung wurde dadurch unlesbar (Befund 2026-08-22:
+       eine Tabelle kam als „Aneinanderreihung von Buchstaben und Zahlen" an). */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+/* Monospace-Block aus einem ```-Abschnitt im message-Text: nur so stehen Spalten
+   untereinander. Scrollt horizontal, statt die Karte zu sprengen. */
+.notif-item-msg pre {
+    margin: 0.4em 0;
+    padding: 0.5em 0.6em;
+    background: var(--bg-secondary, rgba(127, 127, 127, 0.12));
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.74rem;
+    line-height: 1.35;
+    white-space: pre;
+    overflow-x: auto;
 }
 .notif-item-meta {
     font-size: 0.7rem;

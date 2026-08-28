@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="set.title">FORGE - public: Settings</title>
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
-    <link rel="stylesheet" href="css/settings.css?v=20260819b">
+    <link rel="stylesheet" href="css/settings.css?v=20260823c">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
@@ -25,13 +25,6 @@
                   data-tooltip-title="Premium" data-tooltip-content="" data-i18n-attr="title:nav.message.premium,data-tooltip-title:nav.message.premium"><img src="/forge/img/forge-logo.png" alt="Premium"></span>
         </div>
         <div class="header-right">
-            <!-- Sprache der Installation (gilt für Backend UND Oberfläche, nicht pro
-                 Nutzer – FORGE public ist Single-Tenant). Bewusst im Header und nicht in
-                 einem Bot-Tab: die Einstellung ist bot-übergreifend. -->
-            <select class="lang-select" id="langSelect" title="Sprache" data-i18n-attr="title:set.language">
-                <option value="de">Deutsch</option>
-                <option value="en">English</option>
-            </select>
             <span class="last-update" id="lastUpdate">–</span>
             <button class="notif-bell" id="notifBell" title="Message Center" data-i18n-attr="title:nav.message_center">
                 <span class="notif-envelope">
@@ -58,6 +51,6 @@
     </table>
 </div>
 
-<script type="module" src="js/settings.js?v=20260815a"></script>
+<script type="module" src="js/settings.js?v=20260827a"></script>
 </body>
 </html>

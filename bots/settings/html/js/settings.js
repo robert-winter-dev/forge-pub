@@ -5,12 +5,12 @@
  * Navigation erfolgt über das Hamburger-Menü (nav.js).
  */
 
-import { initNav, initFooter } from '/forge/js/nav.js?v=20260816a';
+import { initNav, initFooter } from '/forge/js/nav.js?v=20260826a';
 import { showToast }           from '/forge/js/toast.js?v=20260722b';
-import { initMessageBell }     from '/forge/js/message-bell.js?v=20260818a';
+import { initMessageBell }     from '/forge/js/message-bell.js?v=20260825a';
 import { t as tr }             from '/forge/js/i18n.js?v=20260811a';
-import * as liquidity          from './bot-liquidity.js?v=20260819f';
-import * as lending            from './bot-lending.js?v=20260819f';
+import * as liquidity          from './bot-liquidity.js?v=20260827a';
+import * as lending            from './bot-lending.js?v=20260823c';
 import { initForgeTooltip }    from './tooltip.js?v=20260811a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────
@@ -49,7 +49,7 @@ const FULL_NAME = {
 const hash      = location.hash.slice(1);
 const activeSvc = HASH_TO_SVC[hash] || 'forge-liquiditybot';
 
-initNav({ current: SVC_TO_NAV_ID[activeSvc] || 'settings' });
+initNav({ current: SVC_TO_NAV_ID[activeSvc] || 'settings', logout: '/api/auth/logout' });
 
 // Header-Titel: "Settings: Liquidity" (Kurzform)
 const _h1 = document.querySelector('.header-logo h1');
@@ -60,34 +60,6 @@ initFooter({ botName: `Settings: ${FULL_NAME[activeSvc] ?? activeSvc}` });
 
 // Brief-Icon → Message Center. Settings ist immer LAN-only (Port 3200) → requireLan:false.
 initMessageBell({ requireLan: false });
-
-// ── Sprachwahl ────────────────────────────────────────────────────────────────
-// Setzt die Sprache der GANZEN Installation (Backend + Oberfläche), nicht nur die
-// des Browsers – siehe Core/forge-pub/i18n.md (E3). Danach ein
-// Reload, weil der Katalog synchron im <head> geladen wird (html/i18n/active.js):
-// ein Umschalten ohne Neuladen würde nur die Hälfte der Oberfläche erwischen.
-const _langSelect = document.getElementById('langSelect');
-if (_langSelect) {
-    fetch('/api/i18n')
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { if (d?.lang) _langSelect.value = d.lang; })
-        .catch(() => {});
-
-    _langSelect.addEventListener('change', async () => {
-        const lang = _langSelect.value;
-        try {
-            const r = await fetch('/api/i18n', {
-                method:  'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ lang }),
-            });
-            if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? `HTTP ${r.status}`);
-            location.reload();
-        } catch (err) {
-            showToast(tr('set.language_failed', 'Sprache konnte nicht gesetzt werden: {error}', { error: err.message }), 'error');
-        }
-    });
-}
 
 let botStatuses  = {};
 let botCapital   = {};

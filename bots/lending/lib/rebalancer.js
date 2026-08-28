@@ -1,11 +1,14 @@
 /**
  * FORGE LendingBot – Pool-Qualifikation & Auto-Exit
  *
- * Qualifikation:  Pool aktiviert (isPoolEnabled) UND 72h-Durchschnitts-APY ≥ APY_THRESHOLD_PERCENT
- *                 UND weder TVL- noch Liquiditäts-Schutzschwelle unterschritten
- *                 UND ausreichende Datenbasis (minDataPoints / minCoverageHours) —
- *                 ein frisch ins Polling aufgenommener Pool rankt erst mit, wenn sein
- *                 avgApy über genug Messpunkte und Zeit geglättet ist
+ * Qualifikation (nur für automatisches Investieren, z.B. "Bester Pool"):
+ *                 Pool aktiviert (isPoolEnabled) UND weder TVL- noch
+ *                 Liquiditäts-Schutzschwelle unterschritten (siehe Settings).
+ *                 APY-Schwelle und Mindest-Datenbasis sind seit 2026-08-21
+ *                 bewusst KEINE Qualifikationskriterien mehr – manuelles
+ *                 Investieren ist für den Nutzer immer uneingeschränkt möglich
+ *                 (Settings-UI), Auto-Deploy respektiert weiterhin nur die
+ *                 beiden Schutzschwellen.
  * Deposit-Cap:    Pools mit TVL < 1M: max. 2.500 USDC gesamt (Sicherheitsnetz, unverändert)
  * Auto-Exit:      TVL < protokoll-eigene TVL-Schutz-Schwelle → sofortiger Withdraw + Deaktivierung
  *                 Liquidität < Liquiditäts-Schutz-Schwelle → sofortiger Withdraw (ohne Deaktivierung)
@@ -164,9 +167,11 @@ export function checkDataBasis(stats) {
 // ── Pool-Qualifikation ────────────────────────────────────────────────────────
 
 /**
- * Gibt qualifizierte Pools zurück: Pool aktiviert (isPoolEnabled) UND 72h-avg
- * APY ≥ Schwelle UND keine Schutzschwelle unterschritten. Sortiert nach avgApy
- * absteigend.
+ * Gibt qualifizierte Pools zurück: Pool aktiviert (isPoolEnabled) UND keine
+ * Schutzschwelle unterschritten. Sortiert nach avgApy absteigend.
+ *
+ * Nur für automatisches Investieren relevant (z.B. "Bester Pool") – manuelles
+ * Investieren in der Settings-UI ist davon unabhängig immer möglich.
  *
  * Die Schwellenprüfung ist bewusst live und zusätzlich zur Pool-Freigabe: der
  * TVL-Schutz deaktiviert einen Pool erst beim nächsten Bot-Tick (checkAndAutoExit),
@@ -183,7 +188,6 @@ export function checkDataBasis(stats) {
  */
 export function getQualifiedPools(poolStats72h) {
     const { tvlCapThreshold, depositCapUsdc } = REBALANCER_CONFIG;
-    const minApyPct = config.apyThresholdPercent;
     const result = [];
     for (const [protocol, stats] of poolStats72h) {
         const tvl = stats.tvl ?? 0;
@@ -192,14 +196,9 @@ export function getQualifiedPools(poolStats72h) {
         // nächstbeste Pool rückt nach; beim Austritt wäre dieselbe Regel gefährlich
         // (Begründung in checkInvestGuards, lib/tvl-guard.js).
         if (!checkInvestGuards(protocol, stats).ok) continue;
-        // Zu dünne Datenbasis → nicht ranken. Bewusst ein Ausschluss und keine
-        // Abwertung: ein Pool mit einem einzigen Messpunkt ist nicht "etwas
-        // schlechter", sein avgApy ist schlicht nicht vergleichbar.
-        if (!checkDataBasis(stats).ok) continue;
-        if (stats.avgApy >= minApyPct && isPoolEnabled(protocol)) {
-            const maxDepositUsdc = tvl >= tvlCapThreshold ? Infinity : depositCapUsdc;
-            result.push({ protocol, avgApy: stats.avgApy, tvl: stats.tvl, maxDepositUsdc });
-        }
+        if (!isPoolEnabled(protocol)) continue;
+        const maxDepositUsdc = tvl >= tvlCapThreshold ? Infinity : depositCapUsdc;
+        result.push({ protocol, avgApy: stats.avgApy, tvl: stats.tvl, maxDepositUsdc });
     }
     return result.sort((a, b) => b.avgApy - a.avgApy);
 }

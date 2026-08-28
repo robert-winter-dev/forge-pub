@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260731e">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/message.css?v=20260819b">
+    <link rel="stylesheet" href="css/message.css?v=20260826a">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
     <script src="/forge/i18n/active.js"></script>
@@ -29,28 +29,9 @@
             </button>
         </div>
     </div>
-    <!-- Zeile 2: Rubriken-Tabs. Gleiche Optik/Bedienung wie die Reiter im Health
-         Monitor (html/health.php, Klassen .health-tabs-band/.htab) – hier bewusst
-         mit eigenen Klassennamen, weil message.html html/css/health.css nicht
-         einbindet. "Einstellungen" ist absichtlich KEIN Reiter: dort gibt es keine
+    <!-- "Einstellungen" ist absichtlich KEIN Reiter: dort gibt es keine
          Nachrichtenliste, die Rubrik hängt seit 2026-08-16 als eigener Eintrag im
          Hamburger-Menü (siehe nav.js) und schaltet die Seite auf ein Vollbreite-Panel. -->
-    <div class="mc-tabs-band">
-        <div class="mc-tabs-inner" id="mcTabs" role="tablist">
-            <button class="mctab active" data-tab="system" role="tab" aria-selected="true">
-                <span data-i18n="nav.message.system">System</span><span class="mctab-count" id="mcTabCountSystem" hidden>0</span>
-            </button>
-            <button class="mctab" data-tab="bots" role="tab" aria-selected="false">
-                <span data-i18n="nav.message.bots">Bots</span><span class="mctab-count" id="mcTabCountBots" hidden>0</span>
-            </button>
-            <button class="mctab" data-tab="support" role="tab" aria-selected="false">
-                <span data-i18n="nav.message.support">Support</span><span class="mctab-count" id="mcTabCountSupport" hidden>0</span>
-            </button>
-            <button class="mctab" data-tab="premium" role="tab" aria-selected="false">
-                <span data-i18n="nav.message.premium">Premium</span><span class="mctab-count" id="mcTabCountPremium" hidden>0</span>
-            </button>
-        </div>
-    </div>
 </header>
 
 <main class="main-content mc-layout">
@@ -62,7 +43,26 @@
          unter "Health Monitor > Daten teilen" (.hshare-history-split). -->
     <div class="mc-mail" id="mcMail" hidden>
         <div class="mc-toolbar">
-            <input type="search" class="mcs-search" id="mcSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
+            <div class="mc-toolbar-left">
+                <input type="search" class="mcs-search" id="mcSearchInput" placeholder="Suchen…" autocomplete="off" data-i18n-attr="placeholder:msg.search">
+                <!-- Rubriken als Pillen statt der früheren Reiter im Header (seit 2026-08-25).
+                     Gleiche Buttons/Klasse .mctab wie vorher, selectMenu() in message.js
+                     kennt ihre Position im DOM nicht – nur CSS-Optik und Ort haben sich geändert. -->
+                <div class="mc-tabs-inner" id="mcTabs" role="tablist">
+                    <button class="mctab active" data-tab="system" role="tab" aria-selected="true">
+                        <span data-i18n="nav.message.system">System</span><span class="mctab-count" id="mcTabCountSystem" hidden>0</span>
+                    </button>
+                    <button class="mctab" data-tab="bots" role="tab" aria-selected="false">
+                        <span data-i18n="nav.message.bots">Bots</span><span class="mctab-count" id="mcTabCountBots" hidden>0</span>
+                    </button>
+                    <button class="mctab" data-tab="support" role="tab" aria-selected="false">
+                        <span data-i18n="nav.message.support">Support</span><span class="mctab-count" id="mcTabCountSupport" hidden>0</span>
+                    </button>
+                    <button class="mctab" data-tab="premium" role="tab" aria-selected="false">
+                        <span data-i18n="nav.message.premium">Premium</span><span class="mctab-count" id="mcTabCountPremium" hidden>0</span>
+                    </button>
+                </div>
+            </div>
             <div class="mc-toolbar-right">
                 <button class="msg-new-btn" id="msgNewBtn" hidden data-i18n="msg.new_message">Neue Nachricht</button>
                 <button class="msg-icon-btn" id="mcMarkAllBtn"
@@ -87,6 +87,6 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/message.js?v=20260819c"></script>
+<script type="module" src="js/message.js?v=20260826d"></script>
 </body>
 </html>

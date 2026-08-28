@@ -134,6 +134,23 @@ export function scamInfoIconHtml(tokens) {
         >&#9432;</span>`;
 }
 
+/**
+ * Auffälligkeits-Badge direkt vor dem "Verwalten"-Button der Wallet-Zeile.
+ *
+ * Ergänzt scamInfoIconHtml() (dezentes ⓘ neben dem Wallet-Namen, Fund 2026-08-21:
+ * an dieser Stelle leicht zu übersehen) um einen deutlich sichtbaren Zähler direkt
+ * an der Stelle, an der ein Nutzer tatsächlich hinschaut, bevor er auf "Verwalten"
+ * klickt. Leerer String, wenn nichts vorliegt.
+ */
+export function scamManageBadgeHtml(tokens) {
+    const n = (tokens ?? []).length;
+    if (n === 0) return '';
+    return `<span class="wat-scam-badge"
+        data-tooltip-title="${tr('scam.icon_title', 'Auffällige Token')}"
+        data-tooltip-content="${tr('scam.icon_tip', 'Im Wallet liegen {n} Token, die zu keinem bekannten Pool oder Protokoll gehören. Öffne „Verwalten“ und sieh im Reiter „Auffällig“ nach.', { n })}"
+        >${n}</span> `;
+}
+
 /** Inhalt des Reiters. */
 export function buildScamTabHtml(data) {
     const tokens  = data?.tokens ?? [];
@@ -169,6 +186,9 @@ const THIN_LIQUIDITY_USDC = 25_000;
 // Ab wann ein Mint nicht mehr „neu" ist. Airdrop-Wellen laufen über Tage, nicht über
 // Monate; alles darüber ist als Indiz wertlos.
 const RECENT_MINT_DAYS = 30;
+// Ab wieviel Haltern die Zahl nicht mehr aussagekräftig ist. Reine Anzeigeschwelle:
+// sie entscheidet nichts, sie blendet nur eine nichtssagende Angabe aus.
+const FEW_HOLDERS = 500;
 
 /**
  * Baut den Begründungstext als kurze Aufzählung.
@@ -209,6 +229,20 @@ function buildVerdictTip(tk) {
         points.push(tr('scam.tip_similar', 'Ähnelt bekanntem Namen: {sym}', { sym: tk.dupSymbol }));
     }
 
+    // Urteil von Jupiter. Bewusst als eigener Punkt und mit genannter Quelle: es ist
+    // eine FREMDE Einschätzung, keine eigene Messung — der Nutzer soll wissen, worauf
+    // sie beruht.
+    if (tk.susReason) {
+        points.push(tr('scam.tip_jupiter', 'Von Jupiter als verdächtig eingestuft'));
+    }
+
+    // Holder-Zahl: reine Kontextinformation für den Menschen, nie Grundlage der
+    // Einstufung (Begründung in lib/scam-classify.js). Nur bei wirklich kleinen
+    // Zahlen erwähnenswert — „13.000 Halter" sagt niemandem etwas.
+    if (tk.holderCount != null && tk.holderCount < FEW_HOLDERS) {
+        points.push(tr('scam.tip_few_holders', 'Nur {n} Wallets halten diesen Token', { n: tk.holderCount }));
+    }
+
     // Auffangfall: alter Mint, ausreichend Liquidität, keine Namensähnlichkeit — dann
     // bleibt als Aussage nur der Grund, aus dem der Token überhaupt in dieser Liste
     // steht. Ohne diesen Zweig wäre der Tooltip leer.
@@ -224,10 +258,11 @@ function scamCardHtml(tk, collapsed) {
     const shown = cleanSymbol(tk.symbol) ?? tr('scam.no_symbol', 'ohne Symbol');
     const url   = `https://solscan.io/token/${encodeURIComponent(tk.mint)}`;
 
-    // Einstufung. „Vermutet: Scam" NUR bei Symbol-Kollision — bei WARN haben wir
+    // Einstufung. „Vermutet: Scam" nur bei echter Evidenz — entweder eine Kollision
+    // mit einem bekannten Namen oder ein Scam-Urteil von Jupiter. Bei WARN haben wir
     // keine Evidenz, sondern nur fehlende Information.
-    const isImitation = !!tk.dupSymbol;
-    const verdict = isImitation
+    const hasEvidence = !!tk.dupSymbol || !!tk.susReason;
+    const verdict = hasEvidence
         ? tr('scam.verdict_scam', 'Vermutet: Scam')
         : tr('scam.verdict_unclear', 'Unklar');
 
@@ -260,7 +295,7 @@ function scamCardHtml(tk, collapsed) {
                        aria-label="${tr('scam.delete', 'Token löschen')}">&#128465;</button>`
             : `<span class="info-tip-label"
                      data-tooltip-title="${tr('scam.no_action', 'Kein Löschen möglich')}"
-                     data-tooltip-content="${tr('scam.no_action_tip', 'Für diesen Token fehlt uns die Grundlage für eine Empfehlung. Sieh ihn dir im Explorer an und entscheide selbst.')}"
+                     data-tooltip-content="${tr('scam.no_action_tip', 'Für diesen Token fehlt uns die Grundlage für eine Empfehlung. Sieh ihn dir im Explorer an und entscheide selbst; über das Terminal lässt er sich gezielt entfernen.')}"
                      >&#9432;</span>`}`;
 
     // Zeile 1 trägt allein schon die Entscheidung — deshalb bleibt genau sie stehen,
@@ -283,7 +318,7 @@ function scamCardHtml(tk, collapsed) {
 
     const created = fmtDateTime(tk.createdAt ? Date.parse(tk.createdAt) : null);
     const line2 = created
-        ? `<div class="scam-detail">${tr('scam.created_line', 'Dieser „{sym}“-Token wurde erzeugt: {date}', { sym: esc(shown), date: esc(created) })}</div>`
+        ? `<div class="scam-detail">${tr('scam.created_line', 'Dieser „{sym}“-Token wurde erzeugt: {date} Uhr', { sym: esc(shown), date: esc(created) })}</div>`
         : '';
 
     // Empfangszeitpunkt aus der Kette schlägt first_seen: Letzteres sagt nur, wann WIR
@@ -299,7 +334,7 @@ function scamCardHtml(tk, collapsed) {
                aria-label="${tr('scam.show_tx', 'Transaktion ansehen, mit der der Token ankam')}">&#8599;</a>`
         : '';
     const line3 = receivedText
-        ? `<div class="scam-detail">${tr('scam.since_line', 'Im Wallet seit: {date}', { date: esc(receivedText) })}${txLink}</div>`
+        ? `<div class="scam-detail">${tr('scam.since_line', 'Im Wallet seit: {date} Uhr', { date: esc(receivedText) })}${txLink}</div>`
         : '';
 
     return `<div class="scam-card">${line1}${line2}${line3}</div>`;
@@ -359,22 +394,28 @@ function confirmAndBurn(flavor, tk, onChanged) {
     const mid    = 'scam-burn-confirm';
     const shown  = cleanSymbol(tk.symbol) ?? tr('scam.no_symbol', 'ohne Symbol');
     const typing = tk.needsTyping;
+    // Was abgetippt werden muss, bestimmt der Server (confirmLabel) — er prüft
+    // dagegen. Ein Token ohne Symbol hätte sonst nichts Abtippbares und wäre
+    // dauerhaft unlöschbar.
+    const confirmLabel = tk.confirmLabel ?? cleanSymbol(tk.symbol) ?? '';
 
     const warning = typing
-        ? tr('scam.confirm_review',
-             'Dieser Token gibt sich als „{sym}“ aus, stammt aber von einem fremden Mint — und der Bestand ist derzeit rund {value} wert. Falls du ihn doch selbst erworben hast, wäre dieses Geld unwiderruflich weg. Tippe zum Bestätigen das angezeigte Symbol ab.',
-             { sym: tk.dupSymbol, value: tk.value != null
-                 ? `${Number(tk.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC`
-                 : '?' })
+        ? (tk.value != null
+            ? tr('scam.confirm_review',
+                 'Dieser Token ist auffällig und stammt von einem fremden Mint — und der Bestand ist derzeit rund {value} wert. Falls du ihn doch selbst erworben hast, wäre dieses Geld unwiderruflich weg. Tippe zum Bestätigen „{label}“ ab.',
+                 { label: confirmLabel, value: `${Number(tk.value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC` })
+            : tr('scam.confirm_review_no_price',
+                 'Dieser Token ist auffällig und stammt von einem fremden Mint. Für ihn konnte kein Preis ermittelt werden. Falls du ihn doch selbst erworben hast, könnte trotzdem ein Wert darin stecken, der dann unwiderruflich weg wäre. Tippe zum Bestätigen „{label}“ ab.',
+                 { label: confirmLabel }))
         : tr('scam.confirm_burn',
              'Der Token wird verbrannt und sein Konto geschlossen. Das lässt sich nicht rückgängig machen — auch nicht von uns. Bitte entscheide selbst, ob du ihn wirklich nicht brauchst.',
              {});
 
     const typingHtml = typing
         ? `<div class="settings-row" style="border:none; margin-top:0.75rem;">
-               <span class="settings-label">${tr('scam.type_symbol', 'Symbol abtippen')}</span>
+               <span class="settings-label">${tr('scam.type_symbol', 'Zur Bestätigung abtippen')}</span>
                <input type="text" id="scam-confirm-input" class="settings-input"
-                      autocomplete="off" spellcheck="false" placeholder="${esc(shown)}">
+                      autocomplete="off" spellcheck="false" placeholder="${esc(confirmLabel)}">
            </div>`
         : '';
 
@@ -393,9 +434,10 @@ function confirmAndBurn(flavor, tk, onChanged) {
             {
                 label: tr('scam.confirm_delete', 'Löschen'),
                 onClick: async () => {
-                    const modalEl = getModal(mid);
-                    const status  = modalEl?.querySelector('#scam-burn-status');
-                    const payload = { mint: tk.mint };
+                    const modalEl    = getModal(mid);
+                    const status     = modalEl?.querySelector('#scam-burn-status');
+                    const deleteBtn  = modalEl?.querySelector('[data-mi="0"]');
+                    const payload    = { mint: tk.mint };
 
                     if (typing) {
                         const typed = modalEl?.querySelector('#scam-confirm-input')?.value ?? '';
@@ -403,13 +445,17 @@ function confirmAndBurn(flavor, tk, onChanged) {
                         // unsichtbares Steuerzeichen abtippen müssen. Der Server prüft
                         // zusätzlich gegen den Originalwert, ein Client ist keine
                         // Sicherheitsgrenze.
-                        if (typed.trim().toLowerCase() !== String(shown).trim().toLowerCase()) {
-                            if (status) status.textContent = tr('scam.type_mismatch', 'Das Symbol stimmt noch nicht überein.');
+                        if (typed.trim().toLowerCase() !== String(confirmLabel).trim().toLowerCase()) {
+                            if (status) status.textContent = tr('scam.type_mismatch', 'Die Eingabe stimmt noch nicht überein.');
                             return;
                         }
-                        payload.confirmSymbol = tk.symbol;
+                        payload.confirmSymbol = confirmLabel;
                     }
 
+                    // Deaktiviert für die Dauer der Anfrage — sichtbares Zeichen, dass der
+                    // Löschvorgang läuft, und verhindert einen Doppelklick, der den Burn
+                    // während der TX-Bestätigung ein zweites Mal anstößt.
+                    if (deleteBtn) deleteBtn.disabled = true;
                     if (status) status.textContent = tr('scam.deleting', 'Wird gelöscht…');
                     try {
                         const res  = await fetch(`/api/wallet/${flavor}/scam/burn`, {
@@ -421,10 +467,40 @@ function confirmAndBurn(flavor, tk, onChanged) {
 
                         if (res.status === 409 || json.busy) {
                             if (status) status.textContent = tr('scam.busy', 'Gerade läuft schon eine Prüfung. Versuch es in einer Minute noch einmal.');
+                            if (deleteBtn) deleteBtn.disabled = false;
                             return;
                         }
                         if (!json.ok) {
                             if (status) status.textContent = tr('scam.failed', 'Löschen fehlgeschlagen: {error}', { error: json.error ?? 'unbekannt' });
+                            if (deleteBtn) deleteBtn.disabled = false;
+                            return;
+                        }
+
+                        // Weder geschlossen noch fehlgeschlagen: der Token lag beim
+                        // Ausführen schon nicht mehr im Wallet (z.B. ein zuvor bereits
+                        // erfolgreicher Burn, dessen Ergebnis hier nur noch nicht
+                        // ankam). "Token gelöscht, 0 SOL" wäre hier irreführend.
+                        // Der Server sagt uns ehrlich, wenn der Wallet-Refresh danach
+                        // fehlgeschlagen ist (Timeout/RPC-Fehler) — dann kann die Liste noch
+                        // den alten Stand zeigen, bis der nächste Cron-Lauf sie korrigiert.
+                        const staleHint = json.scamListStale
+                            ? `<p>${tr('scam.stale_hint',
+                                'Die Liste konnte gerade nicht sofort neu eingelesen werden — bis zur nächsten automatischen Prüfung kann sie hier noch veraltete Einträge zeigen.')}</p>`
+                            : '';
+
+                        const closedCount = json.result?.closed?.length ?? 0;
+                        const failedCount = json.result?.failed?.length ?? 0;
+                        if (closedCount === 0 && failedCount === 0) {
+                            closeModal(mid);
+                            showModal({
+                                id:    'scam-burn-done',
+                                title: tr('scam.gone_title', 'Bereits nicht mehr im Wallet'),
+                                body: `<p>${tr('scam.gone_body',
+                                    '„{sym}“ liegt nicht mehr in deinem Wallet — vermutlich wurde er schon vorher gelöscht. Die Liste wird aktualisiert.',
+                                    { sym: esc(shown) })}</p>${staleHint}`,
+                                actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('scam-burn-done') }],
+                            });
+                            onChanged?.();
                             return;
                         }
 
@@ -435,12 +511,13 @@ function confirmAndBurn(flavor, tk, onChanged) {
                             title: tr('scam.done_title', 'Token gelöscht'),
                             body: `<p>${tr('scam.done_body',
                                 '„{sym}“ wurde verbrannt und sein Konto geschlossen. {sol} SOL Konto-Miete sind wieder in deinem Wallet.',
-                                { sym: esc(shown), sol: freed.toFixed(6) })}</p>`,
+                                { sym: esc(shown), sol: freed.toFixed(6) })}</p>${staleHint}`,
                             actions: [{ label: tr('common.close', 'Schließen'), onClick: () => closeModal('scam-burn-done') }],
                         });
                         onChanged?.();
                     } catch (err) {
                         if (status) status.textContent = tr('scam.failed', 'Löschen fehlgeschlagen: {error}', { error: err.message });
+                        if (deleteBtn) deleteBtn.disabled = false;
                     }
                 },
             },

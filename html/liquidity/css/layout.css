@@ -636,6 +636,7 @@ body {
     padding: 2rem 1rem;
     color: var(--text-secondary);
     font-size: 0.85rem;
+    font-weight: 600;
 }
 
 .chart-grid {
@@ -675,6 +676,7 @@ body {
     text-align: center;
     padding: 2rem;
     color: var(--text-secondary);
+    font-weight: 600;
 }
 
 /* ── Footer ───────────────────────────────────────────────────────────────── */
@@ -812,6 +814,8 @@ body {
     padding: 12px 14px;
     font-size: 0.82rem;
     color: var(--text-primary);
+    text-align: center;
+    font-weight: 600;
 }
 .pools-overview-row.inactive { color: rgba(100, 116, 139, 0.85); }
 .pools-overview-row.inactive .value-good   { color: rgba(100, 116, 139, 0.85) !important; }

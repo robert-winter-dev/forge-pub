@@ -25,6 +25,7 @@
  *      leert Fees und brennt dann das NFT. Gilt für jede Liquiditätsmenge.
  */
 
+import { readFileSync }  from 'node:fs';
 import { config }        from '../lib/config.js';
 import { openDatabase }  from '../lib/db.js';
 import {
@@ -33,6 +34,7 @@ import {
     assertSufficientSol,
 } from '../lib/wallet.js';
 import { rpcLimiter }    from '../lib/rate-limiter.js';
+import { PATHS }         from '../../../config/paths.js';
 import {
     WhirlpoolContext,
     buildWhirlpoolClient,
@@ -71,6 +73,32 @@ const PRIORITY_FEE_LAMPORTS = 10_000;
 const db      = openDatabase();
 const keypair = getKeypair();
 const conn    = getConnection();
+
+// Pool-Namen wie auf Orca (displayPair), nicht die interne DB-Reihenfolge (pair) —
+// gleiche Konvention wie überall sonst in FORGE (notify.js, daily-report.js, export.js).
+const displayPairMap = (() => {
+    const m = new Map();
+    try {
+        for (const p of JSON.parse(readFileSync(PATHS.liquidityPools, 'utf8'))) {
+            m.set(p.id, p.displayPair ?? p.pair ?? p.id);
+        }
+    } catch { /* Fallback unten */ }
+    return m;
+})();
+
+const poolByMintStmt = db.prepare(`
+    SELECT po.id AS pool_id, po.pair
+    FROM positions p
+    JOIN pools po ON po.id = p.pool_id
+    WHERE p.nft_mint = ?
+    ORDER BY p.id DESC
+    LIMIT 1
+`);
+function displayPairForMint(mintStr) {
+    const row = poolByMintStmt.get(mintStr);
+    if (!row) return 'unbekannter Pool';
+    return displayPairMap.get(row.pool_id) ?? row.pair;
+}
 
 // Aktive NFT-Mints aus der DB (closed_at IS NULL)
 const activeNftMints = new Set(
@@ -153,12 +181,13 @@ for (let i = 0; i < posInfos.length; i++) {
     const needsCollect = feeOwedA > 0n || feeOwedB > 0n;
 
     const posPda = posPdas[i];
-    zombies.push({ mint, posPda, mintStr, needsCollect, needsDecrease, dustLiq: totalLiq, feeOwedA, feeOwedB, rentLamports: info.lamports });
+    const pair   = displayPairForMint(mintStr);
+    zombies.push({ mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq: totalLiq, feeOwedA, feeOwedB, rentLamports: info.lamports });
     const tags = [];
     if (needsDecrease) tags.push(`Dust L=${totalLiq}`);
     if (needsCollect)  tags.push(`Fees ${feeOwedA}A/${feeOwedB}B`);
     const tagStr = tags.length > 0 ? ` (${tags.join(' + ')})` : '';
-    console.log(`  🧟 Zombie${tagStr}: ${mintStr}`);
+    console.log(`  🧟 Zombie${tagStr}: ${mintStr} (${pair})`);
 }
 
 console.log(`\n[burn-zombie] Zombies gesamt: ${zombies.length}`);
@@ -216,8 +245,23 @@ if (!EXECUTE) {
 }
 
 // ─── Verbrennen ───────────────────────────────────────────────────────────────
-
-await assertSufficientSol(keypair.publicKey);
+// SOL-Check VOR dem ersten On-Chain-Call: burn/decrease/collect kosten alle Fees,
+// ein Abbruch mitten in der Zombie-Liste würde einen Teil-Zustand hinterlassen.
+// Sauberer Abbruch statt ungefangener Exception (die crashte den Cron-Job bisher
+// mit vollem Stacktrace, siehe LIQ#0341-Folgevorfall 2026-08-28) — jede gefundene
+// Zombie-Position wird als [burn-pending] geloggt, damit der Wrapper
+// (run-zombie-check.sh) trotz Abbruch weiß, welche Pools betroffen sind.
+try {
+    await assertSufficientSol(keypair.publicKey);
+} catch (err) {
+    console.error(`\n[burn-zombie] ${err.message}`);
+    for (const z of zombies) {
+        console.log(`[burn-pending] pool=${z.pair} mint=${z.mintStr}`);
+    }
+    console.log(`\n[burn-zombie] Abgebrochen: ${zombies.length} Zombie(s) gefunden, 0 geburnt (zu wenig SOL).`);
+    db.close();
+    process.exit(1);
+}
 
 const wallet = new Wallet(keypair);
 const ctx    = WhirlpoolContext.from(conn, wallet, undefined, undefined, {
@@ -228,17 +272,8 @@ const ctx    = WhirlpoolContext.from(conn, wallet, undefined, undefined, {
 
 const client = buildWhirlpoolClient(ctx);
 
-const poolByMintStmt = db.prepare(`
-    SELECT po.pair
-    FROM positions p
-    JOIN pools po ON po.id = p.pool_id
-    WHERE p.nft_mint = ?
-    ORDER BY p.id DESC
-    LIMIT 1
-`);
-
 let burned = 0;
-for (const { mint, posPda, mintStr, needsCollect, needsDecrease, dustLiq, rentLamports } of zombies) {
+for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, rentLamports } of zombies) {
     try {
         // Liquidität abziehen falls noch >0 (sonst wirft closePosition 0x178b ClosePositionNotEmpty)
         // Bei --full-close: echte Position inkl. Kapital; bei --include-dust: nur Dust-Rest
@@ -298,7 +333,6 @@ for (const { mint, posPda, mintStr, needsCollect, needsDecrease, dustLiq, rentLa
             .addInstruction(burnIx);
         const txHash = await burnTx.buildAndExecute();
 
-        const pair = poolByMintStmt.get(mintStr)?.pair ?? 'unbekannter Pool';
         const rentSol = (rentLamports / 1e9).toFixed(5);
         console.log(`  🔥 Geburnt: ${mintStr} | TX=${txHash}`);
         console.log(`[burn-result] pool=${pair} mint=${mintStr} rentSol=${rentSol}`);

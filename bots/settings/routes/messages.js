@@ -59,6 +59,22 @@ const BOT_IDS       = ['liquidity', 'lending'];
 const BOT_NAMES     = BOT_IDS.map(id => getBotConfig(id).displayName);
 const BOT_NAME_BY_ID = Object.fromEntries(BOT_IDS.map(id => [id, getBotConfig(id).displayName]));
 
+// Risk-Management-Kategorien (2026-08-25, Message Center > Einstellungen >
+// Benachrichtigungen > "Risk-Management"): alle Meldungen, die ein Risikomanagement-
+// Ereignis auslöst – Trailing Stop, TVL-Schutz, Score-Limit, plus die gemeinsame
+// rm-warning/rm-executed-Fassade (deckt sowohl Trailing Stop als auch Score-Limit
+// ab, siehe bots/liquidity/lib/trailing-stop.js + score-limit.js). Anders als
+// System/Bots/Support/Premium ist das KEINE eigene Rubrik, sondern ein Unterfilter
+// innerhalb von "Bots" (die Kategorien kommen ausschließlich vom Liquidity-Bot) –
+// betrifft deshalb nur den Ungelesen-Zähler der Rubrik Bots, nicht die Sichtbarkeit
+// der Meldungen selbst (gleiches Prinzip wie bei den anderen vier Toggles).
+const RISK_CATEGORIES = [
+    'rm-warning', 'rm-executed',
+    'trailing-stop', 'trailing-stop-done', 'trailing-stop-partial',
+    'tvl', 'tvl-done',
+    'score-limit', 'score-limit-done',
+];
+
 /**
  * Anzeigename des betroffenen Bots für die Kopfzeile im Message Center.
  *
@@ -109,6 +125,44 @@ function extractPool(context) {
     } catch {
         return null;  // kein valides JSON – dann eben kein Pool-Bezug
     }
+}
+
+/**
+ * Strukturierte Darstellung eines Tagesberichts (n.dailyReport, siehe
+ * bots/liquidity/bin/daily-report.js buildReportData()) fürs Message Center —
+ * analog zu extractRiskExit() beim Trailing Stop: eigene Frontend-Darstellung
+ * (Überschrift, Aufzählung, farbige Tabelle) statt Fließtext mit Pipe-Tabelle.
+ *
+ * Alle Zahlen kommen bereits fertig formatiert aus daily-report.js (deutsches
+ * Zahlenformat, Europe/Berlin-Zeitzone) — hier wird nichts nachgerechnet, nur
+ * durchgereicht. Ältere Tagesberichte (vor 2026-08-24) haben kein `data`-Feld in
+ * msg_params und fallen auf die Fließtext-Darstellung zurück (liefert `null`).
+ */
+function extractDailyReport(msgKey, msgParams) {
+    if (msgKey !== 'notify.liq.daily_report') return null;
+    let p = msgParams;
+    if (typeof p === 'string') {
+        try { p = JSON.parse(p); } catch { return null; }
+    }
+    if (!p || typeof p !== 'object' || !p.data) return null;
+    return { day: p.day ?? null, ...p.data };
+}
+
+/**
+ * Betreffzeile für die SOL-Reserve-Warnung/-Erholung (n.solLow, siehe
+ * bots/liquidity/lib/notify.js solLow()) — der Fließtext bleibt unverändert
+ * (körperlicher Meldungstext, notify.liq.sol_low/_recovered), nur die Kopfzeile
+ * der Detailansicht bekommt einen Wiederholungszähler ("Warnung: … (2)") bzw.
+ * die Erholungs-Kennzeichnung ("Hinweis: … wiederhergestellt").
+ */
+function extractSolLow(msgKey, msgParams) {
+    if (msgKey !== 'notify.liq.sol_low' && msgKey !== 'notify.liq.sol_recovered') return null;
+    let p = msgParams;
+    if (typeof p === 'string') {
+        try { p = JSON.parse(p); } catch { return null; }
+    }
+    if (msgKey === 'notify.liq.sol_recovered') return { recovered: true, reserve: p?.reserve ?? null };
+    return { recovered: false, count: p?.count ?? null, reserve: p?.reserve ?? null };
 }
 
 /**
@@ -195,16 +249,48 @@ function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
             ? `${pnlUsdcNum >= 0 ? '+' : ''}${(pnlUsdcNum / lpValueNum * 100).toFixed(2)}%`
             : null;
 
+        // "Max %"/"Ende %" – beide relativ zum Einstieg (entryUsdRaw), nicht zum
+        // Poolwert bei Schließung (das ist pnlPct, andere Bezugsgröße, siehe oben).
+        // Rohzahlen kommen seit 2026-08-24 zusätzlich zu den fertig formatierten
+        // Strings aus exitMetricsParams() – Ende-% gab es als fertige Zeile vorher
+        // nicht, deshalb hier aus den Rohwerten berechnet statt übernommen.
+        const entryUsdNum = p.entryUsdRaw ?? null;
+        const hwmUsdNum   = p.hwmUsdRaw ?? null;
+        const swappedNum  = p.swappedLine?.p?.usdc != null ? parseFloat(p.swappedLine.p.usdc) : null;
+        // "Ende" ist der tatsächlich realisierte Gegenwert – nach Swap, falls einer
+        // stattfand, sonst der letzte gemessene Poolwert (kein Swap konfiguriert/nötig).
+        // Bewusst NICHT der Poolwert vor dem Exit (lpValueNum): der Abschnitt erzählt
+        // Start → Max → Kosten → Ende, und "Ende" soll das sein, was am Ende wirklich
+        // in der Wallet ankam (Vorgabe 2026-08-24).
+        const endValueNum = swappedNum ?? lpValueNum;
+        // Nur für "Max %" – rein informativ (wie weit lag der Peak über dem Start),
+        // keine PnL-Zahl. "Ende %" dagegen ist unten bewusst identisch mit pnlPct
+        // (siehe dort): zwei verschiedene Formeln für "praktisch dieselbe Zahl" hätten
+        // bei mehreren Ein-/Auszahlungen während der Laufzeit auseinanderlaufen können
+        // (lib/pnl.js verankert am letzten externen Deposit, nicht zwingend am
+        // Öffnungszeitpunkt) — 🔒 PnL kommt in FORGE ausschließlich aus lib/pnl.js,
+        // kein zweites Berechnungsverfahren dafür (siehe CLAUDE.md, oberste Regel).
+        const pctVs = (valueNum) => (entryUsdNum != null && entryUsdNum !== 0 && valueNum != null)
+            ? `${valueNum >= entryUsdNum ? '+' : ''}${((valueNum - entryUsdNum) / entryUsdNum * 100).toFixed(2)}%`
+            : null;
+
         return {
             pair:        p.pair ?? null,
             scenario,
-            lpValue:     p.lpValue ?? null,
-            coinsA:      p.coinsA ?? null,
-            symA:        p.symA ?? null,
-            coinsB:      p.coinsB ?? null,
-            symB:        p.symB ?? null,
-            swappedUsdc: p.swappedLine?.p?.usdc ?? null,
+            // entryValue/hwmValue kommen bereits fertig formatiert aus exitMetricsParams()
+            // (bots/liquidity/lib/notify.js) — keine zweite Formatierungslogik hier, anders
+            // als bei den übrigen Feldern unten (die stammen noch aus der Fließtext-Ära).
+            entryValue:  entryUsdNum != null ? entryUsdNum.toFixed(2) : null,
+            hwmValue:    hwmUsdNum   != null ? hwmUsdNum.toFixed(2)   : null,
+            hwmPct:      pctVs(hwmUsdNum),
+            endValue:    endValueNum != null ? endValueNum.toFixed(2) : null,
+            // Bewusst derselbe Wert wie pnlPct, nicht pctVs(endValueNum): die Details-
+            // Tabelle soll erklären, WIE der oben gezeigte PnL zustande kommt – beide
+            // Zahlen müssen deckungsgleich sein (Vorgabe 2026-08-24).
+            exitPct:     pnlPct,
             exitCost:    p.swappedLine?.p?.cost ?? null,
+            openedAtMs:  p.openedAtMs ?? null,
+            exitAtMs:    timestamp ?? null,
             pnlUsdc,
             pnlPct,
             actionText,
@@ -367,8 +453,34 @@ router.get('/support/stream', async (req, res) => {
 // Daten") ist bewusst 'info' – kein Alarm, aber trotzdem die eine Meldung, die
 // diese Rubrik laut Freigabe-Tab ("Daten teilen") verspricht sichtbar zu machen.
 // Ohne diese Ausnahme verschwand er lautlos hinter demselben Filter wie die
+//
+// Zweite Ausnahme (2026-08-23): der tägliche Tagesbericht (category
+// 'daily-report') wurde an diesem Tag von 'warn' auf 'info' korrigiert (er ist
+// keine Warnung, sondern reine Rückschau) — dieselbe Blende hätte ihn dadurch
+// ungewollt komplett aus System UND Bots verschwinden lassen (Fund 2026-08-23:
+// Nachricht stand korrekt in der DB, war aber in keiner Rubrik zu sehen).
 // Positions-/Deposit-Rauschmeldungen, die die Blende ursprünglich abstellen
 // sollte (Fund 2026-08-13: Report kam korrekt in der DB an, war aber nie sichtbar).
+//
+// Dritte Ausnahme (2026-08-24): Trailing-Stop-Abschlussmeldung (category
+// 'rm-executed') von 'warn' auf 'info' korrigiert (normales Bot-Verhalten, keine
+// Warnung) — derselbe Fehler wie beim Tagesbericht am 23.08., diesmal direkt beim
+// Umstellen entdeckt statt erst durch "die Nachricht ist weg".
+//
+// Vierte Ausnahme (2026-08-26): Scam-Token-Fund im Wallet (category 'scam_token',
+// Wallet-Monitor) ist bewusst 'info' (kein Telegram, siehe Kommentar in
+// core/wallet-monitor/monitor.js) — sollte aber im Message Center sichtbar sein,
+// da es die einzige aktive Anzeige für den Fund ist. Derselbe Fehler ein drittes
+// Mal: neue info-Kategorie eingeführt, hier vergessen (Fund 2026-08-26: Meldung
+// stand korrekt in der DB, war aber in keiner Rubrik zu sehen).
+//
+// Fünfte Ausnahme (2026-08-27): Zombie-NFT-Cleanup (category 'zombie-check',
+// bin/run-zombie-check.sh) wurde am 24.08. im Zuge von LIQ#0327 korrekt von
+// 'warn' auf 'info' umgestellt (reiner Erfolgsfall) — genau derselbe Fehler ein
+// viertes Mal: die Blende hier wurde beim Umstellen nicht mitgezogen, seitdem
+// unsichtbar trotz korrekt geburnter Zombies (Fund 2026-08-27: seit dem
+// Umstellen keine Nachricht mehr gesehen, obwohl 26.08. zwei Zombies geburnt
+// wurden — Meldungen standen korrekt in der DB).
 function handleNotificationWindow(req, res, scope) {
     // Reine Lese-Queries auf die Nexus-DB sind laut Konvention erlaubt (exklusiver
     // Schreibzugriff bleibt beim Nexus selbst, siehe notify-db.js). Kein Nostr-Bezug,
@@ -443,7 +555,7 @@ function handleNotificationWindow(req, res, scope) {
             + restartTexts.map(() => "COALESCE(message,'') NOT LIKE ?").join(' AND ');
         const restartParams = hasI18n ? [...restartKeys, ...restartTexts] : [...restartTexts];
 
-        const baseFilter = `(level != 'info' OR category = 'health-share-report')`
+        const baseFilter = `(level != 'info' OR category IN ('health-share-report', 'daily-report', 'rm-executed', 'scam_token', 'zombie-check'))`
             + ` AND message NOT LIKE '%APR-Alert%' AND ${scopeSql} AND ${restartSql}`;
         const baseParams = [...scopeParams, ...restartParams];
         // Suche schließt Anzeigename UND context mit ein: die UI zeigt "Liquidity Bot"
@@ -476,23 +588,42 @@ function handleNotificationWindow(req, res, scope) {
               message:  notificationText({ ...r, msg_key, msg_params }),
               read:     !!r.read,
               botName:  resolveBotName(r.displayName, r.botId),
-              pool:     extractPool(context),
-              riskExit: extractRiskExit(msg_key, msg_params, r.timestamp, getLiquidityDb()),
+              pool:        extractPool(context),
+              riskExit:    extractRiskExit(msg_key, msg_params, r.timestamp, getLiquidityDb()),
+              dailyReport: extractDailyReport(msg_key, msg_params),
+              solLow:      extractSolLow(msg_key, msg_params),
           }));
 
         // Für "alle als gelesen"-Bulk-Aktion, auf die aktuelle Suche beschränkt.
         const allIds = db.prepare(`SELECT id FROM notifications ${whereSql}`).all(...params).map(r => r.id);
+
+        // "Risk-Management" (Einstellungen > Benachrichtigungen) ausgeschaltet? Nur
+        // relevant für die Rubrik "Bots" (siehe RISK_CATEGORIES oben) und nur für die
+        // beiden Zähler unten – Messages bleiben immer in `rows` sichtbar, gleiches
+        // Prinzip wie bei den anderen vier Toggles.
+        // settings-Tabelle kann bei einer frisch erzeugten nexus.db theoretisch noch
+        // fehlen (wird erst bei getDb() im Nexus-Prozess angelegt) – gleiche
+        // Vorsichtsmaßnahme wie bei hasDisplayName/hasRead oben, sonst würde die ganze
+        // Rubrik über den äußeren catch-Zweig leer laufen statt nur den Toggle zu ignorieren.
+        const hasSettingsTable = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings'"
+        ).get() != null;
+        const riskDisabled = scope === 'bots' && hasSettingsTable
+            && db.prepare("SELECT value FROM settings WHERE key = 'notify_risk'").get()?.value === '0';
+        const riskExclSql    = riskDisabled ? ` AND category NOT IN (${RISK_CATEGORIES.map(() => '?').join(',')})` : '';
+        const riskExclParams = riskDisabled ? RISK_CATEGORIES : [];
+
         // Für Brief-Icon-Badge + Menü-Zähler – server-seitig statt Client-Diff gegen
         // localStorage (siehe message-bell.js), damit der Stand über alle Geräte gleich ist.
         const unreadCount = hasRead
-            ? db.prepare(`SELECT COUNT(*) AS c FROM notifications ${whereSql} AND read = 0`).get(...params).c
+            ? db.prepare(`SELECT COUNT(*) AS c FROM notifications ${whereSql}${riskExclSql} AND read = 0`).get(...params, ...riskExclParams).c
             : allIds.length;
         // Zeitstempel der ältesten ungelesenen Nachricht – Brief-Icon (message-bell.js)
         // vergleicht das mit Support/Premium, um bei Klick auf Icon/Badge zur Rubrik
         // mit der am längsten offenen ungelesenen Nachricht zu springen, statt fest
         // auf eine Rubrik zu verlinken.
         const oldestUnread = hasRead
-            ? (db.prepare(`SELECT MIN(timestamp) AS t FROM notifications ${whereSql} AND read = 0`).get(...params).t ?? null)
+            ? (db.prepare(`SELECT MIN(timestamp) AS t FROM notifications ${whereSql}${riskExclSql} AND read = 0`).get(...params, ...riskExclParams).t ?? null)
             : null;
 
         // hasMore statt totalPages: der Client hängt beim Scrollen an, statt zu blättern.
@@ -537,5 +668,15 @@ router.get('/notify-settings', (req, res) => proxyNexusJson(req, res, '/notifica
 
 router.post('/notify-settings', (req, res) =>
     proxyNexusJson(req, res, '/notifications/settings', { method: 'POST', body: JSON.stringify(req.body ?? {}) }));
+
+// GET  /features/:feature → { enabled } – Feature-Toggle aus Einstellungen, das
+// nicht nur die Badge-Sichtbarkeit steuert, sondern ob eine Meldung überhaupt
+// erzeugt wird (erster Nutzer: Liquidity-Tagesbericht, feature = 'daily_report').
+// POST /features/:feature { enabled } → Toggle setzen.
+router.get('/features/:feature', (req, res) =>
+    proxyNexusJson(req, res, `/features/${encodeURIComponent(req.params.feature)}`));
+
+router.post('/features/:feature', (req, res) =>
+    proxyNexusJson(req, res, `/features/${encodeURIComponent(req.params.feature)}`, { method: 'POST', body: JSON.stringify(req.body ?? {}) }));
 
 export default router;

@@ -21,8 +21,10 @@ import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
 import dotenv                from 'dotenv';
 import { getSplTokensUsd, getLatestWalletBalance } from '../lib/wallet-monitor-client.js';
-import { config } from '../lib/config.js';
+import { config, getCleanupTrendGateFromEnv, isPoolEnabled } from '../lib/config.js';
 import { checkInvestEligibility } from '../lib/invest-eligibility.js';
+import { poolInvestCooldowns } from '../lib/invest-cooldown.js';
+import { loadTrendStates, checkTrendGate, parseTrendGate, TREND_TIMEFRAMES } from '../lib/trend-indicators.js';
 import { FORGE_TZ, midnightTzMs } from '../../../core/config.js';
 import { readMaintenanceFlag, getMaintenanceWindows } from '../../../core/maintenance.js';
 import { getActiveProfile }       from '../lib/economic-scorer/config.js';
@@ -31,6 +33,7 @@ import { getActiveProfile }       from '../lib/economic-scorer/config.js';
 import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows }
     from '../../../lib/pnl.js';
 import { loadOpportunityScores, loadInvestScores } from '../lib/invest-score-provider.js';
+import { resolvePnlAnchorMs, resolvePnlAnchorSource } from '../lib/pnl-anchor.js';
 import { getPremiumCoverage } from '../../../lib/premium-wallet.js';
 // Neutrale Blend-Formel (kein IP-Bezug) – NICHT aus lib/invest-score.js importieren,
 // das würde über dessen Kopfimport die Score-Gewichte in invest-score-config.js
@@ -148,6 +151,7 @@ const poolsConfigPath = resolve(__dirname, '..', 'config', 'pools.json');
 const poolsConfigRaw  = JSON.parse(readFileSync(poolsConfigPath, 'utf8'));
 const displayPairMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.displayPair ?? p.pair]));
 const volatilePairMap = Object.fromEntries(poolsConfigRaw.map(p => [p.id, !!p.volatilePair]));
+const usdcIsTokenAMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, !!p.usdcIsTokenA]));
 const poolTypeMap     = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.poolType ?? null]));
 // Einheit des Poolpreises (= echtes tokenB). Wird hier abgeleitet und fertig exportiert,
 // weil nur der Bot die volle Pool-Config kennt: `pair` ist ein Label-Feld und bei
@@ -315,6 +319,8 @@ const poolsOverview = pools.map(pool => {
         address:          pool.address,
         tokenA:           pool.token_a,
         tokenB:           pool.token_b,
+        usdcIsTokenA:     usdcIsTokenAMap[pool.id] ?? false,
+        volatilePair:     volatilePairMap[pool.id] ?? false,
         feeTier:          pool.fee_tier,
         tickSpacing:      pool.tick_spacing ?? null,
         rankPos:          latestRank[pool.id]?.pos ?? null,
@@ -561,8 +567,12 @@ const txFeesMonth = db.prepare(`
 // Mindestens 25h zurück, damit die 1D-Ansicht (letzte 24h) auch am Monatsanfang vollständig ist.
 const poolPairDbMap = Object.fromEntries(pools.map(p => [p.id, p.pair]));
 const _claimHistoryCutoff = Math.min(monthStartMs, Date.now() - 25 * 3_600_000);
+// position_id geht mit: Das Modal zeigt die Claims der *aktuellen Position*, nicht des Pools
+// über alle Sessions hinweg. Ohne diese Grenze summierte „Heute" bei einem Pool, der am selben
+// Tag mehrfach geschlossen und wiedereröffnet wurde, die Claims aller Vorgänger-Positionen
+// (ZEC/USDC auf forge-pub1, 2026-08-22: 13 Claims angezeigt, Position erst Minuten alt).
 const claimHistoryRows = db.prepare(`
-    SELECT fh.claimed_at, fh.pool_id, fh.amount_a, fh.amount_b, fh.usd_value, fh.action, fh.tx_hash
+    SELECT fh.claimed_at, fh.pool_id, fh.position_id, fh.amount_a, fh.amount_b, fh.usd_value, fh.action, fh.tx_hash
     FROM fee_history fh
     WHERE fh.claimed_at >= ?
     ORDER BY fh.claimed_at DESC
@@ -572,6 +582,7 @@ const claimHistory = claimHistoryRows.map(r => {
     const flip = pairFlipMap[r.pool_id] === true;
     return ({
     claimedAt:   r.claimed_at,
+    positionId:  r.position_id ?? null,
     pair:        poolPairDbMap[r.pool_id] ?? r.pool_id,         // DB-Pair (für JS-Matching mit data-pool-pair)
     displayPair: displayPairMap[r.pool_id] ?? poolPairDbMap[r.pool_id] ?? r.pool_id,
     amountA:     round6(flip ? r.amount_b : r.amount_a),
@@ -1022,9 +1033,13 @@ const npSnapshotRaw = db.prepare(`
     ORDER BY pool_id, recorded_at ASC
 `).all(thirtyDaysAgo);
 
-// Alle Fee-Claims (komplett, für korrekte kumulative Summe)
+// Alle Fee-Claims (komplett, für korrekte kumulative Summe). position_id geht mit — für
+// npHistory/currentNpUsd bewusst pool-weit über alle Sessions (Netto-Performance des Pools als
+// Ganzes), für die tagesbezogenen Zähler unten (todayClaimCount/-Usd) wird auf die aktuelle
+// Position eingegrenzt: derselbe Fehler wie im Claims-Modal (2026-08-22) — ein Pool mit
+// mehreren Sessions am selben Tag zählte sonst auch hier die Claims aller Vorgänger mit.
 const allFeeHistory = db.prepare(`
-    SELECT pool_id, claimed_at, usd_value
+    SELECT pool_id, position_id, claimed_at, usd_value
     FROM fee_history
     WHERE usd_value IS NOT NULL
     ORDER BY pool_id, claimed_at ASC
@@ -1345,7 +1360,7 @@ const _lastDepositAtByPool = Object.fromEntries(
 );
 const _sinceDepositPnlByPool = Object.fromEntries(
     openPositions.map(pos => {
-        const fromMs = _lastDepositAtByPool[pos.pool_id] ?? pos.opened_at;
+        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
         return [pos.pool_id, pnlForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs })];
     })
 );
@@ -1408,10 +1423,11 @@ function buildPosition(pos, isActive) {
         amountA:            posAmtA != null ? round6(posAmtA) : null,
         amountB:            posAmtB != null ? round6(posAmtB) : null,
         feesPendingUsd:     isActive ? round4(posSnap?.fees_pending_usd ?? null) : null,
-        todayClaimCount:    (feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs).length,
-        todayClaimUsd:      round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs).reduce((s, f) => s + (f.usd_value ?? 0), 0)),
+        todayClaimCount:    (feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).length,
+        todayClaimUsd:      round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).reduce((s, f) => s + (f.usd_value ?? 0), 0)),
         todayPnlUsd:        _todayPnlByPool[pos.pool_id] ?? null,
-        sinceDepositAt:     _lastDepositAtByPool[pos.pool_id] ?? pos.opened_at,
+        sinceDepositAt:     resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at),
+        sinceDepositSource: resolvePnlAnchorSource(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at),
         sinceDepositPnlUsd: _sinceDepositPnlByPool[pos.pool_id] ?? null,
         inRange:            isActive ? (priceNow != null
                                 ? priceNow >= pos.price_lower && priceNow <= pos.price_upper
@@ -1428,6 +1444,7 @@ function buildPosition(pos, isActive) {
                                 ? round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at <= posSnap.recorded_at).reduce((s, f) => s + f.usd_value, 0) + posSnap.il_usd)
                                 : null,
         nftMint:            pos.nft_mint,
+        positionId:         pos.id,
         openedAt:           pos.opened_at,
         closedAt:           pos.closed_at ?? null,
     };
@@ -1581,6 +1598,7 @@ for (const p of positionsOut) {
         flavor:  'liquidity',
         now:     Date.now(),
         windows: [
+            { id: '1h',  ms:   1 * 3_600_000 },
             { id: '6h',  ms:   6 * 3_600_000 },
             { id: '12h', ms:  12 * 3_600_000 },
             { id: '24h', ms:  24 * 3_600_000 },
@@ -1654,11 +1672,17 @@ for (const p of positionsOut) {
 // 6h-Hopium-Gate (Preis↓ + APR↓ gleichzeitig) wirkt als Score-Veto → max. 40.
 // Ergebnis: po.investScore = { value, arrow, confidence, dataDays, metrics, hopiumVeto }
 // Timestamp geteilt mit npWindows-Fixup (INSERT OR REPLACE braucht exakt denselben Wert).
+//
+// Trend-Zustand einmal geladen, zwei Konsumenten: das Trend-Feinsignal im InvestScore
+// hier UND die Dashboard-Trend-Gate-Anzeige weiter unten (Opportunity 2.0, 2026-08-25) —
+// dieselbe Berechnung, keine zweite Kopie (siehe lib/trend-indicators.js Kopf-Kommentar).
 const _investScoreNowMs = Date.now();
+const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
 {
     const _invRes = await loadInvestScores({
         pools, poolsOverview, volHistRaw, poolTypeMap, openPosByPool,
         lastNonZeroCapitalByPool, oppStatsByPool: _oppStatsByPool, volatilePairMap,
+        trendStates: _trendStatesForExport,
     }, opportunityScores);
     if (_invRes.source !== 'compute') { scoreSource = _invRes.source; scoreStale = _invRes.stale; }
 
@@ -1819,6 +1843,10 @@ const _investScoreNowMs = Date.now();
         const psQ  = { '6h': qSlope('price_slope_pct', B5m), '12h': qSlope('price_slope_pct', B10m), '1d': qSlope('price_slope_pct', B10m), '1w': qSlope('price_slope_pct', B1h), '1m': qSlope('price_slope_pct', B1d) };
         const asQ  = { '6h': qSlope('yield_slope_pct', B5m), '12h': qSlope('yield_slope_pct', B10m), '1d': qSlope('yield_slope_pct', B10m), '1w': qSlope('yield_slope_pct', B1h), '1m': qSlope('yield_slope_pct', B1d) };
         const tvlQ = { '6h': qSlope('tvl_slope_pct',   B5m), '12h': qSlope('tvl_slope_pct',   B10m), '1d': qSlope('tvl_slope_pct',   B10m), '1w': qSlope('tvl_slope_pct',   B1h), '1m': qSlope('tvl_slope_pct',   B1d) };
+        // volatilePair-Pools (z.B. PUMP/SOL): price_slope_pct ist die Token/Token-Ratio,
+        // kein USD-Trend — für die Preis-Slope-Historie dort usd_trend_slope_pct nehmen
+        // (gleiche Weiche wie die aktuelle Tabellenzelle und invest-score-compute.js).
+        const utQ  = { '6h': qSlope('usd_trend_slope_pct', B5m), '12h': qSlope('usd_trend_slope_pct', B10m), '1d': qSlope('usd_trend_slope_pct', B10m), '1w': qSlope('usd_trend_slope_pct', B1h), '1m': qSlope('usd_trend_slope_pct', B1d) };
 
         const toPoints = rows => rows.map(r => ({ ts: r.ts, v: r.v }));
 
@@ -1835,7 +1863,7 @@ const _investScoreNowMs = Date.now();
                 const base = windowBase ?? (rawPnl.length ? rawPnl[0].v : 0);
                 po.metricHistory[range] = {
                     pnl:        rawPnl.map(p => ({ ts: p.ts, v: parseFloat((p.v - base).toFixed(2)) })),
-                    priceSlope: toPoints(psQ[range] .all(po.id, cut)),
+                    priceSlope: toPoints((po.volatilePair ? utQ : psQ)[range].all(po.id, cut)),
                     aprSlope:   toPoints(asQ[range] .all(po.id, cut)),
                     tvlSlope:   toPoints(tvlQ[range].all(po.id, cut)),
                 };
@@ -1860,6 +1888,7 @@ const NP_CAPITAL    = 1000;
 // volaDefault dort = sigmaFallback hier (gleiche Stunden-Sigma-Reserve).
 const NP_CANDIDATES = [0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30];
 const NP_WINDOWS    = [
+    { id: '1h',  h:   1, ms:   1 * 3_600_000 },
     { id: '6h',  h:   6, ms:   6 * 3_600_000 },
     { id: '12h', h:  12, ms:  12 * 3_600_000 },
     { id: '24h', h:  24, ms:  24 * 3_600_000 },
@@ -2052,7 +2081,7 @@ try {
     const _NP_UNRELIABLE_MIN_N = 30;
     const _npUnreliableByPool = {};
     try {
-        const _wlabel = { 6: '6h', 12: '12h', 24: '24h' };
+        const _wlabel = { 1: '1h', 6: '6h', 12: '12h', 24: '24h' };
         for (const r of db.prepare(`
             SELECT pool_id, window_h,
                    COUNT(*) AS n,
@@ -2570,6 +2599,92 @@ for (const po of poolsOverview) {
         });
         po.investBlocked = elig.ok ? null : { rule: elig.rule, ...elig.detail };
     } catch { po.investBlocked = null; }
+
+    // Zweites Tor derselben Klasse: nach einem Risk-Management-Exit ist der Pool für
+    // `cooldownHours` vom Invest ausgeschlossen (lib/invest-cooldown.js — dieselbe
+    // Funktion, mit der bin/cleanup.js seine Rangliste filtert). Ohne Anzeige gewinnt
+    // im Ranking scheinbar grundlos ein niedriger bewerteter Pool.
+    // Nur Schlüssel + Endzeitpunkt: die Restzeit rechnet die Oberfläche beim Rendern
+    // aus, sonst wäre sie bis zum nächsten Export-Lauf veraltet.
+    try {
+        const cds = poolInvestCooldowns(db, po.id, { settings: poolSettings[po.id] ?? null });
+        po.investCooldowns = cds.length ? cds.map(c => ({ key: c.key, untilMs: c.untilMs })) : null;
+    } catch { po.investCooldowns = null; }
+}
+
+// Drittes Tor derselben Klasse: das optionale Trend-Gate (.env CLEANUP_TREND_GATE).
+// Es entscheidet nicht über Kapital, das schon im Pool liegt — es entscheidet, ob
+// welches hinein darf. Ohne Anzeige wäre für den Betreiber wieder nicht erkennbar,
+// warum ein Pool mit Spitzen-Score übersprungen wurde (dieselbe Lücke wie beim
+// Invest-Cooldown am 2026-08-23).
+//
+// Der Trendzustand wird IMMER exportiert (auch bei ausgeschaltetem Gate) — die
+// Opportunity-Tabelle zeigt ihn dann als reine Information, und der Betreiber kann
+// vor dem Einschalten sehen, was das Gate tun würde. Nur `required`/`ok` hängen an
+// der Konfiguration.
+try {
+    const required = parseTrendGate(getCleanupTrendGateFromEnv());
+    const states   = _trendStatesForExport;
+    for (const po of poolsOverview) {
+        const state = states.get(po.id) ?? null;
+        if (!state) { po.trendGate = null; continue; }
+        const gate = checkTrendGate(state, required);
+        po.trendGate = {
+            required,
+            ok: gate.ok,
+            failing: gate.failing,
+            unknown: gate.unknown,
+            // Nur das, was die Oberfläche für Icon und Tooltip braucht — keine
+            // EMA-Rohwerte, die sonst je Minute das data.json aufblähen.
+            state: Object.fromEntries(TREND_TIMEFRAMES.map(tf => [tf, {
+                up:   state[tf]?.up ?? null,
+                rsi:  state[tf]?.rsi == null ? null : Math.round(state[tf].rsi),
+                reason: state[tf]?.reason ?? 'insufficient_data',
+            }])),
+        };
+    }
+} catch (err) {
+    console.warn(`[export] Trend-Zustand nicht ermittelbar: ${err.message}`);
+    for (const po of poolsOverview) po.trendGate ??= null;
+}
+
+// ─── "Bester Pool" jetzt: Vorschau fürs Dashboard (Hammer-Icon) ──────────────
+// Zeigt, welchen Pool der nächste stündliche Cleanup-Lauf (Modus 'ranking') mit dem
+// aktuellen Datenstand wählen würde. Nutzt bewusst dieselben, oben bereits berechneten
+// Tore (investBlocked, trendGate, investCooldowns) statt sie ein weiteres Mal zu
+// berechnen — zwei Kopien derselben Regel liefen in der Vergangenheit auseinander
+// (siehe checkInvestEligibility-Kommentar oben). Deckt nur den Modus 'ranking' ab;
+// bei 'pool:<id>' (fest gewählter Pool) oder 'disabled' gibt es keine „Wahl" zu zeigen.
+{
+    const cleanupModeNow     = process.env.CLEANUP_MODE
+        ?? (process.env.CLEANUP_ENABLED === 'false' ? 'disabled' : 'ranking');
+    const cleanupMinScoreNow = Math.max(0, parseInt(process.env.CLEANUP_MIN_SCORE ?? '65', 10));
+    const cleanupTrendRequired = parseTrendGate(getCleanupTrendGateFromEnv());
+
+    let cleanupWinnerPoolId = null;
+    if (cleanupModeNow === 'ranking') {
+        const candidates = poolsOverview.filter(po => {
+            // Bewusst über config.pools.all (DB-überlagert), nicht _allPoolsConfig (rohe
+            // pools.json): Bei jedem forge-pub-Fork setzt tools/pub-export/sanitize-pools-config.js
+            // enabled/active in der JSON hart auf false, autoritativ ist aber die DB. Mit der
+            // rohen JSON blieb das Hammer-Icon auf dem Fork immer aus, selbst wenn der Betreiber
+            // den Pool über die Settings-UI freigeschaltet hatte (2026-08-24).
+            const poolCfg = config.pools.all.find(p => p.id === po.id);
+            if (!poolCfg || !isPoolEnabled(poolCfg)) return false;
+            if (poolSettings[po.id]?.cleanup?.rankingEligible === false) return false;
+            if (po.investCooldowns?.length) return false;
+            if (cleanupTrendRequired.length && !po.trendGate?.ok) return false;
+            if (po.investBlocked) return false;
+            if (po.investScore?.value == null) return false;
+            return po.investScore.value >= cleanupMinScoreNow;
+        }).sort((a, b) => b.investScore.value - a.investScore.value);
+        cleanupWinnerPoolId = candidates[0]?.id ?? null;
+    }
+    for (const po of poolsOverview) {
+        po.cleanupWinner = (po.id === cleanupWinnerPoolId)
+            ? { score: po.investScore.value, minScore: cleanupMinScoreNow }
+            : null;
+    }
 }
 
 // ─── Zusammenführen ───────────────────────────────────────────────────────────

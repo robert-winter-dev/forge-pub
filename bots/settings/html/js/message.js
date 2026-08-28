@@ -34,13 +34,14 @@
  * im Hamburger-Menü (nav.js) und schaltet die Seite auf ein Vollbreite-Panel.
  */
 
-import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260816a';
+import { initNav, initFooter, setNavBadge, setNavCurrent } from '/forge/js/nav.js?v=20260826a';
 import { t as tr, NUM_LOCALE } from '/forge/js/i18n.js?v=20260811a';
 import { showToast } from '/forge/js/toast.js?v=20260722b';
 import { showModal, closeModal } from '/forge/js/modal.js?v=20260731a';
 import {
     initMessageBell, isNotifyEnabled, loadNotifySettings, setNotifyEnabled, getOldestUnreadCategory,
-} from '/forge/js/message-bell.js?v=20260818a';
+    isFeatureEnabled, loadFeatureFlag, setFeatureEnabled,
+} from '/forge/js/message-bell.js?v=20260825a';
 
 // Rubriken mit Nachrichtenliste (= Reiter) und die reine Einstellungen-Ansicht.
 // Reihenfolge = Reihenfolge der Reiter in message.html.
@@ -65,7 +66,7 @@ const PAGE_SIZE = 25;
 const peerParam   = new URLSearchParams(location.search).get('peer');
 const initialPeer = peerParam && /^[0-9a-f]{64}$/.test(peerParam) ? peerParam : null;
 
-initNav({ current: initialMenu === 'einstellungen' ? 'message-einstellungen' : 'message-inbox' });
+initNav({ current: initialMenu === 'einstellungen' ? 'message-einstellungen' : 'message-inbox', logout: '/api/auth/logout' });
 // Bewusst ohne botName: die zweite Footer-Zeile ist für "<Name>: <Version>" gedacht
 // und wird per id="footerVersion" nachgefüllt (siehe initFooter() in nav.js). Das
 // Message Center hat keine eigene Version zu zeigen – übrig blieb ein nacktes
@@ -95,6 +96,96 @@ function fmtTime(ts) {
 }
 function esc(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Wandelt ```-Abschnitte im Meldungstext in einen Monospace-Block.
+ *
+ * Warum nötig: `.mc-detail-text` steht auf `white-space: pre-line`. Das erhält zwar
+ * Zeilenumbrüche, **kollabiert aber mehrfache Leerzeichen** — eine mit `padStart`/`padEnd`
+ * ausgerichtete Tabelle rutscht dadurch zu einer Zeichenkette zusammen (Befund 2026-08-22:
+ * „Das ist keine Tabelle, das ist eine Aneinanderreihung von Buchstaben und Zahlen").
+ * Ein `<pre>` mit `white-space: pre` hält die Spalten.
+ *
+ * 🔒 Läuft IMMER auf bereits escaptem Text; der einzige eingefügte Tag ist `<pre>`, es gibt
+ * keinen Markdown-Parser und keine Attribute. Aus dem Meldungstext lässt sich damit kein
+ * Markup einschleusen.
+ */
+/**
+ * Macht http(s)-URLs im Meldungstext klickbar.
+ *
+ * 🔒 Läuft IMMER auf bereits escaptem Text (siehe fenceToPre) — die URL selbst
+ * kommt aus Bot-generierten Meldungen, nicht aus Nutzereingaben.
+ */
+function linkifyUrls(escaped) {
+    return String(escaped).replace(/https?:\/\/[^\s<]+/g, url =>
+        `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+}
+
+/**
+ * Setzt die beiden Inline-Markdown-Konventionen um, die lib/i18n/de.json (und en.json)
+ * tatsächlich benutzen (Stand 2026-08-23, siehe grep über beide Kataloge):
+ *   `*fett*`   – Meldungstitel wie "*Tagesbericht {day}*"
+ *   `` `code` `` – Adressen/Befehle wie "Wallet: `{wallet}`" oder "`node bin/…`"
+ * Telegram rendert beides über parse_mode 'Markdown' (core/nexus/server.js); im Message
+ * Center blieben bisher die rohen Zeichen stehen. Bewusst nur diese zwei, einfachen Fälle
+ * — keine allgemeine Markdown-Engine (kein Kursiv, keine Listen, keine Verschachtelung).
+ * Kein Katalogeintrag nutzt aktuell Kursiv (`_..._`) oder Links (`[text](url)`).
+ *
+ * 🔒 Läuft auf bereits escaptem Text (siehe fenceToPre) — es entsteht kein zusätzliches
+ * Markup außer den festen `<strong>`/`<code>`-Tags.
+ */
+function inlineMarkdown(escaped) {
+    return String(escaped)
+        .replace(/`([^\n`]+)`/g, '<code>$1</code>')
+        .replace(/\*([^\n*]+)\*/g, '<strong>$1</strong>');
+}
+
+function fenceToPre(escaped) {
+    return String(escaped).split('```').map((p, i) => {
+        if (i % 2 === 0) return inlineMarkdown(linkifyUrls(p));
+        const body = p.replace(/^\n/, '').replace(/\n$/, '');
+        // Erst versuchen, eine echte Tabelle daraus zu machen — Spalten mit Linien liest ein
+        // Mensch deutlich schneller als ausgerichteten Monospace-Text.
+        return pipeTableToHtml(body) ?? `<pre class="mc-pre">${body}</pre>`;
+    }).join('');
+}
+
+/**
+ * Macht aus einer Pipe-Tabelle eine echte HTML-Tabelle.
+ *
+ *   | Datum  | Pool    | früher |
+ *   |--------|---------|--------|
+ *   | 22.08. | ZEC/SOL | −2,09  |
+ *
+ * Rechtsbündig wird eine Spalte, wenn ihre Trennzeile auf `-:` endet (Markdown-Konvention) —
+ * Zahlenspalten sind so untereinander lesbar.
+ *
+ * 🔒 Läuft auf bereits escaptem Text. Erzeugt ausschließlich `<table>/<thead>/<tbody>/<tr>/
+ * <th>/<td>` mit einer festen CSS-Klasse; Zellinhalte werden nie als Markup interpretiert.
+ * Passt der Block nicht auf das Muster, wird `null` zurückgegeben und der Aufrufer fällt auf
+ * den Monospace-Block zurück.
+ */
+function pipeTableToHtml(block) {
+    const lines = String(block).split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 3) return null;                       // Kopf + Trenner + mind. 1 Zeile
+    if (!lines.every(l => l.startsWith('|') && l.endsWith('|'))) return null;
+
+    const cells = l => l.slice(1, -1).split('|').map(c => c.trim());
+    const head  = cells(lines[0]);
+    const sep   = cells(lines[1]);
+    if (sep.length !== head.length) return null;
+    if (!sep.every(s => /^:?-{2,}:?$/.test(s))) return null;  // zweite Zeile muss Trenner sein
+
+    const alignRight = sep.map(s => s.endsWith(':'));
+    const rows = lines.slice(2).map(cells).filter(r => r.length === head.length);
+    if (!rows.length) return null;
+
+    const cls = i => alignRight[i] ? ' class="mc-num"' : '';
+    return `<table class="mc-table">`
+        + `<thead><tr>${head.map((h, i) => `<th${cls(i)}>${h}</th>`).join('')}</tr></thead>`
+        + `<tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${cls(i)}>${c}</td>`).join('')}</tr>`).join('')}</tbody>`
+        + `</table>`;
 }
 function shortPeer(npub) {
     return npub && npub.length > 20 ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : (npub ?? '');
@@ -347,8 +438,8 @@ function listItems() {
             // Pool-Bezug steht seit 2026-08-08 im Betreff statt beim Absender. Bei
             // Pool-Meldungen ersetzt "Pool <Pair>:" das Level – welcher Pool betroffen
             // ist, wiegt hier schwerer als die Art der Meldung.
-            subject: n.pool ? `Pool ${n.pool}: ${stripEmoji(stripNotifyHeader(n.message))}`
-                            : stripEmoji(stripNotifyHeader(n.message)),
+            subject: n.pool ? `Pool ${n.pool}: ${stripMarkdownMarkers(stripEmoji(stripNotifyHeader(n.message)))}`
+                            : stripMarkdownMarkers(stripEmoji(stripNotifyHeader(n.message))),
             poolPrefix: !!n.pool,
         }));
     }
@@ -394,7 +485,8 @@ function renderList() {
     const scrollTop = elList.scrollTop;
 
     if (!items.length) {
-        elList.innerHTML = `<div class="msg-empty">${esc(EMPTY_TEXT[activeMenu]())}</div>`;
+        elList.innerHTML = `<div class="mcli-empty">${esc(EMPTY_TEXT[activeMenu]())}</div>`;
+        if (activeKey === null && !composeOpen) renderPanePlaceholder();
         return;
     }
 
@@ -415,6 +507,7 @@ function renderList() {
     elList.querySelectorAll('.mcli').forEach(btn => {
         btn.addEventListener('click', () => openKey(btn.dataset.key));
     });
+    if (activeKey === null && !composeOpen) renderPanePlaceholder();
     elList.scrollTop = scrollTop;
     // Ist die Liste kürzer als ihr Container, feuert nie ein scroll-Event – dann
     // muss der nächste Block sofort nachgeladen werden, sonst bliebe die Liste
@@ -562,6 +655,16 @@ function stripNotifyHeader(text) {
     return String(text ?? '').replace(/^📅[^\n]*\n/, '');
 }
 
+// Für Klartext-Kontexte (Listen-Betreff, Support-Zitat), in denen inlineMarkdown()
+// nicht greift, weil dort kein HTML gerendert wird – entfernt nur die Trägerzeichen,
+// ohne den Inhalt in <strong>/<code> zu wandeln. Sonst stünde z.B. "*Tagesbericht
+// 23.08.26*" mit rohen Sternchen im Listen-Betreff.
+function stripMarkdownMarkers(text) {
+    return String(text ?? '')
+        .replace(/`([^\n`]+)`/g, '$1')
+        .replace(/\*([^\n*]+)\*/g, '$1');
+}
+
 // Emoji/Icons aus der Telegram-Formatierung (🔴⚠️💰🚨 usw.) sind im Message Center
 // nur Bildrauschen ohne Zusatzinfo (die Art steht separat als Text-Badge) – nur
 // für die Anzeige entfernt, gilt für System/Premium/Support gleichermaßen.
@@ -587,9 +690,15 @@ const LEVEL_LABEL = {
 };
 
 // ── Detailansicht (rechte Spalte) ────────────────────────────────────────────
+// Zeigt bei leerer Rubrik denselben Leertext wie die Liste links statt der
+// Auswahl-Aufforderung ("Wähle links…") – die wäre irreführend, wenn es links
+// gar nichts zum Auswählen gibt (frisches FORGE public, oder System/Bots ohne
+// aktuelle Meldungen).
 function renderPanePlaceholder() {
     activeKey = null;
-    elPane.innerHTML = `<p class="mc-pane-placeholder">${esc(tr('msg.select_message', 'Wähle links eine Nachricht aus, um sie zu lesen.'))}</p>`;
+    const text = listItems().length ? tr('msg.select_message', 'Wähle links eine Nachricht aus, um sie zu lesen.')
+                                     : EMPTY_TEXT[activeMenu]();
+    elPane.innerHTML = `<p class="mc-pane-placeholder">${esc(text)}</p>`;
 }
 
 /** Markiert den geöffneten Eintrag in der Liste, ohne sie neu zu bauen. */
@@ -637,7 +746,7 @@ function openSystemMessage(id) {
     const bot = n.botName || n.botId || 'System';
     elPane.innerHTML = `
         <div class="mc-pane-head">
-            <h2 class="mc-pane-title">${esc(LEVEL_LABEL[n.level] ?? n.level)}${n.pool ? ` · ${esc(n.pool)}` : ''}</h2>
+            <h1 class="mc-pane-title">${esc(paneTitle(n))}</h1>
             <div class="mc-pane-actions">
                 <button type="button" class="msg-icon-btn msg-icon-btn-accent" id="msgForwardBtn"
                     title="${tr('msg.forward_to_support', 'Diese Nachricht an den FORGE Support weiterleiten')}" aria-label="${tr('msg.forward', 'Weiterleiten')}">↪</button>
@@ -651,7 +760,9 @@ function openSystemMessage(id) {
                 [tr('msg.to',   'An'),  esc(myNick())],
                 [tr('msg.date', 'Datum'), esc(fmtDateTimeLong(n.timestamp))],
             ])}
-            ${n.riskExit ? riskExitHtml(n.riskExit) : `<div class="mc-detail-text">${esc(stripEmoji(stripNotifyHeader(n.message)))}</div>`}
+            ${n.riskExit ? riskExitHtml(n.riskExit)
+                : n.dailyReport ? dailyReportHtml(n.dailyReport)
+                : `<div class="mc-detail-text">${fenceToPre(esc(stripEmoji(stripNotifyHeader(n.message))))}</div>`}
         </div>`;
 
     elPane.querySelector('#msgForwardBtn').addEventListener('click', () => confirmForwardSystemMessage(n));
@@ -661,37 +772,234 @@ function openSystemMessage(id) {
     }));
 }
 
+// Std./Min. statt hh:mm — die Laufzeit einer Position liegt oft im Tage-Bereich,
+// eine reine Uhrzeit-Formatierung (fmtTime) würde bei >24h falsch umlaufen.
+function fmtDuration(ms) {
+    if (!(ms > 0)) return '–';
+    const totalMin = Math.round(ms / 60_000);
+    const days  = Math.floor(totalMin / 1440);
+    const hours = Math.floor((totalMin % 1440) / 60);
+    const mins  = totalMin % 60;
+    const parts = [];
+    if (days > 0) parts.push(tr('time.unit_days', '{n} Tag(e)', { n: days }));
+    parts.push(tr('time.unit_hours_min', '{h} Std. {m} Min.', { h: hours, m: mins }));
+    return parts.join(' ');
+}
+
+/**
+ * r.scenario ist ein fertig übersetzter Freitext aus dem Backend-Katalog
+ * (z.B. "Trailing Stop (2%)" oder "Trailing Stop Stufe 2 – Gewinnsicherung
+ * (0.5%)", siehe rm_label_trailing/_s2 in lib/i18n/*.json). Stufe und
+ * Prozentwert stecken dort nur als Text — für die einheitliche Kopf-/
+ * Zwischenüberschrift (Vorgabe 2026-08-25) ziehen wir sie hier per Regex
+ * wieder raus, statt das Backend/die Notify-Pipeline anzufassen. Andere
+ * Exit-Typen (Mindestwert, Score-Limit) haben keine Stufe/Prozent — dafür
+ * liefert diese Funktion `null`, und der Aufrufer zeigt den Szenario-Text
+ * unverändert (Vorgabe 2026-08-25).
+ */
+function parseTrailingStopStage(scenario) {
+    if (!scenario || !/trailing/i.test(scenario)) return null;
+    const pctMatch = scenario.match(/\(([\d]+(?:[.,]\d+)?)\s*%\)/);
+    if (!pctMatch) return null;
+    const stage = /(?:stufe|stage)\s*2/i.test(scenario) ? 2 : 1;
+    return { stage, pct: pctMatch[1] };
+}
+
+/** Kopfzeile der Detailansicht — bei Risk-Management-Trailing-Stop-Exits mit
+ * Stufennummer statt des sonst üblichen Pools (der steht bei riskExit ohnehin
+ * schon im Körper, siehe riskExitHtml()). */
+function paneTitle(n) {
+    const level = LEVEL_LABEL[n.level] ?? n.level;
+    if (n.riskExit) {
+        const stage = parseTrailingStopStage(n.riskExit.scenario);
+        return `${level}: ${tr('msg.risk_exit_title', 'Risk-Management')}${stage
+            ? `: ${tr('msg.risk_exit_stage_title', 'Trailing Stop Stufe {stage}', { stage: stage.stage })}`
+            : ''}`;
+    }
+    if (n.dailyReport) {
+        return `${level}: ${tr('msg.daily_report_title', 'Tagesbericht')}${n.dailyReport.day ? ` ${n.dailyReport.day}` : ''}`;
+    }
+    if (n.solLow) {
+        const reserve = n.solLow.reserve ?? '';
+        if (n.solLow.recovered) {
+            return `${level}:  ${tr('msg.sol_recovered_title', 'Mindestreserve von {reserve} SOL wurde wiederhergestellt', { reserve })}`;
+        }
+        const count = n.solLow.count ? ` (${n.solLow.count})` : '';
+        return `${level}:  ${tr('msg.sol_low_title', 'Mindestreserve von {reserve} SOL unterschritten', { reserve })}${count}`;
+    }
+    return `${level}${n.pool ? ` · ${n.pool}` : ''}`;
+}
+
+/** Baut eine `.mc-table`-Tabelle aus [Label, Wert]-Paaren, Wert rechtsbündig. */
+function riskExitTable(rows) {
+    if (!rows.length) return '';
+    return `<table class="mc-table"><tbody>${
+        rows.map(([label, value]) => `<tr><td>${esc(label)}</td><td class="mc-num">${value}</td></tr>`).join('')
+    }</tbody></table>`;
+}
+
 /**
  * Eigene Darstellung für Risk-Management-Exits (n.riskExit gesetzt, siehe
  * routes/messages.js extractRiskExit() aus msg_params von notify.js rmExecuted()):
- * strukturierte Zeilen statt Fließtext, damit der PnL auf einen Blick als
- * Gewinn/Verlust erkennbar ist (Vorzeichen im Text, Farbe nur als Zusatz – siehe
- * feedback_color_blindness).
- *
- * Bewusst KEIN Label/Wert-Raster mit fester Spaltenbreite (anders als
- * premiumPaymentHtml()) – die Labels hier sind teils lang ("Pool-Wert bei
- * Schließung") und würden in einer schmalen Spalte hässlich umbrechen. Jede
- * Zeile fließt stattdessen als ein Satz ("Label: Wert"), genau wie im
- * ursprünglichen Fließtext.
+ * eigene Überschriftenstruktur statt Fließtext, damit Ergebnis und Verlauf
+ * (Start → Max → Kosten → Ende) auf einen Blick auseinanderzuhalten sind — nicht
+ * nur der PnL am Schluss (Vorzeichen im Text, Farbe nur als Zusatz, siehe
+ * feedback_color_blindness). Layout 2026-08-25 (Vorgabe, vierte Fassung — jede
+ * Trailing-Stop-Stufe einheitlich, kein Sonderfall mehr für Stufe 1 ohne
+ * Gedankenstrich): Kopfzeile bleibt fest "Risk-Management" (siehe paneTitle()),
+ * darunter immer das volle Szenario als Zwischenüberschrift / „Pool: …“ /
+ * fett hervorgehobenes PnL-Ergebnis /
+ * EINE Tabelle „Details“ (Invest Beginn/Guthaben Start/Max/Max %/Exit-Kosten/
+ * Guthaben nach Exit/Ende %/Invest Ende/Laufzeit) — zwei Tabellen nebeneinander
+ * sahen nicht gut aus, sind jetzt zusammengeführt. "Ende %" ist bewusst identisch
+ * mit dem PnL-% oben (siehe extractRiskExit()): die Tabelle soll erklären, WIE der
+ * PnL zustande kommt, darf ihm also nie widersprechen.
  */
 function riskExitHtml(r) {
     const pnlClass = r.pnlUsdc == null ? '' : (r.pnlUsdc.trim().startsWith('-') ? 'msg-pnl-negative' : 'msg-pnl-positive');
-    const rows = [
-        r.lpValue     != null && [tr('msg.risk_exit_pool_value', 'Pool-Wert bei Schließung'), `${esc(r.lpValue)} USDC`],
-        (r.coinsA != null && r.coinsB != null) &&
-            [tr('msg.risk_exit_withdrawn', 'Entnommen'), `${esc(r.coinsA)} ${esc(r.symA)} + ${esc(r.coinsB)} ${esc(r.symB)}`],
-        r.swappedUsdc != null && [tr('msg.risk_exit_swapped', 'Getauscht'), `${esc(r.swappedUsdc)} USDC`],
-        r.exitCost    != null && [tr('msg.risk_exit_cost', 'Exit-Kosten'), `${esc(r.exitCost)} USDC`],
-        r.pnlUsdc     != null && [tr('msg.risk_exit_pnl', 'PnL'),
-            `<span class="${pnlClass}">${esc(r.pnlUsdc)} USDC${r.pnlPct != null ? ` / ${esc(r.pnlPct)}` : ''}</span>`],
+    const duration = (r.openedAtMs != null && r.exitAtMs != null) ? fmtDuration(r.exitAtMs - r.openedAtMs) : null;
+    // Stufe steht schon in der Kopfzeile (siehe paneTitle()) — hier nur noch der
+    // Gewinnsicherungs-Prozentwert als eigene Zwischenüberschrift. Andere Exit-Typen
+    // ohne Stufe (Mindestwert, Score-Limit) zeigen weiterhin den vollen Szenario-Text.
+    const stage = parseTrailingStopStage(r.scenario);
+    const scenarioHeading = stage
+        ? tr('msg.risk_exit_stage_heading', 'Gewinnsicherung: {pct}%', { pct: stage.pct })
+        : r.scenario;
+
+    // Guthaben-Zeilen mit %-Bezug (Max, Ende) zeigen den Prozentwert in Klammern VOR
+    // dem USDC-Betrag, statt einer eigenen Zeile (Vorgabe 2026-08-24) — % ist hier
+    // die Einordnung ("wie weit über/unter Start"), der USDC-Betrag der Beleg dazu.
+    const withPct = (usdc, pct) => pct != null ? `(${esc(pct)}) ${esc(usdc)} USDC` : `${esc(usdc)} USDC`;
+
+    const detailsTable = riskExitTable([
+        r.openedAtMs != null && [tr('msg.risk_exit_begin',     'Invest Beginn'),      fmtDateTimeLong(r.openedAtMs)],
+        r.entryValue != null && [tr('msg.risk_exit_start',     'Guthaben Start'),     `${esc(r.entryValue)} USDC`],
+        r.hwmValue   != null && [tr('msg.risk_exit_peak',      'Guthaben Max'),       withPct(r.hwmValue, r.hwmPct)],
+        r.exitCost   != null && [tr('msg.risk_exit_cost',      'Exit-Kosten'),        `${esc(r.exitCost)} USDC`],
+        r.endValue   != null && [tr('msg.risk_exit_end_value', 'Guthaben nach Exit'), withPct(r.endValue, r.exitPct)],
+        r.exitAtMs   != null && [tr('msg.risk_exit_end_time',  'Invest Ende'),        fmtDateTimeLong(r.exitAtMs)],
+        duration     != null && [tr('msg.risk_exit_duration',  'Invest Laufzeit'),    esc(duration)],
+    ].filter(Boolean));
+
+    // Alles in EINEM Wrapper-Element zurückgeben, nicht als lose Geschwister-Tags:
+    // .mc-pane-body ist ein Flex-Container (display:flex; flex-direction:column) —
+    // lose Top-Level-Elemente würden dadurch JEDES EINZELN zum Flex-Item, und eine
+    // <table> als direktes Flex-Item mit width:max-content kann browserabhängig auf
+    // Null-Höhe schrumpfen (Fund 2026-08-24: auf Linux/mehreren Browsern zeigten sich
+    // leere Tabellen, auf Windows zufällig nicht — Chrome-Versionsunterschied im
+    // Umgang mit genau diesem Grenzfall). Ein einzelner Wrapper-Div ist selbst das
+    // Flex-Item, alles darin läuft in normalem Blockfluss.
+    return `<div class="mc-risk-block">
+        ${scenarioHeading ? `<h2 class="mc-risk-heading">${esc(scenarioHeading)}</h2>` : ''}
+        ${r.pair ? `<h2 class="mc-risk-h2">${tr('msg.risk_exit_pool', 'Pool')}: ${esc(r.pair)}</h2>` : ''}
+        ${r.pnlUsdc != null ? `
+        <p class="mc-risk-result">${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${pnlClass}">${tr('msg.risk_exit_pnl', 'PnL')}: ${esc(r.pnlUsdc)} USDC${r.pnlPct != null ? ` / ${esc(r.pnlPct)}` : ''}</b></p>` : ''}
+        ${detailsTable ? `<h2 class="mc-risk-h2">${tr('msg.risk_exit_details', 'Details')}</h2><div class="mc-risk-details">${detailsTable}</div>` : ''}
+        ${r.actionText ? `<p class="mc-detail-text mc-risk-action">${esc(r.actionText)}</p>` : ''}
+    </div>`;
+}
+
+/** CSS-Klasse für Textfarbe nach Vorzeichen (+1/0/-1) — dieselbe Konvention wie
+ * riskExitHtml() (Vorzeichen im Text, Farbe nur Verstärkung, siehe
+ * feedback_color_blindness): 0 (kein Ergebnis/genau ausgeglichen) bleibt neutral. */
+function signClass(sign) {
+    return sign > 0 ? 'msg-pnl-positive' : sign < 0 ? 'msg-pnl-negative' : '';
+}
+
+/**
+ * Eigene Darstellung des Tagesberichts (n.dailyReport gesetzt, siehe
+ * routes/messages.js extractDailyReport() aus msg_params von notify.js
+ * dailyReport()): Überschrift, Aufzählung mit fett/farbig hervorgehobenem
+ * Ergebnis, dann eine Tabelle mit getrennten PnL(USDC)/PnL(%)-Spalten und
+ * grün/rot eingefärbten Zeilen (Vorgabe 2026-08-24, dasselbe Prinzip wie bei
+ * riskExitHtml() — Kernzahl zuerst, Details zum Nachvollziehen darunter).
+ * Alle Werte kommen bereits fertig formatiert aus daily-report.js.
+ */
+function dailyReportHtml(d) {
+    const rowsHtml = (d.rows ?? []).map(row => `
+        <tr>
+            <td class="mc-center">${esc(row.timeText ?? '–')}</td>
+            <td class="mc-center">${esc(row.pair ?? '–')}</td>
+            <td class="mc-num ${signClass(row.pnlSign)}">${esc(row.pnlUsdText ?? '–')}</td>
+            <td class="mc-num ${signClass(row.pnlSign)}">${esc(row.pnlPctText ?? '–')}</td>
+            <td class="mc-num">${esc(row.reason ?? '–')}</td>
+        </tr>`).join('');
+
+    const table = rowsHtml ? `<div class="mc-risk-details"><table class="mc-table">
+        <thead><tr>
+            <th class="mc-center">${tr('msg.daily_report_col_time',   'Zeit')}</th>
+            <th class="mc-center">${tr('msg.daily_report_col_pool',   'Pool')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_pnl_usdc', 'PnL (USDC)')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_pnl_pct',  'PnL (%)')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_reason', 'Exit-Grund')}</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+    </table></div>` : '';
+
+    // Nur noData/failedCount als Fußnote — der Rebalancing-Hinweis ist auf Wunsch
+    // 2026-08-24 vorerst raus (der Tagesbericht wird schrittweise um weitere
+    // Details ausgebaut, der Rebalancing-Teil kommt dann zusammen mit den anderen zurück).
+    const footnotes = [
+        d.noData      && tr('msg.daily_report_note_no_data', 'Bei {n} davon fehlt die Wertreihe – sie sind in der Summe NICHT enthalten.', { n: d.noData }),
+        d.failedCount && tr('msg.daily_report_note_failed', '* {n}: erster Versuch fehlgeschlagen, der Bot hat automatisch erneut versucht.', { n: d.failedCount }),
     ].filter(Boolean);
 
-    return `
-        ${r.scenario ? `<p class="mc-detail-text">${esc(r.scenario)}</p>` : ''}
-        <ul class="mc-risk-list">
-            ${rows.map(([label, value]) => `<li><span class="mc-risk-label">${esc(label)}:</span> ${value}</li>`).join('')}
+    // Zweite Tabelle: was zum Ende des Berichtstags noch offen war (Vorgabe 2026-08-25),
+    // unten an den Bericht angehängt — gleiches Aufbauprinzip wie die Tabelle der
+    // geschlossenen Trades oben (mc-risk-details hält beide auf derselben Breite).
+    const openRowsHtml = (d.openRows ?? []).map(row => `
+        <tr>
+            <td class="mc-center">${esc(row.openedText ?? '–')}</td>
+            <td class="mc-center">${esc(row.pair ?? '–')}</td>
+            <td class="mc-num">${esc(row.shareText ?? '–')}</td>
+            <td class="mc-num ${signClass(row.pnlSign)}">${esc(row.pnlUsdText ?? '–')}</td>
+            <td class="mc-num ${signClass(row.pnlSign)}">${esc(row.pnlPctText ?? '–')}</td>
+        </tr>`).join('');
+
+    const openTable = openRowsHtml ? `<div class="mc-risk-block">
+        <h2 class="mc-risk-heading">${tr('msg.daily_report_open_heading', 'Offene Trades vom {day}', { day: d.day ?? '' })}</h2>
+        <p class="mc-detail-text">${tr('msg.daily_report_open_intro', '{n} Positionen offen. Davon:', { n: d.openCount })}</p>
+        <ul class="mc-risk-ul">
+            <li>${tr('msg.daily_report_split', '{w} im Plus, {l} im Minus', { w: d.openWinners, l: d.openLosers })}</li>
+            <li>${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${signClass(d.openSumSign)}">${esc(d.openSumText ?? '–')}</b></li>
         </ul>
-        ${r.actionText ? `<p class="mc-detail-text">${esc(r.actionText)}</p>` : ''}`;
+        <div class="mc-risk-details"><table class="mc-table">
+        <thead><tr>
+            <th class="mc-center">${tr('msg.daily_report_col_opened',   'Eröffnet')}</th>
+            <th class="mc-center">${tr('msg.daily_report_col_pool',     'Pool')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_share',       'Anteil (USDC)')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_pnl_usdc',    'PnL (USDC)')}</th>
+            <th class="mc-num">${tr('msg.daily_report_col_pnl_pct',     'PnL (%)')}</th>
+        </tr></thead>
+        <tbody>${openRowsHtml}</tbody>
+        </table></div>
+    </div>` : '';
+
+    // Status-Kopf (Vorgabe 2026-08-25): Fees bezahlt/erhalten + PnL des Tages, unabhängig
+    // von Exits/offenen Trades — steht auch an Tagen ohne Ausstieg. Werte kommen bereits
+    // fertig formatiert aus daily-report.js (status-Objekt in buildReportData()).
+    const statusBlock = d.status ? `<div class="mc-risk-block">
+        <h2 class="mc-risk-heading">${tr('msg.daily_report_status_heading', 'Status {day}', { day: d.day ?? '' })}</h2>
+        <ul class="mc-risk-ul">
+            <li>${tr('msg.daily_report_fees_paid', 'Gezahlte Fees')}: ${esc(d.status.feesPaidText ?? '–')}</li>
+            <li>${tr('msg.daily_report_fees_received', 'Erhaltene Fees')}: ${esc(d.status.feesReceivedText ?? '–')}</li>
+            <li>${tr('msg.risk_exit_pnl', 'PnL')}: <b class="${signClass(d.status.pnlSign)}">${esc(d.status.pnlUsdText ?? '–')}${d.status.pnlPctText != null ? ` / ${esc(d.status.pnlPctText)}` : ''}</b></li>
+        </ul>
+    </div>` : '';
+
+    // Anzahl steht als Einleitungssatz VOR der Liste, nicht als eigener Punkt darin
+    // (Vorgabe 2026-08-24) — die Liste enthält bewusst nur die beiden Kernzahlen
+    // Plus/Minus-Verteilung und Ergebnis.
+    return `${statusBlock}<div class="mc-risk-block">
+        <h2 class="mc-risk-heading">${tr('msg.daily_report_heading', 'Geschlossene Trades vom {day}', { day: d.day ?? '' })}</h2>
+        <p class="mc-detail-text">${tr('msg.daily_report_intro', '{n} Positionen geschlossen. Davon:', { n: d.count })}</p>
+        <ul class="mc-risk-ul">
+            <li>${tr('msg.daily_report_split', '{w} im Plus, {l} im Minus', { w: d.winners, l: d.losers })}</li>
+            <li>${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${signClass(d.sumSign)}">${esc(d.sumText ?? '–')}</b></li>
+        </ul>
+        ${table}
+        ${footnotes.map(f => `<p class="mc-detail-text">${f}</p>`).join('')}
+    </div>${openTable}`;
 }
 
 function premiumPaymentHtml(p) {
@@ -717,9 +1025,9 @@ async function openPremiumMessage(id) {
 
     elPane.innerHTML = `
         <div class="mc-pane-head">
-            <h2 class="mc-pane-title">${esc(m.payment
+            <h1 class="mc-pane-title">${esc(m.payment
                 ? tr('msg.auto_premium_pay', 'Automatische Premium Zahlung')
-                : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')))}</h2>
+                : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')))}</h1>
             <div class="mc-pane-actions">
                 <button type="button" class="msg-icon-btn" id="msgDeleteBtn"
                     title="${tr('msg.delete', 'Löschen')}" aria-label="${tr('msg.delete', 'Löschen')}">🗑</button>
@@ -763,7 +1071,7 @@ async function openSupportThread(peerPubkeyHex, threadId, { markRead = false } =
     activeThreadId = threadId;
     elPane.innerHTML = `
         <div class="mc-pane-head">
-            <h2 class="mc-pane-title">${esc(tr('msg.conversation', 'Konversation'))}</h2>
+            <h1 class="mc-pane-title">${esc(tr('msg.conversation', 'Konversation'))}</h1>
             <div class="mc-pane-actions">
                 <button type="button" class="msg-icon-btn" id="msgDeleteThreadBtn"
                     title="${tr('msg.delete_conv', 'Konversation löschen')}" aria-label="${tr('msg.delete_conv', 'Konversation löschen')}">🗑</button>
@@ -911,7 +1219,7 @@ async function openCompose(quoteText = null) {
 
     elPane.innerHTML = `
         <div class="mc-pane-head">
-            <h2 class="mc-pane-title">${esc(tr('msg.new_message', 'Neue Nachricht'))}</h2>
+            <h1 class="mc-pane-title">${esc(tr('msg.new_message', 'Neue Nachricht'))}</h1>
         </div>
         <div class="mc-pane-body">
             ${metaHtml([
@@ -1020,7 +1328,7 @@ function confirmForwardSystemMessage(n) {
 function forwardSystemMessage(n) {
     const bot = n.botName || n.botId || 'System';
     const quoteText = [
-        `${tr('msg.subject', 'Betreff')}: ${LEVEL_LABEL[n.level] ?? n.level}${n.pool ? ` · ${n.pool}` : ''}`,
+        `${tr('msg.subject', 'Betreff')}: ${paneTitle(n)}`,
         `${tr('msg.from', 'Von')}: ${bot}`,
         `${tr('msg.timestamp', 'Zeitpunkt')}: ${fmtDateTimeLong(n.timestamp)}`,
         '',
@@ -1193,6 +1501,13 @@ async function renderSettingsPanel() {
             </label>
             <label class="msg-setting-row">
                 <span>
+                    <span class="msg-setting-label">${tr('msg.risk_messages', 'Risk-Management')}</span>
+                    <span class="msg-setting-hint">${tr('msg.risk_messages_hint', 'Zähler oben (Reiter + Brief-Icon) bei Meldungen aus einem Risk-Management-Ereignis (z.B. Risk-Management – Trailing Stop, TVL-Schutz, Score-Limit). Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Bots trotzdem sichtbar.')}</span>
+                </span>
+                <input type="checkbox" id="setNotifyRisk">
+            </label>
+            <label class="msg-setting-row">
+                <span>
                     <span class="msg-setting-label">${tr('msg.support_messages', 'Support-Nachrichten')}</span>
                     <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen Antworten. Ausgeschaltet: keine Zähler/Hinweise, die Konversationen bleiben in der Rubrik Support trotzdem sichtbar.</span>
                 </span>
@@ -1204,6 +1519,13 @@ async function renderSettingsPanel() {
                     <span class="msg-setting-hint">Zähler oben (Reiter + Brief-Icon) bei neuen Premium-Meldungen. Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Premium trotzdem sichtbar.</span>
                 </span>
                 <input type="checkbox" id="setNotifyPremium">
+            </label>
+            <label class="msg-setting-row">
+                <span>
+                    <span class="msg-setting-label">${tr('msg.daily_report', 'Tagesbericht')}</span>
+                    <span class="msg-setting-hint">${tr('msg.daily_report_hint', 'Tägliche Meldung über geschlossene Liquidity-Positionen des Vortags (nur an Tagen mit mindestens einer geschlossenen Position).')}</span>
+                </span>
+                <input type="checkbox" id="setDailyReport">
             </label>
 
             <h3 class="msg-settings-heading">${tr('msg.nostr_account', 'Nostr-Account')}</h3>
@@ -1247,7 +1569,7 @@ async function renderSettingsPanel() {
 
     // Betrifft ausschließlich Zähler/Badges (Reiter + Brief-Icon) – die Nachrichten
     // selbst bleiben immer sichtbar, siehe isNotifyEnabled() in message-bell.js.
-    const NOTIFY_CHECKBOX_IDS = { system: 'setNotifySystem', bots: 'setNotifyBots', support: 'setNotifySupport', premium: 'setNotifyPremium' };
+    const NOTIFY_CHECKBOX_IDS = { system: 'setNotifySystem', bots: 'setNotifyBots', risk: 'setNotifyRisk', support: 'setNotifySupport', premium: 'setNotifyPremium' };
     await loadNotifySettings();
     for (const [type, elId] of Object.entries(NOTIFY_CHECKBOX_IDS)) {
         const cb = document.getElementById(elId);
@@ -1255,6 +1577,18 @@ async function renderSettingsPanel() {
         cb.checked = isNotifyEnabled(type);
         cb.addEventListener('change', () => {
             setNotifyEnabled(type, cb.checked).then(refreshBadges);
+        });
+    }
+
+    // Steuert, ob der Tagesbericht (bots/liquidity/bin/daily-report.js) überhaupt
+    // erzeugt wird — anders als die notify_*-Toggles oben keine reine Badge-Sicht-
+    // barkeit. Default AN, siehe message-bell.js / notify-db.js.
+    const setDailyReport = document.getElementById('setDailyReport');
+    if (setDailyReport) {
+        await loadFeatureFlag('daily_report');
+        setDailyReport.checked = isFeatureEnabled('daily_report');
+        setDailyReport.addEventListener('change', () => {
+            setFeatureEnabled('daily_report', setDailyReport.checked);
         });
     }
 

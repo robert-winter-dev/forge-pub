@@ -491,7 +491,23 @@ footer a:hover { color: var(--accent); }
 .notif-item.level-error { border-left: 3px solid #e74c3c; }
 .notif-item.level-info  { border-left: 3px solid transparent; }
 .notif-item-top  { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.notif-item-msg  { font-size: 0.82rem; color: var(--text); line-height: 1.4; }
+/* white-space: Zeilenumbrüche aus dem message-Text erhalten — ohne das kollabiert HTML sie
+   zu einem Fließtext und mehrzeilige Meldungen werden unlesbar (Befund 2026-08-22).
+   Gleiche Regel in shared.css für die Bot-Seiten. */
+.notif-item-msg  { font-size: 0.82rem; color: var(--text); line-height: 1.4;
+                   white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Monospace-Block aus einem ```-Abschnitt: nur so stehen Spalten untereinander. */
+.notif-item-msg pre {
+    margin: 0.4em 0;
+    padding: 0.5em 0.6em;
+    background: rgba(127, 127, 127, 0.12);
+    border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.74rem;
+    line-height: 1.35;
+    white-space: pre;
+    overflow-x: auto;
+}
 .notif-item-meta { font-size: 0.7rem; color: var(--text-muted); }
 
 /* ── Klickbare Cards ─────────────────────────────────────────────── */

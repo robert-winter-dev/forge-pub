@@ -66,6 +66,13 @@
  *  Ohne brauchbare Klammer-Snapshots (siehe SNAPSHOT_MAX_GAP_MS) wird nicht
  *  gebucht, sondern gemeldet.
  *
+ *  WANN GEMELDET WIRD
+ *  ──────────────────
+ *  Erst nach der Karenzzeit (REPORT_GRACE_MS). Ein abgebrochener Vorgang wird vom
+ *  Resume-Mechanismus im nächsten Bot-Zyklus zu Ende geführt und dann gebucht — wer
+ *  sofort meldet, meldet Vorgänge, die noch laufen. Gemeldet wird deshalb nur, was
+ *  auch Stunden später noch ungebucht ist.
+ *
  *  Alle Chain-Abfragen laufen über den `rpcLimiter` (Rate-Limit-Regel).
  * ════════════════════════════════════════════════════════════════════════════
  */
@@ -116,12 +123,64 @@ const SIG_LIMIT = 200;
  * wäre die falsche Antwort gewesen: es verdeckt genau die Löcher, die dieser Abgleich
  * finden soll.
  *
- * Gilt bewusst NUR für Abflüsse. Zuflüsse (openPosition, increaseLiquidity) sind je
- * genau EINE Transaktion, die der Bot mit ihrem eigenen Hash bucht — dort bleibt der
- * Abgleich exakt über den Hash, ohne Toleranzfenster. Genau diese Strenge hat den
- * Vorfall vom 2026-08-15 sichtbar gemacht.
+ * Galt bis 2026-08-24 bewusst NUR für Abflüsse — die Annahme war: Zuflüsse
+ * (openPosition, increaseLiquidity) sind je genau EINE Transaktion, die der Bot mit
+ * ihrem eigenen Hash bucht. Das stimmt nicht für `sweepResidualIntoPosition()`
+ * (deposit-lib.js): Bei mehreren Runden sendet sie bis zu vier increaseLiquidity-TX,
+ * bucht aber nur EINE kombinierte `deposit`-Zeile mit dem Hash der LETZTEN Runde —
+ * die Hashes der Zwischenrunden tauchen in `transactions.tx_hash` nie auf. Der
+ * Abgleich hielt sie für ungebuchte Einzahlungen und bucht seither auch für Zuflüsse
+ * ein Match-Fenster, siehe INFLOW_MATCH_WINDOW_MS unten.
  */
 const OUTFLOW_MATCH_WINDOW_MS = 3 * 60 * 1000;
+
+/**
+ * Match-Fenster für Zuflüsse — Pendant zu OUTFLOW_MATCH_WINDOW_MS.
+ *
+ * 🔴 Vorfall 2026-08-24 (LMB-Ticket, siehe Changelog): `liq-zec-usdc` auf Master zeigte
+ * einen PnL von −1034,70 USDC, real war der Pool nahe ±0. Ursache: `sweepResidualIntoPosition()`
+ * lief in drei Runden; nur die letzte bekam über die kombinierte `cleanup rest`-Zeile einen
+ * Hash gebucht. Der Abgleich fand die Hashes der ersten beiden Runden nicht in
+ * `transactions`, hielt sie für eine ungebuchte Einzahlung und bucht für JEDE der drei
+ * denselben vollen Snapshot-Sprung (`snapshotJump()`) nach — das Kapital wurde 3× statt
+ * 1× gezählt, `cap` in lib/pnl.js entsprechend überhöht. Auf forge-pub1 dieselbe Ursache,
+ * dort als echte Race Condition: die kombinierte Buchung landete nur 5 Sekunden nach dem
+ * verfrühten Nachtrag.
+ *
+ * Bevor eine Einzahlung gebucht wird, deshalb prüfen: existiert bereits eine reguläre
+ * `deposit`-Zeile für denselben Pool in der Nähe? Dann hat der Bot den Wert schon über
+ * einen anderen Hash erfasst (z.B. die kombinierte Sweep-Buchung) — nicht erneut buchen.
+ * Das Fenster ist bewusst größer als OUTFLOW_MATCH_WINDOW_MS: Ein mehrrundiger Sweep kann
+ * mehrere Zyklen brauchen, die tatsächlich beobachteten Abstände lagen bei 5–25 Sekunden.
+ */
+const INFLOW_MATCH_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Karenzzeit, bevor ein Befund überhaupt gemeldet wird.
+ *
+ * 🔒 Der Abgleich prüft einen Zustand, der sich noch ändern kann. Ein Ausstieg besteht
+ * aus mehreren Transaktionen; bricht er zwischendrin ab, führt der Resume-Mechanismus
+ * ihn im nächsten Bot-Zyklus zu Ende und bucht dann. Zwischen Abbruch und Resume ist
+ * das Leg on-chain und noch nicht gebucht — für den Abgleich ununterscheidbar von einer
+ * echten Lücke.
+ *
+ * Genau das passierte am 2026-08-22 auf forge-pub1: Der Trailing-Stop-Exit von ZEC/USDC
+ * scheiterte um 23:04:08 am Burn (Orca-Stale-Read 0x1775), der Cleanup lief eine Minute
+ * später um 23:05, und der Resume buchte den Close erst um 23:14. Ergebnis: zwei
+ * Fehlalarme („Kapitalbewegung noch nicht zugeordnet") für einen Vorgang, der zehn
+ * Minuten später vollständig und korrekt verbucht war — und weil `seen` den Befund
+ * dauerhaft merkt, wurden sie nie zurückgenommen.
+ *
+ * Die Karenzzeit ist die richtige Antwort, kein größeres Match-Fenster: Ein Match-Fenster
+ * erklärt Transaktionen, die es nicht erklären kann (das war der Fehler von
+ * OUTFLOW_MATCH_WINDOW_MS und verdeckt echte Löcher). Die Karenzzeit erklärt nichts —
+ * sie wartet nur ab, bis der Zustand stabil ist, und prüft dann unverändert streng.
+ *
+ * Kosten: null. Der Abgleich läuft stündlich über ein 24-h-Fenster; eine echte Lücke wird
+ * ein bis zwei Läufe später genauso sicher gefunden. Der Befund ist ein Buchungsfehler,
+ * keine Gefahr für Kapital — es gibt keinen Grund, ihn eilig zu melden.
+ */
+const REPORT_GRACE_MS = 2 * 3600 * 1000;
 
 /** Gemeldete Abflüsse merken: der Abgleich läuft stündlich und schaut 24 h zurück —
  *  ohne Gedächtnis würde derselbe Befund bis zu 24 Mal gemeldet. */
@@ -237,11 +296,19 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
             if (deltas.length === 0) continue;   // berührt die Vaults nicht (z.B. reine Metadaten-TX)
 
             const isInflow = deltas.every(d => d.delta >= 0);
-            // `location` sagt der Notification, wo das Kapital gerade liegt (wallet vs.
-            // position) — Grundlage für die passende Handlungsaufforderung in notify.js.
-            const flag = (reason, location) => {
-                log(`[reconcile] ⚠ ${pool.pair}: ${s.signature.slice(0, 12)}… nicht gebucht – ${reason}`);
-                flagged.push({ poolId: pool.id, pair: pool.displayPair ?? pool.pair, txHash: s.signature, whenMs, reason, location });
+            // `kind` steuert Meldungstext und Handlungsaufforderung in notify.js (Abfluss:
+            // Kapital liegt in der Wallet · Zufluss: Kapital ist Teil der Position).
+            // Innerhalb der Karenzzeit wird nur protokolliert, nicht gemeldet — der Vorgang
+            // kann noch durch einen Resume gebucht werden (siehe REPORT_GRACE_MS).
+            const flag = (kind, params = {}) => {
+                const age = Date.now() - whenMs;
+                if (age < REPORT_GRACE_MS) {
+                    log(`[reconcile] ${pool.pair}: ${s.signature.slice(0, 12)}… noch nicht gebucht (${kind}) – ` +
+                        `${Math.round(age / 60000)} Min alt, Karenzzeit läuft, keine Meldung`);
+                    return;
+                }
+                log(`[reconcile] ⚠ ${pool.pair}: ${s.signature.slice(0, 12)}… nicht gebucht – ${kind}`);
+                flagged.push({ poolId: pool.id, pair: pool.displayPair ?? pool.pair, txHash: s.signature, whenMs, kind, params });
             };
 
             if (!isInflow) {
@@ -266,19 +333,49 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
                 // Abfluss: decreaseLiquidity und collectFees sind on-chain nicht
                 // unterscheidbar (siehe Dateikopf). Nicht raten. Das Kapital selbst ist in
                 // beiden Fällen in der Wallet gelandet, nur die Buchung ist offen.
-                flag('es lässt sich nicht sicher unterscheiden, ob es eine normale Entnahme oder eine Gebühren-Auszahlung war', 'wallet');
+                flag('outflow_unbooked');
+                continue;
+            }
+
+            // Mehrrundiger Sweep (sweepResidualIntoPosition, deposit-lib.js): nur die
+            // letzte Runde bekommt über die kombinierte Buchung einen Hash — die
+            // Zwischenrunden sehen für den Abgleich für immer wie eine Lücke aus, sind
+            // aber im Wert bereits über diese kombinierte Zeile erfasst. Vor dem Buchen
+            // deshalb prüfen, ob der Pool in der Nähe schon eine reguläre Einzahlung
+            // verbucht hat (siehe INFLOW_MATCH_WINDOW_MS oben).
+            const inflowExplained = db.prepare(`
+                SELECT 1 FROM transactions
+                 WHERE pool_id = ? AND type = 'deposit'
+                   AND created_at BETWEEN ? AND ?
+                 LIMIT 1
+            `).get(pool.id, whenMs - INFLOW_MATCH_WINDOW_MS, whenMs + INFLOW_MATCH_WINDOW_MS);
+            if (inflowExplained) {
+                log(`[reconcile] ${pool.pair}: ${s.signature.slice(0, 12)}… bereits über eine ` +
+                    `andere Einzahlungs-Buchung erklärt – kein Nachtrag`);
+                continue;
+            }
+
+            // Karenzzeit auch fürs BUCHEN, nicht nur fürs Melden (flag() oben): Ein noch
+            // laufender Sweep kann seine kombinierte Zeile erst Sekunden später schreiben
+            // (auf forge-pub1 am 2026-08-24 beobachtet: 5 Sekunden) — ohne Wartezeit bucht
+            // der Abgleich den vollen Snapshot-Sprung, bevor der obige Explained-Check ihn
+            // hätte abfangen können.
+            const inflowAge = Date.now() - whenMs;
+            if (inflowAge < REPORT_GRACE_MS) {
+                log(`[reconcile] ${pool.pair}: ${s.signature.slice(0, 12)}… noch nicht gebucht (inflow) – ` +
+                    `${Math.round(inflowAge / 60000)} Min alt, Karenzzeit läuft, kein Nachtrag`);
                 continue;
             }
 
             const jump = snapshotJump(db, pool.id, whenMs);
             if (!jump) {
-                flag('der genaue Wert lässt sich gerade nicht zuverlässig bestimmen', 'position');
+                flag('inflow_no_valuation');
                 continue;
             }
             if (jump.usd <= 0) {
                 // Zufluss on-chain, aber der Positionswert ist nicht gestiegen —
                 // die beiden Quellen widersprechen sich, das muss ein Mensch ansehen.
-                flag(`on-chain kam Kapital in den Pool, der Positionswert ist aber nicht im gleichen Maß gestiegen (${jump.usd.toFixed(2)} USDC) – die Zahlen passen nicht zusammen`, 'position');
+                flag('inflow_value_mismatch', { jump: jump.usd.toFixed(2) });
                 continue;
             }
             if (jump.usd < MIN_BOOKABLE_USD) continue;   // Staub
@@ -331,7 +428,7 @@ export async function reconcileCapitalFlows(db, { poolsById, connection, dryRun 
             if (seen[f.txHash]) continue;
             seen[f.txHash] = Date.now();
             const pool = poolsById instanceof Map ? poolsById.get(f.poolId) : poolsById?.[f.poolId];
-            if (pool) await notify.capitalFlowNeedsReview(pool, { txHash: f.txHash, whenMs: f.whenMs, reason: f.reason, location: f.location });
+            if (pool) await notify.capitalFlowNeedsReview(pool, { txHash: f.txHash, whenMs: f.whenMs, kind: f.kind, params: f.params });
         }
         saveSeen(seen);
     }

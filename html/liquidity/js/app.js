@@ -5,7 +5,7 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260826a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -15,7 +15,7 @@ import { startOfDayMs }                        from '../../js/tz.js?v=20260414a'
 import { formatPrice }                         from '../../js/format-price.js?v=20260820a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
-import { initMessageBell }                     from '../../js/message-bell.js?v=20260818a';
+import { initMessageBell }                     from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
 import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20260727a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
@@ -57,6 +57,10 @@ function displayPairOf(data, pair) {
         ?? data?.pools?.find(p => p.pair === pair)?.displayPair
         ?? pair;
 }
+
+// Unter dieser SOL-Reserve eröffnet der Bot keine neuen Positionen mehr
+// (siehe bots/liquidity/bin/deposit.js) – Schwelle fürs Warn-Icon neben Wallet.
+const SOL_RESERVE_MIN = 0.1;
 
 function fmtUsdc(v, dec = 2) {
     if (v == null) return '—';
@@ -215,6 +219,20 @@ function renderMetrics(data) {
     const walletEl = $('walletValue');
     if (walletEl) walletEl.textContent = fmtUsdc(freeWallet);
 
+    // Warn-Icon: SOL-Reserve unterschritten (unter diesem Wert eröffnet der Bot
+    // keine neuen Positionen mehr, siehe bots/liquidity/bin/deposit.js).
+    const solWarnEl = $('walletSolWarnIcon');
+    if (solWarnEl) {
+        const solBal = wmSnap?.sol_balance ?? null;
+        if (solBal != null && solBal < SOL_RESERVE_MIN) {
+            solWarnEl.setAttribute('data-tooltip-content',
+                `SOL-Reserve beträgt aktuell ${fmtUsdc(solBal, 4)} SOL. Unter ${fmtUsdc(SOL_RESERVE_MIN, 1)} SOL werden keine neuen Positionen mehr eröffnet. Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`);
+            solWarnEl.style.display = '';
+        } else {
+            solWarnEl.style.display = 'none';
+        }
+    }
+
     // Gesamt: LP + Fees + Wallet (balance)
     const gesamt = p.balance ?? 0;
     const gesEl = $('gesamtValue');
@@ -361,6 +379,7 @@ let _oppSortDir = (localStorage.getItem(LS_OPP_SORT_DIR) === 'asc') ? 'asc' : 'd
 // Opportunity-Anzeige-Zeitfenster (steuert nur die PnL-Spalte in der Opportunity-Tabelle)
 const LS_OPP_DISPLAY_TIMEFRAME = 'liquiditybot_opp_display_tf';
 const OPP_TF_OPTIONS = [
+    { id: '1h',  label: '1 h'    },
     { id: '6h',  label: '6 h'    },
     { id: '12h', label: '12 h'   },
     { id: '24h', label: '24 h'   },
@@ -432,37 +451,103 @@ function formatPremiumCountdown(coveredUntilMs) {
 }
 
 /**
- * „Bester Pool" überspringt diesen Pool: Verbots-Icon vor dem Score.
+ * Pool ist aktuell "Bester Pool": Hammer-Icon hinter dem Poolnamen.
  *
- * Der Score bleibt sichtbar und korrekt — er sagt nur nichts mehr darüber aus, ob
- * hier investiert wird. Ohne dieses Zeichen wäre ein still übersprungener Pool nicht
- * von einem defekten zu unterscheiden (derselbe Merksatz wie beim LendingBot).
- * Bewusst das Verbots-Icon und nicht das Warndreieck der Risk-Management-Schwellen:
- * dort ist Kapital in Gefahr, hier wird nur keines hineingelegt. Die Bedeutung steht
- * im Tooltip, nie allein in der Farbe.
+ * Ersetzt seit 2026-08-24 die drei einzelnen Zustands-Icons (Trend-Gate, Cooldown,
+ * Invest-Blocked) — deren Kombination verwirrte mehr, als sie half: ein Pool konnte z.B.
+ * das Trend-Gate-Icon zeigen, obwohl er den letzten Cleanup-Lauf schon vor dem Kippen des
+ * Trends gewonnen hatte (Befund 2026-08-24, SOL/USDC & ZEC/USDC). Jetzt bekommt nur der
+ * Pool ein Icon, den der nächste stündliche Cleanup-Lauf im Modus „Bester Pool" mit dem
+ * aktuellen Datenstand wählen würde — Datenquelle `pool.cleanupWinner` aus bin/export.js,
+ * berechnet mit denselben Toren, die bin/cleanup.js `runCleanupByRanking()` nutzt.
  *
- * Der Platzhalter (visibility:hidden) hält die Score-Spalte bündig — dasselbe Muster
- * wie beim ⚠ der PnL-Spalte.
+ * Bedeutung steht im Tooltip, nie allein im Symbol.
  */
-function _investBlockedIcon(pool) {
-    const b = pool?.investBlocked;
-    const slot = html => `<span style="display:inline-block;min-width:1.2em;text-align:center">${html}</span>`;
-    if (!b) return slot('<span style="visibility:hidden">⛔</span>');
+function _cleanupWinnerIcon(pool) {
+    const w = pool?.cleanupWinner;
+    if (!w) return '';
 
-    const fmtUsd = v => Math.round(v).toLocaleString(NUM_LOCALE) + ' USDC';
-    let text;
-    if (b.rule === 'tvl') {
-        text = tr('liq.invest_blocked_tvl', 'Der TVL liegt unter der Schwelle des TVL-Schutzes ({threshold}) – eine Einzahlung würde sofort wieder abgezogen.')
-            .replace('{threshold}', fmtUsd(b.threshold ?? 0)).replace('{tvl}', fmtUsd(b.tvl ?? 0));
-    } else if (b.rule === 'tvl_unknown') {
-        text = tr('liq.invest_blocked_tvl_unknown', 'Für diesen Pool liegt kein TVL-Messwert vor – solange das so ist, wird er übersprungen.');
-    } else {
-        text = tr('liq.invest_blocked_score', 'Der Exit-Score ({score}) liegt unter dem Score-Limit ({min}) – eine Einzahlung würde sofort wieder abgezogen.')
-            .replace('{score}', String(b.exitScore ?? '?')).replace('{min}', String(b.minScore ?? '?'));
+    const tfLabel = tf => ({
+        '1h': tr('liq.trend_tf_1h', '1 Stunde'),
+        '4h': tr('liq.trend_tf_4h', '4 Stunden'),
+        '1d': tr('liq.trend_tf_1d', '1 Tag'),
+    }[tf] ?? tf);
+
+    const lines = [tr('liq.cw_score', 'Opportunity Score {score} ≥ Minimum {min}')
+        .replace('{score}', w.score).replace('{min}', w.minScore)];
+    const req = pool.trendGate?.required ?? [];
+    if (req.length) {
+        lines.push(tr('liq.cw_trend', 'Aufwärtstrend auf {timeframes}').replace('{timeframes}', req.map(tfLabel).join(', ')));
     }
-    const note = tr('liq.invest_blocked_note', 'Der Pool rankt automatisch wieder mit, sobald die Regel nicht mehr greift.');
-    const title = tr('liq.invest_blocked_title', 'Für Investitionen gesperrt');
-    return slot(`<span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text + ' ' + note)}" data-tooltip-type="text" style="cursor:default;color:#f59e0b">⛔</span>`);
+    lines.push(tr('liq.cw_no_cooldown', 'Kein Risk-Management-Cooldown aktiv'));
+    lines.push(tr('liq.cw_no_block', 'Nicht durch TVL-Schutz/Score-Limit gesperrt'));
+
+    // Cleanup läuft stündlich zu :05 (bin/cleanup.js Cron) — dieselbe Formel wie
+    // _cleanupTitleSuffix() im Settings-Modal (bot-liquidity.js), damit beide Anzeigen
+    // nie auseinanderlaufen.
+    const cdMin = (65 - new Date().getMinutes()) % 60;
+    const title = cdMin === 0
+        ? tr('liq.cw_title_now', 'Cleanup > Bester Pool läuft gerade')
+        : tr('liq.cw_title', 'Nächster Cleanup > Bester Pool in {min} min').replace('{min}', cdMin);
+    const text  = tr('liq.cw_intro', 'Würde „Cleanup > Bester Pool" jetzt laufen, würde er hier investieren:') + '\n\n'
+        + lines.map(l => `✓ ${l}`).join('\n');
+    return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">🔨</span>`;
+}
+
+/**
+ * Pool liegt im Invest-Cooldown (z.B. Trailing-Stop-Drawdown-Schutz): Schlaf-Icon
+ * hinter dem Poolnamen.
+ *
+ * Reaktiviert am 2026-08-26 — beim Umstieg auf das Hammer-Icon (92ca0817, 2026-08-24)
+ * ist die Cooldown-Anzeige mit den anderen zwei Zustands-Icons weggefallen, war aber
+ * weiterhin nötig: ohne sie ist ein Pool, der wegen eines aktiven Trailing-Stop/TVL-
+ * Schutz/Score-Limit-Cooldowns von „Bester Pool" übersprungen wird, nicht von einem
+ * schlicht schwächeren Pool zu unterscheiden. Das Hammer-Icon zeigt nur den Gewinner,
+ * nicht warum die anderen ausgeschlossen sind — beide Icons ergänzen sich.
+ *
+ * Die Restzeit wird hier gerechnet, nicht in export.js: data.json wird im Minutentakt
+ * geschrieben, ein exportierter Minutenwert wäre beim Lesen schon veraltet.
+ *
+ * Bedeutung steht im Tooltip, nie allein in Farbe oder Symbol.
+ */
+function _investCooldownIcon(pool) {
+    const now = Date.now();
+    const active = (pool?.investCooldowns ?? [])
+        .filter(c => Number(c?.untilMs) > now)
+        .sort((a, b) => b.untilMs - a.untilMs);
+    if (!active.length) return '';
+
+    const srcLabel = key => ({
+        trailingStop:  tr('liq.cooldown_src_trailing_stop', 'Trailing Stop'),
+        tvlProtection: tr('liq.cooldown_src_tvl',           'TVL-Schutz'),
+        scoreLimit:    tr('liq.cooldown_src_score_limit',   'Score-Limit'),
+    }[key] ?? key);
+
+    const fmtRemaining = ms => {
+        const totalMin = Math.max(1, Math.ceil(ms / 60_000));
+        const h = Math.floor(totalMin / 60);
+        const m = totalMin % 60;
+        const hStr = tr('liq.unit_hours_short', 'Std.');
+        const mStr = tr('liq.unit_minutes_short', 'Min.');
+        if (h && m) return `${h} ${hStr} ${m} ${mStr}`;
+        if (h)      return `${h} ${hStr}`;
+        return `${m} ${mStr}`;
+    };
+
+    const note = tr('liq.cooldown_note', 'Solange wird hier nicht investiert, der Pool rankt danach automatisch wieder mit.');
+    let text;
+    if (active.length === 1) {
+        text = tr('liq.cooldown_single', '{source} hat hier zuletzt Kapital freigegeben. Noch {time} gesperrt.')
+            .replace('{source}', srcLabel(active[0].key))
+            .replace('{time}', fmtRemaining(active[0].untilMs - now))
+            + ' ' + note;
+    } else {
+        text = tr('liq.cooldown_multi', 'Mehrere Sperren laufen gleichzeitig:') + '\n'
+            + active.map(c => `• ${srcLabel(c.key)}: ${tr('liq.cooldown_still', 'noch')} ${fmtRemaining(c.untilMs - now)}`).join('\n')
+            + '\n' + note;
+    }
+    const title = tr('liq.cooldown_title', 'Cooldown aktiv');
+    return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">\u{1F4A4}</span>`;
 }
 
 function renderOpportunityScores(data) {
@@ -493,7 +578,7 @@ function renderOpportunityScores(data) {
             if (infoEl) {
                 const pool = (_lastData?.pools ?? []).find(p => p.id === infoEl.dataset.poolId);
                 if (!pool) return;
-                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20260727a');
+                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20260823b');
                 await openTokenInfoModal(pool);
                 return;
             }
@@ -669,9 +754,13 @@ function renderOpportunityScores(data) {
     }
 
     // Pool-Reihen: generische Spaltensortierung, Fallback auf InvestScore
+    // Preis-Trend: bei volatilePair-Pools (z.B. PUMP/SOL) ist pool_stats.price die
+    // Token/Token-Ratio, kein USD-Preis — usdTrendSlopePct (USD-Korb-Trend) zeigt dort
+    // stattdessen die reale Richtung. Gleiche Weiche wie invest-score-compute.js.
     const rows = pools.map(p => {
         const s = scores[p.id]?.[_oppDisplayTf] ?? null;
-        return { pool: p, s };
+        const trendPct = s == null ? null : (p.volatilePair ? (s.usdTrendSlopePct ?? null) : (s.priceSlopePct ?? null));
+        return { pool: p, s, trendPct };
     }).sort((a, b) => {
         if (_oppSortCol) {
             const dir = _oppSortDir === 'asc' ? 1 : -1;
@@ -692,7 +781,7 @@ function renderOpportunityScores(data) {
                     if (_npRaw == null) return null;
                     return _sCap != null ? _npRaw * _sCap / 1000 : _npRaw;
                 }
-                if (_oppSortCol === 'priceSlope') return item.s?.priceSlopePct ?? null;
+                if (_oppSortCol === 'priceSlope') return item.trendPct;
                 if (_oppSortCol === 'aprSlope')   return item.s?.yieldSlopePct ?? null;
                 if (_oppSortCol === 'tvlSlope')   return item.s?.tvlSlopePct   ?? null;
                 return null;
@@ -777,8 +866,18 @@ function renderOpportunityScores(data) {
         <option value="sim"${_oppPnlMode==='sim'?' selected':''}>${tr('liq.pnl_sim', 'PnL sim')}</option>
     </select></span>`;
 
-    const _chartIconSvg = `<svg width="14" height="12" viewBox="0 0 14 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <polyline points="1,11 4,7 7,9 10,3 13,1" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    // Chart-Icon spiegelt den Preis-Trend des aktuell gewählten Zeitfensters (_oppDisplayTf)
+    // wider (trendPct aus rows-Mapping oben — bei volatilePair-Pools usdTrendSlopePct statt
+    // priceSlopePct, siehe dortiger Kommentar), gleiche Schwellen wie slopeCls() weiter unten.
+    const _chartIconPoints = {
+        up:   '1,11 4,7 7,9 10,3 13,1',
+        down: '1,1 4,5 7,3 10,9 13,11',
+        flat: '1,7 4,5 7,8 10,5 13,6',
+    };
+    const _chartIconArrow = slopePct =>
+        slopePct == null ? 'flat' : slopePct > 0.1 ? 'up' : slopePct < -0.1 ? 'down' : 'flat';
+    const _chartIconSvg = arrow => `<svg width="14" height="12" viewBox="0 0 14 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <polyline points="${_chartIconPoints[arrow] ?? _chartIconPoints.flat}" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
     </svg>`;
 
     const _infoIconSvg = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -796,14 +895,18 @@ function renderOpportunityScores(data) {
     };
 
     // Token-Info-Icon: Kategorien beider Tokens als Teaser, Details im Klick-Modal.
-    // "Layer-1-Coin" (i.d.R. SOL) ist Boilerplate, da fast jeder Pool eine Seite davon hat —
-    // wird nur gezeigt, wenn die andere Seite keine eigene, aussagekräftigere Kategorie hat.
+    // "Layer-1-Coin" (i.d.R. SOL) und "Stablecoin" (USDC/EURC/USDG) sind Boilerplate, da
+    // fast jeder Pool eine dieser beiden Seiten hat — werden nur gezeigt, wenn die andere
+    // Seite keine eigene, aussagekräftigere Kategorie hat. Sonst suggeriert z.B. bei
+    // SPX/USDC das führende "Stablecoin" fälschlich, der Pool sei stabil, obwohl SPX ein
+    // Meme-Coin ist.
+    const _TOKEN_INFO_BOILERPLATE_CATS = ['Layer-1-Coin', 'Stablecoin'];
     const _tokenInfoTip = pool => {
         const catA = getTokenInfo(pool.tokenA)?.category;
         const catB = getTokenInfo(pool.tokenB)?.category;
         let cats = [catA, catB].filter(Boolean);
         if (cats.length > 1) {
-            const specific = cats.filter(c => c !== 'Layer-1-Coin');
+            const specific = cats.filter(c => !_TOKEN_INFO_BOILERPLATE_CATS.includes(c));
             if (specific.length > 0) cats = specific;
         }
         return (cats.length ? `${cats.join(' / ')}\n` : '') + tr('liq.more_info', 'Klick für mehr Infos.');
@@ -829,9 +932,11 @@ function renderOpportunityScores(data) {
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('tvlSlope',tr('liq.sort_tvl_slope', 'Nach TVL-Slope sortieren'))}TVL-Slope</span>
         </div>
         <div class="opp-score-body">
-        ${rows.map(({pool, s}) => {
+        ${rows.map(({pool, s, trendPct}) => {
             const rowCls  = pool.active ? '' : ' inactive';
             const pair    = escHtml(pool.displayPair ?? pool.pair ?? '—');
+            const winnerIcon = _cleanupWinnerIcon(pool);
+            const cooldownIcon = _investCooldownIcon(pool);
             const isGated   = pool.investScore?.hopiumVeto === true;
             const isNewPool = (pool.investScore?.dataDays ?? 1) === 0;
             const badge   = isGated
@@ -844,7 +949,7 @@ function renderOpportunityScores(data) {
             const capital  = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
             const pid     = escHtml(pool.id);
             const mc      = `opp-metric-clickable`;
-            const _tfMs   = { '6h': 6, '12h': 12, '24h': 24, '7d': 168 };
+            const _tfMs   = { '1h': 1, '6h': 6, '12h': 12, '24h': 24, '7d': 168 };
             let pnlCell;
             // NP auf kurzen Fenstern für volatile Pools unzuverlässig (Richtungstreffer < 50%).
             const _npUnreliable = Array.isArray(pool.npUnreliableWindows)
@@ -893,11 +998,11 @@ function renderOpportunityScores(data) {
             }
             return `
         <div class="opp-score-row${rowCls}">
-            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${badge}${newPoolBadge}</span></span>
-            <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg}</button>
-            <span>${_investBlockedIcon(pool)}<span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span></span>
+            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${winnerIcon}${cooldownIcon}${badge}${newPoolBadge}</span></span>
+            <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg(_chartIconArrow(trendPct))}</button>
+            <span><span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span></span>
             ${pnlCell}
-            <span class="opp-col-detail ${mc} ${slopeCls(s?.priceSlopePct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${s?.priceSlopePct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.priceSlopePct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
+            <span class="opp-col-detail ${mc} ${slopeCls(trendPct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${trendPct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(trendPct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="' + tr('liq.slope_apr_show', 'APR-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.tvlSlopePct)}"  data-pool-id="${pid}" data-metric="tvlSlope"   style="cursor:pointer"${s?.tvlSlopePct == null ? '' : ' title="' + tr('liq.slope_tvl_show', 'TVL-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.tvlSlopePct, '%/h', pool.id, _oppDisplayTf, 'TVL-Slope')}</span>
         </div>`;
@@ -1289,13 +1394,23 @@ function renderActivePositions(data) {
             const _pnlDepTime   = pos.sinceDepositAt != null
                 ? new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
                 : null;
+            // Label je nach tatsächlicher Anker-Quelle — ein manueller Reset ist keine
+            // Einzahlung, sah aber bis 2026-08-22 im Tooltip identisch aus (Fund: SOL/cbBTC
+            // Position 78 auf forge-pub1, Reset ohne Kapitalfluss wirkte wie eine Neueröffnung).
+            const _pnlDepLabel  = pos.sinceDepositSource === 'reset'  ? 'Höchststand zurückgesetzt'
+                                : pos.sinceDepositSource === 'opened' ? 'seit Eröffnung'
+                                : 'letzte Einzahlung';
             const _pnlDepBlock  = _pnlDepDate != null
-                ? `${_pnlDepDate}, ${_pnlDepTime} Uhr (letzte Einzahlung):\n${_pnlDep != null
+                ? `${_pnlDepDate}, ${_pnlDepTime} Uhr (${_pnlDepLabel}):\n${_pnlDep != null
                     ? `${_pnlDepSign}${fmtUsdc(_pnlDep)} USDC${_pnlDepPct != null ? ` (${fmtPct(_pnlDepPct)})` : ''}`
                     : '—'}`
                 : null;
+            // "heute, ab 00:00 Uhr" entfällt, wenn die Position erst heute eröffnet/bestückt
+            // wurde — sonst zeigt der Block PnL für Kursbewegung VOR der Einzahlung, was
+            // irreführend ist (der Wert enthält Marktbewegung, die die Position nie erlebt hat).
+            const _isDepositToday = pos.sinceDepositAt != null && pos.sinceDepositAt >= _todayStart.getTime();
             const _pnlTtTitle   = `${pair}: PnL`;
-            const _pnlTtContent = [_pnlTodayBlock, _pnlDepBlock].filter(Boolean).join('\n\n');
+            const _pnlTtContent = [_isDepositToday ? null : _pnlTodayBlock, _pnlDepBlock].filter(Boolean).join('\n\n');
             return `
         <div class="active-pools-row">
             <span>${pair}</span>
@@ -4205,7 +4320,18 @@ function _renderClaimHistTab(tab) {
     const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
     const monthStart     = new Date(todayStart); monthStart.setDate(1);
 
-    const allEntries       = (data?.claimHistory ?? []).filter(e => e.pair === poolPair);
+    // Nur die Claims der AKTUELLEN Position dieses Pools. Ein Pool kann am selben Tag mehrfach
+    // geschlossen und wiedereröffnet worden sein — die Claims der Vorgänger-Positionen gehören
+    // nicht in dieses Modal (sie stehen in den Tagesaggregaten und im Profit-Chart).
+    // Grenze: positionId (seit 2026-08-22 im Export), Fallback: Eröffnungszeitpunkt.
+    const curPos = (data?.positions ?? []).find(p => p.pair === poolPair && p.active)
+                ?? (data?.positions ?? []).find(p => p.pair === poolPair);
+    const allEntries       = (data?.claimHistory ?? []).filter(e => {
+        if (e.pair !== poolPair) return false;
+        if (!curPos) return true;
+        if (e.positionId != null && curPos.positionId != null) return e.positionId === curPos.positionId;
+        return !(curPos.openedAt > 0) || e.claimedAt >= curPos.openedAt;
+    });
     const todayEntries     = allEntries.filter(e => e.claimedAt >= todayStart.getTime());
     const yesterdayEntries = allEntries.filter(e =>
         e.claimedAt >= yesterdayStart.getTime() && e.claimedAt < todayStart.getTime());
@@ -4277,9 +4403,14 @@ function _renderClaimHistTab(tab) {
     const total      = entries.reduce((s, e) => s + (e.usdValue ?? 0), 0);
     const contentHtml = _buildClaimTable(cols, rows, total, entries.length);
 
+    // Geltungsbereich sichtbar machen: Position, nicht Pool-Historie.
+    const scopeHtml = curPos?.openedAt > 0
+        ? `<div class="tx-modal-scope" style="font-size:0.85em;opacity:0.75;margin:-0.25rem 0 0.5rem">${tr('liq.claims_scope_position', 'Nur Claims der aktuellen Position, eröffnet')} ${new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: _tz }).format(new Date(curPos.openedAt))}</div>`
+        : '';
+
     listEl.innerHTML = `
         <div class="modal-tabs" style="margin:-0.25rem 0 0.75rem">${tabsHtml}</div>
-        ${contentHtml}`;
+        ${scopeHtml}${contentHtml}`;
 
     listEl.querySelectorAll('[data-claim-tab]').forEach(btn =>
         btn.addEventListener('click', () => _renderClaimHistTab(btn.dataset.claimTab))
@@ -4715,6 +4846,16 @@ function openInvestScoreModal(poolId, data) {
                 <td style="width:${colWidths[3]}"></td>
             </tr>` : '';
 
+        // Trend-Feinsignal (Opportunity 2.0): separate Modifier-Zeile wie der Volumen-
+        // Malus – nur sichtbar, wenn der Pool-Typ das Signal überhaupt nutzt (weight > 0).
+        const tfs = is?.trendFineSignal;
+        const trendFineSignalRow = (tfs && tfs.weight > 0) ? `<tr>
+                <td style="padding:6px 8px;color:#94a3b8;width:${colWidths[0]}">${tr('liq.trend_fine_signal', 'Trend-Feinsignal')}<br><span style="font-size:0.72rem;color:#94a3b8">${tfs.composite == null ? tr('liq.trend_unknown', 'Trend nicht bestimmbar') : `EMA-Composite ${Math.round(tfs.composite)}%`}</span></td>
+                <td style="width:${colWidths[1]}"></td>
+                <td style="padding:6px 8px;text-align:right;font-weight:600;width:${colWidths[2]}"><span class="${tfs.offset > 0 ? 'value-good' : tfs.offset < 0 ? 'value-danger' : ''}">${tfs.offset > 0 ? '+' : ''}${tfs.offset.toFixed(1)}</span></td>
+                <td style="width:${colWidths[3]}"></td>
+            </tr>` : '';
+
         const scrollable = metrics.length > 5;
         const tbodyStyle = scrollable
             ? 'display:block;max-height:155px;overflow-y:auto'
@@ -4765,6 +4906,7 @@ function openInvestScoreModal(poolId, data) {
                 </tbody>
                 <tfoot style="display:table;width:100%;table-layout:fixed;border-top:1px solid #334155">
                     ${volMalusRow}
+                    ${trendFineSignalRow}
                     <tr>
                         <td style="padding:6px 8px;font-weight:600;color:#e2e8f0;width:${colWidths[0]}">Gesamt</td>
                         <td style="width:${colWidths[1]}"></td>

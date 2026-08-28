@@ -19,9 +19,9 @@
 import { DataManager }    from './data.js?v=20260421f';
 import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
-import { initMessageBell } from '../../js/message-bell.js?v=20260818a';
+import { initMessageBell } from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260816a';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260826a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (15 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -41,6 +41,10 @@ const earningsToast  = new EarningsToast();
 earningsToast.startPolling('../liquidity/data/data.json', null);
 
 // ─── Hilfsfunktionen ──────────────────────────────────────────────────────────
+
+// Unter dieser SOL-Reserve eröffnet der Bot keine neuen Positionen mehr
+// (siehe SOL_TOPUP_TRIGGER in bots/lending/bin/bot.js) – Schwelle fürs Warn-Icon neben Wallet.
+const SOL_RESERVE_MIN = 0.1;
 
 /** Zahlen-Formatierung mit Fallback */
 function fmt(n, decimals = 2, fallback = '—') {
@@ -235,6 +239,20 @@ function renderMetrics(data) {
     const freeWallet = wmSnap ? wmSnap.total_usd : (p?.walletUsdc ?? 0);
     const el_wallet  = document.getElementById('walletValue');
     if (el_wallet) el_wallet.textContent = fmt(freeWallet);
+
+    // Warn-Icon: SOL-Reserve unterschritten (unter diesem Wert eröffnet der Bot
+    // keine neuen Positionen mehr, siehe SOL_TOPUP_TRIGGER in bots/lending/bin/bot.js).
+    const solWarnEl = document.getElementById('walletSolWarnIcon');
+    if (solWarnEl) {
+        const solBal = wmSnap?.sol_balance ?? null;
+        if (solBal != null && solBal < SOL_RESERVE_MIN) {
+            solWarnEl.setAttribute('data-tooltip-content',
+                `SOL-Reserve beträgt aktuell ${fmt(solBal, 4)} SOL. Unter ${fmt(SOL_RESERVE_MIN, 1)} SOL werden keine neuen Positionen mehr eröffnet. Bitte Wallet mit mindestens 0,15 SOL aufladen oder warten, bis sich der SOL Bestand wieder erholt.`);
+            solWarnEl.style.display = '';
+        } else {
+            solWarnEl.style.display = 'none';
+        }
+    }
 
     // Gesamt: Positionen + Wallet
     const gebunden = p?.currentValue ?? 0;

@@ -36,8 +36,9 @@ import { describeError } from '../../../lib/error-messages.js';
 import { FORGE_TZ }      from '../../../core/config.js';
 import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
+import { markSolLowActive, incrementSolLowCount, isSolLowActive, resetSolLow } from './db.js';
 import { renderNotification } from '../../../lib/notify-render.js';
-import { getLang, t }    from '../../../lib/i18n.js';
+import { getLang, t, numLocale } from '../../../lib/i18n.js';
 // Preisformatierung liegt unter html/js/, weil das Dashboard dieselbe Regel braucht und
 // nur der html/-Baum ausgeliefert wird — Begründung im Kopf des Moduls.
 import { formatPrice, quoteSymbol } from '../../../html/js/format-price.js';
@@ -100,6 +101,13 @@ const ACTION = {
     retrying:  'notify.act.retrying',
     /** Endgültig gescheitert, Nutzer muss handeln. */
     manual:    'notify.act.manual',
+    /**
+     * Kapital liegt in der Wallet, der Vorgang ist aber NICHT abgeschlossen — der Bot
+     * holt den Rest automatisch nach. Eigener Baustein, weil weder `inWallet`
+     * („es ist nichts zu tun") noch `retrying` („der Bot versucht es erneut", ohne ein
+     * Wort zum bewegten Geld) diesen Zwischenzustand ehrlich beschreibt (LIQ#0312).
+     */
+    inWalletRetrying: 'notify.act.in_wallet_retrying',
     /** Wallet braucht Geld. */
     topUp:     'notify.act.top_up',
     /** Konfiguration muss angepasst werden. */
@@ -312,6 +320,25 @@ export async function info(context, message) {
     }, { context, message });
 }
 
+/**
+ * Tagesbericht: alle am Vortag geschlossenen Positionen mit Ergebnis und Exit-Grund.
+ * Läuft einmal täglich (Cron `liquidity-daily-report`) und nur, wenn es etwas zu berichten
+ * gibt — ein Tag ohne Exit erzeugt keine Nachricht.
+ *
+ * @param {object} [data]  Strukturierte Fassung derselben Zahlen für die Message-Center-
+ *   Detailansicht (routes/messages.js: extractDailyReport()/dailyReportHtml(), Vorgabe
+ *   2026-08-24 analog zu rmExecuted()). `message` bleibt der Fließtext-Fallback für Alt-
+ *   Clients/Suche — beide beschreiben denselben Bericht, nicht zwei verschiedene.
+ */
+export async function dailyReport(day, message, data) {
+    // Level 'info' statt 'warn' (bis 2026-08-23 fälschlich 'warn'): der Bericht meldet nur,
+    // was der Bot bereits erledigt hat — er verlangt keine Reaktion und ist keine Warnung.
+    // Kein _action-Baustein: der Bericht ist reine Rückschau, keine Handlungsaufforderung nötig.
+    await send('info', 'daily-report', 'notify.liq.daily_report', {
+        day, message, data,
+    }, { day, message });
+}
+
 /** Range Advisor – bessere Range verfügbar → warn+range-hint → DB + Telegram */
 export async function rangeHint(context, message) {
     await send('warn', 'range-hint', 'notify.liq.range_hint', { context, message },
@@ -410,7 +437,8 @@ let _lastSolLowNotifyAt = 0;
 const SOL_LOW_COOLDOWN_MS = 60 * 60 * 1000; // max. 1× pro Stunde
 
 /**
- * SOL-Balance unter der Reserve (nur DB, kein Telegram), max. 1×/h.
+ * SOL-Balance unter der Reserve (nur DB, kein Telegram außer im kritischen Fall),
+ * max. 1×/h.
  *
  * Schwelle = `config.solReserve` (Default 0,1), NICHT darüber: erst unter der
  * Reserve hört der Bot tatsächlich auf Positionen zu eröffnen. Eine Warnung
@@ -418,9 +446,32 @@ const SOL_LOW_COOLDOWN_MS = 60 * 60 * 1000; // max. 1× pro Stunde
  * Schwelle im `wallet-monitor` am 30.07.2026 von 0,12 auf 0,1 zurückgenommen
  * wurde (17 Fehlalarme in 48h auf forge-pub1). Beide Schwellen gehören zusammen;
  * wird eine geändert, muss die andere mit.
+ *
+ * Level `warn` statt `error` für den regulären Fall (2026-08-28, Betreiber-Vorgabe):
+ * eine Unterschreitung der Reserve ist eine Warnung, kein Fehler — der Bot arbeitet
+ * weiter, öffnet nur keine neuen Positionen. `count` (persistiert in `sol_low_state`,
+ * überlebt Neustarts) zählt, wie oft dieselbe, weiterhin unbehobene Warnung schon
+ * gefeuert hat, für die Betreffzeile im Message Center ("… (1)", "… (2)", …).
+ *
+ * Der kritische Fall (< 0,05 SOL, Bot kann sich nicht mehr selbst auffüllen) bleibt
+ * bewusst `error` mit Telegram-Alarm — hier ist tatsächlich manuelles Eingreifen nötig.
+ *
+ * Erholt sich die Reserve wieder über die Schwelle, feuert einmalig `notify.liq.sol_recovered`
+ * (info, siehe feedback_notify_level_resolved_vs_warn: "nichts zu tun" gehört auf info).
  */
-export async function solLow(solBalance) {
-    if (solBalance >= config.solReserve) return;
+export async function solLow(db, solBalance) {
+    if (solBalance >= config.solReserve) {
+        if (isSolLowActive(db)) {
+            resetSolLow(db);
+            await send('info', 'wallet', 'notify.liq.sol_recovered', {
+                sol:     solBalance.toFixed(4),
+                reserve: String(config.solReserve).replace('.', ','),
+                _action: ACTION.fyi,
+            });
+        }
+        return;
+    }
+    markSolLowActive(db);
     if (Date.now() - _lastSolLowNotifyAt < SOL_LOW_COOLDOWN_MS) return;
     _lastSolLowNotifyAt = Date.now();
     if (solBalance < 0.05) {
@@ -428,9 +479,12 @@ export async function solLow(solBalance) {
             sol: solBalance.toFixed(4), _action: ACTION.topUp,
         });
     } else {
-        await send('info', 'wallet', 'notify.liq.sol_low', {
+        const count = incrementSolLowCount(db);
+        await send('warn', 'wallet', 'notify.liq.sol_low', {
             sol:     solBalance.toFixed(4),
             reserve: String(config.solReserve).replace('.', ','),
+            count,
+            _action: ACTION.topUp,
         });
     }
 }
@@ -463,11 +517,15 @@ export async function warn(context, err) {
 
 /**
  * Eine on-chain gelandete, aber nie gebuchte Einzahlung wurde nachgetragen.
- * Level `warn`, nicht `info`: dass es dazu kam, heißt ein Lauf ist vorher
- * abgebrochen — das soll sichtbar sein. Zu tun ist trotzdem nichts mehr.
+ * Level `info` statt `warn` (bis 2026-08-24 fälschlich `warn`, siehe LIQ#0327 —
+ * gleicher Fehler wie bei dailyReport, 2026-08-23 behoben): Die Meldung selbst sagt
+ * "PnL und Kapital stimmen wieder" — sie berichtet einen bereits erledigten
+ * Selbstheilungs-Vorgang, keine offene Warnung. Ein "Warnung"-Badge über einem Text,
+ * der "nichts zu tun" sagt, verunsichert ohne Grund und verwässert die Bedeutung
+ * echter Warnungen.
  */
 export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
-    await send('warn', 'system', 'notify.liq.capital_recovered', {
+    await send('info', 'system', 'notify.liq.capital_recovered', {
         pair: pool.displayPair ?? pool.pair,
         usd:  usdValue.toFixed(2),
         tx:   txHash,
@@ -477,19 +535,64 @@ export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
 }
 
 /**
- * Kapitalbewegung on-chain gefunden, die NICHT gebucht ist und die der
- * Reconciler bewusst nicht selbst nachträgt (Richtung mehrdeutig, Bewertung
- * nicht belastbar). Das Kapital selbst ist nicht weg — `location` sagt, wo es
- * gerade liegt (Wallet oder offene Position), das steuert die Handlungsaufforderung.
+ * Kapitalbewegung on-chain gefunden, die NICHT gebucht ist und die der Reconciler
+ * bewusst nicht selbst nachträgt (lib/capital-reconcile.js). Gemeldet wird erst nach
+ * der Karenzzeit, also wenn feststeht, dass kein Resume die Buchung noch nachholt.
+ *
+ * 🔒 Der Adressat ist kein Entwickler. Die Meldung sagt deshalb NICHT, warum der
+ * Abgleich technisch unsicher ist (ob `decreaseLiquidity` oder `collectFees` — das ist
+ * unsere Implementierungsfrage), sondern was für den Nutzer daraus folgt: wo sein
+ * Kapital liegt und dass der ausgewiesene Gewinn dieses Pools davon abweichen kann.
+ * Die frühere Fassung nannte nur die interne Unsicherheit und verunsicherte damit,
+ * ohne irgendetwas zu erklären.
+ *
+ * `kind` unterscheidet die drei Fälle des Abgleichs; jeder hat eigenen Text und eigene
+ * Handlungsaufforderung, weil das Kapital bei Ab- und Zufluss an verschiedenen Orten liegt.
  */
-export async function capitalFlowNeedsReview(pool, { txHash, whenMs, reason, location }) {
-    await send('warn', 'system', 'notify.liq.capital_unclear', {
+const CAPITAL_UNCLEAR = {
+    /** Abfluss: Kapital ist in der Wallet, nur die Buchung fehlt. */
+    outflow_unbooked:     { key: 'notify.liq.capital_unclear_out', action: ACTION.inWallet },
+    /** Zufluss ohne brauchbare Snapshot-Klammer — Wert nicht belastbar bestimmbar. */
+    inflow_no_valuation:  { key: 'notify.liq.capital_unclear_in',  action: ACTION.inPosition,
+                            reason: 'notify.liq.capital_reason_no_valuation' },
+    /** Zufluss on-chain, Positionswert stieg nicht mit — die Quellen widersprechen sich. */
+    inflow_value_mismatch:{ key: 'notify.liq.capital_unclear_in',  action: ACTION.inPosition,
+                            reason: 'notify.liq.capital_reason_mismatch' },
+};
+
+export async function capitalFlowNeedsReview(pool, { txHash, whenMs, kind, params = {} }) {
+    const spec = CAPITAL_UNCLEAR[kind];
+    if (!spec) return;   // unbekannte Art: lieber nichts melden als Unverständliches
+    await send('warn', 'system', spec.key, {
         pair: pool.displayPair ?? pool.pair,
         tx:   txHash,
         when: new Date(whenMs).toLocaleString('de-DE'),
-        reason,
-        _action: location === 'wallet' ? ACTION.inWallet : ACTION.inPosition,
-    }, { context: pool.id, txHash, reason, location });
+        ...(spec.reason ? { reason: { k: spec.reason, p: params } } : {}),
+        _action: spec.action,
+    }, { context: pool.id, txHash, kind, ...params });
+}
+
+/**
+ * Ein Pending-Fee-Messwert war unplausibel und wurde verworfen (Guard in
+ * `refresh-state.js`, Regel in `FORGE/lib/fee-plausibility.js`).
+ *
+ * Level `warn`, nicht `info`: Der Bot hat sich zwar selbst geholfen, aber ein
+ * verworfener Messwert heißt, dass eine Kette-Abfrage Unsinn geliefert hat — das
+ * gehört sichtbar gemacht. Vor allem aber: Wer die Zahl im Dashboard kurz gesehen
+ * hat, soll erfahren, dass sie nicht stimmte und warum. Ein Schutz, der stumm
+ * greift, ist vom Nutzer nicht von einem zu unterscheiden, den es nicht gibt.
+ */
+export async function feeMeasurementRejected(pool, { measuredUsd, lpValueUsd, previousUsd, impliedAprPct }) {
+    await send('warn', 'system', 'notify.liq.fee_measurement_rejected', {
+        pair:     pool.displayPair ?? pool.pair,
+        measured: measuredUsd.toFixed(2),
+        lp:       lpValueUsd.toFixed(2),
+        // Tausendertrennung in der Sprache der Installation — eine siebenstellige
+        // Zahl ohne Gruppierung liest niemand.
+        apr:      Math.round(impliedAprPct).toLocaleString(numLocale()),
+        previous: previousUsd.toFixed(4),
+        _action:  ACTION.fyi,
+    }, { context: pool.id, measuredUsd, lpValueUsd, previousUsd, impliedAprPct });
 }
 
 /** Manueller Deposit in eine bestehende oder neue Position */
@@ -562,9 +665,12 @@ export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
  * automatisch entfallen (Konvention 1, notify-render.js) statt eine falsche
  * Zahl zu erfinden.
  */
-function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc } = {}) {
+function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc, entryUsd, hwmUsd, openedAtMs } = {}) {
     const [symA, symB] = pool.pair.split('/');
     const hasCoins = coinsA != null && coinsB != null;
+    const hwmPct = (hwmUsd != null && entryUsd != null && entryUsd !== 0)
+        ? ((hwmUsd - entryUsd) / entryUsd) * 100
+        : null;
     return {
         lpValue: lpValueUsd != null ? lpValueUsd.toFixed(2) : undefined,
         coinsA:  hasCoins ? coinsA.toFixed(6) : undefined,
@@ -590,6 +696,27 @@ function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlU
                       : '',
               } }
             : undefined,
+        // ── Tabellenlayout (nur notify.liq.rm_executed) ────────────────────────
+        // Fertig formatierte Werte statt verschachtelter Katalog-Referenzen: eine
+        // Tabellenzeile ist eine Zeile, keine zwei. hwmPct relativ zum Einstieg
+        // (entryUsd) – zeigt, wie weit der Peak über dem Start lag, nicht relativ
+        // zum Poolwert bei Schließung (das ist pnlPct, andere Bezugsgröße).
+        entryValue: entryUsd != null ? `${entryUsd.toFixed(2)} USDC` : undefined,
+        hwmValue:   hwmUsd != null
+            ? `${hwmUsd.toFixed(2)} USDC${hwmPct != null ? ` (${hwmPct >= 0 ? '+' : ''}${hwmPct.toFixed(2)}%)` : ''}`
+            : undefined,
+        costValue:    (lpValueUsd != null && swappedUsdc != null) ? `${(lpValueUsd - swappedUsdc).toFixed(2)} USDC` : undefined,
+        swappedValue: swappedUsdc != null ? `${swappedUsdc.toFixed(2)} USDC` : undefined,
+        pnlValue: pnlUsdc != null
+            ? `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)} USDC${(lpValueUsd != null && lpValueUsd !== 0) ? ` (${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / lpValueUsd * 100).toFixed(2)}%)` : ''}`
+            : undefined,
+        // Rohzahlen zusätzlich zu den fertig formatierten Strings oben: die
+        // Message-Center-Detailansicht (extractRiskExit()/riskExitHtml()) rechnet
+        // daraus eigene Kennzahlen (u.a. Ende-% relativ zum Start), die es in einer
+        // fertig zusammengesetzten Anzeigezeile nicht mehr geben würde.
+        entryUsdRaw: entryUsd ?? undefined,
+        hwmUsdRaw:   hwmUsd ?? undefined,
+        openedAtMs:  openedAtMs ?? undefined,
     };
 }
 
@@ -602,7 +729,9 @@ function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlU
  */
 export async function rmExecuted(pool, scenarioLabel, exitInfo = {}) {
     const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'rm-executed', 'notify.liq.rm_executed', {
+    // info statt warn: der Bot hat sich hier normal verhalten (Trailing Stop hat
+    // planmäßig gegriffen) – keine Warnung, sondern eine Information (2026-08-24).
+    await send('info', 'rm-executed', 'notify.liq.rm_executed', {
         scenario: rmScenario(scenarioLabel),
         pair,
         ...exitMetricsParams(pool, exitInfo),
@@ -693,12 +822,46 @@ export async function trailingStopCompleted(pool, { coinsA, coinsB, swappedUsdc,
         { pair });
 }
 
+/**
+ * Exit-Versuch gescheitert, OHNE dass etwas bewegt wurde (z.B. Slippage-Abbruch).
+ * Folgenlos: der nächste Lauf versucht es erneut, das Kapital steht unverändert in der
+ * Position. Bleibt deshalb LOG_ONLY (core/nexus/notify-visibility.js).
+ *
+ * 🔒 NICHT für Teilfehlschläge verwenden — dafür gibt es trailingStopPartial().
+ * Bis 2026-08-22 teilten sich beide Fälle diesen Schlüssel, weshalb ein Exit, bei dem
+ * echtes Kapital ungeschützt im Wallet lag, im Message Center verworfen wurde (LIQ#0312).
+ */
 export async function trailingStopError(pool, step, err) {
     const pair = pool.displayPair ?? pool.pair;
     const { reason, detail, raw } = errorParts(err);
     await send('error', 'trailing-stop', 'notify.liq.trailing_stop_error', {
         step, reason, detail, _action: ACTION.retrying,
     }, { pair, errorMessage: raw });
+}
+
+/**
+ * Exit nur TEILWEISE gelungen: Liquidität ist entnommen und liegt in der Wallet, das
+ * Schließen der Position ist danach gescheitert.
+ *
+ * Das ist der Fall, der sichtbar sein MUSS: Der Pool ist bereits inaktiv, der Trailing
+ * Stop hat also seine Schutzwirkung angefangen, aber nicht zu Ende gebracht — und
+ * ungetauschtes Kapital in der Wallet trägt weiter das volle Kursrisiko.
+ *
+ * @param {Object} partial  { coinsA, coinsB, decreaseTxHash } aus err.partialExit
+ */
+export async function trailingStopPartial(pool, err, partial) {
+    const pair = pool.displayPair ?? pool.pair;
+    const [symA, symB] = pool.pair.split('/');
+    const { reason, detail, raw } = errorParts(err);
+    await send('error', 'trailing-stop-partial', 'notify.liq.trailing_stop_partial', {
+        pair,
+        coinsA: (partial.coinsA ?? 0).toFixed(6),
+        coinsB: (partial.coinsB ?? 0).toFixed(6),
+        symA, symB,
+        reason, detail,
+        _action: ACTION.inWalletRetrying,
+    }, { pair, errorMessage: raw, decreaseTxHash: partial.decreaseTxHash ?? null,
+         coinsA: partial.coinsA ?? 0, coinsB: partial.coinsB ?? 0 });
 }
 
 /**
@@ -771,6 +934,56 @@ export async function premiumPoolExitError(pool, err) {
     }, { pair, error: err.message });
 }
 
+/**
+ * Neue Pools wurden automatisch aus dem Premium-Datendienst übernommen
+ * (bin/pool-offers-sync.js). Eine Meldung je Lauf, nicht je Pool.
+ *
+ * Bewusst `info` und nicht `warn`: es ist der vorgesehene Normalbetrieb, kein
+ * Zwischenfall. Die Meldung sagt zugleich, was NICHT passiert ist — dass ein
+ * übernommener Pool erst dann Kapital bekommt, wenn er im Ranking vorn liegt.
+ * Ohne diesen Satz liest sich „neuer Pool" wie „dein Geld wurde investiert".
+ */
+export async function premiumPoolsAdopted(pools) {
+    const lines = pools
+        .map(p => `• ${p.displayPair ?? p.pair}${p.protocol ? ` (${p.protocol})` : ''}`)
+        .join('\n');
+    await send('info', 'premium-offer', 'notify.liq.premium_adopted', {
+        count: pools.length,
+        lines,
+        _action: ACTION.fyi,
+    }, { pools: pools.map(p => ({ id: p.id, pair: p.pair, address: p.address })) });
+}
+
+/**
+ * Der automatische Deposit-Probelauf für einen übernommenen Pool schlägt fehl
+ * (bin/pool-offers-dryrun.js). Reine Diagnose: der Pool bleibt freigegeben und im
+ * Ranking, es ist nichts gesperrt.
+ *
+ * `warn` statt `error` — kein Telegram-Alarm. Es brennt nichts: ein Pool, in den der
+ * Bot gerade nicht einzahlen kann, kostet Gelegenheit, kein Kapital. Der Nutzer soll es
+ * wissen, aber nicht nachts geweckt werden.
+ */
+export async function poolDepositCheckFailed(pool, errorText) {
+    const pair = pool.displayPair ?? pool.pair;
+    await send('warn', 'premium-offer', 'notify.liq.deposit_check_failed', {
+        pair,
+        error: errorText,
+        _action: ACTION.observe,
+    }, { pair, error: errorText });
+}
+
+/**
+ * Der Probelauf geht wieder durch, nachdem er zuvor gescheitert war. Gegenstück zu
+ * poolDepositCheckFailed() — ohne diese Entwarnung bliebe die Warnung oben für immer
+ * der letzte Stand, den der Nutzer zu dem Pool gesehen hat.
+ */
+export async function poolDepositCheckRecovered(pool) {
+    const pair = pool.displayPair ?? pool.pair;
+    await send('info', 'premium-offer', 'notify.liq.deposit_check_ok', {
+        pair, _action: ACTION.fyi,
+    }, { pair });
+}
+
 /** Übernommene Feldänderungen eines bestehenden Pools (alt → neu, im Klartext). */
 export async function premiumPoolUpdated(pool, { applied, deferred }) {
     const pair = pool.displayPair ?? pool.pair;
@@ -811,6 +1024,7 @@ export async function premiumPoolIdentityMismatch(pool, changes) {
 export async function newPoolsFound(pools, feesThresholdUsdc, tvlThresholdUsdc) {
     const lines = pools.map(p =>
         `${p.pair} – Fees24h ${p.fees24h.toFixed(0)} USDC, TVL ${p.tvlUsd.toFixed(0)} USDC\n\`${p.address}\``
+        + (p.knownPairNote ? `\n${p.knownPairNote}` : '')
     ).join('\n\n');
     await send('warn', 'new-pool-alert', 'notify.liq.new_pools', {
         fees: feesThresholdUsdc.toLocaleString('de-DE'),

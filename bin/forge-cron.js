@@ -93,6 +93,11 @@ mkdirSync(LOG_DIR,  { recursive: true });
 function ts() {
     return NOW.toLocaleString('sv'); // YYYY-MM-DD HH:MM:SS (Host-TZ)
 }
+// Wie ts(), aber fuer einen beliebigen Zeitpunkt – die Runner-Uebersicht friert NOW
+// zum Minutenbeginn ein, ein Job-Log braucht dagegen die echte Start-/Endzeit.
+function stamp(d) {
+    return d.toLocaleString('sv'); // YYYY-MM-DD HH:MM:SS (Host-TZ)
+}
 function log(line) {
     const msg = `[${ts()}] ${line}`;
     console.log(msg);
@@ -228,6 +233,11 @@ function resolveCwd(job) {
     return isAbsolute(job.cwd) ? job.cwd : join(ROOT, job.cwd);
 }
 
+// ─── Eine Zeile ins Job-Log schreiben (darf den Lauf nie killen) ────────────
+function writeLine(fd, line) {
+    try { writeSync(fd, line + '\n'); } catch { /* Log darf nie den Lauf killen */ }
+}
+
 // ─── Einen Job ausführen (Promise, resolved bei Prozess-Ende) ───────────────────
 function runJob(job) {
     return new Promise((resolve) => {
@@ -245,6 +255,12 @@ function runJob(job) {
 
         const started = Date.now();
         log(`▶ ${job.id} · ${job.command}${job.cwd ? ` (cwd ${job.cwd})` : ''}`);
+
+        // Lauf-Kopfzeile ins Job-Log. Das Log wird bewusst angehaengt (kein Datenverlust),
+        // ohne Trenner stehen die Ausgaben aller Laeufe aber ununterscheidbar hintereinander:
+        // Am 27.08.2026 wurde der DB-Pfad-Fehler des Laufs vom 26.08. fuer einen aktuellen
+        // Fehler gehalten, obwohl der Lauf darunter sauber war (CORE#0335).
+        writeLine(fd, `── ${stamp(new Date(started))} · ${job.id} · ${job.command} ──`);
 
         const child = spawn(job.command, {
             cwd,
@@ -264,8 +280,16 @@ function runJob(job) {
         });
 
         const finish = (exitCode, errMsg) => {
-            try { closeSync(fd); } catch { /* egal */ }
             const durationMs = Date.now() - started;
+            // errMsg ist der stderr-Auszug und kann mehrzeilig sein – fuer die Fusszeile
+            // auf eine Zeile zusammenziehen, sonst zerfaellt der Trenner.
+            const reason = errMsg ? errMsg.replace(/\s+/g, ' ').trim().slice(0, 120) : null;
+            const outcome = exitCode === null ? `abgebrochen · ${reason}`
+                          : reason ? `Exit ${exitCode} · ${reason}`
+                          : `Exit ${exitCode}`;
+            writeLine(fd, `── ${stamp(new Date())} · ${job.id} · ${outcome} · `
+                        + `${(durationMs / 1000).toFixed(1)}s ──\n`);
+            try { closeSync(fd); } catch { /* egal */ }
             const patch = {
                 lastRun: new Date().toISOString(),
                 lastExitCode: exitCode,

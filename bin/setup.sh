@@ -6,7 +6,7 @@
 # FORGE-public-Installation ab, nicht nur die Erstinstallation:
 #
 #   install | uninstall | packages | wallet | nostr | ssl | services | cron
-#   backup  | restore   | update   | status | help
+#   backup  | restore   | update   | reset-password | status | help
 #
 # Jeder Teilschritt ist EINZELN aufrufbar und vollständig über Parameter
 # steuerbar (--non-interactive), damit Automatisierung und Cron ihn nutzen
@@ -211,6 +211,7 @@ case "$CMD" in
     logrotate) do_logrotate ;;
     backup)    do_backup ;;
     restore)   do_restore ;;
+    reset-password) do_reset_password ;;
     status)    do_status ;;
     *)         die "Unbekannter Befehl: $CMD  (Hilfe: $0 help)" ;;
 esac

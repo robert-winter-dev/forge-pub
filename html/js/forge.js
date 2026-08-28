@@ -3,10 +3,10 @@
 
     const { ToastManager }      = await import('./toast.js?v=20260809a');
     const { EarningsToast }     = await import('./earnings-toast.js?v=20260720a');
-    const { renderNotifItem }   = await import('./notifications.js');
-    const { NotifHub }          = await import('./notif-hub.js?v=20260720a');
-    const { initMessageBell }   = await import('./message-bell.js?v=20260818a');
-    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260816a');
+    const { renderNotifItem }   = await import('./notifications.js?v=20260822a');
+    const { NotifHub }          = await import('./notif-hub.js?v=20260822a');
+    const { initMessageBell }   = await import('./message-bell.js?v=20260825a');
+    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260826a');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
     // Zahlen-/Datumsformate folgen der Sprache (siehe js/i18n.js). t() wird hier
@@ -490,7 +490,7 @@
 
             return `<tr>
                 <td><a href="${r.href}" class="bt-name">${r.label}</a></td>
-                <td><span class="${pCls}">${g}</span></td>
+                <td><span class="bt-val">${g}</span></td>
                 <td><span class="${pCls}">${pTxt}</span></td>
                 <td><span class="${aCls}">${aTxt}</span></td>
             </tr>`;
@@ -504,7 +504,7 @@
         const tpEl = document.getElementById('totalProfit');
         const totalProfitRounded = Math.round(totalProfit * 100) / 100;
         const totalCls = totalProfitRounded === 0 ? 'bt-val' : totalProfit >= 0 ? 'bt-pos' : 'bt-neg';
-        if (tgEl) tgEl.innerHTML = `<span class="${totalCls}">${fmt2(totalGesamt)}\u00A0USDC</span>`;
+        if (tgEl) tgEl.innerHTML = `<span class="bt-val">${fmt2(totalGesamt)}\u00A0USDC</span>`;
         if (tpEl) {
             const txt = totalProfitRounded === 0
                 ? '0,00\u00A0USDC'

@@ -205,11 +205,17 @@ function _fmtTime(ts) {
 function _esc(s) {
     return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+/** ```-Abschnitte als Monospace-Block. Siehe fenceToPre() in notifications.js — identische
+ *  Regel: läuft immer auf bereits escaptem Text, einziger eingefügter Tag ist <pre>. */
+function _fenceToPre(escaped) {
+    return String(escaped).split('```').map((p, i) =>
+        i % 2 === 0 ? p : `<pre>${p.replace(/^\n/, '').replace(/\n$/, '')}</pre>`).join('');
+}
 function _renderItem(n) {
     const time = n.ts ? _fmtTime(n.ts) : '';
     const meta = [time, _esc(n.botLabel ?? ''), _esc(n.pool ?? '')].filter(Boolean).join(' · ');
     return `<div class="notif-item level-${n.level ?? 'info'}">
         <div class="notif-item-top"><span class="notif-item-meta">${meta}</span></div>
-        <div class="notif-item-msg">${_esc(n.message)}</div>
+        <div class="notif-item-msg">${_fenceToPre(_esc(n.message))}</div>
     </div>`;
 }

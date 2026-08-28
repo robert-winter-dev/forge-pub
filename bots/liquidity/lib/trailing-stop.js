@@ -14,7 +14,18 @@
  *     ist nach insertPosition NULL → erster Snapshot setzt sie neu)
  *
  * State-Machine (persistiert in ts_executions):
- *   preparing → withdrawn → swapped → transferred → complete
+ *   preparing → [drained] → withdrawn → swapped → transferred → complete
+ * `drained` ist ein Teilfehlschlag-Zustand (LIQ#0312): die Liquidität ist entnommen und
+ * liegt im Wallet, der Position-Close ist aber gescheitert. Er hält die tatsächlich
+ * entnommenen Mengen fest, damit der Wiederanlauf sie nicht aus der dann leeren Position
+ * neu schätzt (und den Erlös als ~0 verbucht).
+ *
+ * 🔒 Ein gescheiterter Position-Close hält den Exit NICHT auf (seit 23.08.2026): Nur die
+ * Entnahme bewegt Geld, der NFT-Burn holt ~0,002 SOL Rent zurück. Der Verkauf läuft
+ * deshalb sofort weiter, die Position wird in der DB geschlossen und das leere NFT dem
+ * täglichen Zombie-Cron überlassen. Vorher hing der schützende Verkauf am Burn und das
+ * Kapital lag bis zu 15 Minuten (`RESUME_RETRY_INTERVAL_MS`) mit vollem Kursrisiko im
+ * Wallet — genau das, was der Trailing Stop verhindern soll.
  * Jeder Schritt wird vor Ausführung in die DB geschrieben.
  * Bei Bot-Restart wird jede unvollständige Ausführung fortgesetzt
  * (resumePendingTsExecutions).
@@ -48,12 +59,12 @@ import { setPoolActive, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
-    insertCapitalFlow, getOpenPosition, closePosition as markPositionClosedInDb,
+    getOpenPosition, closePosition as markPositionClosedInDb,
     updatePositionHwm,
     createTsExecution, updateTsExecution, getIncompleteTsExecutions,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition, computeExitPnl } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, closePositionOrRescue, computeExitPnl, recordExitProceeds } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
@@ -172,7 +183,7 @@ function resolveActiveThreshold(cfg, position) {
  *
  * Einmal gesetzt, bleibt `d2_armed_at` stehen (Ratchet, siehe Modulkopf).
  */
-function armSecondStageIfReached(db, poolId, positionId, cfg) {
+export function armSecondStageIfReached(db, poolId, positionId, cfg) {
     const firstPct  = normalizeThreshold(cfg.thresholdPct);
     const secondPct = resolveSecondThreshold(cfg, firstPct);
     if (secondPct == null) return;   // keine zweite Stufe konfiguriert
@@ -271,10 +282,15 @@ export function processHwmResetIfRequested(db, pool, position, lpValueUsd) {
     // gesenkten Höchststand — also mit einem viel schärferen Stop, als der Nutzer beim
     // Klick auf „Höchststand zurücksetzen" erwartet. Nach dem Reset muss Stufe 2 erneut
     // verdient werden. Das ist die sichere Richtung: zu weit schadet weniger als zu eng.
+    // pnl_anchor_reset_at mit auf denselben Zeitpunkt setzen: Der Klick sagt "miss ab hier
+    // neu" — dieselbe Aussage muss für "Anteil"/PnL-seit-Einstieg gelten, sonst zeigt das
+    // Dashboard nach einem Reset weiterhin den Verlust seit dem echten Einstieg, während
+    // der Trailing Stop schon wieder bei 0 % steht (siehe resolvePnlAnchorMs()).
+    const resetAt = Date.now();
     db.prepare(
-        `UPDATE positions SET hwm_usd = ?, hwm_at = ?, entry_usd = ?, entry_flow_ratio = NULL, d2_armed_at = NULL WHERE id = ?`
-    ).run(targetUsd, Date.now(), targetUsd, position.id);
-    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, lp=${lpValueUsd.toFixed(2)}); Einstiegsreferenz mit zurückgesetzt, Stufe 2 wieder entschärft.`);
+        `UPDATE positions SET hwm_usd = ?, hwm_at = ?, entry_usd = ?, entry_flow_ratio = NULL, d2_armed_at = NULL, pnl_anchor_reset_at = ? WHERE id = ?`
+    ).run(targetUsd, resetAt, targetUsd, resetAt, position.id);
+    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, lp=${lpValueUsd.toFixed(2)}); Einstiegsreferenz mit zurückgesetzt, Stufe 2 wieder entschärft, PnL-Anker auf jetzt gesetzt.`);
 
     clearResetFlag(pool.id);
     return true;
@@ -347,8 +363,50 @@ function clearResetFlag(poolId) {
 // ─── Trigger-Check ────────────────────────────────────────────────────────────
 
 /**
+ * Die eigentliche Auslöse-Entscheidung — bewusst **frei von DB und Settings-Zugriff**,
+ * damit sie ohne Bot-Umgebung durchgespielt werden kann.
+ *
+ * `bin/test-trailing-stop-sim.js` fährt genau diese Funktion gegen ganze Kursverläufe
+ * (Kapitalflüsse, Rebalancings, Exit + Wiedereinstieg, Kurslücken zwischen Snapshots).
+ * Bliebe die Logik in `shouldTriggerTs()` eingebettet, prüfte der Simulator eine
+ * Nachbildung statt des Originals — genau die Art Test, die einen Fehler nicht findet.
+ *
+ * @param {Object} cfg          Trailing-Stop-Konfiguration des Pools
+ * @param {Object} position     offene Position (braucht `hwm_usd`, `d2_armed_at`)
+ * @param {number} lpValueUsd   aktueller (gemessener) Positionswert
+ * @returns {{ trigger: boolean, reason: 'drawdown'|'minimum'|null, drawdownPct: number,
+ *             thresholdPct: number, stage: 1|2, triggerAt: number }}
+ */
+export function evaluateTsTrigger(cfg, position, lpValueUsd) {
+    const none = { trigger: false, reason: null, drawdownPct: 0, thresholdPct: 0, stage: 1, triggerAt: 0 };
+    if (!cfg?.enabled || !position) return none;
+
+    const { pct: thresholdPct, stage } = resolveActiveThreshold(cfg, position);
+
+    const hwmUsd = position.hwm_usd ?? 0;
+    if (!(hwmUsd > 0)) return none;          // HWM noch nicht etabliert
+    if (!(lpValueUsd > 0)) return none;      // kein verwertbarer Messwert
+
+    const triggerAt   = hwmUsd * (1 - thresholdPct / 100);
+    const drawdownPct = ((hwmUsd - lpValueUsd) / hwmUsd) * 100;
+    const base        = { drawdownPct, thresholdPct, stage, triggerAt };
+
+    if (lpValueUsd < triggerAt) return { ...base, trigger: true, reason: 'drawdown' };
+
+    // Pool-Mindestwert: absoluter USDC-Boden, unabhängig vom Drawdown.
+    // Guard: nur prüfen wenn der HWM jemals >= Minimum war — verhindert sofortigen
+    // Exit bei Positionen, die von Anfang an unter dem Mindestwert eröffnet wurden.
+    const minValueUsd = Number(cfg.minimumValueUsd) || 0;
+    if (minValueUsd > 0 && hwmUsd >= minValueUsd && lpValueUsd < minValueUsd) {
+        return { ...base, trigger: true, reason: 'minimum' };
+    }
+
+    return { ...base, trigger: false, reason: null };
+}
+
+/**
  * Gibt true zurück wenn der Trailing Stop für diesen Pool feuern soll.
- * Kein API-Call – nur DB-Lookups.
+ * Kein API-Call – nur DB-Lookups; die Entscheidung selbst trifft evaluateTsTrigger().
  */
 export function shouldTriggerTs(pool, db) {
     const cfg = loadTsConfig(pool.id);
@@ -357,70 +415,104 @@ export function shouldTriggerTs(pool, db) {
     const position = getOpenPosition(db, pool.id);
     if (!position) return false;
 
-    const { pct: thresholdPct } = resolveActiveThreshold(cfg, position);
-
-    const hwmUsd = position.hwm_usd ?? 0;
-    if (!(hwmUsd > 0)) return false; // HWM noch nicht etabliert
-
     // Sofort-Trigger: keine Mehrfach-Bestätigung mehr — der neueste Snapshot
     // entscheidet direkt. Bewusst so gewünscht (kein verzögerter Stop-Loss).
     const row = db.prepare(
         `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
          ORDER BY recorded_at DESC LIMIT 1`
     ).get(pool.id);
-    if (!row || !((row.lp_value_usd ?? 0) > 0)) return false;
 
-    const triggerAt = hwmUsd * (1 - thresholdPct / 100);
-    if (row.lp_value_usd < triggerAt) return true;
-
-    // Pool-Mindestwert: absoluter USDC-Boden, unabhängig vom Drawdown.
-    // Guard: nur prüfen wenn der HWM jemals >= Minimum war — verhindert sofortigen
-    // Exit bei Positionen, die von Anfang an unter dem Mindestwert eröffnet wurden.
-    const minValueUsd = Number(cfg.minimumValueUsd) || 0;
-    if (minValueUsd > 0 && hwmUsd >= minValueUsd && row.lp_value_usd < minValueUsd) return true;
-
-    return false;
+    return evaluateTsTrigger(cfg, position, row?.lp_value_usd ?? 0).trigger;
 }
 
 // ─── State-Machine: Withdraw-Step ────────────────────────────────────────────
 
-async function stepWithdraw(pool, db, execId) {
-    const adapter  = getAdapter(pool);
+/**
+ * Holt das Kapital aus der Position und gibt die entnommenen Mengen zurück.
+ *
+ * 🔒 Ein Teilfehlschlag bricht den Exit NICHT mehr ab (Entkopplung 23.08.2026).
+ * Der Ausstieg besteht aus zwei on-chain-Legs: `decreaseLiquidity` holt das Kapital
+ * heraus, `closePositionIx` verbrennt danach das leere NFT. Nur das erste bewegt Geld —
+ * das zweite holt ~0,002 SOL Rent zurück. Bis 23.08. hing der schützende Verkauf am
+ * Gelingen des zweiten: scheiterte der Burn, brach der ganze Exit ab und das Kapital lag
+ * bis zum nächsten Wiederanlauf (bis zu 15 Min, `RESUME_RETRY_INTERVAL_MS`) ungetauscht
+ * im Wallet — mit vollem Kursrisiko, obwohl der Trailing Stop genau das verhindern soll.
+ *
+ * Jetzt gilt: Kapital zuerst. Ist die Entnahme gelandet, wird der Exit fortgesetzt, die
+ * Position in der DB geschlossen und das leere NFT dem täglichen Zombie-Cron überlassen
+ * (`bin/run-zombie-check.sh`). Der Fehlschlag bleibt in `close_error` protokolliert.
+ *
+ * @param {Object|null} exec  Die ts_executions-Zeile, wenn dieser Aufruf eine ANGEFANGENE
+ *        Ausführung fortsetzt. Steht sie auf 'drained', ist die Liquidität bereits
+ *        entnommen; dann werden Fee-Claim und Entnahme übersprungen und die Mengen
+ *        stammen aus der DB statt aus einer Quote auf die leere Position.
+ * @returns {Promise<{tsCoinsA: number, tsCoinsB: number, closePending: Object|null}>}
+ *        `closePending` beschreibt ein liegengebliebenes NFT (sonst null).
+ */
+async function stepWithdraw(pool, db, execId, exec = null) {
     const position = getOpenPosition(db, pool.id);
+    const logPfx   = `[trailing-stop:${pool.id}]`;
 
-    let feesA = 0, feesB = 0;
+    const drained = exec?.step === 'drained';
+    const knownA  = drained ? (exec.ts_coins_a ?? 0) : 0;
+    const knownB  = drained ? (exec.ts_coins_b ?? 0) : 0;
 
-    if (position) {
-        // SOL-Vorsicherung + Fee-Claim (letzterer entfällt bei knappem SOL).
-        // Blockiert den Ausstieg nie — siehe prepareExitAndClaimFees().
-        const fees = await prepareExitAndClaimFees(adapter, pool, position, db, {
-            logPrefix: `[trailing-stop:${pool.id}]`,
-        });
-        feesA = fees.amountA;
-        feesB = fees.amountB;
-        if (!fees.skipped) {
-            console.log(`[trailing-stop:${pool.id}] Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
-        }
-
-        const { closed, coinsA: tsCoinsA, coinsB: tsCoinsB } = await finalizeClosePosition(adapter, pool, position, db, {
-            feesA, feesB,
-            note:      'trailing-stop',
-            logPrefix: `[trailing-stop:${pool.id}]`,
-        });
-
-        markPositionClosedInDb(db, position.id, closed.txHash);
-
-        updateTsExecution(db, execId, {
-            step:       'withdrawn',
-            ts_coins_a: tsCoinsA,
-            ts_coins_b: tsCoinsB,
-        });
-        return { tsCoinsA, tsCoinsB };
-    } else {
-        console.log(`[trailing-stop:${pool.id}] Keine offene Position mehr – überspringe Withdraw`);
-        updateTsExecution(db, execId, { step: 'withdrawn', ts_coins_a: 0, ts_coins_b: 0 });
-        return { tsCoinsA: 0, tsCoinsB: 0 };
+    if (drained) {
+        // Fortsetzung: die Entnahme ist gelandet, ein zweiter Burn-Versuch würde den
+        // Verkauf nur erneut aufhalten. Die close_position-Zeile steht bereits aus dem
+        // ersten Lauf — hier NICHT noch einmal buchen (sonst doppelter Anker).
+        console.log(
+            `${logPfx} Fortsetzung aus 'drained' (Entnahme-TX ${exec.decrease_tx_hash}): `
+            + `${knownA.toFixed(6)} A + ${knownB.toFixed(6)} B liegen im Wallet – `
+            + `überspringe Fee-Claim, Entnahme und Burn.`
+        );
+        if (position) markPositionClosedInDb(db, position.id, exec.decrease_tx_hash ?? null);
+        updateTsExecution(db, execId, { step: 'withdrawn' });
+        return { tsCoinsA: knownA, tsCoinsB: knownB, closePending: null };
     }
+
+    if (!position) {
+        console.log(`${logPfx} Keine offene Position mehr – überspringe Withdraw`);
+        updateTsExecution(db, execId, { step: 'withdrawn', ts_coins_a: 0, ts_coins_b: 0 });
+        return { tsCoinsA: 0, tsCoinsB: 0, closePending: null };
+    }
+
+    // SOL-Vorsicherung + Fee-Claim (letzterer entfällt bei knappem SOL).
+    // Blockiert den Ausstieg nie — siehe prepareExitAndClaimFees().
+    const adapter = getAdapter(pool);
+    const fees    = await prepareExitAndClaimFees(adapter, pool, position, db, { logPrefix: logPfx });
+    const feesA = fees.amountA;
+    const feesB = fees.amountB;
+    if (!fees.skipped) {
+        console.log(`${logPfx} Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
+    }
+
+    // Wirft nur, wenn die Entnahme NICHT stattgefunden hat — dann steht das Kapital
+    // unverändert in der Position und der nächste Lauf versucht es erneut.
+    const { coinsA, coinsB, closeTxHash, closePending } = await closePositionOrRescue(
+        adapter, pool, position, db, { feesA, feesB, note: 'trailing-stop', logPrefix: logPfx },
+    );
+
+    if (closePending) {
+        // Zwischenstand festhalten, BEVOR die Position geschlossen wird: stirbt der Prozess
+        // dazwischen, weiß der Wiederanlauf sonst nichts von den entnommenen Mengen.
+        updateTsExecution(db, execId, {
+            step:             'drained',
+            ts_coins_a:       coinsA,
+            ts_coins_b:       coinsB,
+            decrease_tx_hash: closePending.decreaseTxHash,
+            close_error:      closePending.reason,
+        });
+    }
+
+    markPositionClosedInDb(db, position.id, closeTxHash);
+    updateTsExecution(db, execId, { step: 'withdrawn', ts_coins_a: coinsA, ts_coins_b: coinsB });
+    // Mengen mitgeben: scheitert weiter unten der Verkauf, muss die Meldung beziffern
+    // können, wie viel ungeschützt im Wallet liegt.
+    return {
+        tsCoinsA: coinsA, tsCoinsB: coinsB,
+        closePending: closePending && { ...closePending, coinsA, coinsB },
+    };
 }
 
 async function stepSwap(pool, db, execId, cfg, tsCoinsA, tsCoinsB) {
@@ -432,7 +524,7 @@ async function stepSwap(pool, db, execId, cfg, tsCoinsA, tsCoinsB) {
         slippageBps: config.rm.swapSlippageBps,
         onSwapped:   (swappedUsdc) => {
             updateTsExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
-            insertCapitalFlow(db, { poolId: pool.id, usdcAmount: -swappedUsdc, note: 'trailing-stop-exit', isExternal: 1 });
+            recordExitProceeds(db, { poolId: pool.id, swappedUsdc, note: 'trailing-stop-exit' });
             console.log(`[trailing-stop:${pool.id}] Kapitalabfluss erfasst: -${swappedUsdc.toFixed(2)} USDC`);
         },
     });
@@ -452,7 +544,13 @@ async function stepTransfer(pool, db, execId, cfg, tsCoinsA, tsCoinsB, swappedUs
 
 // ─── Haupt-Ausführung ────────────────────────────────────────────────────────
 
-export async function executeTs(pool, db) {
+/**
+ * @param {{ source?: 'tick'|'fast' }} [opts]  Herkunft des Auslösers — 'tick' = regulärer
+ *        5-Min-Zyklus, 'fast' = Schnellprüfung zwischen zwei Zyklen (lib/fast-stop-check.js).
+ *        Landet in ts_executions.trigger_source, damit die Wirkung der Schnellprüfung
+ *        messbar bleibt.
+ */
+export async function executeTs(pool, db, { source = 'tick' } = {}) {
     const cfg = loadTsConfig(pool.id);
     if (!cfg?.enabled) return;
 
@@ -474,7 +572,7 @@ export async function executeTs(pool, db) {
     const triggerReason    = triggeredByMin
         ? `Mindestwert-Unterschreitung (${currentUsd.toFixed(2)} < ${minValueUsd.toFixed(2)} USDC)`
         : `Drawdown ${drawdownPct.toFixed(1)}% (Schwelle ${thresholdPct}% — ${stageLabel})`;
-    console.log(`[trailing-stop:${pool.id}] Trailing Stop ausgelöst: HWM ${hwmUsd.toFixed(2)} → ${currentUsd.toFixed(2)} USDC, Grund: ${triggerReason}`);
+    console.log(`[trailing-stop:${pool.id}] Trailing Stop ausgelöst (${source === 'fast' ? 'Schnellprüfung' : 'Zyklus'}): HWM ${hwmUsd.toFixed(2)} → ${currentUsd.toFixed(2)} USDC, Grund: ${triggerReason}`);
 
     await waitForCleanupToFinish();
     acquireSlLock();
@@ -485,7 +583,12 @@ export async function executeTs(pool, db) {
         currentUsd,
         drawdownPct,
         configSnapshot: cfg,
+        triggerSource:  source,
     });
+
+    // Beschreibt Kapital, das die Position bereits verlassen hat. Ab dem Moment ist ein
+    // Fehler weiter unten ein Fehler MIT Geld im Wallet — das entscheidet über die Meldung.
+    let partial = null;
 
     try {
         // Pool sofort inaktiv → verhindert Re-Open im nächsten Tick (Idempotenz)
@@ -496,8 +599,10 @@ export async function executeTs(pool, db) {
             console.error(`[trailing-stop:${pool.id}] setPoolActive fehlgeschlagen: ${err.message}`);
         }
 
-        // Phase 2: Withdraw
-        const { tsCoinsA, tsCoinsB } = await stepWithdraw(pool, db, execId);
+        // Phase 2: Withdraw. Ein liegengebliebenes NFT (closePending) hält den Exit nicht
+        // mehr auf — der Verkauf unten schützt das Kapital, das NFT ist nur noch Rent.
+        const { tsCoinsA, tsCoinsB, closePending } = await stepWithdraw(pool, db, execId);
+        partial = closePending;
 
         // Phase 3: Swap (optional)
         let swappedUsdc = null;
@@ -529,22 +634,57 @@ export async function executeTs(pool, db) {
         }
         await notify.rmExecuted(pool, execLabel, {
             lpValueUsd: currentUsd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc, pnlUsdc,
+            entryUsd: position?.entry_usd ?? null, hwmUsd, openedAtMs: position?.opened_at ?? null,
         }).catch(() => {});
 
         // Mindestwert nach Mindestwert-Exit nullen, damit eine Wiedereröffnung nicht
         // sofort wieder triggert (neues Kapital liegt i.d.R. unterhalb des alten Grenzwerts).
         if (triggeredByMin) clearMinimumValue(pool.id);
 
-        console.log(`[trailing-stop:${pool.id}] Trailing Stop vollständig abgeschlossen.`);
+        if (partial) {
+            console.warn(
+                `[trailing-stop:${pool.id}] Trailing Stop abgeschlossen, Kapital gesichert — `
+                + `ein leeres Position-NFT ist offen geblieben (Entnahme-TX ${partial.decreaseTxHash}). `
+                + `Der tägliche Zombie-Cron holt die Rent zurück; für den Nutzer ist nichts zu tun.`
+            );
+        } else {
+            console.log(`[trailing-stop:${pool.id}] Trailing Stop vollständig abgeschlossen.`);
+        }
 
     } catch (err) {
         console.error(`[trailing-stop:${pool.id}] FEHLER: ${err.message}`);
         updateTsExecution(db, execId, { error_msg: err.message });
-        await notify.trailingStopError(pool, 'execution', err).catch(() => {});
+        await notifyExitFailure(pool, err, partial);
         throw err;
     } finally {
         releaseSlLock();
     }
+}
+
+/**
+ * Meldet einen gescheiterten Exit — und unterscheidet dabei die beiden Fälle, die sich
+ * bis 2026-08-22 einen msgKey teilten (LIQ#0312):
+ *
+ *   - Abbruch OHNE Kettenwirkung (z.B. Slippage): nichts wurde bewegt, der nächste Lauf
+ *     versucht es erneut. Bleibt LOG_ONLY, sonst meldet der Bot Normalbetrieb.
+ *   - Teilfehlschlag: die Liquidität ist bereits entnommen, das Kapital liegt
+ *     ungeschützt im Wallet und der Pool ist inaktiv. Das MUSS sichtbar sein.
+ *
+ * Ein Fehler beim Melden darf den Exit-Fehler nicht überschreiben — aber auch nicht
+ * lautlos verschwinden (das war die zweite Ursache, aus der nie eine Meldung ankam).
+ */
+async function notifyExitFailure(pool, err, known = null) {
+    // 🔒 Der Marker am Fehler beschreibt nur den Aufruf, der ihn geworfen hat. Scheitert
+    // erst der Verkauf NACH einer geretteten Entnahme, trägt der Fehler keinen
+    // partialExit — das Kapital liegt aber sehr wohl im Wallet. Deshalb zählt auch der
+    // vom Aufrufer durchgereichte Zustand, sonst verschwindet genau der Fall, in dem
+    // wirklich Geld ungeschützt liegt, wieder in LOG_ONLY.
+    const partial = err.partialExit ?? known;
+    const send = partial
+        ? notify.trailingStopPartial(pool, err, partial)
+        : notify.trailingStopError(pool, 'execution', err);
+    await send.catch(e =>
+        console.error(`[trailing-stop:${pool.id}] Meldung konnte nicht abgesetzt werden: ${e.message}`));
 }
 
 // ─── Startup: unvollständige Ausführungen fortsetzen ─────────────────────────
@@ -571,31 +711,77 @@ export async function resumePendingTsExecutions(db) {
         console.log(`[trailing-stop:${exec.pool_id}] Fortsetze ab Step '${exec.step}'`);
         acquireSlLock();
 
+        // Vor dem Withdraw lesen (wie in executeTs()) — danach ist die Position
+        // geschlossen und resolveActiveThreshold()/computeExitPnl() bräuchten sie
+        // für die Erfolgsmeldung unten sonst vergeblich.
+        const position = getOpenPosition(db, exec.pool_id);
+        const hwmUsd   = position?.hwm_usd ?? 0;
+
+        // Kapital, das die Position schon verlassen hat — aus diesem Lauf oder, bei
+        // 'drained', aus einem früheren. Entscheidet unten über die Meldung.
+        let partial = exec.step === 'drained'
+            ? { coinsA: exec.ts_coins_a ?? 0, coinsB: exec.ts_coins_b ?? 0, decreaseTxHash: exec.decrease_tx_hash }
+            : null;
+
         try {
             let tsCoinsA    = exec.ts_coins_a ?? 0;
             let tsCoinsB    = exec.ts_coins_b ?? 0;
             let swappedUsdc = exec.swapped_usdc ?? null;
 
-            if (exec.step === 'preparing') {
-                const result = await stepWithdraw(pool, db, exec.id);
+            // 'drained' verhält sich hier wie 'preparing' — nur überspringt stepWithdraw()
+            // dann Fee-Claim, Entnahme und Burn und rechnet mit den persistierten Mengen.
+            if (exec.step === 'preparing' || exec.step === 'drained') {
+                const result = await stepWithdraw(pool, db, exec.id, exec);
                 tsCoinsA = result.tsCoinsA;
                 tsCoinsB = result.tsCoinsB;
+                partial  = result.closePending;
             }
 
-            if ((exec.step === 'preparing' || exec.step === 'withdrawn') && cfg.autoSwapToUSDC) {
+            if (['preparing', 'drained', 'withdrawn'].includes(exec.step) && cfg.autoSwapToUSDC) {
                 swappedUsdc = await stepSwap(pool, db, exec.id, cfg, tsCoinsA, tsCoinsB);
             }
 
-            if (['preparing', 'withdrawn', 'swapped'].includes(exec.step) && cfg.sendTo) {
+            if (['preparing', 'drained', 'withdrawn', 'swapped'].includes(exec.step) && cfg.sendTo) {
                 await stepTransfer(pool, db, exec.id, cfg, tsCoinsA, tsCoinsB, swappedUsdc);
             }
 
-            updateTsExecution(db, exec.id, { step: 'complete', completed_at: Date.now() });
+            // 🔒 error_msg MIT löschen: bis LIQ#0312 blieb die Fehlermeldung des ersten
+            // Versuchs stehen, während step auf 'complete' sprang — die Zeile behauptete
+            // gleichzeitig „vollständig" und trug einen Fehler. Wer sie las, konnte einen
+            // echten Teilfehlschlag nicht von einem geheilten Abbruch unterscheiden.
+            updateTsExecution(db, exec.id, { step: 'complete', completed_at: Date.now(), error_msg: null });
             console.log(`[trailing-stop:${exec.pool_id}] Fortgesetzt und abgeschlossen.`);
+
+            // 🔒 LIQ-Fix 2026-08-23: Dieser Erfolgspfad meldete den Exit nie — nur
+            // executeTs() tat das. Scheiterte der erste Versuch (LOG_ONLY-Fehler) und
+            // schloss erst der Resume die Position, kam beim Nutzer gar keine Meldung
+            // an (weder Fehler noch Erfolg). Ab hier: identische Meldung wie in executeTs().
+            const minValueUsd    = Number(cfg.minimumValueUsd) || 0;
+            const triggeredByMin = minValueUsd > 0 && exec.current_usd < minValueUsd;
+            const { pct: thresholdPct, stage } = resolveActiveThreshold(cfg, position);
+            const execLabel = triggeredByMin
+                ? { k: 'notify.liq.rm_label_min_value', p: { usdc: minValueUsd.toFixed(0) } }
+                : (stage === 2
+                    ? { k: 'notify.liq.rm_label_trailing_s2', p: { pct: thresholdPct } }
+                    : { k: 'notify.liq.rm_label_trailing',    p: { pct: thresholdPct } });
+            let pnlUsdc = null;
+            try {
+                if (position) pnlUsdc = computeExitPnl(db, pool, position);
+            } catch (err) {
+                console.warn(`[trailing-stop:${exec.pool_id}] PnL-Berechnung fehlgeschlagen (nicht kritisch): ${err.message}`);
+            }
+            await notify.rmExecuted(pool, execLabel, {
+                lpValueUsd: exec.current_usd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc, pnlUsdc,
+                entryUsd: position?.entry_usd ?? null, hwmUsd, openedAtMs: position?.opened_at ?? null,
+            }).catch(() => {});
+            if (triggeredByMin) clearMinimumValue(exec.pool_id);
 
         } catch (err) {
             console.error(`[trailing-stop:${exec.pool_id}] Fehler beim Fortsetzen: ${err.message}`);
             updateTsExecution(db, exec.id, { error_msg: err.message });
+            // Auch der gescheiterte Wiederanlauf gehört gemeldet: sonst erfährt der Nutzer
+            // von einem Kapital-im-Wallet-Zustand nur beim allerersten Versuch etwas.
+            await notifyExitFailure(pool, err, partial);
         } finally {
             releaseSlLock();
         }

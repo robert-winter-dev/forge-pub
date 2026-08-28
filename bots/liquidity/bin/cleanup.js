@@ -5,6 +5,8 @@
  *  1. Invest-Logik je CLEANUP_MODE:
  *       'ranking' → komplett in den höchstbewerteten Pool (Score >= CLEANUP_MIN_SCORE)
  *       'pool:X'  → fest in den gewählten Pool X
+ *     Optionales Trend-Gate (CLEANUP_TREND_GATE, z.B. '4h,1d'): Pools, deren EMA-Trend
+ *     auf einer geforderten Zeitebene nicht aufwärts zeigt, scheiden vorher aus.
  *     Konsolidiert dabei Fremd-Token-Reste ab MIN_SWAP_USDC zu USDC und zahlt ein.
  *  2. Dust-Sweep (sweepDust, per Settings → Cleanup → Dust an/abschaltbar):
  *     verbleibende bekannte Pool-Token-Reste zwischen CLEANUP_DUST_MIN_USDC und
@@ -24,7 +26,7 @@ const __dirnameCleanup = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB    = PATHS.settingsDb;
 const LIQUIDITY_DATA_PATH = resolve(__dirnameCleanup, '../../../html/liquidity/data/data.json');
 
-import { config, setPoolActive, isPoolEnabled } from '../lib/config.js';
+import { config, setPoolActive, isPoolEnabled, getCleanupTrendGateFromEnv } from '../lib/config.js';
 import { t } from '../../../lib/i18n.js';
 import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset } from '../lib/settings-auto.js';
 import {
@@ -42,17 +44,16 @@ import * as notify     from '../lib/notify.js';
 import { recordFailure, recordSuccess } from '../lib/fail-streak.js';
 import { refreshAfterAction } from '../lib/refresh-state.js';
 import { acquireLock, releaseLock, isSlLocked, isManualLocked, isRebalanceLocked } from '../lib/cleanup-lock.js';
+import { getExitReservations, describeReservation, assertReservationsReadable } from '../lib/exit-reservation.js';
 import { deposit, getTokenUsdPrice, checkClmmRatio } from '../lib/deposit-lib.js';
 import { reconcileCapitalFlows } from '../lib/capital-reconcile.js';
 import { ensureWalletSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
 import {
     getOpenPosition, getDustWatch, startDustWatch, clearDustWatch,
-    getLastTsExecutionAt, getLastTvlExecutionAt, getLastScoreLimitExecutionAt,
 } from '../lib/db.js';
-import { loadTsConfig } from '../lib/trailing-stop.js';
-import { loadTvlConfig } from '../lib/tvl-protection.js';
-import { checkInvestEligibility } from '../lib/invest-eligibility.js';
-import { loadConfig as loadScoreLimitConfig } from '../lib/score-limit.js';
+import { checkInvestEligibility, remainingInvestCapacity } from '../lib/invest-eligibility.js';
+import { investCooldownBlockedPools } from '../lib/invest-cooldown.js';
+import { parseTrendGate, loadTrendStates, checkTrendGate } from '../lib/trend-indicators.js';
 import { calculateRange } from '../lib/range.js';
 import { PATHS } from '../../../config/paths.js';
 
@@ -79,7 +80,11 @@ Zwei Schritte pro Lauf:
      Invest-Schritt oben übernimmt das im nächsten Lauf).
 
 Relevante Env-Vars: CLEANUP_MODE, CLEANUP_MIN_SCORE, CLEANUP_MAX_DEPOSIT,
-CLEANUP_MIN_DEPOSIT.
+CLEANUP_MIN_DEPOSIT, CLEANUP_TREND_GATE.
+
+CLEANUP_TREND_GATE=<Liste>  Trend-Gate, Komma-Liste aus 1h, 4h, 1d (leer = aus).
+                            Investiert nur in Pools, deren EMA-Trend auf JEDER
+                            genannten Zeitebene aufwärts zeigt (lib/trend-indicators.js).
 
 Aufruf: node bin/cleanup.js
         node bin/cleanup.js --help   (dieser Text, kein Cleanup-Lauf)
@@ -91,6 +96,18 @@ Aufruf: node bin/cleanup.js
 // Vergleicht den Opportunity Score aus data.json (identisch zur Tabelle im Dashboard).
 // Cleanup wird übersprungen wenn der beste Pool < CLEANUP_MIN_SCORE ist.
 const CLEANUP_MIN_SCORE = Math.max(0, parseInt(process.env.CLEANUP_MIN_SCORE ?? '65', 10));
+
+// ─── Trend-Gate (nur für Modus 'ranking' und den festen Pool) ────────────────
+// Komma-Liste geforderter Zeitebenen, z.B. 'CLEANUP_TREND_GATE=4h,1d'. Leer = aus
+// (unverändertes Verhalten). Ein Pool darf nur Ziel eines Invests sein, wenn auf
+// JEDER geforderten Zeitebene der EMA-Trend aufwärts zeigt — Definition und
+// Messgrundlage stehen in lib/trend-indicators.js.
+//
+// Frisch aus der .env gelesen (nicht process.env): dieselbe Quelle, aus der
+// bin/export.js den Gate-Zustand fürs Dashboard schreibt. Zwei Wahrheiten über
+// dieselbe Einstellung wären genau der Fall, den lib/invest-cooldown.js
+// vermeiden sollte.
+const CLEANUP_TREND_GATE = parseTrendGate(getCleanupTrendGateFromEnv());
 
 // ─── Maximale Einzahlung pro Cleanup-Lauf ─────────────────────────────────────
 // 0 = kein Limit (Standard). Werte < 10 werden ignoriert.
@@ -206,6 +223,64 @@ function getRelevantTokens(pools) {
         }
     }
     return [...tokens.values()];
+}
+
+/**
+ * Mints, die gerade zu einem laufenden Exit gehören (Ticket LIQ#0310).
+ *
+ * Bewusst bei JEDER Prüfstelle frisch gelesen und nicht einmal pro Lauf: ein
+ * Cleanup-Durchgang dauert wegen der On-Chain-Swaps Minuten, in denen ein Exit erst
+ * beginnen kann. Ein Snapshot vom Laufbeginn würde genau dieses Fenster offenlassen.
+ * Die Abfrage kostet sechs indizierte Reads auf kleine Tabellen.
+ *
+ * @returns {Map|null} Map der reservierten Mints, oder `null` wenn der Zustand nicht
+ *   verlässlich gelesen werden konnte — dann muss der Aufrufer so handeln, als liefe
+ *   ein Exit (nicht investieren ist folgenlos, falsch investieren nicht).
+ */
+function loadReservedMints(db, logPrefix) {
+    const reservations = getExitReservations(db);
+    if (!assertReservationsReadable(reservations, logPrefix)) return null;
+
+    for (const s of reservations.stale) {
+        // Nur ins Journal, keine Benachrichtigung: der Cleanup läuft stündlich, eine
+        // notify.warn hier würde bei einem hängenden Exit 24-mal am Tag feuern. Das
+        // Erkennen dauerhafter Zustände gehört in bin/forge-check.js.
+        console.warn(
+            `${logPrefix} ⚠ Exit hängt: ${describeReservation(s)} – Reservierung bleibt bestehen, `
+            + `Kapital liegt so lange ungenutzt. Bitte nachsehen.`,
+        );
+    }
+    return reservations.mints;
+}
+
+/**
+ * Filtert Token, die zu einem laufenden Exit gehören, aus einer Kandidatenliste und
+ * protokolliert jede Auslassung.
+ *
+ * @param {Array} tokens        Kandidaten aus getRelevantTokens()
+ * @param {Map|null} reserved   Ergebnis von loadReservedMints()
+ * @returns {Array} die unbedenklichen Token (leer, wenn `reserved` null ist)
+ */
+function withoutReservedTokens(tokens, reserved, logPrefix) {
+    if (reserved === null) {
+        console.warn(`${logPrefix} Exit-Zustand unbekannt – kein Token wird angefasst.`);
+        return [];
+    }
+    if (reserved.size === 0) return tokens;
+
+    const free = [];
+    for (const token of tokens) {
+        const entry = reserved.get(token.mint);
+        if (entry) {
+            console.log(
+                `${logPrefix} ${token.symbol} gehört zu einem laufenden Exit `
+                + `(${describeReservation(entry)}) – nicht angefasst.`,
+            );
+            continue;
+        }
+        free.push(token);
+    }
+    return free;
 }
 
 /**
@@ -344,7 +419,16 @@ async function swapTo(token, amount, outputMint, outputDecimals, outputSymbol, k
 // Fremd-Token-Reste ab MIN_SWAP_USDC konsolidiert; hier bleiben nur die kleinen
 // Reste darunter — genau die, die sonst dauerhaft im Wallet liegen bleiben.
 async function sweepDust(db, keypair, connection) {
-    const relevantTokens = getRelevantTokens(config.pools.all);
+    // 🔒 LIQ#0310: auch der Dust-Sweep greift mint-basiert zu und muss Token eines
+    // laufenden Exits auslassen. Er ist zwar auf CLEANUP_DUST_MAX_USDC gedeckelt und
+    // hätte Position 336 nicht anfassen können — aber die „Notbremse" nach
+    // CLEANUP_STUCK_HOURS swappt auch Beträge oberhalb des Deckels, und ein Exit auf
+    // einer kleinen Position liegt ohnehin im Dust-Fenster.
+    const relevantTokens = withoutReservedTokens(
+        getRelevantTokens(config.pools.all),
+        loadReservedMints(db, '[cleanup:dust]'),
+        '[cleanup:dust]',
+    );
     // Grobfilter über den (evtl. gecachten) Gesamt-Read; die tatsächliche
     // Swap-Menge + Dust-Einstufung nutzt danach einen Fresh-Read pro Kandidat,
     // da der vorherige Invest-Schritt Balances verändert haben kann (Cache stale).
@@ -497,22 +581,10 @@ function _loadRankingIneligiblePools() {
  * stehen sollten).
  */
 function _loadCleanupCooldownBlockedPools(db, { quiet = false } = {}) {
-    const blocked = new Map();
-    for (const poolId of config.pools.all.map(p => p.id)) {
-        const candidates = [
-            { reason: 'Trailing Stop', lastAt: getLastTsExecutionAt(db, poolId),         cooldownHours: Number(loadTsConfig(poolId)?.cooldownHours) },
-            { reason: 'TVL-Schutz',    lastAt: getLastTvlExecutionAt(db, poolId),        cooldownHours: Number(loadTvlConfig(poolId)?.cooldownHours) },
-            { reason: 'Score-Limit',   lastAt: getLastScoreLimitExecutionAt(db, poolId), cooldownHours: Number(loadScoreLimitConfig(poolId)?.cooldownHours) },
-        ];
-        for (const c of candidates) {
-            if (!c.lastAt) continue;
-            const cooldownHours = Number.isFinite(c.cooldownHours) && c.cooldownHours > 0 ? c.cooldownHours : 1;
-            const until = c.lastAt + cooldownHours * 3_600_000;
-            if (Date.now() >= until) continue;
-            const existing = blocked.get(poolId);
-            if (!existing || until > existing.until) blocked.set(poolId, { until, reason: c.reason });
-        }
-    }
+    // Berechnung selbst liegt in lib/invest-cooldown.js — dieselbe Quelle, aus der
+    // bin/export.js `pool.investCooldowns` fürs Dashboard schreibt. Zwei Kopien dieser
+    // Frist hätten zwangsläufig auseinanderlaufen können.
+    const blocked = investCooldownBlockedPools(db, config.pools.all.map(p => p.id));
     if (!quiet) {
         for (const [poolId, { until, reason }] of blocked) {
             const remainingMin = Math.ceil((until - Date.now()) / 60_000);
@@ -547,6 +619,47 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
         return;
     }
 
+    // 🔒 LIQ#0310: Läuft auf dem Ziel-Pool selbst gerade ein Exit, wird hier nicht
+    // investiert. Die Exit-Module setzen den Pool zu Beginn auf active=false — ohne
+    // diese Prüfung sähe der Block am Ende dieser Funktion `wasInactive === true` und
+    // würde den Pool nach dem Invest reaktivieren, während er noch geräumt wird.
+    // Der Cooldown weiter unten deckt das nicht ab: er greift erst nach einem
+    // ABGESCHLOSSENEN Exit, nicht währenddessen.
+    const reservationsForTarget = getExitReservations(db);
+    if (!assertReservationsReadable(reservationsForTarget, '[cleanup:invest]')) {
+        console.warn(`[cleanup:invest] ${targetPool.pair}: Exit-Zustand unbekannt – kein Invest.`);
+        return;
+    }
+    const runningExit = reservationsForTarget.pools.get(targetPoolId);
+    if (runningExit) {
+        console.log(
+            `[cleanup:invest] ${targetPool.pair}: Exit läuft `
+            + `(${describeReservation(runningExit)}) – kein Invest.`,
+        );
+        return;
+    }
+
+    // 🔒 LIQ#0310, zweiter Teil: Gehört eines der beiden POOL-Token des Ziels zu einem
+    // Exit auf einem ANDEREN Pool, wird ebenfalls nicht investiert — dann ist der ganze
+    // Pool tabu, nicht nur ein Swap.
+    //
+    // Der Fremd-Token-Filter unten greift hier nämlich nicht: ein Pool-Token des Ziels
+    // ist per Definition kein Fremd-Token und läuft gar nicht durch jene Schleife. Der
+    // Deposit und der CLMM-Ratio-Pre-Swap fassen den Wallet-Bestand dieses Mints aber
+    // sehr wohl an. Betroffen sind die sieben Mints, die in mehr als einem Pool liegen
+    // (cbBTC in dreien; ZEC, HYPE, WBTC, JitoSOL, JLP, Fartcoin in je zweien): Läuft
+    // etwa auf liq-zec-usdc ein Exit, während der Cleanup in liq-sol-zec investiert,
+    // sind es physisch dieselben ZEC im Wallet.
+    for (const mint of [targetPool.tokenA, targetPool.tokenB]) {
+        const reserved = reservationsForTarget.mints.get(mint);
+        if (!reserved) continue;
+        console.log(
+            `[cleanup:invest] ${targetPool.pair}: Pool-Token gehört zu einem laufenden Exit `
+            + `(${describeReservation(reserved)}) – kein Invest.`,
+        );
+        return;
+    }
+
     // Risk-Management-Cooldown: gilt in JEDEM Invest-Pfad, nicht nur im Ranking-Modus.
     // runCleanupByRanking() filtert Cooldown-Pools bereits vorab aus (dort ist diese
     // Prüfung dann wirkungslos), der Modus CLEANUP_MODE='pool:<id>' läuft aber direkt
@@ -560,6 +673,21 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
         const remainingMin = Math.ceil((cooldown.until - Date.now()) / 60_000);
         console.log(`[cleanup:invest] ${targetPool.pair}: ${cooldown.reason}-Cooldown aktiv (noch ${remainingMin} Min) – kein Invest.`);
         return;
+    }
+
+    // Trend-Gate: im Ranking-Pfad bereits gefiltert (dort ist diese Prüfung dann
+    // wirkungslos), CLEANUP_MODE='pool:<id>' läuft aber direkt hier herein. Bewusst
+    // kein Ausweichen auf einen anderen Pool — bei einem fest gewählten Ziel ist
+    // Nichtstun die einzig richtige Antwort (gleiche Entscheidung wie beim Guard).
+    if (CLEANUP_TREND_GATE.length) {
+        // config.pools.all statt nur des Ziel-Pools: bei volatilePair-Pools braucht die
+        // USD-Korb-Herleitung die Kursreihe des Quote-Pools (liq-sol-usdc & Co.).
+        const gate = checkTrendGate(
+            loadTrendStates(db, config.pools.all).get(targetPoolId), CLEANUP_TREND_GATE);
+        if (!gate.ok) {
+            console.log(`[cleanup:invest] ${t('cli.cl.guard_blocked', { pool: targetPool.pair, reason: gate.reason })}`);
+            return;
+        }
     }
 
     // Invest-Guard: TVL-Schutz / Score-Limit würden den Pool sofort wieder räumen.
@@ -636,13 +764,25 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                 const lastPosForReact = db.prepare(
                     `SELECT capital_usdc FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1`
                 ).get(targetPoolId);
-                const reactTargetUsdc  = lastPosForReact?.capital_usdc ?? targetPool.capitalUSDC ?? 1000;
+                // Ziel-Kapital gibt es nur, wenn der Pool schon einmal eine Position hatte
+                // (capital_usdc) oder explizit ein capitalUSDC in pools.json konfiguriert ist.
+                // Kein Fallback auf einen erfundenen Wert mehr (früher: `?? 1000`) – das erzeugte
+                // bei nie zuvor bespielten Pools (z.B. frisch nach Neuinstallation) eine
+                // künstliche 30-%-Schranke gegen ein Phantom-Ziel, die reales Wallet-Guthaben
+                // blockierte, obwohl genug USDC vorhanden war (pub1, 2026-08-25: cbBTC/USDC und
+                // SOL/USDC hatten nie eine Position, Fallback verlangte 300 USDC statt der
+                // eigentlich konfigurierten CLEANUP_MIN_DEPOSIT-Schwelle).
+                const configuredTarget = targetPool.capitalUSDC > 0 ? targetPool.capitalUSDC : null;
+                const reactTargetUsdc  = lastPosForReact?.capital_usdc ?? configuredTarget;
                 // Schwelle: relative 30-%-Schranke UND – falls konfiguriert – der absolute
                 // CLEANUP_MIN_DEPOSIT-Floor. Der Floor schützt davor, dass ein korruptes/zu
                 // kleines capital_usdc der Vorposition (z.B. nach fehlerhafter Withdraw-Buchung)
                 // die relative Schranke auf Cent-Niveau drückt und so eine Mini-Reaktivierung
-                // durchwinkt. Beide müssen erfüllt sein → größeres Limit gewinnt.
-                const minReactivateUsd = Math.max(MIN_USDC_AMOUNT, reactTargetUsdc * 0.30, CLEANUP_MIN_DEPOSIT);
+                // durchwinkt. Beide müssen erfüllt sein → größeres Limit gewinnt. Ohne Ziel
+                // (reactTargetUsdc === null, siehe oben) gilt nur noch der reale Floor.
+                const minReactivateUsd = reactTargetUsdc != null
+                    ? Math.max(MIN_USDC_AMOUNT, reactTargetUsdc * 0.30, CLEANUP_MIN_DEPOSIT)
+                    : Math.max(MIN_USDC_AMOUNT, CLEANUP_MIN_DEPOSIT);
                 const walletUsdc = await getUsableUsdcBalanceFresh(keypair.publicKey);
                 if (walletUsdc >= minReactivateUsd) {
                     setPoolActive(targetPoolId, true);
@@ -654,7 +794,11 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
                     ensureTrailingStopMinimumReset(targetPoolId);
                 } else {
                     const floorNote = CLEANUP_MIN_DEPOSIT > 0 ? `, Min-Floor ${CLEANUP_MIN_DEPOSIT}` : '';
-                    console.log(`[cleanup:invest] ${t('cli.cl.not_reactivated', { pool: targetPool.pair, have: walletUsdc.toFixed(2), min: minReactivateUsd.toFixed(2), target: reactTargetUsdc.toFixed(2), floorNote })}`);
+                    if (reactTargetUsdc != null) {
+                        console.log(`[cleanup:invest] ${t('cli.cl.not_reactivated', { pool: targetPool.pair, have: walletUsdc.toFixed(2), min: minReactivateUsd.toFixed(2), target: reactTargetUsdc.toFixed(2), floorNote })}`);
+                    } else {
+                        console.log(`[cleanup:invest] ${t('cli.cl.not_reactivated_no_target', { pool: targetPool.pair, have: walletUsdc.toFixed(2), min: minReactivateUsd.toFixed(2), floorNote })}`);
+                    }
                 }
             }
         } catch (err) {
@@ -693,6 +837,13 @@ async function runCleanupByRanking(db, keypair, connection) {
     const scored   = [];
     const excluded = [];   // vom Guard verworfene Kandidaten (mit Grund) – fürs Decision-Log
     const poolById = new Map(config.pools.all.map(p => [p.id, p]));
+
+    // Trend-Gate: Zustände einmal für alle Pools laden (eine pool_stats-Abfrage
+    // statt einer je Kandidat). Ohne konfiguriertes Gate wird gar nicht geladen.
+    const trendStates = CLEANUP_TREND_GATE.length ? loadTrendStates(db, config.pools.all) : null;
+    if (trendStates) {
+        console.log(`[cleanup:ranking] ${t('cli.cl.trend_gate_active', { timeframes: CLEANUP_TREND_GATE.join(', ') })}`);
+    }
     for (const poolId of configuredIds) {
         if (ineligible.has(poolId)) continue;
         if (cooldownBlocked.has(poolId)) continue;
@@ -701,6 +852,20 @@ async function runCleanupByRanking(db, keypair, connection) {
         if (!isPoolEnabled(poolById.get(poolId))) continue;
         const sc = scoreByPool.get(poolId);
         if (!sc) continue;
+
+        // Trend-Gate vor dem Invest-Guard: kein Kapital in einen Pool, dessen Trend
+        // auf einer geforderten Zeitebene nicht aufwärts zeigt. Wie beim Guard filtert
+        // das VOR dem Sortieren — scored[0] bleibt damit per Konstruktion der beste
+        // zulässige Pool, es gibt kein „Platz 1 überspringen" als Sonderfall.
+        if (trendStates) {
+            const gate = checkTrendGate(trendStates.get(poolId), CLEANUP_TREND_GATE);
+            if (!gate.ok) {
+                excluded.push({ id: poolId, score: sc.value, rule: 'trend_gate', reason: gate.reason,
+                                failing: gate.failing, unknown: gate.unknown });
+                console.log(`[cleanup:ranking] ${t('cli.cl.guard_excluded', { pool: poolId, reason: gate.reason })}`);
+                continue;
+            }
+        }
 
         // Invest-Guard VOR dem Sortieren: Regeln, die den Pool sofort wieder räumen
         // würden (TVL-Schutz, Score-Limit), schließen ihn hier aus der Rangliste aus.
@@ -772,12 +937,28 @@ async function runCleanupByRanking(db, keypair, connection) {
  */
 async function _investStandard(targetPool, db, keypair, connection, { skipCap = false } = {}) {
     const allPools = config.pools.all;
+    // Max-Investment-Restkapazität gilt unabhängig von skipCap (Nutzer-Risikogrenze,
+    // kein operatives Limit wie CLEANUP_MAX_DEPOSIT) — deckelt jeden Pre-Swap UND
+    // den finalen Deposit, sonst blieben pre-geswappte Pool-Token als Rest im Wallet
+    // liegen (gleiche Fallklasse wie das ORCA-Vorkommnis oben, LIQ#0310).
+    const remainingCapacity = remainingInvestCapacity(targetPool, db);
 
     // Fremd-Tokens (nicht USDC, nicht tokenA, nicht tokenB des Ziel-Pools) → USDC swappen.
     // tokenB explizit ausschließen: bei usdcIsTokenA-Pools (EURC/USDC) ist tokenB (EURC)
     // kein Fremd-Token – es wird für den Deposit benötigt.
-    const foreignTokens = getRelevantTokens(allPools).filter(t =>
-        t.mint !== USDC_MINT && t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+    //
+    // 🔒 LIQ#0310: Token eines laufenden Exits sind hier ausgenommen. Genau an dieser
+    // Stelle ging Position 336 verloren — die 811,68 ORCA eines Exits mit gescheitertem
+    // closePosition wurden als beliebiger Wallet-Rest zu USDC geswappt und dem Ziel-Pool
+    // zugerechnet. Die bestehende Sperre in deposit-lib.js greift dagegen nicht: sie
+    // prüft den Ziel-Pool (hier liq-pump-sol), nicht den Pool mit den gestrandeten Token
+    // (liq-orca-sol) — und sie greift erst im Deposit, also nach diesem Swap.
+    const foreignTokens = withoutReservedTokens(
+        getRelevantTokens(allPools).filter(t =>
+            t.mint !== USDC_MINT && t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+        ),
+        loadReservedMints(db, '[cleanup:invest]'),
+        '[cleanup:invest]',
     );
     const allBalancesStd = await getAllTokenBalances(keypair.publicKey);
     for (const token of foreignTokens) {
@@ -851,7 +1032,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
                         // das komplette Wallet-USDC in SOL, obwohl Schritt 5 (depositStandard)
                         // den tatsächlichen Deposit ohnehin auf den Cap begrenzt — der Rest
                         // bliebe unnötig als Fremdwährung (Kursrisiko) im Wallet liegen.
-                        const swapCap    = (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity;
+                        const swapCap    = Math.min((!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity, remainingCapacity);
                         const usdcToSwap = Math.min(delta * 1.01, walletUsdc * 0.995, swapCap);
                         console.log(`[cleanup:invest] ${targetPool.pair}: ${usdcToSwap.toFixed(2)} USDC → SOL (CLMM-Ratio ${ratio.pctA}/${ratio.pctB})`);
                         await swapTo(USDC_TOKEN, usdcToSwap, WSOL_MINT, SOL_DECIMALS, 'SOL', keypair, connection, targetPool.id);
@@ -894,7 +1075,7 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
                         // sonst swappt dieser Ratio-Pre-Swap mehr USDC in tokenA, als Schritt 5
                         // (depositStandard) später überhaupt einzahlen darf, und der Überschuss
                         // bleibt als ungedeckte Token-Position (Kursrisiko) im Wallet liegen.
-                        const swapCap    = (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity;
+                        const swapCap    = Math.min((!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity, remainingCapacity);
                         const usdcToSwap = Math.min(delta * 1.01, walletUsdcCur * 0.995, swapCap);
                         console.log(`[cleanup:invest] ${targetPool.pair}: ${usdcToSwap.toFixed(2)} USDC → ${tokenASym} (CLMM-Ratio ${ratio.pctA}/${ratio.pctB})`);
                         await swapTo(USDC_TOKEN, usdcToSwap, targetPool.tokenA, targetPool.decimalsA, tokenASym, keypair, connection, targetPool.id);
@@ -971,9 +1152,10 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
     if (!skipCap && CLEANUP_MIN_DEPOSIT > 0 && walletUsdc < CLEANUP_MIN_DEPOSIT) {
         return;
     }
-    const depositUsdc = (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? Math.min(walletUsdc, CLEANUP_MAX_DEPOSIT) : walletUsdc;
+    const depositUsdc = Math.min(walletUsdc, (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity, remainingCapacity);
     if (depositUsdc < walletUsdc) {
-        console.log(`[cleanup:invest] Max-Einzahlung aktiv: ${depositUsdc.toFixed(2)} USDC von ${walletUsdc.toFixed(2)} USDC (Cap: ${CLEANUP_MAX_DEPOSIT} USDC)`);
+        const reason = remainingCapacity < walletUsdc ? `Max Investment, Rest ${remainingCapacity.toFixed(2)} USDC` : `Cap: ${CLEANUP_MAX_DEPOSIT} USDC`;
+        console.log(`[cleanup:invest] Max-Einzahlung aktiv: ${depositUsdc.toFixed(2)} USDC von ${walletUsdc.toFixed(2)} USDC (${reason})`);
     }
     await deposit(targetPool, depositUsdc, keypair, db, getAdapter(targetPool), { note: 'cleanup' });
 }
@@ -993,6 +1175,8 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
  */
 async function _investVolatilePair(targetPool, db, keypair, connection, { skipCap = false } = {}) {
     const allPools     = config.pools.all;
+    // Siehe Begründung in _investStandard() — gilt unabhängig von skipCap.
+    const remainingCapacity = remainingInvestCapacity(targetPool, db);
     const tokenASymbol = targetPool.pair.split('/')[0];
     const tokenBSymbol = targetPool.pair.split('/')[1];
     const tokenADef    = { mint: targetPool.tokenA, decimals: targetPool.decimalsA, symbol: tokenASymbol };
@@ -1000,8 +1184,14 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
     const solIsPoolToken = targetPool.tokenA === WSOL_MINT || targetPool.tokenB === WSOL_MINT;
 
     // ─── 1. Fremd-Tokens → USDC ────────────────────────────────────────────
-    const foreignTokens = getRelevantTokens(allPools).filter(t =>
-        t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+    // 🔒 LIQ#0310: Token eines laufenden Exits bleiben unangetastet (siehe
+    // ausführliche Begründung im gleichen Schritt in _investStandard()).
+    const foreignTokens = withoutReservedTokens(
+        getRelevantTokens(allPools).filter(t =>
+            t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+        ),
+        loadReservedMints(db, '[cleanup:invest]'),
+        '[cleanup:invest]',
     );
     const allBalancesVol = await getAllTokenBalances(keypair.publicKey);
     for (const token of foreignTokens) {
@@ -1116,9 +1306,10 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
     const totalDeficitUsd = deficitAUsd + deficitBUsd;
 
     if (walletUsdc >= MIN_USDC_AMOUNT && totalDeficitUsd > 0) {
-        const cappedUsdc = (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? Math.min(walletUsdc, CLEANUP_MAX_DEPOSIT) : walletUsdc;
+        const cappedUsdc = Math.min(walletUsdc, (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity, remainingCapacity);
         if (cappedUsdc < walletUsdc) {
-            console.log(`[cleanup:invest] ${targetPool.pair}: Max-Einzahlung aktiv: USDC-Budget ${cappedUsdc.toFixed(2)} von ${walletUsdc.toFixed(2)} USDC (Cap: ${CLEANUP_MAX_DEPOSIT} USDC)`);
+            const reason = remainingCapacity < walletUsdc ? `Max Investment, Rest ${remainingCapacity.toFixed(2)} USDC` : `Cap: ${CLEANUP_MAX_DEPOSIT} USDC`;
+            console.log(`[cleanup:invest] ${targetPool.pair}: Max-Einzahlung aktiv: USDC-Budget ${cappedUsdc.toFixed(2)} von ${walletUsdc.toFixed(2)} USDC (${reason})`);
         }
         const useUsdc  = Math.min(cappedUsdc, totalDeficitUsd);
         const usdcForA = useUsdc * (deficitAUsd / totalDeficitUsd);

@@ -27,7 +27,6 @@ import { getKeypair, getConnection, getSolBalanceFresh } from './wallet.js';
 import { ensureWalletSol, SOL_TOPUP_TARGET } from './sol-topup.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
-    insertCapitalFlow,
     createScoreLimitExecution,
     updateScoreLimitExecution,
     getIncompleteScoreLimitExecutions,
@@ -35,7 +34,7 @@ import {
     closePosition as markPositionClosedInDb,
 } from './db.js';
 import * as notify from './notify.js';
-import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, finalizeClosePosition, computeExitPnl } from './exit-finalizer.js';
+import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, closePositionOrRescue, computeExitPnl, recordExitProceeds } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname   = dirname(fileURLToPath(import.meta.url));
@@ -239,18 +238,22 @@ async function stepWithdraw(pool, db, execId, cfg) {
             console.log(`[scoreLimit:${pool.id}] Fees geclaimed: ${feesA.toFixed(6)} A + ${feesB.toFixed(6)} B`);
         }
 
-        const { closed, coinsA, coinsB } = await finalizeClosePosition(adapter, pool, position, db, {
-            feesA, feesB,
-            note:      'score-limit',
-            logPrefix: `[scoreLimit:${pool.id}]`,
-        });
+        // Ein gescheiterter NFT-Burn haelt den schuetzenden Verkauf nicht auf (LIQ#0312):
+        // wirft nur, wenn die Entnahme selbst nicht stattgefunden hat. Siehe
+        // closePositionOrRescue() in exit-finalizer.js.
+        const { coinsA, coinsB, closeTxHash, closePending } = await closePositionOrRescue(
+            adapter, pool, position, db, {
+                feesA, feesB, note: 'score-limit', logPrefix: `[scoreLimit:${pool.id}]`,
+            },
+        );
 
-        markPositionClosedInDb(db, position.id, closed.txHash);
+        markPositionClosedInDb(db, position.id, closeTxHash);
 
         updateScoreLimitExecution(db, execId, {
             step:    'withdrawn',
             coins_a: coinsA,
             coins_b: coinsB,
+            ...(closePending && { close_error: closePending.reason }),
         });
         return { coinsA, coinsB };
     } else {
@@ -269,7 +272,7 @@ async function stepSwap(pool, db, execId, cfg, coinsA, coinsB) {
         slippageBps: config.rm.swapSlippageBps,
         onSwapped:   (swappedUsdc) => {
             updateScoreLimitExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
-            insertCapitalFlow(db, { poolId: pool.id, usdcAmount: -swappedUsdc, note: 'score-limit-exit', isExternal: 1 });
+            recordExitProceeds(db, { poolId: pool.id, swappedUsdc, note: 'score-limit-exit' });
             console.log(`[scoreLimit:${pool.id}] Kapitalabfluss erfasst: -${swappedUsdc.toFixed(2)} USDC`);
         },
     });
@@ -433,7 +436,9 @@ export async function resumePendingScoreLimitExecutions(db) {
                 await stepTransfer(pool, db, exec.id, cfg, coinsA, coinsB, swappedUsdc);
             }
 
-            updateScoreLimitExecution(db, exec.id, { step: 'complete', completed_at: Date.now() });
+            // error_msg mit loeschen: 'complete' und eine stehende Fehlermeldung schliessen
+            // sich aus. Ein liegengebliebenes NFT steht getrennt davon in close_error.
+            updateScoreLimitExecution(db, exec.id, { step: 'complete', completed_at: Date.now(), error_msg: null });
             console.log(`[scoreLimit:${exec.pool_id}] Fortgesetzt und abgeschlossen.`);
             triggerPoolTypeAdvisorAsync(exec.pool_id);
 

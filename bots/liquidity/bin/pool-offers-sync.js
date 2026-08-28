@@ -1,28 +1,41 @@
 #!/usr/bin/env node
 /**
- * FORGE public Premium – Offer-Updates für bereits übernommene Pools
+ * FORGE public Premium – Neue Pool-Offers übernehmen + Updates für bekannte Pools
  *
- * Produktentscheidung 2026-07-29 (pool-offers.md): ändert der Master Angaben zu einem
- * Pool, den dieser Fork bereits übernommen hat (Pool-Typ korrigiert, TVL-Schwellen
- * nachgezogen …), übernimmt der Fork das automatisch — ohne erneute Freigabe, aber mit
- * einer System-Message, die jede Änderung im Klartext alt → neu benennt.
+ * Zwei Aufgaben, beide als Cron (config/cron-jobs.json):
  *
- * Läuft als Cron (config/cron-jobs.json). Der Gegenpart — die Rückstufung mit
- * Kapital-Exit — sitzt bewusst NICHT hier, sondern im Bot-Zyklus
- * (lib/pool-retirement.js): er bewegt Kapital und braucht den Cleanup-Lock.
+ *   1. NEUE OFFERS ÜBERNEHMEN (seit 2026-08-21). Ein verifiziertes Angebot, das dieser
+ *      Fork noch nicht kennt, wird automatisch als freigegebener Pool angelegt und der
+ *      Nutzer per Message Center darüber informiert. Vorher war das ein Klickpfad in
+ *      der Settings-Oberfläche; die Begründung für den Wegfall steht ausführlich im
+ *      Kopf von lib/pool-offer-adopt.js — kurz: über Kapital entscheidet das
+ *      Score-Ranking, nicht die Freigabe, und der Klick verlangte ein Urteil, das der
+ *      Nutzer nicht fällen kann.
+ *
+ *   2. UPDATES FÜR BEREITS ÜBERNOMMENE POOLS (Produktentscheidung 2026-07-29,
+ *      pool-offers.md): ändert der Master Angaben zu einem bekannten Pool (Pool-Typ
+ *      korrigiert, TVL-Schwellen nachgezogen …), übernimmt der Fork das automatisch —
+ *      mit einer System-Message, die jede Änderung im Klartext alt → neu benennt.
+ *
+ * Der Gegenpart — die Rückstufung mit Kapital-Exit — sitzt bewusst NICHT hier, sondern
+ * im Bot-Zyklus (lib/pool-retirement.js): er bewegt Kapital und braucht den Cleanup-Lock.
  *
  * Was hier NIEMALS passiert:
- *   • Kein neuer Pool. Übernahme bleibt eine ausdrückliche Nutzeraktion über die UI.
- *   • Kein Betriebszustand (enabled/active/capitalUSDC) — nie aus Lieferdaten.
+ *   • Kein Kapital. Auch ein frisch übernommener Pool bekommt erst dann Geld, wenn er
+ *     im stündlichen Cleanup-Ranking auf Platz 1 landet.
+ *   • Kein Betriebszustand (`active`, `capitalUSDC`) aus Lieferdaten — den schreibt
+ *     ausschließlich die Bot-Automatik.
+ *   • Kein `enabled`-Wechsel an einem BESTEHENDEN Pool. Hat der Nutzer einen Pool
+ *     gesperrt, bleibt er gesperrt; die Freigabe gilt nur für die Erstanlage.
  *   • Keine nutzer-autoritativen Werte. Geändert wird ausschließlich die Vorschlags-
  *     ebene in pools.json; was der Nutzer im Risk-Management selbst gesetzt hat
  *     (settings.db `pool_settings`) hat Vorrang und bleibt unberührt.
  *   • Keine Identitätsfelder. Weicht Adresse/Mint/Fee-Tier ab, ist es ein anderer Pool
  *     unter bekannter ID → Alarm, keine Übernahme.
  *
- * Jedes Offer wird vor der Übernahme erneut gegen die Chain geprüft (derselbe
- * Validator wie beim Erst-Ingest) — „die Lieferung ist eine Behauptung, die Chain ist
- * die Wahrheit" gilt für Updates genauso wie für Neu-Übernahmen.
+ * Jedes Offer wird vor Übernahme UND vor Update erneut gegen die Chain geprüft
+ * (derselbe Validator wie beim Erst-Ingest) — „die Lieferung ist eine Behauptung, die
+ * Chain ist die Wahrheit".
  *
  *   node bin/pool-offers-sync.js [--dry-run] [--json]
  */
@@ -32,9 +45,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from '../lib/config.js';
 import { openDatabase, getOpenPosition, recordOfferUpdate } from '../lib/db.js';
-import { loadPoolOffers } from '../lib/premium-offers-store.js';
+import { loadPoolOffers, isRetired } from '../lib/premium-offers-store.js';
 import { assessDelivery, isAdoptedFromOffer, diffOfferUpdates, checkIdentity } from '../lib/pool-offer-sync.js';
 import { validatePoolOffer } from '../lib/pool-offers-validator.js';
+import { buildPoolEntry, applyAdoptSideEffects } from '../lib/pool-offer-adopt.js';
 import * as notify from '../lib/notify.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -82,9 +96,44 @@ const db = openDatabase();
 let pools = loadPoolsJson();
 const localPoolIds = pools.map(p => p.id);
 let dirty = false;
+const adopted = [];
 
 try {
+    // ─── 1. Neue Offers übernehmen ───────────────────────────────────────────
+    //
+    // Erst die Übernahmen, dann die Updates: ein soeben angelegter Pool trägt
+    // bereits alle Offer-Werte, die Update-Schleife findet an ihm nichts zu tun.
+    for (const offer of offers) {
+        if (localPoolIds.includes(offer.id)) continue;
+        // Ein zurückgestuftes Angebot wird nie übernommen — unabhängig davon, wie
+        // sauber es sich gegen die Chain prüfen lässt. Die Chain-Prüfung sagt „dieser
+        // Pool existiert wie beschrieben", nicht „der Datendienst steht noch dahinter".
+        if (isRetired(offer)) continue;
+
+        const validation = await validatePoolOffer(offer, { localPoolIds });
+        if (validation.status !== 'verified') {
+            // 'unsupported'/'rejected' sind hier der Normalfall, kein Zwischenfall:
+            // der Master bietet auch Pools an, die dieser Fork technisch nicht
+            // tragen kann. Nur protokollieren, den Nutzer nicht damit behelligen.
+            console.log(`[pool-offers-sync:${offer.id}] nicht übernommen (${validation.status})`);
+            results.push({ poolId: offer.id, status: `adopt-skipped:${validation.status}` });
+            continue;
+        }
+
+        const entry = buildPoolEntry(offer);
+        pools.push(entry);
+        localPoolIds.push(offer.id);
+        dirty = true;
+        adopted.push(entry);
+        results.push({ poolId: offer.id, status: 'adopted' });
+
+        if (!dryRun) applyAdoptSideEffects(offer);
+        console.log(`[pool-offers-sync:${offer.id}] übernommen: ${entry.displayPair} (${entry.protocol})`);
+    }
+
+    // ─── 2. Updates für bereits übernommene Pools ────────────────────────────
     for (const pool of pools) {
+        if (adopted.includes(pool)) continue; // gerade erst angelegt, schon aktuell
         if (!isAdoptedFromOffer(pool)) continue;
 
         const offer = offerById.get(pool.premiumOffer.offerId);
@@ -131,14 +180,25 @@ try {
     }
 
     if (dirty && !dryRun) writePoolsJsonAtomic(pools);
+
+    // Erst melden, wenn die Pools tatsächlich in der Datei stehen. Andersherum
+    // könnte ein Absturz zwischen Meldung und Write den Nutzer über Pools
+    // informieren, die es nicht gibt.
+    //
+    // Eine Sammelnachricht für den ganzen Lauf, keine je Pool — bei einer ersten
+    // Lieferung kämen sonst zehn Meldungen auf einmal.
+    if (adopted.length > 0 && !dryRun) {
+        await notify.premiumPoolsAdopted(adopted).catch(() => {});
+    }
 } finally {
     db.close();
 }
 
 if (jsonOutput) {
-    console.log(JSON.stringify({ dryRun, updated: results.length, results }, null, 2));
+    console.log(JSON.stringify({ dryRun, adopted: adopted.length, changed: results.length, results }, null, 2));
 } else if (results.length === 0) {
     console.log('[pool-offers-sync] keine Änderungen.');
 } else if (dryRun) {
-    console.log(`[pool-offers-sync] --dry-run: ${results.length} Pool(s) hätten Änderungen bekommen, nichts geschrieben.`);
+    console.log(`[pool-offers-sync] --dry-run: ${results.length} Pool(s) hätten Änderungen bekommen `
+        + `(davon ${adopted.length} Neuübernahme[n]), nichts geschrieben.`);
 }

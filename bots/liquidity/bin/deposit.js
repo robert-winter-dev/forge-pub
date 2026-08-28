@@ -40,7 +40,8 @@
 
 import { parseArgs }   from 'node:util';
 import { config, setPoolActive, isPoolEnabled } from '../lib/config.js';
-import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset } from '../lib/settings-auto.js';
+import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
+         ensureTrailingStopDefaults } from '../lib/settings-auto.js';
 import {
     openDatabase, syncPools, getOpenPosition,
     insertPosition, insertTransaction, updatePositionCapital, updatePositionHodl, insertCapitalFlow,
@@ -52,19 +53,22 @@ import { getAdapter }        from '../lib/pool-adapter/index.js';
 import { calculateRange }    from '../lib/range.js';
 import {
     getKeypair, getUsdcBalance, getUsableSolBalance, getTokenBalance,
-    getTokenBalanceFresh, getUsableSolBalanceFresh, getSolBalanceFresh, getConnection, getTxFee, USDC_MINT,
+    getTokenBalanceFresh, getUsableSolBalanceFresh, getSolBalanceFresh,
+    getConnection, getTxFee, USDC_MINT,
 } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
 import * as notify           from '../lib/notify.js';
 import { getSplTokensUsd } from '../lib/wallet-monitor-client.js';
-import { refreshAfterAction } from '../lib/refresh-state.js';
+import { refreshAfterAction, establishPositionBaseline, settleCapitalFlow } from '../lib/refresh-state.js';
 import { logActionError } from '../lib/error-log.js';
 import { matchErrorCode, describeError } from '../../../lib/error-messages.js';
 import { t } from '../../../lib/i18n.js';
+import { quoteSymbol } from '../../../html/js/format-price.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import { PublicKey }           from '@solana/web3.js';
 import {
     clmmTokenAForDeposit, calcDepositedUsdc, getTokenUsdPrice,
+    sweepResidualIntoPosition,
     DEPOSIT_SLIPPAGE, SLIPPAGE_FACTOR,
 } from '../lib/deposit-lib.js';
 import {
@@ -74,6 +78,7 @@ import {
 } from '../lib/cleanup-lock.js';
 import Decimal                 from 'decimal.js';
 import BN                      from 'bn.js';
+import { remainingInvestCapacity } from '../lib/invest-eligibility.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -175,6 +180,13 @@ const modeBAmount   = useModeB ? parseFloat(args.amount) : NaN;
 const maxAArg       = useMaxPair ? parseFloat(args['max-a']) : NaN;
 const maxBArg       = useMaxPair ? parseFloat(args['max-b']) : NaN;
 let   depositAmount = hasUsdc ? parseFloat(args.usdc) : (hasTokenB ? parseFloat(args.tokenb) : (useModeB ? modeBAmount : Math.max(maxAArg, maxBArg)));
+
+// Angefordertes USDC-Budget festhalten. `depositAmount` wird weiter unten teils
+// überschrieben (usdcIsTokenA → tokenB-Menge) oder heruntergezogen (volatilePair-Cap);
+// die Rest-Einzahlung am Ende braucht aber die ursprüngliche Obergrenze in USDC, damit
+// sie nie mehr einzahlt als angefordert — im Wallet kann Kapital liegen, das gar nicht
+// für diese Einzahlung gedacht war.
+let budgetUsdcTotal = hasUsdc ? depositAmount : 0;
 
 if (useMaxPair && (isNaN(maxAArg) || maxAArg <= 0 || isNaN(maxBArg) || maxBArg <= 0)) {
     const msg = t('cli.ld.invalid_pair_amounts', { maxA: args['max-a'], maxB: args['max-b'] });
@@ -387,6 +399,23 @@ if (!dryRun && !isPoolEnabled(pool)) {
     abort(t('cli.ld.pool_disabled', { pool: pool.pair }));
 }
 
+// Max Investment: voll ausgeschöpft → keine weitere Einzahlung, auch nicht im
+// Dry-Run (die Vorschau soll den Grund zeigen statt eine Aktion vorzugaukeln,
+// die die anschließende echte Einzahlung dann doch verweigert).
+const remainingCapacity = remainingInvestCapacity(pool, db);
+if (remainingCapacity <= 0) {
+    abort(`Max Investment erreicht – keine weitere Einzahlung in ${pool.pair} möglich.`);
+}
+// Modus A (--usdc): auf die Restkapazität deckeln statt den ganzen Betrag abzulehnen —
+// siehe Kommentar in lib/pool-settings-defaults.js (maxInvestment). Andere Modi (--tokenb,
+// Modus B/C) spezifizieren Token-Mengen statt eines USDC-Budgets und werden hier bewusst
+// nicht anteilig gekürzt; der Block oben verhindert dort nur den voll ausgeschöpften Fall.
+if (hasUsdc && remainingCapacity < depositAmount) {
+    console.log(`[deposit] Max Investment aktiv: ${remainingCapacity.toFixed(2)} USDC statt ${depositAmount.toFixed(2)} USDC angefordert (Rest bis Cap).`);
+    depositAmount   = remainingCapacity;
+    budgetUsdcTotal = depositAmount;
+}
+
 console.log(`[deposit] Pool:    ${pool.pair} (${pool.id})`);
 const _tbLabel = pool.usdcIsTokenA ? pool.pair.split('/')[0] : pool.pair.split('/')[1];
 if (useMaxPair) {
@@ -412,6 +441,20 @@ if (!useModeBOrC) {
     if (hasUsdc && depositAmount < minUsdc) {
         abort(t('cli.ld.below_minimum', { label, min: minUsdc, given: depositAmount.toFixed(2) }));
     }
+}
+
+// CLMM-korrekte Aufteilung für volatilePair-Pools: statt naiv 50/50 nach USD-Wert
+// zu splitten, wird das tatsächliche Ratio der Ziel-Range genutzt (gleiches Prinzip
+// wie usdcBudgetB/clmmTokenAForDeposit unten für Standard-Pools). Eine 50/50-Annahme
+// lässt bei asymmetrischen Ranges (z.B. PUMP/SOL) regelmäßig einen Rest der
+// nicht-bindenden Seite im Wallet liegen, weil Orca beim Deposit nur min(tokenA, tokenB)
+// nach Range-Ratio nimmt (Ticket LIQ, gemeldet 23.08.2026: 13,86 USDC PUMP-Rest bei 500 USDC).
+function volatilePairTargets(depositUsd, currentPrice, priceLower, priceUpper, usdPerA, usdPerB) {
+    if (usdPerA <= 0 || usdPerB <= 0) return { tokenANeeded: 0, tokenBNeeded: 0 };
+    const aPerUnitB     = clmmTokenAForDeposit(1, currentPrice, priceLower, priceUpper); // tokenA je 1 tokenB
+    const tokenBNeeded  = depositUsd / (usdPerA * aPerUnitB + usdPerB);
+    const tokenANeeded  = aPerUnitB * tokenBNeeded;
+    return { tokenANeeded, tokenBNeeded };
 }
 
 // ─── Position prüfen ─────────────────────────────────────────────────────────
@@ -469,6 +512,18 @@ if (pool.volatilePair) {
     console.log(`[deposit] USD/${tokenALabel}: ${usdPerTokenA.toFixed(4)} | USD/${tokenBLabel}: ${usdPerTokenB.toFixed(4)}`);
 }
 
+// ─── Ziel-Range bestimmen (vor allen CLMM-Ratio-Rechnungen) ──────────────────
+// Bei --new existiert noch keine Position. Ohne die geplante Range fiele
+// clmmTokenAForDeposit auf den Full-Range-Zweig zurück und würde stumm mit 50/50
+// rechnen — der Pre-Swap tauscht dann am tatsächlichen Bedarf vorbei und ein Teil des
+// Kapitals bleibt beim Deposit liegen (Orca nimmt nur die bindende Seite).
+// Fall B unten benutzt exakt diese Range weiter, deshalb wird sie hier einmal berechnet.
+const newRange = (!position && args.new)
+    ? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db)
+    : null;
+const planLower = position?.price_lower ?? newRange?.priceLower;
+const planUpper = position?.price_upper ?? newRange?.priceUpper;
+
 // ─── IL-Check: Pool-Preis vs. Jupiter-Marktpreis ─────────────────────────────
 // Nur für Standard X/USDC-Pools: Weicht der On-Chain-Preis stark vom Marktpreis ab,
 // würden Arbitrageure sofort IL erzeugen. Ab 15% Abweichung wird die Einzahlung geblockt.
@@ -501,9 +556,10 @@ let manualAmountA = 0;
 let manualAmountB = 0;
 let modeBAnchorIsA = false;
 if (useModeBOrC) {
-    // Range für Ratio-Berechnung: bei bestehender Position deren Range, sonst undefined
-    const prLower = position?.price_lower;
-    const prUpper = position?.price_upper;
+    // Range für Ratio-Berechnung: bestehende Position → deren Range, --new → die
+    // geplante Range (siehe planLower/planUpper oben), sonst undefined.
+    const prLower = planLower;
+    const prUpper = planUpper;
 
     if (useModeB) {
         const symbolUp = modeBToken.toUpperCase();
@@ -616,21 +672,24 @@ if (position && pool.volatilePair && hasUsdc && !useModeBOrC) {
 // Modus B + --tokenb: kein Auto-Swap (User wählt explizit andere Pfade).
 let swappedVolatileB = false; // Merker: Swap B lief durch (für OOR-Recovery unten)
 if (pool.volatilePair && hasUsdc && !useModeBOrC) {
-    let halfUsd = depositAmount / 2;
-    let tokenANeeded = usdPerTokenA > 0 ? halfUsd / usdPerTokenA : 0;
-    let tokenBNeeded = usdPerTokenB > 0 ? halfUsd / usdPerTokenB : 0;
+    let { tokenANeeded, tokenBNeeded } = volatilePairTargets(
+        depositAmount, currentPrice, planLower, planUpper, usdPerTokenA, usdPerTokenB,
+    );
 
     // Frische USDC-Balance lesen (alte Reads können stale sein)
     walletUsdc = await getTokenBalanceFresh(keypair.publicKey, USDC_MINT, 6);
     console.log(`[deposit] ${t('cli.ld.volatile_wallet', { a: walletTokenA.toFixed(8), tokenA: tokenALabel, b: walletTokenB.toFixed(8), tokenB: tokenBLabel, usdc: walletUsdc.toFixed(2) })}`);
 
-    // Defizit pro Seite ermitteln, jeweils mit +1.5% Puffer für Slippage
+    // Defizit pro Seite ermitteln, jeweils mit +0,5 % Puffer für Slippage.
+    // Bewusst knapp: der Puffer deckt genau die Swap-Slippage (0,5 %), mehr wäre
+    // Überschuss, der als volatiler Token im Wallet liegen bliebe. Ein zu knapper
+    // Swap ist der harmlosere Fehler — die Rest-Einzahlung am Ende gleicht ihn aus.
     const usdValueA = usdPerTokenA;
     const usdValueB = usdPerTokenB;
     let deficitA = Math.max(0, tokenANeeded - walletTokenA);
     let deficitB = Math.max(0, tokenBNeeded - walletTokenB);
-    let usdcForA  = deficitA > 0 ? (deficitA * usdValueA) * 1.015 : 0;
-    let usdcForB  = deficitB > 0 ? (deficitB * usdValueB) * 1.015 : 0;
+    let usdcForA  = deficitA > 0 ? (deficitA * usdValueA) * 1.005 : 0;
+    let usdcForB  = deficitB > 0 ? (deficitB * usdValueB) * 1.005 : 0;
     let totalUsdcNeeded = usdcForA + usdcForB;
 
     // Reicht das USDC für beide Pool-Swaps nicht mehr — typisch wenn der vorgelagerte
@@ -643,14 +702,16 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
         const scale = (walletUsdc * 0.997) / totalUsdcNeeded;
         const prev  = depositAmount;
         depositAmount   = depositAmount * scale;
-        halfUsd         = depositAmount / 2;
-        tokenANeeded    = usdPerTokenA > 0 ? halfUsd / usdPerTokenA : 0;
-        tokenBNeeded    = usdPerTokenB > 0 ? halfUsd / usdPerTokenB : 0;
+        // Ziel-Mengen sind linear im USD-Budget → einfach mitskalieren statt neu
+        // zu berechnen (identisch zu einem erneuten volatilePairTargets()-Aufruf).
+        tokenANeeded    = tokenANeeded * scale;
+        tokenBNeeded    = tokenBNeeded * scale;
         deficitA        = Math.max(0, tokenANeeded - walletTokenA);
         deficitB        = Math.max(0, tokenBNeeded - walletTokenB);
-        usdcForA        = deficitA > 0 ? (deficitA * usdValueA) * 1.015 : 0;
-        usdcForB        = deficitB > 0 ? (deficitB * usdValueB) * 1.015 : 0;
+        usdcForA        = deficitA > 0 ? (deficitA * usdValueA) * 1.005 : 0;
+        usdcForB        = deficitB > 0 ? (deficitB * usdValueB) * 1.005 : 0;
         totalUsdcNeeded = usdcForA + usdcForB;
+        budgetUsdcTotal = depositAmount;   // Rest-Einzahlung darf nur das gekappte Budget nutzen
         console.log(`[deposit] ${t('cli.ld.volatile_capped', { old: prev.toFixed(2), new: depositAmount.toFixed(2), available: walletUsdc.toFixed(2), factor: scale.toFixed(4) })}`);
     }
 
@@ -742,10 +803,10 @@ if (useModeBOrC) {
         console.log(`[deposit] ${t('cli.ld.wallet_capped', { factor: scale.toFixed(4), oldA: prevA.toFixed(6), newA: manualAmountA.toFixed(6), tokenA: tokenALabel, oldB: prevB.toFixed(6), newB: manualAmountB.toFixed(6), tokenB: tokenBLabel })}`);
     }
 } else if (pool.volatilePair) {
-    // volatilePair: USD-Bedarf je Seite (halbiertes Kapital), nach Auto-Swap sollten beide Seiten passen
-    const halfUsd = depositAmount / 2;
-    const aNeed   = usdPerTokenA > 0 ? halfUsd / usdPerTokenA : 0;
-    const bNeed   = usdPerTokenB > 0 ? halfUsd / usdPerTokenB : 0;
+    // volatilePair: CLMM-korrekter USD-Bedarf je Seite, nach Auto-Swap sollten beide Seiten passen
+    const { tokenANeeded: aNeed, tokenBNeeded: bNeed } = volatilePairTargets(
+        depositAmount, currentPrice, planLower, planUpper, usdPerTokenA, usdPerTokenB,
+    );
     console.log(`[deposit] Wallet:  ${walletTokenA.toFixed(6)} ${tokenALabel} + ${walletTokenB.toFixed(6)} ${tokenBLabel}`);
     console.log(`[deposit] Bedarf:  ~${aNeed.toFixed(6)} ${tokenALabel} + ~${bNeed.toFixed(6)} ${tokenBLabel} (≈ ${depositAmount.toFixed(2)} USDC)`);
     if (walletTokenA < aNeed * 0.5)
@@ -779,7 +840,7 @@ if (useModeBOrC) {
 //   usdcBudgetB + clmmTokenAForDeposit(usdcBudgetB) * price ≈ depositAmount
 let usdcBudgetB = depositAmount; // Fallback für alle anderen Modi (tokenB, volatilePair, etc.)
 if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
-    const tokenAPerUnitB = clmmTokenAForDeposit(1, currentPrice, position?.price_lower, position?.price_upper);
+    const tokenAPerUnitB = clmmTokenAForDeposit(1, currentPrice, planLower, planUpper);
     const totalUsdcPerUnitB = tokenAPerUnitB * currentPrice + 1; // USDC-Wert pro 1 USDC tokenB
     usdcBudgetB = depositAmount / totalUsdcPerUnitB;
 }
@@ -799,14 +860,16 @@ if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
     walletUsdc   = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
 
     // CLMM-korrekte Schätzung: tokenA-Bedarf aus Range-Ratio, nicht 50/50-Annahme
-    const targetA      = clmmTokenAForDeposit(usdcBudgetB, currentPrice, position?.price_lower, position?.price_upper);
+    const targetA      = clmmTokenAForDeposit(usdcBudgetB, currentPrice, planLower, planUpper);
     const [symA, symB] = pool.pair.split('/');
 
     if (walletTokenA < targetA) {
         // Zu wenig tokenA → USDC → tokenA tauschen
-        // +1,5 % Puffer: deckt 0,5 % Swap-Slippage + minimale Preisbewegung zwischen
-        // Swap und Deposit ab, damit der Abort-Check danach sicher passt.
-        const deficitUsdc = (targetA - walletTokenA) * currentPrice * 1.015;
+        // +0,5 % Puffer: deckt genau die Swap-Slippage ab. Früher 1,5 % — das eine
+        // Prozent Überschuss landete zuverlässig als tokenA-Rest im Wallet, weil Orca
+        // beim Deposit nur die bindende Seite nimmt. Fällt der Swap jetzt minimal zu
+        // knapp aus, zahlt die Rest-Einzahlung am Ende nach.
+        const deficitUsdc = (targetA - walletTokenA) * currentPrice * 1.005;
         const swapAmount  = Math.min(deficitUsdc, walletUsdc * 0.99);
 
         if (swapAmount >= 1.0) {
@@ -854,7 +917,7 @@ if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
 
 if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
     const budget = depositAmount; // USDC
-    const usdcPerB      = clmmTokenAForDeposit(1, currentPrice, position?.price_lower, position?.price_upper);
+    const usdcPerB      = clmmTokenAForDeposit(1, currentPrice, planLower, planUpper);
     const usdcValuePerB = usdcPerB + 1 / currentPrice;
     const targetB       = budget / usdcValuePerB;
     const targetA       = targetB * usdcPerB;
@@ -869,7 +932,7 @@ if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
         // tokenA → tokenB swappen, um Defizit auszugleichen
         // swapAmount in USDC: deficitB / price (USDC-Wert von deficitB) × 1.015 Slippage-Puffer
         const deficitB        = targetB - walletTokenB;
-        const swapAmountUsdc  = (deficitB / currentPrice) * 1.015;
+        const swapAmountUsdc  = (deficitB / currentPrice) * 1.005;  // Puffer = Swap-Slippage, siehe oben
         const maxSwapBudget   = budget - targetA;          // USDC die für Swap übrig bleiben (≈ USDC-Wert von targetB)
         const swapAmountFinal = Math.min(swapAmountUsdc, maxSwapBudget * 1.015, walletTokenA * 0.99);
 
@@ -906,6 +969,31 @@ if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
 
     // Override: depositAmount ist ab hier tokenB-Menge (Fall A/B benutzen das als amountB)
     depositAmount = targetB;
+}
+
+// ─── Rest-Einzahlung („Residual-Sweep") ──────────────────────────────────────
+//
+// Nach dem Deposit bleibt regelmäßig etwas im Wallet liegen (Orca nimmt nur die bindende
+// Seite, Slippage-Puffer, Preisdrift zwischen Pre-Swap und Position). Die eigentliche Logik
+// steht in lib/deposit-lib.js und wird vom automatischen Cleanup-Pfad genauso benutzt —
+// bewusst EINE Implementierung, damit manueller und automatischer Pfad nicht auseinanderlaufen.
+//
+// Hier nur die Randbedingungen des manuellen Aufrufs:
+//   - nur Modus A (--usdc): bei --tokenb / --token / --max-a+--max-b hat der Nutzer die Mengen
+//     bewusst gewählt, Nachschieben wäre ein ungefragter zusätzlicher Einsatz
+//   - nie im Dry-Run
+//   - nie mehr als das angeforderte Budget (budgetUsdcTotal), weil im Wallet Kapital liegen
+//     kann, das gar nicht zu dieser Einzahlung gehört
+//
+// Fehler sind nie fatal: die Haupteinzahlung ist beim Aufruf bereits erfolgt.
+
+async function sweepResidualSafe(nftMint, priceLower, priceUpper, budgetLeftUsdc) {
+    if (!hasUsdc || dryRun) return null;
+    return sweepResidualIntoPosition(pool, nftMint, {
+        keypair, db, adapter, currentPrice, priceLower, priceUpper,
+        budgetLeftUsdc, quotePrice,
+        logPrefix: '[deposit]',
+    });
 }
 
 // ─── FALL A: Bestehende Position aufstocken (increaseLiquidity) ───────────────
@@ -954,16 +1042,20 @@ if (position) {
     console.log(`[deposit] ${t('cli.liq.head_range_ok', { lower: state.priceLower.toFixed(4), upper: state.priceUpper.toFixed(4) })}`);
 
     // TokenA-Bedarf schätzen (CLMM-korrekt):
-    //   volatilePair: depositAmount / 2 / usdPerTokenA (je Hälfte des USD-Betrags in tokenA)
+    //   volatilePair: CLMM-Ratio der bestehenden Position (nicht mehr naiv 50/50)
     //   Standard:     CLMM-Ratio aus aktueller Preis-Position in der Range
     //   Modus B:      User-Anker (manualAmountA), kein Check gegen estTokenANeeded
     const estTokenANeeded = useModeBOrC
         ? manualAmountA
         : pool.volatilePair
-            ? (usdPerTokenA > 0 ? (depositAmount / 2) / usdPerTokenA : 0)
+            ? volatilePairTargets(depositAmount, currentPrice, state.priceLower, state.priceUpper, usdPerTokenA, usdPerTokenB).tokenANeeded
             : clmmTokenAForDeposit(usdcBudgetB, currentPrice, state.priceLower, state.priceUpper);
-    // Modus B/C: bereits oben im Wallet-Check geprüft; sonst Abort nur bei deutlichem Mangel
-    if (!useModeBOrC && walletTokenA < estTokenANeeded * 0.98) {
+    // Modus B/C: bereits oben im Wallet-Check geprüft; sonst Abort nur bei deutlichem Mangel.
+    // Schwelle 0,9 (früher 0,98): seit der Pre-Swap nur noch die Slippage puffert, kann die
+    // tokenA-Seite knapp unter dem Soll landen. Das ist kein Abbruchgrund — Orca zahlt dann
+    // etwas weniger ein und die Rest-Einzahlung unten gleicht die Differenz aus. Identisch
+    // zur Schwelle in Fall B.
+    if (!useModeBOrC && walletTokenA < estTokenANeeded * 0.9) {
         const fehlend = (estTokenANeeded - walletTokenA).toFixed(6);
         abort(t('cli.ld.not_enough_deposit', { token: tokenALabel, need: estTokenANeeded.toFixed(6), have: walletTokenA.toFixed(6), missing: fehlend }));
     }
@@ -982,7 +1074,7 @@ if (position) {
     const depositAmountB = useModeBOrC
         ? manualAmountB
         : pool.volatilePair
-            ? (usdPerTokenB > 0 ? (depositAmount / 2) / usdPerTokenB : 0)
+            ? volatilePairTargets(depositAmount, currentPrice, state.priceLower, state.priceUpper, usdPerTokenA, usdPerTokenB).tokenBNeeded
             : usdcBudgetB;
     // amountA: Modus B/C nimmt User-Wahl, sonst kompletter Wallet-Balance (Orca deckelt intern).
     const amountA = useModeBOrC
@@ -1031,12 +1123,12 @@ if (position) {
                 try {
                     result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
                 } catch (err2) {
-                    await notify.solLow(err2.solBalance ?? healedSol);
+                    await notify.solLow(db, err2.solBalance ?? healedSol);
                     db.close();
                     abort(err2.message);
                 }
             } else {
-                await notify.solLow(err.solBalance);
+                await notify.solLow(db, err.solBalance);
                 db.close();
                 abort(err.message);
             }
@@ -1070,51 +1162,44 @@ if (position) {
         }
     }
 
-    const depositedUsdc = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, currentPrice, pool, 0, quotePrice);
+    // Ist-Mengen aus der bestätigten TX (Vault-Deltas) zum Ausführungspreis — siehe orca.js.
+    const depositedUsdcMain = calcDepositedUsdc(result.tokenEstA, result.tokenEstB, result.priceExec ?? currentPrice, pool, 0, quotePrice);
+
+    // Rest-Einzahlung: was durch Slippage-Puffer, Preisdrift und die Engpass-Seite im
+    // Wallet liegen geblieben ist, sofort nachziehen statt bis zum nächsten Cleanup zu warten.
+    const sweep = await sweepResidualSafe(
+        position.nft_mint, state.priceLower, state.priceUpper,
+        Math.max(0, budgetUsdcTotal - depositedUsdcMain),
+    );
+    const depositedUsdc = depositedUsdcMain + (sweep?.usdc ?? 0);
+    const addedTokenA   = result.tokenEstA  + (sweep?.tokenEstA ?? 0);
+    const addedTokenB   = result.tokenEstB  + (sweep?.tokenEstB ?? 0);
 
     // Kapital dieser Position um den deponierten Betrag erhöhen (für myApr-Berechnung)
     const oldCapital = position.capital_usdc ?? 0;
     const newCapital = oldCapital + depositedUsdc;
     updatePositionCapital(db, position.id, newCapital);
-    updatePositionHodl(db, position.id, result.tokenEstA, result.tokenEstB);
+    updatePositionHodl(db, position.id, addedTokenA, addedTokenB);
 
-    // Trailing-Stop-Referenz nachziehen. Muss VOR dem Sofort-Snapshot unten passieren —
-    // danach steht in position_snapshots der bereits erhöhte (geschätzte) Wert.
-    const hwmRebase = rebaseHwmForCapitalFlow(db, position.id, lpValueBeforeDeposit);
-
-    // Sofort-Snapshot: Dashboard zeigt neuen LP-Wert sofort, ohne auf den nächsten Bot-Tick zu warten.
-    // Strategie: letzten Snapshot als Basis + deponierte Token-Delta addieren.
-    // Fees werden aus prev übernommen — `increaseLiquidity` setzt on-chain `feesOwed` nicht zurück,
-    // nur `update_fees_and_rewards` wird intern aufgerufen. Der nächste Bot-Tick korrigiert
-    // IL und Fees präzise via On-Chain-Read.
-    {
-        const prevSnap  = db.prepare(
-            `SELECT amount_a, amount_b, fees_pending_a, fees_pending_b, fees_pending_usd
-             FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`,
-        ).get(pool.id);
-        const snapAmtA  = (prevSnap?.amount_a ?? 0) + result.tokenEstA;
-        const snapAmtB  = (prevSnap?.amount_b ?? 0) + result.tokenEstB;
-        const lpVal     = calcDepositedUsdc(snapAmtA, snapAmtB, currentPrice, pool, 0, quotePrice);
-        insertPositionSnapshot(db, {
-            poolId:         pool.id,
-            lpValueUsd:     lpVal,
-            feesPendingUsd: prevSnap?.fees_pending_usd ?? 0,
-            feesPendingA:   prevSnap?.fees_pending_a   ?? 0,
-            feesPendingB:   prevSnap?.fees_pending_b   ?? 0,
-            ilUsd:          0,
-            ilPct:          0,
-            amountA:        snapAmtA,
-            amountB:        snapAmtB,
-            price:          currentPrice,
-        });
-        console.log(`[deposit] Sofort-Snapshot: ${lpVal.toFixed(2)} USDC`);
-    }
+    // Trailing-Stop-Referenz mit dem on-chain Liquiditätsfaktor nachziehen und den ersten
+    // Messwert der neuen Kapitalstufe sofort schreiben (lib/refresh-state.js). Fällt nur auf
+    // die alte Sequenz (Verhältnis zum letzten Snapshot + Schätz-Snapshot) zurück, wenn die
+    // Transaktion nicht lesbar ist.
+    const flow = settleCapitalFlow(db, pool, position, {
+        liquidityBefore: state.liquidity, legs: [result, sweep],
+        fallback: { lpBefore: lpValueBeforeDeposit, deltaA: addedTokenA, deltaB: addedTokenB, price: currentPrice },
+        logPrefix: '[deposit]',
+    });
+    const hwmRebase = flow.mode === 'legacy'
+        ? (flow.rebase ?? { applied: false, drawdownPct: 0 })
+        : { applied: flow.factor != null, drawdownPct: null };
+    if (flow.lpUsd > 0) console.log(`[deposit] Messwert nach Einzahlung: ${flow.lpUsd.toFixed(2)} USDC`);
 
     // Echter Kapital-Zufluss → capital_flows-Eintrag (Quelle für netDeposited).
     // balance_snapshot bleibt für Audit, wird aber nicht mehr als Baseline gelesen.
     insertCapitalFlow(db, {
         poolId:          pool.id,
-        usdcAmount:      depositedUsdc,
+        usdcAmount:      depositedUsdcMain,
         balanceSnapshot: null,
         txHash:          result.txHash,
         note:            'Manueller Deposit (increaseLiquidity)',
@@ -1126,16 +1211,38 @@ if (position) {
         type:     'deposit',
         amountA:  result.tokenEstA,
         amountB:  result.tokenEstB,
-        usdValue: depositedUsdc,
+        usdValue: depositedUsdcMain,
         txHash:   result.txHash,
         txFeeSol: depositFee,
         note:     'Manueller Deposit (increaseLiquidity)',
     });
 
+    // Die Rest-Einzahlung ist eine eigene Transaktion — eigener Kapitalfluss, eigene
+    // TX-Zeile, damit Fee und Zeitpunkt der Kette entsprechen.
+    if (sweep) {
+        insertCapitalFlow(db, {
+            poolId:          pool.id,
+            usdcAmount:      sweep.usdc,
+            balanceSnapshot: null,
+            txHash:          sweep.txHash,
+            note:            'Rest-Einzahlung (automatisch)',
+        });
+        insertTransaction(db, {
+            poolId:   pool.id,
+            type:     'deposit',
+            amountA:  sweep.tokenEstA,
+            amountB:  sweep.tokenEstB,
+            usdValue: sweep.usdc,
+            txHash:   sweep.txHash,
+            txFeeSol: await getTxFee(sweep.txHash),
+            note:     'Rest-Einzahlung (automatisch)',
+        });
+    }
+
     console.log(`[deposit] ✓ ${t('cli.ld.success')}`);
     console.log(`[deposit] TX:       ${result.txHash}`);
     console.log(`[deposit] ${t('cli.liq.head_capital_change', { old: oldCapital.toFixed(2), new: newCapital.toFixed(2) })}`);
-    if (hwmRebase.applied) {
+    if (hwmRebase.applied && hwmRebase.drawdownPct != null) {
         console.log(`[deposit] ${t('cli.liq.hwm_rebased', { pct: hwmRebase.drawdownPct.toFixed(2) })}`);
     }
 
@@ -1144,13 +1251,14 @@ if (position) {
         console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
     }
     ensureScoreLimitEnabled(pool.id);
+    ensureTrailingStopDefaults(pool.id, pool.poolType);
     {
         const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
         ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
     }
     ensureTrailingStopMinimumReset(pool.id);
 
-    await notify.depositAdded(pool, depositedUsdc, result.tokenEstA, result.tokenEstB, result.txHash, false);
+    await notify.depositAdded(pool, depositedUsdc, addedTokenA, addedTokenB, result.txHash, false);
 
     // Portfolio + frischer Wallet-Snapshot + Sync via Orchestrator.
     // Pos-Snapshot wurde oben bereits geschrieben (Sofort-Snapshot via Delta-Arithmetik).
@@ -1159,33 +1267,40 @@ if (position) {
     Object.assign(jsonResult, {
         mode: 'increaseLiquidity',
         txHash: result.txHash,
-        depositedTokenA: result.tokenEstA,
-        depositedTokenB: result.tokenEstB,
+        depositedTokenA: addedTokenA,
+        depositedTokenB: addedTokenB,
         depositedUsdc, tokenALabel, tokenBLabel,
         capitalUsdc: newCapital,
+        sweepTxHash: sweep?.txHash ?? null,
+        sweepUsdc:   sweep?.usdc   ?? 0,
     });
     successExit();
 }
 
 // ─── FALL B: Neue Position eröffnen (--new) ───────────────────────────────────
 
-// rangeOverride beachten (z.B. fixedPct: 0.5 für cbBTC/WBTC)
-const effectiveRangeB = pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range;
-const range = calculateRange(pool, currentPrice, effectiveRangeB, db);
-console.log(`[deposit] Range:   ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)} USDC`);
+// Range wurde oben schon berechnet (newRange) — dieselben Eingaben, deshalb kein
+// zweiter Aufruf: der Pre-Swap muss zwingend mit genau der Range gerechnet haben,
+// die hier eröffnet wird, sonst passt der getauschte Token-Mix nicht zum Bedarf.
+const range = newRange
+    ?? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db);
+console.log(`[deposit] Range:   ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)} ${quoteSymbol(pool)}`);
 
 // Modus B/C: manualAmountA/B direkt, kein Wallet-Cap nötig (oben schon geprüft).
+const volatileNewTargets = pool.volatilePair
+    ? volatilePairTargets(depositAmount, currentPrice, range.priceLower, range.priceUpper, usdPerTokenA, usdPerTokenB)
+    : null;
 const amountBNew = useModeBOrC
     ? Math.min(manualAmountB, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
     : pool.volatilePair
-        ? Math.min(usdPerTokenB > 0 ? (depositAmount / 2) / usdPerTokenB : 0, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
+        ? Math.min(volatileNewTargets.tokenBNeeded, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
         : pool.usdcIsTokenA
             ? Math.min(depositAmount, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
             : Math.min(usdcBudgetB, walletUsdc / SLIPPAGE_FACTOR);
 const estTokenANeededB = useModeBOrC
     ? manualAmountA
     : pool.volatilePair
-        ? (usdPerTokenA > 0 ? (depositAmount / 2) / usdPerTokenA : 0)
+        ? volatileNewTargets.tokenANeeded
         : clmmTokenAForDeposit(usdcBudgetB, currentPrice, range.priceLower, range.priceUpper);
 const amountANew = useModeBOrC
     ? Math.min(manualAmountA, walletTokenA / SLIPPAGE_FACTOR)
@@ -1234,12 +1349,12 @@ try {
                     pool, range.tickLower, range.tickUpper, amountANew, amountBNew, DEPOSIT_SLIPPAGE
                 );
             } catch (err2) {
-                await notify.solLow(err2.solBalance ?? healedSol);
+                await notify.solLow(db, err2.solBalance ?? healedSol);
                 db.close();
                 abort(err2.message);
             }
         } else {
-            await notify.solLow(err.solBalance);
+            await notify.solLow(db, err.solBalance);
             db.close();
             abort(err.message);
         }
@@ -1280,11 +1395,22 @@ const realTokenA  = new Decimal(realAmounts.tokenA.toString()).div(new Decimal(1
 const realTokenB  = new Decimal(realAmounts.tokenB.toString()).div(new Decimal(10).pow(pool.decimalsB)).toNumber();
 const realCapital = calcDepositedUsdc(realTokenA, realTokenB, currentPrice, pool, 0, quotePrice);
 
+// Rest-Einzahlung: der beim Öffnen nicht verbrauchte Teil (Engpass-Seite, Slippage-
+// Puffer, Preisdrift zwischen Pre-Swap und Position) wandert direkt in die frische
+// Position statt bis zum nächsten Cleanup im Wallet zu liegen.
+const sweepNew = await sweepResidualSafe(
+    resultNew.nftMint, range.priceLower, range.priceUpper,
+    Math.max(0, budgetUsdcTotal - realCapital),
+);
+const totalTokenA  = realTokenA  + (sweepNew?.tokenEstA ?? 0);
+const totalTokenB  = realTokenB  + (sweepNew?.tokenEstB ?? 0);
+const totalCapital = realCapital + (sweepNew?.usdc      ?? 0);
+
 // Neue Position: nur den tatsächlich eingezahlten LP-Wert als Baseline verwenden.
 // Die Portfolio-weite Baseline (LP + Wallet) funktioniert nur bei einer einzigen
 // Position — bei mehreren Pools würden sich die Werte in SUM(capital_usdc) addieren
 // und die Baseline wäre doppelt so hoch wie das tatsächliche Portfolio.
-const capitalUsdc  = realCapital;
+const capitalUsdc  = totalCapital;
 
 // In DB speichern (PnL-History zurücksetzen: neues Investment, neuer Start)
 clearPositionSnapshots(db, pool.id);
@@ -1295,10 +1421,10 @@ insertPosition(db, {
     tickUpper:    range.tickUpper,
     priceLower:   range.priceLower,
     priceUpper:   range.priceUpper,
-    liquidity:    resultNew.liquidity,
+    liquidity:    sweepNew?.addedLiquidity ?? resultNew.liquidity,
     capitalUsdc:  capitalUsdc,
-    hodlTokenA:   realTokenA,
-    hodlTokenB:   realTokenB,
+    hodlTokenA:   totalTokenA,
+    hodlTokenB:   totalTokenB,
     hodlPriceUsd: currentPrice,
     openTx:       resultNew.txHash,
     openedAt:     Date.now(),
@@ -1317,21 +1443,28 @@ insertTransaction(db, {
 });
 
 // Sofort-Snapshot: Dashboard zeigt neue Position sofort, ohne auf den nächsten Bot-Tick zu warten.
-// Bei --new gibt es keinen vorherigen Snapshot — wir nehmen die deponierten Mengen direkt.
-// Der nächste Bot-Tick korrigiert IL und Fees präzise via On-Chain-Read.
-insertPositionSnapshot(db, {
-    poolId:         pool.id,
-    lpValueUsd:     realCapital,
-    feesPendingUsd: 0,
-    feesPendingA:   0,
-    feesPendingB:   0,
-    ilUsd:          0,
-    ilPct:          0,
-    amountA:        realTokenA,
-    amountB:        realTokenB,
-    price:          currentPrice,
-});
-console.log(`[deposit] Sofort-Snapshot: ${realCapital.toFixed(2)} USDC`);
+// Bevorzugt als gemessener On-Chain-Read, weil damit zugleich die Trailing-Stop-Referenz
+// steht (siehe establishPositionBaseline) — sonst beginnt sie erst beim nächsten Bot-Tick
+// und ein Kursrutsch direkt nach dem Einstieg bliebe für den Stop unsichtbar.
+// Fallback: deponierte Mengen direkt; der nächste Bot-Tick korrigiert IL und Fees präzise.
+const depositBaselineOk = await establishPositionBaseline(
+    db, pool, adapter, resultNew.nftMint, currentPrice, { logPrefix: '[deposit]' },
+);
+if (!depositBaselineOk) {
+    insertPositionSnapshot(db, {
+        poolId:         pool.id,
+        lpValueUsd:     totalCapital,
+        feesPendingUsd: 0,
+        feesPendingA:   0,
+        feesPendingB:   0,
+        ilUsd:          0,
+        ilPct:          0,
+        amountA:        totalTokenA,
+        amountB:        totalTokenB,
+        price:          currentPrice,
+    });
+    console.log(`[deposit] Sofort-Snapshot: ${totalCapital.toFixed(2)} USDC`);
+}
 
 // Echter Kapital-Zufluss → capital_flows-Eintrag (Quelle für netDeposited).
 insertCapitalFlow(db, {
@@ -1342,24 +1475,46 @@ insertCapitalFlow(db, {
     note:            'Manueller Deposit --new',
 });
 
+// Rest-Einzahlung als eigene Transaktion buchen (eigener TX-Hash, eigene Fee).
+if (sweepNew) {
+    insertCapitalFlow(db, {
+        poolId:          pool.id,
+        usdcAmount:      sweepNew.usdc,
+        balanceSnapshot: null,
+        txHash:          sweepNew.txHash,
+        note:            'Rest-Einzahlung (automatisch)',
+    });
+    insertTransaction(db, {
+        poolId:   pool.id,
+        type:     'deposit',
+        amountA:  sweepNew.tokenEstA,
+        amountB:  sweepNew.tokenEstB,
+        usdValue: sweepNew.usdc,
+        txHash:   sweepNew.txHash,
+        txFeeSol: await getTxFee(sweepNew.txHash),
+        note:     'Rest-Einzahlung (automatisch)',
+    });
+}
+
 console.log(`[deposit] ✓ ${t('cli.ld.new_position_success')}`);
 console.log(`[deposit] NFT:     ${resultNew.nftMint}`);
 console.log(`[deposit] TX:      ${resultNew.txHash}`);
-const _fmtB = pool.decimalsB >= 8 ? realTokenB.toFixed(6) : realTokenB.toFixed(2);
-console.log(`[deposit] ${t('cli.ld.head_capital_real', { a: realTokenA.toFixed(6), tokenA: tokenALabel, b: _fmtB, tokenB: tokenBLabel, usdc: realCapital.toFixed(2) })}`);
+const _fmtB = pool.decimalsB >= 8 ? totalTokenB.toFixed(6) : totalTokenB.toFixed(2);
+console.log(`[deposit] ${t('cli.ld.head_capital_real', { a: totalTokenA.toFixed(6), tokenA: tokenALabel, b: _fmtB, tokenB: tokenBLabel, usdc: totalCapital.toFixed(2) })}`);
 
 // Auto-Activate: Pool als aktiv markieren (DB ist Single Source of Truth)
 if (setPoolActive(pool.id, true)) {
     console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
 }
 ensureScoreLimitEnabled(pool.id);
+ensureTrailingStopDefaults(pool.id, pool.poolType);
 {
     const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
     ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
 }
 ensureTrailingStopMinimumReset(pool.id);
 
-await notify.depositAdded(pool, realCapital, realTokenA, realTokenB, resultNew.txHash, true);
+await notify.depositAdded(pool, totalCapital, totalTokenA, totalTokenB, resultNew.txHash, true);
 await notify.positionOpened(pool, {
     priceLower: range.priceLower,
     priceUpper: range.priceUpper,
@@ -1375,11 +1530,13 @@ Object.assign(jsonResult, {
     mode: 'openPosition',
     txHash: resultNew.txHash,
     nftMint: resultNew.nftMint,
-    depositedTokenA: realTokenA,
-    depositedTokenB: realTokenB,
-    depositedUsdc:   realCapital,
+    depositedTokenA: totalTokenA,
+    depositedTokenB: totalTokenB,
+    depositedUsdc:   totalCapital,
     priceLower: range.priceLower,
     priceUpper: range.priceUpper,
     tokenALabel, tokenBLabel,
+    sweepTxHash: sweepNew?.txHash ?? null,
+    sweepUsdc:   sweepNew?.usdc   ?? 0,
 });
 successExit();

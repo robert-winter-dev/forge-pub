@@ -31,7 +31,7 @@ import { spawn }         from 'node:child_process';
 import Database          from 'better-sqlite3';
 import { Connection, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { PATHS }         from '../../../config/paths.js';
-import { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH } from './wallet.js';
+import { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH, RPC_CONN_OPTS } from './wallet.js';
 import { t } from '../../../lib/i18n.js';
 import { renderReason, reasonPayload } from '../../../lib/pool-reason.js';
 
@@ -280,6 +280,33 @@ function buildCliArgs(action, body, poolPair) {
     return { args };
 }
 
+/**
+ * Protokolliert jede kapitalbewegende Anfrage, BEVOR sie ausgeführt wird.
+ *
+ * Am 2026-08-22 landete eine manuelle Einzahlung von ~250 USDC in einem anderen Pool als
+ * erwartet. Ob im Request eine andere Pool-ID stand oder im Modal ein anderer Pool gewählt
+ * war, ließ sich nachträglich **nicht** feststellen: Gebucht ist nur das Ergebnis, die
+ * Anfrage selbst hinterließ keine Spur. Eine Finanzaktion, die sich im Nachhinein nicht
+ * rekonstruieren lässt, kostet im besten Fall eine Stunde Forensik — und im schlechteren
+ * das Vertrauen in die Software, weil niemand die Frage beantworten kann.
+ *
+ * Bewusst vor der Ausführung: Bricht der Prozess ab oder läuft er in einen Timeout, ist die
+ * Absicht trotzdem dokumentiert. Das Ergebnis kommt als zweite Zeile dazu.
+ *
+ * Bewusst ohne Empfängeradresse (`--send-to`): Die Zieladresse einer Auszahlung gehört nicht
+ * ins Journal, sie steht bereits im Adressbuch und in der Transaktion.
+ */
+function logAction(phase, action, pool, body, extra = '') {
+    const parts = [`pool=${pool.id}`, `pair=${pool.pair}`, `mode=${body?.mode ?? '?'}`];
+    if (body?.usdc         != null) parts.push(`usdc=${body.usdc}`);
+    if (body?.amount       != null) parts.push(`amount=${body.amount} ${body.tokenSymbol ?? ''}`.trim());
+    if (body?.maxA         != null) parts.push(`maxA=${body.maxA}`, `maxB=${body.maxB}`);
+    if (body?.isNew)                parts.push('new=1');
+    if (body?.swapToUsdc)           parts.push('swapToUsdc=1');
+    if (body?.sendTo)               parts.push('sendTo=gesetzt');
+    console.log(`[pools-actions] ${action} ${phase}: ${parts.join(' ')}${extra ? ' – ' + extra : ''}`);
+}
+
 /** Startet bin/export.js im Hintergrund – Antwort an Client ist bereits raus. */
 function triggerExport() {
     const proc = spawn('node', [path.join(LIQUIDITYBOT_ROOT, 'bin', 'export.js')], {
@@ -413,7 +440,7 @@ router.get('/liquidity/:poolId/deposit-gas-estimate', async (req, res) => {
         const keypairPath = readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH');
         const kp          = keypairPath ? loadKeypair(keypairPath) : null;
         if (!kp) throw new Error(t('api.poolact.keypair_missing'));
-        const conn     = new Connection(NEXUS_RPC_FRESH, 'confirmed');
+        const conn     = new Connection(NEXUS_RPC_FRESH, RPC_CONN_OPTS);
         const lamports = await conn.getBalance(new PublicKey(kp.pubkey));
         walletSolTotal = lamports / LAMPORTS_PER_SOL;
     } catch (err) {
@@ -499,8 +526,15 @@ router.post('/liquidity/:poolId/deposit', async (req, res) => {
     const built = buildCliArgs('deposit', req.body, pool.pair);
     if (built.error) return res.status(400).json({ error: built.error });
 
-    const result = await runCli('bin/deposit.js', built.args, { timeoutMs: 120_000 });
+    // 180 s statt 120 s: seit der Rest-Einzahlung (bin/deposit.js, „Residual-Sweep")
+    // können hinter dem eigentlichen Deposit noch ein Ausgleichs-Swap und ein zweites
+    // increaseLiquidity liegen. Ein Timeout würde den Prozess mitten in der Buchung
+    // abschießen — die On-Chain-TX wäre dann gelaufen, die DB-Einträge nicht.
+    logAction('angefordert', 'deposit', pool, req.body);
+    const result = await runCli('bin/deposit.js', built.args, { timeoutMs: 180_000 });
     const status = result.ok ? 200 : 409;
+    logAction(result.ok ? 'ausgeführt' : 'fehlgeschlagen', 'deposit', pool, req.body,
+        result.ok ? `tx=${result.result?.txHash ?? 'keine'}` : (result.error ?? 'ohne Fehlertext'));
     res.status(status).json(result);
 
     if (result.ok) { triggerExport(); triggerWalletMonitor(); }
@@ -513,8 +547,11 @@ router.post('/liquidity/:poolId/withdraw', async (req, res) => {
     const built = buildCliArgs('withdraw', req.body, pool.pair);
     if (built.error) return res.status(400).json({ error: built.error });
 
+    logAction('angefordert', 'withdraw', pool, req.body);
     const result = await runCli('bin/withdraw.js', built.args, { timeoutMs: 120_000 });
     const status = result.ok ? 200 : 409;
+    logAction(result.ok ? 'ausgeführt' : 'fehlgeschlagen', 'withdraw', pool, req.body,
+        result.ok ? `tx=${result.result?.txHash ?? 'keine'}` : (result.error ?? 'ohne Fehlertext'));
     res.status(status).json(result);
 
     if (result.ok) { triggerExport(); triggerWalletMonitor(); }
@@ -532,6 +569,7 @@ router.post('/liquidity/:poolId/rebalance', (req, res) => {
         return res.status(500).json({ error: t('api.poolact.flag_failed', { error: err.message }) });
     }
 
+    console.log(`[pools-actions] rebalance angefordert: pool=${pool.id} pair=${pool.pair}`);
     res.json({ ok: true, message: t('api.poolact.rebalance_queued') });
 });
 
@@ -559,12 +597,18 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
         });
     }
 
-    // Dry-Run-Gate (pool-offers.md Schritt 6): ein aus einem Pool-Offer übernommener Pool
-    // (cleanup.rankingEligible === false, siehe bots/settings/routes/pool-offers.js) darf
-    // erst Kapital erhalten, wenn pool-offers-dryrun.js einen erfolgreichen deposit.js
-    // --dry-run für ihn bestätigt hat. Ohne diese Sperre könnte „Pool aktivieren" einen
-    // technisch kaputten Deposit-Pfad (z.B. fehlendes volatilePair-Flag) erst beim ersten
-    // echten Einzahlversuch mit echtem Kapital aufdecken.
+    // Dry-Run-Gate (pool-offers.md Schritt 6): ein Pool mit gesetzter Cleanup-Sperre
+    // (cleanup.rankingEligible === false) darf erst Kapital erhalten, wenn
+    // pool-offers-dryrun.js einen erfolgreichen deposit.js --dry-run für ihn bestätigt
+    // hat. Ohne diese Sperre könnte „Pool aktivieren" einen technisch kaputten
+    // Deposit-Pfad (z.B. fehlendes volatilePair-Flag) erst beim ersten echten
+    // Einzahlversuch mit echtem Kapital aufdecken.
+    //
+    // Betrifft seit 2026-08-21 nur noch Bestandspools: der damals abgeschaffte
+    // Klick-Pfad legte diese Sperre an, der automatische Import tut es nicht mehr
+    // (Begründung in bots/liquidity/lib/pool-offer-adopt.js). Die Prüfung bleibt,
+    // solange solche Pools existieren — sie gilt für jede gesetzte Sperre, egal
+    // woher sie stammt.
     if (enabled === true) {
         const poolSettings = loadPoolSettingsEntry(pool.id);
         if (poolSettings.cleanup?.rankingEligible === false && poolSettings.dryRunGate?.status !== 'passed') {

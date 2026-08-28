@@ -61,6 +61,30 @@
       "pair": "WINGS/USDC",
       "reason": "Token-2022 (tokenA, WINGS, metadataPointer/tokenMetadata-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (WINGS = Wingbits, DePIN-Flugtracking-Token, kein Backed-Finance-Token). TVL ~332.7k USDC, Fees24h ~1654 USDC. Volumenmuster auffällig: 24h-Volumen (185.9k) macht bereits 71% des 7d-Volumens (260.3k) aus, volumeDelta 24h ≈ +204% — Indiz für Einmal-Spike statt stetiger Nachfrage, bei erneuter Prüfung gegenchecken. Aktuell keine Kapazität, den Fix umzusetzen.",
       "addedAt": "2026-08-07"
+    },
+    {
+      "address": "5KqohoeGjTjyHAFJJywK4J7fkFuK82PfMyuseGgLKZu2",
+      "pair": "SOL/USDG",
+      "reason": "Token-2022 (tokenB, USDG) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (USDG ist Global-Dollar/Paxos-Stablecoin, kein Backed-Finance-Token). Beide Blocker technischer Natur, kein struktureller Makel: Stablecoin-Pool, in schlechten Märkten als Parkmöglichkeit interessant (vgl. bereits gelistetes USDG/USDe). TVL ~3,92 Mio USDC, Fees24h ~1115 USDC. Bei Umbau-Kapazität (Token-2022-Support + Live-Fee-Unterstützung) neu bewerten.",
+      "addedAt": "2026-08-21"
+    },
+    {
+      "address": "5WrgXzWiz93g4L5XBmr3ggMybW5gfL7drNAKoQMgpDHc",
+      "pair": "TRUMP/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Fachlich interessant: TVL ~1,14 Mio USDC, Fees24h ~6025 USDC, Volumen 24h ~7,0 Mio USDC. Derselbe Token wird über liq-trump-sol (Ckp1kwZq…, statische Fee) bereits gefahren — bei gelöster Live-Fee-Unterstützung wäre dies der liquidere der beiden TRUMP-Pools.",
+      "addedAt": "2026-08-22"
+    },
+    {
+      "address": "FagzCdPjLjJ4kmeLqRa86MEhzppyzZbMxaiBEsKcRw3P",
+      "pair": "whETH/ZEC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. TVL ~233k USDC, Fees24h ~2875 USDC. Beide Tokens fahren wir bereits in anderen Pools (liq-weth-sol, liq-zec-usdc, liq-sol-zec), das Paar selbst wäre neu.",
+      "addedAt": "2026-08-22"
+    },
+    {
+      "address": "5azLWnTEGdETPwjiXb55x6MUuqpK9QQAazNqihCxtcgq",
+      "pair": "HYPE/USDC",
+      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). Zweiter Orca-Pool desselben Paares wie der Bestandspool liq-hype-usdc (DZN7rhBe…, Basis-Tier 0,65 %), hier Basis-Tier 0,16 %. Analyse 2026-08-22 (Details in liq-neuer-pool-checkliste.md): 95 % des HYPE/USDC-Volumens laufen inzwischen in diesem Pool (688k vs. 33,7k je 24h), TVL 240k vs. 48,9k — der Bestandspool liegt damit unter seinem eigenen tvlExitThreshold von 100k. Bei gelöster Live-Fee-Unterstützung ist dies der Nachfolgepool, nicht nur ein Alternativ-Tier. Hinweis: der Bestandspool ist inzwischen SELBST adaptiveFee.",
+      "addedAt": "2026-08-22"
     }
   ]
 }

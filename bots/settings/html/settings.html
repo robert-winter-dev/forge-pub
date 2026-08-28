@@ -92,6 +92,46 @@
     <div class="up-grid" style="margin-top:1rem;">
         <div class="settings-card">
             <div class="settings-card-header">
+                <span class="sch-title" data-i18n="auth.section_title">Passwortschutz</span>
+            </div>
+            <div class="settings-row" style="border:none;">
+                <span class="up-option-desc" data-i18n="auth.section_hint">Schützt diese Settings-Seite mit einem Passwort.</span>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label" data-i18n="set.status">Status</span>
+                <span class="status-badge" id="authStatusBadge">–</span>
+            </div>
+            <div class="settings-row" id="authCurrentRow" style="display:none;border:none;">
+                <span class="settings-label" data-i18n="auth.current_password">Aktuelles Passwort</span>
+                <input class="modal-input" id="authCurrentPw" type="password" autocomplete="current-password">
+            </div>
+        </div>
+
+        <div class="settings-card">
+            <div class="settings-card-header">
+                <span class="sch-title" data-i18n="auth.new_password">Neues Passwort</span>
+            </div>
+            <div class="settings-row">
+                <span class="settings-label" data-i18n="auth.new_password">Neues Passwort</span>
+                <input class="modal-input" id="authNewPw" type="password" autocomplete="new-password">
+            </div>
+            <div class="settings-row" style="border:none;">
+                <span class="settings-label" data-i18n="auth.new_password_repeat">Wiederholen</span>
+                <input class="modal-input" id="authNewPwRepeat" type="password" autocomplete="new-password">
+            </div>
+            <div class="settings-row" style="border:none;">
+                <div class="bot-actions">
+                    <button class="btn btn-restart" id="authSaveBtn" data-i18n="auth.set_password">Passwort setzen</button>
+                    <button class="btn btn-stop" id="authRemoveBtn" style="display:none;" data-i18n="auth.remove_password">Passwortschutz entfernen</button>
+                </div>
+            </div>
+            <div class="task-status" id="authFeedback"></div>
+        </div>
+    </div>
+
+    <div class="up-grid" style="margin-top:1rem;">
+        <div class="settings-card">
+            <div class="settings-card-header">
                 <span class="sch-title" data-i18n="upd.mode">Update-Modus</span>
             </div>
             <div class="up-option-row">
@@ -116,6 +156,10 @@
                 <button class="up-option-btn" id="upApplyBtn" data-i18n="upd.install">Update einspielen</button>
                 <span class="up-option-desc" data-i18n="upd.install_hint">Spielt ein geprüftes Update ein, inkl. automatischem Selbsttest.</span>
             </div>
+            <div class="up-option-row">
+                <button class="up-option-btn" id="upSelfTestBtn" data-i18n="upd.selftest">Selbsttest</button>
+                <span class="up-option-desc" data-i18n="upd.selftest_hint">Prüft, ob alle aktivierten Dienste laufen und ob die Messwerte der Positionen plausibel sind.</span>
+            </div>
         </div>
     </div>
 </main>
@@ -131,6 +175,6 @@
     </table>
 </div>
 
-<script type="module" src="js/updates.js?v=20260816a"></script>
+<script type="module" src="js/updates.js?v=20260826b"></script>
 </body>
 </html>

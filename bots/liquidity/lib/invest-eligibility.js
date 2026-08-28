@@ -28,6 +28,8 @@ import Database from 'better-sqlite3';
 import { config } from './config.js';
 import { resolveTvlThresholds } from './tvl-thresholds.js';
 import { DEFAULT_TVL_PROTECTION, DEFAULT_SCORE_LIMIT } from './settings-auto.js';
+import { POOL_SETTINGS_DEFAULTS } from '../../../lib/pool-settings-defaults.js';
+import { getOpenPosition } from './db.js';
 import { PATHS } from '../../../config/paths.js';
 
 const SETTINGS_DB = PATHS.settingsDb;
@@ -51,6 +53,30 @@ function loadPoolSettings(poolId) {
     }
 }
 
+/**
+ * Verbleibende Investitionskapazität eines Pools gegen die Max-Investment-Schwelle.
+ * `Infinity` wenn die Regel deaktiviert oder keine Schwelle gesetzt ist.
+ *
+ * Vergleichsgröße ist positions.capital_usdc (gebuchtes Kapital), nicht der
+ * Markt-Wert — siehe Begründung im maxInvestment-Kommentar in
+ * lib/pool-settings-defaults.js.
+ *
+ * @param {object} pool
+ * @param {object} db       Offene Liquidity-DB
+ * @param {object} [settings] vorgeladene Settings-Zeile (spart die Query)
+ * @returns {number} verbleibender USDC-Betrag (>= 0) oder Infinity
+ */
+export function remainingInvestCapacity(pool, db, settings = null) {
+    if (!pool) return Infinity;
+    const s = settings ?? loadPoolSettings(pool.id);
+    const cfg = s?.maxInvestment ?? POOL_SETTINGS_DEFAULTS.maxInvestment;
+    const cap = Number(cfg?.amountUsdc);
+    if (cfg?.enabled !== true || !Number.isFinite(cap) || cap <= 0) return Infinity;
+
+    const capitalUsdc = getOpenPosition(db, pool.id)?.capital_usdc ?? 0;
+    return Math.max(0, cap - capitalUsdc);
+}
+
 /** Letzter bekannter Pool-TVL aus pool_stats (0 = nie gemessen). */
 function latestTvl(db, poolId) {
     const row = db.prepare(
@@ -71,7 +97,7 @@ function latestTvl(db, poolId) {
  *        trägt den Volumen-Malus und darf keinen Exit auslösen).
  * @param {object} [opts.settings] vorgeladene Settings-Zeile (spart die Query)
  * @returns {{ok: boolean, rule: string|null, reason: string|null, detail: object}}
- *          `rule`: 'tvl' | 'tvl_unknown' | 'score_limit' — maschinenlesbar für
+ *          `rule`: 'tvl' | 'tvl_unknown' | 'score_limit' | 'max_investment' — maschinenlesbar für
  *          Dashboard und Entscheidungs-Log; `reason` ist deutscher Klartext fürs Log.
  */
 export function checkInvestEligibility(pool, db, { exitScore = null, settings = null } = {}) {
@@ -83,8 +109,8 @@ export function checkInvestEligibility(pool, db, { exitScore = null, settings = 
     const th     = resolveTvlThresholds(pool, tvlCfg);
     const tvl    = latestTvl(db, pool.id);
 
-    // Greift überhaupt eine TVL-Stufe? Nur dann ist ein fehlender Messwert relevant.
-    const tvlArmed = (th.l1.enabled && th.l1.threshold) || (th.l2.enabled && th.l2.threshold);
+    // Greift der TVL-Schutz überhaupt? Nur dann ist ein fehlender Messwert relevant.
+    const tvlArmed = th.l1.enabled && th.l1.threshold;
 
     if (tvlArmed && !(tvl > 0)) {
         // Kein Messwert. Beim Exit heißt „nicht gemessen" bewusst „nichts tun" (ein
@@ -98,15 +124,12 @@ export function checkInvestEligibility(pool, db, { exitScore = null, settings = 
         };
     }
 
-    // Tiefere Stufe zuerst melden (gravierender), gleiche Reihenfolge wie im Exit.
-    for (const [level, cfg] of [[2, th.l2], [1, th.l1]]) {
-        if (!cfg.enabled || !cfg.threshold) continue;
-        if (tvl >= cfg.threshold) continue;
+    if (th.l1.enabled && th.l1.threshold && tvl < th.l1.threshold) {
         return {
             ok: false, rule: 'tvl',
             reason: `TVL ${Math.round(tvl).toLocaleString('de-DE')} USDC unter Schutz-Schwelle `
-                  + `${Math.round(cfg.threshold).toLocaleString('de-DE')} USDC (Stufe ${level})`,
-            detail: { tvl, threshold: cfg.threshold, level },
+                  + `${Math.round(th.l1.threshold).toLocaleString('de-DE')} USDC`,
+            detail: { tvl, threshold: th.l1.threshold, level: 1 },
         };
     }
 
@@ -120,6 +143,19 @@ export function checkInvestEligibility(pool, db, { exitScore = null, settings = 
             ok: false, rule: 'score_limit',
             reason: `Exit-Score ${exitScore} unter Score-Limit ${minScore}`,
             detail: { exitScore, minScore },
+        };
+    }
+
+    // Max Investment: bei voll ausgeschöpfter Kapazität kein Invest mehr — der
+    // Teil-Invest bis zur Kante (Restkapazität < angefragter Betrag) läuft nicht
+    // hier, sondern über remainingInvestCapacity() direkt in cleanup.js/deposit.js.
+    const remaining = remainingInvestCapacity(pool, db, s);
+    if (remaining <= 0) {
+        const miCfg = s?.maxInvestment ?? POOL_SETTINGS_DEFAULTS.maxInvestment;
+        return {
+            ok: false, rule: 'max_investment',
+            reason: `Max Investment (${Math.round(Number(miCfg.amountUsdc)).toLocaleString('de-DE')} USDC) erreicht`,
+            detail: { capUsdc: Number(miCfg.amountUsdc) },
         };
     }
 
