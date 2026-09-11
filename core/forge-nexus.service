@@ -11,6 +11,10 @@ Environment=FORGE_ENV_DIR=/opt/forge/local/env
 ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
+
+# Weiche Speicherbremse (Reclaim/Throttling, kein Kill) – kein MemoryMax, siehe CORE#000463.
+MemoryHigh=256M
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=forge-nexus

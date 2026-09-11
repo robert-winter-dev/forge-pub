@@ -35,6 +35,7 @@ import lendingActionsRouter  from './routes/lending-actions.js';
 import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
+import strategyRouter from './routes/strategy.js';
 import updateRouter   from './routes/update.js';
 import authRouter     from './routes/auth.js';
 import { siteAuthGate } from './lib/site-auth.js';
@@ -94,6 +95,7 @@ app.use('/api/lending',   lendingActionsRouter);
 app.use('/api/addresses', addressesRouter);
 app.use('/api/messages',  messagesRouter);
 app.use('/api/premium',   premiumRouter);
+app.use('/api/strategy',  strategyRouter);
 app.use('/api/update',    updateRouter);
 // Master-only (Systemdaten-Freigabe) – die Route riegelt sich selbst ab, siehe dort.
 app.use('/api/health-share', healthShareRouter);

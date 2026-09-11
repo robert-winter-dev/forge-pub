@@ -18,6 +18,12 @@ RestartSec=5
 # bekommt nur der Hauptprozess das Stop-Signal, Kind-Prozesse laufen unbeeinflusst weiter.
 KillMode=process
 
+# Weiche Speicherbremse (Reclaim/Throttling, kein Kill) – kein MemoryMax, siehe CORE#000463.
+# Gilt fürs ganze Control-Group, also auch für die Kind-Prozesse aus Update-/Backup-Aktionen
+# (KillMode=process betrifft nur Signale beim Stop, nicht die Memory-Accounting-Scope) –
+# deshalb deutlich großzügiger als der reine Prozess-Speicherbedarf.
+MemoryHigh=512M
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=forge-settings-daemon

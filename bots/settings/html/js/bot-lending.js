@@ -1509,6 +1509,7 @@ function _wireSendPanel(modalEl, tokens, initialAddrs) {
                 fb.innerHTML  = tr('sb.sent_ok', '✓ Gesendet: {amount} {symbol} → {to}', { amount: _fmt(amount), symbol: _esc(symbol), to: _esc(_selectedSendAddr.name) }) + ' '
                               + `<a href="${explorerUrl}" target="_blank" rel="noopener" class="tx-link">${tr('sb.view_tx', 'TX&nbsp;ansehen&nbsp;↗')}</a>`;
                 fb.className  = 'modal-feedback ok';
+                _ctx.showToast?.(tr('sb.sent_ok_toast', 'Gesendet: {amount} {symbol} → {to}', { amount: _fmt(amount), symbol, to: _selectedSendAddr.name }), 'success');
                 if (amountInp) amountInp.value = '';
                 // Server aktualisiert wallet-monitor.db im Hintergrund automatisch
                 // (TX-Confirm + Propagierungspuffer + Monitor-Lauf, siehe

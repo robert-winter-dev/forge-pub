@@ -5,37 +5,43 @@
       "pair": "ANSEM/SOL",
       "reason": "Token-2022 (tokenB) + adaptiveFeeEnabled — beide Abbruchkriterien, kein xStock-Ausnahmemuster. Zusätzlich strukturell riskant: Pool ~3 Tage alt, TVL +36%/24h, Preis-Crash >50% in wenigen Tagen, Fee-APR-Fenster divergieren extrem (565%/205%/48%).",
       "addedAt": "2026-07-05"
+    },
+    {
+      "address": "HsK7nknVVv6E9PEuovdQG1orUKvzZnWZfSpXkLpMCy9U",
+      "pair": "WYT/USDC",
+      "reason": "Neubewertung 2026-09-08 (LIQ#0467): adaptiveFeeEnabled ist seit LIQ#0394 kein Blocker mehr, aber die Orca-API liefert für diesen Pool nur noch hasWarning:true bei tvlUsdc/stats/tokenBalance = null — der Pool ist praktisch tot oder von Orca selbst geflaggt, keine belastbaren Daten mehr für eine Bewertung. Von maybeLater auf blacklist verschoben (ursprünglich 2026-07-08 wegen adaptiveFeeEnabled zurückgestellt, damals TVL 384k USDC).",
+      "addedAt": "2026-09-08"
+    },
+    {
+      "address": "GVJ3uPdWMQto2NeC3KPcxGGZAUDGgxTWYQ519b7YKAyy",
+      "pair": "ZCAT/SOL",
+      "reason": "LIQ#0485 (2026-09-09): Token-2022 (tokenB, ZCAT/\"Anonymous Cat\" trägt zusätzlich transferFeeConfig) + adaptiveFeeEnabled — beide Abbruchkriterien, kein xStock-Ausnahmemuster (reiner Meme-Coin). hasWarning:true von Orca gesetzt; empirisch geprüft (Stichprobe aus 23 Pools, 0/15 eigene Bestandspools mit Warning) korreliert das Flag hier mit fehlender Preishistorie: 8 von 14 6h-Slots in priceHistory7d leer, Pool erst ~4 Tage alt. 24h-Volumen (800.495 USDC) macht 87,5% des gesamten 7d-Volumens aus (7d=30d-Volumen identisch) — Einmal-Spike-Muster wie bei ANSEM/SOL. Preis schwankte zuletzt zwischen 720 und 1145 (≈59% Spanne).",
+      "addedAt": "2026-09-09"
+    },
+    {
+      "address": "6ash7NazTfoeszf7UkKufy8JLTZyaJJtCdkWvsjwpb1d",
+      "pair": "STONK/SOL (0,16 %-Tier)",
+      "reason": "LIQ#0527: Duplikat-Pool zum bereits produktiven liq-stonk-sol (AfrddTGY…, 0,65 %-Tier). Kein Token-2022, kein hasWarning — aber Liquidität liegt eindeutig im Bestandspool, nicht hier (Gegenbeispiel zum HYPE/USDC-Präzedenzfall): TVL 1,79 Mio. vs. 174,8k USDC, 24h-Volumen 8,996 Mio. vs. 328,2k USDC im Kandidaten (Stand 2026-09-10). Ein Import würde Kapital in die deutlich flachere, weniger gehandelte Instanz desselben Paars lenken, keinen Zusatznutzen bringen.",
+      "addedAt": "2026-09-10"
+    },
+    {
+      "address": "AFdizLL2M716aPcV8gu4azEL3JxFpT7wWFgjVwNU3RNm",
+      "pair": "RUSH/USDC",
+      "reason": "LIQ#0534: kein Token-2022 (beide Seiten Standard-SPL), hasWarning:false — aber priceHistory7d nur 2 von 14 Slots gefuellt (Pool <1 Tag alt, 24h=7d=30d-Volumen identisch bestaetigt das) UND Preis brach in dieser kurzen Zeit von 129,67 auf 54,13 USDC ein (-58% in ~12h). Klassisches Pump-and-Dump-Muster trotz hasWarning:false — das Flag ist laut KB-Checkliste kein Freibrief, wenn andere rote Flaggen vorliegen.",
+      "addedAt": "2026-09-11"
     }
   ],
   "maybeLater": [
     {
       "address": "5p58XYzEUuvceAb4momaQ943rTPLgigdBXtJNdnZTDJ9",
       "pair": "USDG/USDe",
-      "reason": "Token-2022 (tokenA, USDG) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (USDG ist Global-Dollar/Paxos-Stablecoin, kein Backed-Finance-xStock-Token). Beide Blocker technischer Natur, kein struktureller Makel: Stablecoin-Pool, in schlechten Märkten als Parkmöglichkeit interessant. Bei Umbau-Kapazität (Token-2022-Support + Live-Fee-Unterstützung) neu bewerten.",
+      "reason": "Token-2022 (tokenA, USDG) + adaptiveFeeEnabled — beide Blocker seit 2026-09-08 technisch abgedeckt (LIQ#0394, LIQ#0276), aber Aufnahme ist eine Einzelfallentscheidung, kein Automatismus. Stablecoin-Pool, in schlechten Märkten als Parkmöglichkeit interessant, kein struktureller Makel. Noch nicht neu bewertet (frische TVL-/Fee-APR-Zahlen fehlen).",
       "addedAt": "2026-07-15"
-    },
-    {
-      "address": "Tuy6gMupGQN7wCZ8rVP1EuLRYB132VSo9Smy4AJvQgn",
-      "pair": "Fartcoin/SOL",
-      "reason": "adaptiveFeeEnabled — estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. APR/Vola-Profil sonst attraktiv (7d/30d Fee-APR ~100%, kein Spike, vgl. PUMP/SOL, HYPE/SOL). Aktuell keine Kapazität, den Fix umzusetzen.",
-      "addedAt": "2026-07-05"
-    },
-    {
-      "address": "HsK7nknVVv6E9PEuovdQG1orUKvzZnWZfSpXkLpMCy9U",
-      "pair": "WYT/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard. estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL 384k USDC, Fee-APR 24h/7d/30d ohne Spike-Muster. Aktuell keine Kapazität, den Fix umzusetzen.",
-      "addedAt": "2026-07-08"
-    },
-    {
-      "address": "ig9EkJ63zrSRg7BKMGdyfPfNRCRwxGNVV1FByz26QkC",
-      "pair": "GEOD/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL ~326k USDC, Fees24h ~7326 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
-      "addedAt": "2026-07-27"
     },
     {
       "address": "3oL8urV54Lm9ZAFemSegmQox6oEzCJ2kag6hbWKbHt6w",
       "pair": "META/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Sonst solide: TVL ~201k USDC, Fees24h ~3148 USDC. META ist MetaDAO-Governance-Token (Futarchy-Protokoll), kein RWA. Aktuell keine Kapazität, den Fix umzusetzen.",
+      "reason": "Neubewertung 2026-09-08 (LIQ#0467): adaptiveFeeEnabled ist seit LIQ#0394 kein Blocker mehr, aber TVL ist von ~201k USDC (2026-08-02) auf ~8,6k USDC eingebrochen — bei nahezu unverändertem 7d/30d-Volumen (419k/6,48 Mio. USDC) ergibt das rechnerische Fee-APR-Fenster von bis zu 4310% (30d) ein reines Artefakt der winzigen TVL, kein reales Signal. Extrem dünne Liquidität, hohe Slippage-Gefahr für LP-Kapital. Weiter zurückstellen, bei nächster Prüfung TVL-Erholung gegenchecken.",
       "addedAt": "2026-08-02"
     },
     {
@@ -51,12 +57,6 @@
       "addedAt": "2026-08-02"
     },
     {
-      "address": "VY1ZQXjqBwvuWgVfTfhqanJe96GGoQrX7xZZDrWPGiT",
-      "pair": "SKR/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. SKR = Seeker (Solana-Mobile-Phone-Token), reales Projekt, kein Meme-Coin. TVL ~362.5k USDC, Fees24h ~1150 USDC, aber Fees24h-Delta -43% und Preis-Delta 24h -19,6% — 7d-Kurshistorie zeigt Spike (0,0063→0,0094→0,0076), eher abklingender Hype als stetige Nachfrage. Aktuell keine Kapazität, den adaptiveFee-Fix umzusetzen.",
-      "addedAt": "2026-08-06"
-    },
-    {
       "address": "yXQzwv3hGxpEyaxPtbsQJdY31vjfh8E6fuVoGvYshio",
       "pair": "WINGS/USDC",
       "reason": "Token-2022 (tokenA, WINGS, metadataPointer/tokenMetadata-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (WINGS = Wingbits, DePIN-Flugtracking-Token, kein Backed-Finance-Token). TVL ~332.7k USDC, Fees24h ~1654 USDC. Volumenmuster auffällig: 24h-Volumen (185.9k) macht bereits 71% des 7d-Volumens (260.3k) aus, volumeDelta 24h ≈ +204% — Indiz für Einmal-Spike statt stetiger Nachfrage, bei erneuter Prüfung gegenchecken. Aktuell keine Kapazität, den Fix umzusetzen.",
@@ -69,22 +69,52 @@
       "addedAt": "2026-08-21"
     },
     {
-      "address": "5WrgXzWiz93g4L5XBmr3ggMybW5gfL7drNAKoQMgpDHc",
-      "pair": "TRUMP/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. Fachlich interessant: TVL ~1,14 Mio USDC, Fees24h ~6025 USDC, Volumen 24h ~7,0 Mio USDC. Derselbe Token wird über liq-trump-sol (Ckp1kwZq…, statische Fee) bereits gefahren — bei gelöster Live-Fee-Unterstützung wäre dies der liquidere der beiden TRUMP-Pools.",
-      "addedAt": "2026-08-22"
-    },
-    {
       "address": "FagzCdPjLjJ4kmeLqRa86MEhzppyzZbMxaiBEsKcRw3P",
       "pair": "whETH/ZEC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). estimate-costs.js/Range-Advisor/Economic-Scorer rechnen mit statischem feeTier, keine Live-Fee-Unterstützung. TVL ~233k USDC, Fees24h ~2875 USDC. Beide Tokens fahren wir bereits in anderen Pools (liq-weth-sol, liq-zec-usdc, liq-sol-zec), das Paar selbst wäre neu.",
+      "reason": "Neubewertung 2026-09-08 (LIQ#0467): adaptiveFeeEnabled ist seit LIQ#0394 kein Blocker mehr. Neuer Vorbehalt: Fee-APR-Fenster fallen deutlich (24h/7d/30d ≈ 14%/55%/88%) — abklingendes Interesse statt stetiger Nachfrage. TVL ~123k USDC, dünnes Volumen (24h ~10,9k, Vol/TVL 0,09). Beide Tokens fahren wir bereits in anderen Pools (liq-weth-sol, liq-zec-usdc, liq-sol-zec), das Paar selbst wäre neu. Weiter zurückstellen, bei nächster Prüfung Trendumkehr gegenchecken.",
       "addedAt": "2026-08-22"
     },
     {
-      "address": "5azLWnTEGdETPwjiXb55x6MUuqpK9QQAazNqihCxtcgq",
-      "pair": "HYPE/USDC",
-      "reason": "adaptiveFeeEnabled — einziger Blocker, Token-Programm Standard (kein Token-2022). Zweiter Orca-Pool desselben Paares wie der Bestandspool liq-hype-usdc (DZN7rhBe…, Basis-Tier 0,65 %), hier Basis-Tier 0,16 %. Analyse 2026-08-22 (Details in liq-neuer-pool-checkliste.md): 95 % des HYPE/USDC-Volumens laufen inzwischen in diesem Pool (688k vs. 33,7k je 24h), TVL 240k vs. 48,9k — der Bestandspool liegt damit unter seinem eigenen tvlExitThreshold von 100k. Bei gelöster Live-Fee-Unterstützung ist dies der Nachfolgepool, nicht nur ein Alternativ-Tier. Hinweis: der Bestandspool ist inzwischen SELBST adaptiveFee.",
-      "addedAt": "2026-08-22"
+      "address": "5H7c1wUYrE3uaEGNfaXLoR4jnUcmyNCRrhfk6oaVxFWt",
+      "pair": "LIT/SOL",
+      "reason": "Neubewertung 2026-09-08 (LIQ#0467): adaptiveFeeEnabled ist seit LIQ#0394 kein Blocker mehr. Der unabhängig davon schon am 2026-09-05 notierte Vorbehalt bestätigt sich verschärft: 24h-Volumen (~5,27 Mio. USDC) bei nur 537k USDC TVL (Vol/TVL 9,8) und 7d-Volumen ≈ 30d-Volumen (6,32 Mio. USDC beide) — praktisch der gesamte Monatsumsatz fiel in die letzten 24h, klassisches Einmal-Spike-Muster (vgl. ANSEM/SOL). Die daraus resultierende Fee-APR (3897%/629%/147%) ist keine verlässliche Grundlage. LIT (\"Lighter\", Perp-DEX) ist kein Meme-Coin, sondern ein etabliertes Projekt (>1 Mrd. USD Marktkapitalisierung) — Spike-Ursache könnte ein Listing-/Unlock-Event sein. Weiter zurückstellen, bis sich das Volumen normalisiert.",
+      "addedAt": "2026-09-05"
+    },
+    {
+      "address": "BM1KpngQa9efH9k6cDvRGatGqE95xbZdLKJHdFKcmBMC",
+      "pair": "TAO/SOL",
+      "reason": "LIQ#0485 (2026-09-09): kein Token-2022-Blocker (beide Tokens Standard-SPL), aber hasWarning:true von Orca gesetzt. Empirisch geprüft (Stichprobe aus 23 Pools) korreliert das Flag mit fehlender Preishistorie: 11 von 14 6h-Slots in priceHistory7d leer — der jüngste Pool der gesamten Stichprobe, erst ~1,5 Tage Preisdaten vorhanden. 7d-Volumen = 30d-Volumen (106.035 USDC identisch). TAO/Bittensor ist als Projekt etabliert (>1 Mrd. USD Marktkapitalisierung), aber diese konkrete Pool-Instanz hat noch keine belastbare Historie — gleiches Muster wie beim bereits zurückgestellten LIT/SOL. Bei nächster Prüfung erneut bewerten, sobald priceHistory7d vollständig ist.",
+      "addedAt": "2026-09-09"
+    },
+    {
+      "address": "AhRKZqCo3UtfyGKBWDG4Z9ZHT7mq66k89zryT2hSJC6G",
+      "pair": "NEAR/SOL",
+      "reason": "LIQ#0527: hasWarning:true, kein Token-2022 (beide Seiten Standard-SPL), adaptiveFeeEnabled:true (kein Blocker mehr seit LIQ#0394). priceHistory7d nur 5 von 14 Slots gefüllt — Pool zu jung für eine belastbare Bewertung, keine sonstige rote Flagge (24h/7d-Volumen 161,6k/194,5k skaliert plausibel, kein Einmal-Spike). TVL 210,8k USDC, Fees24h 2.733 USDC. Bei nächster Prüfung erneut ansehen, sobald priceHistory7d vollständig ist.",
+      "addedAt": "2026-09-10"
+    },
+    {
+      "address": "5mwvuSwa81XwKUmJeaQ23eH9TbcdAzrQHNJ8C1oh5Ew5",
+      "pair": "COST/USDC",
+      "reason": "LIQ#0527: Token-2022 (tokenA, COST = \"Costco Wholesale - Backpack Securities\") mit Extensions (confidentialTransferMint/metadataPointer/pausableConfig/permanentDelegate/scaledUiAmountConfig/tokenMetadata/transferHook) + adaptiveFeeEnabled — Tags aehneln stark dem bekannten xStock-Muster (Backed Finance), Emittent ist hier aber \"Backpack Securities\", ein bisher nicht bewerteter Anbieter. Zusaetzlich Pool erst ~1 Tag alt (priceHistory7d nur 2/14 Slots gefuellt, 24h=7d=30d-Volumen identisch). Wiedervorlage siehe Folgeticket (Anbieter-Recherche + neue Preishistorie).",
+      "addedAt": "2026-09-10"
+    },
+    {
+      "address": "6EVgUURuvprazVdpd717E9uqruHcqRPbhRKDm5Czdidu",
+      "pair": "BABA/USDC",
+      "reason": "LIQ#0527: identisches Muster wie COST/USDC (gleicher Emittent \"Backpack Securities\", gleiche Token-2022-Extensions, adaptiveFeeEnabled, Pool erst ~1 Tag alt mit nur 2/14 gefuellten priceHistory7d-Slots). Wiedervorlage siehe Folgeticket (Anbieter-Recherche + neue Preishistorie).",
+      "addedAt": "2026-09-10"
+    },
+    {
+      "address": "7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG",
+      "pair": "DJT/USDC",
+      "reason": "LIQ#0534: identisches Muster wie COST/USDC und BABA/USDC (2026-09-10) — Emittent \"Backpack Securities\" (DJT = Trump Media & Technology Group tokenisiert), Token-2022 mit denselben Extensions (confidentialTransferMint/metadataPointer/pausableConfig/permanentDelegate/scaledUiAmountConfig/tokenMetadata/transferHook), adaptiveFeeEnabled. Pool ~2 Tage alt (4/14 priceHistory7d-Slots gefuellt), Preis stabil (kein Crash). Kein xStock-Ausnahmemuster (nur Backed Finance ist bestätigt), Anbieter \"Backpack Securities\" weiterhin nicht recherchiert. Gleiche Wiedervorlage wie COST/BABA.",
+      "addedAt": "2026-09-11"
+    },
+    {
+      "address": "G1vH3TjRLfYebrPykMJDJ4yjrircGWsBbXUMQwtb3U5e",
+      "pair": "EDEL/SOL",
+      "reason": "LIQ#0534: kein Token-2022 (beide Seiten Standard-SPL), hasWarning:true. priceHistory7d nur 8 von 14 Slots gefuellt — Pool ~4 Tage alt, noch keine vollstaendige 7-Tage-Historie. Keine sonstige rote Flagge: Preis moderat ruecklaeufig (~11% ueber 4 Tage, kein Crash), kein Einmal-Spike-Muster im Volumen. Bei naechster Pruefung erneut ansehen, sobald priceHistory7d vollstaendig ist.",
+      "addedAt": "2026-09-11"
     }
   ]
 }

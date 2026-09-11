@@ -153,6 +153,18 @@ const _failCounts = new Map();
 const _zeroBalanceStreak = new Map();
 const ZERO_BALANCE_CONFIRM_TICKS = 2;
 
+// ─── Debounce für Reconciliation (Position wieder anlegen, LEN#0329) ─────────
+//
+// Spiegelbild des obigen Falls: Nach einem Withdraw kann dieselbe Stale-API
+// kurzzeitig noch den PRE-Withdrawal-Stand melden (dokumentiert weiter unten bei
+// "isUpwardStale"). Ohne Debounce würde ein ganz normaler, gerade erst
+// abgeschlossener Withdraw sofort wieder als "Position wieder aufgetaucht"
+// fehlinterpretiert und neu angelegt — mit dem falschen (alten) Betrag als
+// Kostenbasis. Gleiches Muster wie oben: erst nach REAPPEAR_CONFIRM_TICKS
+// aufeinanderfolgenden Reads mit Guthaben wirklich neu anlegen.
+const _reappearStreak = new Map();
+const REAPPEAR_CONFIRM_TICKS = ZERO_BALANCE_CONFIRM_TICKS;
+
 function noteFail(key, label, err, { escalateAt = 2 } = {}) {
     const fails = (_failCounts.get(key) ?? 0) + 1;
     _failCounts.set(key, fails);
@@ -654,6 +666,43 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
                 // DB-Position aktualisieren: aktueller Betrag (für Yield-Berechnung) + APY
                 const currentApy = apyMap.get(proto.name) ?? null;
                 const dbPositions = getActivePositions().filter(p => p.protocol === proto.name);
+
+                // Reconciliation (LEN#0329): Protokoll meldet Kapital, DB kennt aber keine
+                // aktive Position (z.B. weil ein manueller Re-Stake nach einem stillen
+                // Schließen den normalen Deposit-Pfad nicht durchlaufen hat, siehe
+                // Loopscale-Fall forge-pub1 09.–18.08.2026). Ohne diesen Zweig bliebe die
+                // Position dauerhaft unsichtbar in DB/Dashboard, obwohl sie in `totalValue`
+                // oben bereits mitgezählt wird. Kostenbasis = aktueller Wert (kein
+                // rückwirkender Fake-Gewinn/-Verlust) — die reale Historie davor ist nicht
+                // rekonstruierbar, siehe Rückfrage/Entscheidung 2026-09-02.
+                if (dbPositions.length === 0) {
+                    const streakKey = `reappear:${proto.name}`;
+                    const streak = (_reappearStreak.get(streakKey) ?? 0) + 1;
+                    _reappearStreak.set(streakKey, streak);
+
+                    if (streak < REAPPEAR_CONFIRM_TICKS) {
+                        log(`⚠ Position ${proto.label}: ${fmt(pos.amount)} USDC on-chain ohne aktive DB-Position – ${streak}/${REAPPEAR_CONFIRM_TICKS}, evtl. staler API-Response nach Withdraw, warte ab`);
+                    } else {
+                        // addPosition (= openPosition) kennt kein entryValue — die Kostenbasis
+                        // muss per updatePosition() auf die neu angelegte Zeile nachgezogen werden.
+                        const inserted = addPosition({
+                            protocol: proto.name,
+                            poolType: proto.poolType ?? 'lending',
+                            asset:    'USDC',
+                            amount:   pos.amount,
+                        });
+                        updatePosition(inserted.lastInsertRowid, { amount: pos.amount, currentApy, entryValue: pos.amount });
+                        _reappearStreak.delete(streakKey);
+                        log(`♻️  Position ${proto.label}: ${fmt(pos.amount)} USDC on-chain, aber keine aktive DB-Position – automatisch neu angelegt (Kostenbasis = aktueller Wert)`);
+                        await notify.positionReconciled(proto.label, fmt(pos.amount));
+                        addNotification({
+                            level: 'info', msgKey: 'notify.len.position_reconciled_short',
+                            params: { pool: proto.label, amount: fmt(pos.amount) },
+                        });
+                    }
+                } else {
+                    _reappearStreak.delete(`reappear:${proto.name}`);
+                }
 
                 for (const dbPos of dbPositions) {
                     try {

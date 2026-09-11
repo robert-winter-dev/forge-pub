@@ -495,7 +495,7 @@ async function runSelfTest() {
 }
 
 // Eigenes Modal statt window.confirm() (keine nativen Browser-Dialoge – gleiches
-// Muster wie bot-liquidity.js _confirmSavePoolType()).
+// Muster wie bot-liquidity.js _confirmSavePoolTypeRiskManagement()).
 function confirmAction({ id, title, body, confirmLabel, onConfirm }) {
     showModal({
         id, title, body,

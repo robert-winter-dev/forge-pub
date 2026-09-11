@@ -187,6 +187,55 @@ function pipeTableToHtml(block) {
         + `<tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${cls(i)}>${c}</td>`).join('')}</tr>`).join('')}</tbody>`
         + `</table>`;
 }
+
+/**
+ * Zombie-Check „Fees geschlossener Pools" (category 'zombie-check', kein msg_key —
+ * run-zombie-check.sh umgeht bewusst die JS-Notify-Fassade, siehe bots/liquidity/
+ * lib/notify.js). Eigene Darstellung statt des generischen Pipe-Tabellen-Fallbacks:
+ * der bekommt nur eine Breitenobergrenze statt der vollen .mc-risk-details-Breite
+ * wie der Tagesbericht (Vorgabe 2026-08-24, siehe CSS-Kommentar bei .mc-detail-text
+ * table.mc-table), und stripEmoji() entfernt ✅/❌ als vermeintliches Bildrauschen
+ * (Dingbats-Bereich) — hier tragen sie aber die Status-Spalte selbst. Läuft deshalb
+ * auf dem UNVERÄNDERTEN n.message, nicht auf der stripEmoji()-Ausgabe.
+ */
+function parseZombieFees(message) {
+    const table = String(message ?? '').match(/```\n([\s\S]*?)```/);
+    if (!table) return null;
+    const lines = table[1].trim().split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 3 || !lines.every(l => l.startsWith('|') && l.endsWith('|'))) return null;
+    const cells = l => l.slice(1, -1).split('|').map(c => c.trim());
+    const rows = lines.slice(2).map(cells).filter(r => r.length === 3);
+    if (!rows.length) return null;
+    const total = String(message).match(/wurden ([\d.,]+) SOL bereits geschlossener Pools abgeholt/);
+    return { rows, totalAmount: total ? total[1] : null };
+}
+
+function zombieFeesHtml(message) {
+    const parsed = parseZombieFees(message);
+    // Unbekanntes/älteres Format (z.B. eine Meldung von vor diesem Umbau) — auf den
+    // generischen Fallback zurückfallen statt eine leere Tabelle zu zeigen.
+    if (!parsed) return `<div class="mc-detail-text">${fenceToPre(esc(stripEmoji(stripNotifyHeader(message))))}</div>`;
+
+    const rowsHtml = parsed.rows.map(([pool, status, result]) => `
+        <tr>
+            <td>${esc(pool)}</td>
+            <td class="mc-center">${esc(status)}</td>
+            <td class="mc-zombie-result">${esc(result)}</td>
+        </tr>`).join('');
+
+    return `<div class="mc-risk-block">
+        <p class="mc-detail-text mc-zombie-intro">${esc(tr('msg.zombie_fees_intro', 'Folgende Fees eines oder mehrerer geschlossener Pools wurde versucht abzuholen:'))}</p>
+        <div class="mc-risk-details"><table class="mc-table mc-table-zombie-fees">
+            <thead><tr>
+                <th>${tr('msg.zombie_fees_col_pool', 'Pool')}</th>
+                <th class="mc-center">${tr('msg.zombie_fees_col_status', 'Status')}</th>
+                <th>${tr('msg.zombie_fees_col_result', 'Ergebnis')}</th>
+            </tr></thead>
+            <tbody>${rowsHtml}</tbody>
+        </table></div>
+        ${parsed.totalAmount ? `<p class="mc-detail-text">${esc(tr('msg.zombie_fees_summary', 'Im heutigen Nachtlauf wurden {total} SOL bereits geschlossener Pools abgeholt.', { total: parsed.totalAmount }))}</p>` : ''}
+    </div>`;
+}
 function shortPeer(npub) {
     return npub && npub.length > 20 ? `${npub.slice(0, 12)}…${npub.slice(-6)}` : (npub ?? '');
 }
@@ -762,6 +811,7 @@ function openSystemMessage(id) {
             ])}
             ${n.riskExit ? riskExitHtml(n.riskExit)
                 : n.dailyReport ? dailyReportHtml(n.dailyReport)
+                : n.category === 'zombie-check' ? zombieFeesHtml(n.message)
                 : `<div class="mc-detail-text">${fenceToPre(esc(stripEmoji(stripNotifyHeader(n.message))))}</div>`}
         </div>`;
 
@@ -801,7 +851,7 @@ function parseTrailingStopStage(scenario) {
     if (!scenario || !/trailing/i.test(scenario)) return null;
     const pctMatch = scenario.match(/\(([\d]+(?:[.,]\d+)?)\s*%\)/);
     if (!pctMatch) return null;
-    const stage = /(?:stufe|stage)\s*2/i.test(scenario) ? 2 : 1;
+    const stage = /(?:stufe|stage|drawdown)\s*2/i.test(scenario) ? 2 : 1;
     return { stage, pct: pctMatch[1] };
 }
 
@@ -812,8 +862,11 @@ function paneTitle(n) {
     const level = LEVEL_LABEL[n.level] ?? n.level;
     if (n.riskExit) {
         const stage = parseTrailingStopStage(n.riskExit.scenario);
+        // Trenner " > " zwischen den Ebenen (Vorgabe 2026-08-30): der Titel ist eine
+        // Kette Bereich > Mechanismus > Stufe, kein Satz mit Doppelpunkten. Das ":"
+        // nach dem Level bleibt — es trennt die Dringlichkeit vom Titel, nicht Ebenen.
         return `${level}: ${tr('msg.risk_exit_title', 'Risk-Management')}${stage
-            ? `: ${tr('msg.risk_exit_stage_title', 'Trailing Stop Stufe {stage}', { stage: stage.stage })}`
+            ? ` > ${tr('msg.risk_exit_stage_title', 'Trailing Stop > Drawdown {stage}', { stage: stage.stage })}`
             : ''}`;
     }
     if (n.dailyReport) {
@@ -827,6 +880,14 @@ function paneTitle(n) {
         const count = n.solLow.count ? ` (${n.solLow.count})` : '';
         return `${level}:  ${tr('msg.sol_low_title', 'Mindestreserve von {reserve} SOL unterschritten', { reserve })}${count}`;
     }
+    // Bewusst nicht ${level}-abhängig (anders als die Fälle oben): ob ein einzelner
+    // Pool an diesem Abend fehlschlug, ändert nichts daran, dass die Meldung als
+    // Ganzes ein reiner Informationslauf ist — kein Handlungsbedarf, jeder
+    // Fehlschlag wird automatisch am nächsten Abend wiederholt (Betreiber-Vorgabe
+    // 2026-08-29, Titel sonst je nach Ausgang "Warnung"/"Info" uneinheitlich).
+    if (n.category === 'zombie-check') {
+        return tr('msg.zombie_fees_title', 'Info:  Fees geschlossener Pools');
+    }
     return `${level}${n.pool ? ` · ${n.pool}` : ''}`;
 }
 
@@ -839,47 +900,144 @@ function riskExitTable(rows) {
 }
 
 /**
+ * Zahlen im Meldungs-Detail: deutsche Schreibweise wie überall sonst in der Oberfläche.
+ *
+ * Das Backend liefert `toFixed()`-Strings ("411.29", "-0.06%") — die standen bis
+ * 30.08.2026 unverändert in der Tabelle, direkt neben Datumsangaben im Format
+ * "30.08.2026 17:11 Uhr". Punkt und Komma in derselben Zeile; der Tagesbericht im selben
+ * Message Center formatiert längst über de-DE.
+ *
+ * @param {string|number} v         Rohwert
+ * @param {number} [min=2]          Mindest-Nachkommastellen
+ * @param {number} [max=min]        Höchst-Nachkommastellen
+ */
+function fmtNum(v, min = 2, max = min) {
+    const n = typeof v === 'number' ? v : parseFloat(String(v ?? '').replace(',', '.'));
+    if (!Number.isFinite(n)) return String(v ?? '');
+    return n.toLocaleString(NUM_LOCALE, { minimumFractionDigits: min, maximumFractionDigits: max });
+}
+
+/**
+ * Wie fmtNum(), behält aber das Pluszeichen: beim Ergebnis soll auf einen Blick sichtbar
+ * sein, ob es ein Gewinn war — ohne die Farbe lesen zu müssen (feedback_color_blindness).
+ * `unit` hängt eine Einheit mit schmalem Abstand an ("-0,06 %").
+ */
+function fmtSigned(v, unit = '') {
+    const n = parseFloat(String(v ?? '').replace(',', '.'));
+    if (!Number.isFinite(n)) return String(v ?? '');
+    return `${n >= 0 ? '+' : ''}${fmtNum(n)}${unit ? ` ${unit}` : ''}`;
+}
+
+/**
  * Eigene Darstellung für Risk-Management-Exits (n.riskExit gesetzt, siehe
  * routes/messages.js extractRiskExit() aus msg_params von notify.js rmExecuted()):
- * eigene Überschriftenstruktur statt Fließtext, damit Ergebnis und Verlauf
- * (Start → Max → Kosten → Ende) auf einen Blick auseinanderzuhalten sind — nicht
- * nur der PnL am Schluss (Vorzeichen im Text, Farbe nur als Zusatz, siehe
- * feedback_color_blindness). Layout 2026-08-25 (Vorgabe, vierte Fassung — jede
- * Trailing-Stop-Stufe einheitlich, kein Sonderfall mehr für Stufe 1 ohne
- * Gedankenstrich): Kopfzeile bleibt fest "Risk-Management" (siehe paneTitle()),
- * darunter immer das volle Szenario als Zwischenüberschrift / „Pool: …“ /
- * fett hervorgehobenes PnL-Ergebnis /
- * EINE Tabelle „Details“ (Invest Beginn/Guthaben Start/Max/Max %/Exit-Kosten/
- * Guthaben nach Exit/Ende %/Invest Ende/Laufzeit) — zwei Tabellen nebeneinander
- * sahen nicht gut aus, sind jetzt zusammengeführt. "Ende %" ist bewusst identisch
- * mit dem PnL-% oben (siehe extractRiskExit()): die Tabelle soll erklären, WIE der
- * PnL zustande kommt, darf ihm also nie widersprechen.
+ * eigene Überschriftenstruktur statt Fließtext (Vorzeichen im Text, Farbe nur als
+ * Zusatz, siehe feedback_color_blindness).
+ *
+ * Layout 2026-08-30 (Vorgabe, fünfte Fassung): <h1> „Pool: …" / Zusammenfassung als
+ * Liste (Schwelle, Laufzeit, Ergebnis) / drei Tabellen Einstieg · Maximum · Ausstieg.
+ *
+ * 🔒 Genau EINE Bezugsgröße für Geldbeträge: das eingezahlte Kapital
+ * (positions.capital_usdc), auf dem auch lib/pnl.js rechnet. Die vierte Fassung
+ * zeigte daneben positions.entry_usd als „Guthaben Start" — das ist die
+ * Trailing-Stop-Referenz, ein über Kapitalflüsse hochskalierter Verhältniswert und
+ * kein Geldbetrag. Am 30.08.2026 stand deshalb bei STONK/SOL „Start 409,04 → nach
+ * Exit 411,05" über einem PnL von −0,23 USDC (LIQ#0353). Ein- und Ausstiegskosten
+ * stehen bewusst als eigene Zeilen daneben und nicht im PnL: sie fallen vor bzw.
+ * nach dem Zeitraum an, über den lib/pnl.js rechnet.
  */
 function riskExitHtml(r) {
     const pnlClass = r.pnlUsdc == null ? '' : (r.pnlUsdc.trim().startsWith('-') ? 'msg-pnl-negative' : 'msg-pnl-positive');
-    const duration = (r.openedAtMs != null && r.exitAtMs != null) ? fmtDuration(r.exitAtMs - r.openedAtMs) : null;
+    // Laufzeit über fmtDuration() — "1 Std. 3 Min.", dieselbe Schreibweise wie im
+    // Tagesbericht (Betreiber-Entscheidung 2026-08-30 nach einem Zwischenstand mit
+    // "1H:03min": lesbarer, und sie kennt eine Tages-Stufe für lange Positionen).
+    const duration = (r.openedAtMs != null && r.exitAtMs != null)
+        ? fmtDuration(r.exitAtMs - r.openedAtMs) : null;
     // Stufe steht schon in der Kopfzeile (siehe paneTitle()) — hier nur noch der
-    // Gewinnsicherungs-Prozentwert als eigene Zwischenüberschrift. Andere Exit-Typen
-    // ohne Stufe (Mindestwert, Score-Limit) zeigen weiterhin den vollen Szenario-Text.
+    // Prozentwert der Schwelle. Andere Exit-Typen ohne Stufe (Mindestwert,
+    // Score-Limit) zeigen weiterhin den vollen Szenario-Text.
     const stage = parseTrailingStopStage(r.scenario);
-    const scenarioHeading = stage
-        ? tr('msg.risk_exit_stage_heading', 'Gewinnsicherung: {pct}%', { pct: stage.pct })
+    const scenarioLine = stage
+        ? tr('msg.risk_exit_stage_heading', 'Trailing Stop: {pct} %', { pct: fmtNum(stage.pct, 0, 2) })
         : r.scenario;
 
-    // Guthaben-Zeilen mit %-Bezug (Max, Ende) zeigen den Prozentwert in Klammern VOR
-    // dem USDC-Betrag, statt einer eigenen Zeile (Vorgabe 2026-08-24) — % ist hier
-    // die Einordnung ("wie weit über/unter Start"), der USDC-Betrag der Beleg dazu.
-    const withPct = (usdc, pct) => pct != null ? `(${esc(pct)}) ${esc(usdc)} USDC` : `${esc(usdc)} USDC`;
+    const usdc = (v) => `${esc(fmtNum(v))} USDC`;
+    // Solscan-Link im selben Stil wie die Premium-Zahlungs-TX (premiumPaymentHtml()) —
+    // volle Nachvollziehbarkeit ist hier ausdrücklich das Ziel (Betreiber-Vorgabe
+    // 2026-09-01): Einstieg, Ausstieg und die Position selbst (für die Reinvests
+    // dazwischen) sollen sich extern verifizieren lassen, ohne FORGE zu vertrauen.
+    const solscanLink = (path, label) => path
+        ? `<a href="https://solscan.io/${path}" target="_blank" rel="noopener" style="color:inherit;">${esc(label)} ↗</a>`
+        : null;
+    // Kürzer als truncateToAddressLength()s Standard (20/20, für die breite
+    // Premium-Zahlungszeile gedacht): die Einstieg-/Ausstieg-Tabelle hier ist per
+    // 50%-Fixed-Layout (.mc-risk-details) auf Handy-Breite oft nur ~140px pro Spalte
+    // breit, `white-space: nowrap` lässt Überlänge dann aus der Zelle laufen und
+    // legt sich über Nachbarelemente — Klicks trafen dadurch daneben statt den Link
+    // (gemeldet 2026-09-01).
+    const txLink = (hash) => solscanLink(`tx/${esc(hash)}`, truncateToAddressLength(hash, 6));
+    // Summe aus Ein- und Ausstiegskosten — fehlt eine Seite, zählt sie als 0 statt
+    // die Zeile ganz entfallen zu lassen (Vorgabe 2026-09-01, analog reinvestSum unten).
+    const costUsdc = (r.entryCostUsdc != null || r.exitCostUsdc != null)
+        ? parseFloat(r.entryCostUsdc ?? 0) + parseFloat(r.exitCostUsdc ?? 0)
+        : null;
+    const summary = [
+        scenarioLine && esc(scenarioLine),
+        duration != null && `${tr('msg.risk_exit_duration', 'Laufzeit')}: ${esc(duration)}`,
+        costUsdc != null && `${tr('msg.risk_exit_costs_summary', 'Kosten')}: ${usdc(costUsdc)}`,
+        r.pnlUsdc != null && `${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${pnlClass}">${tr('msg.risk_exit_pnl', 'PnL')} ${esc(fmtSigned(r.pnlUsdc))} USDC${r.pnlPct != null ? ` / ${esc(fmtSigned(r.pnlPct, '%'))}` : ''}</b>`,
+    ].filter(Boolean);
 
-    const detailsTable = riskExitTable([
-        r.openedAtMs != null && [tr('msg.risk_exit_begin',     'Invest Beginn'),      fmtDateTimeLong(r.openedAtMs)],
-        r.entryValue != null && [tr('msg.risk_exit_start',     'Guthaben Start'),     `${esc(r.entryValue)} USDC`],
-        r.hwmValue   != null && [tr('msg.risk_exit_peak',      'Guthaben Max'),       withPct(r.hwmValue, r.hwmPct)],
-        r.exitCost   != null && [tr('msg.risk_exit_cost',      'Exit-Kosten'),        `${esc(r.exitCost)} USDC`],
-        r.endValue   != null && [tr('msg.risk_exit_end_value', 'Guthaben nach Exit'), withPct(r.endValue, r.exitPct)],
-        r.exitAtMs   != null && [tr('msg.risk_exit_end_time',  'Invest Ende'),        fmtDateTimeLong(r.exitAtMs)],
-        duration     != null && [tr('msg.risk_exit_duration',  'Invest Laufzeit'),    esc(duration)],
-    ].filter(Boolean));
+    // Jede Tabelle nur, wenn sie mindestens eine belegte Zeile hat — fehlende Werte
+    // lassen ihre Zeile entfallen (Konvention 1, notify-render.js), und eine Tabelle
+    // aus lauter fehlenden Zeilen wäre eine leere Überschrift.
+    // Titel bereits übersetzt hereingeben, nicht den Key: bin/i18n-check.js findet
+    // Katalog-Keys nur als Literal am tr()-Aufruf und meldete sie sonst als unbenutzt.
+    const section = (title, rows) => {
+        const table = riskExitTable(rows.filter(Boolean));
+        return table
+            ? `<h2 class="mc-risk-h2">${esc(title)}</h2><div class="mc-risk-details">${table}</div>`
+            : '';
+    };
+
+    const entrySection = section(tr('msg.risk_exit_entry_head', 'Einstieg'), [
+        r.openedAtMs    != null && [tr('msg.risk_exit_begin',      'Einstieg Beginn'),   fmtDateTimeLong(r.openedAtMs)],
+        r.investUsdc    != null && [tr('msg.risk_exit_invest',     'Einstieg Betrag'),   usdc(r.investUsdc)],
+        r.entryCostUsdc != null && [`${tr('msg.risk_exit_entry_cost', 'Einstiegskosten')}*`, usdc(r.entryCostUsdc)],
+        r.openTx        != null && [tr('msg.tx', 'TX'), txLink(r.openTx)],
+    ]);
+    const peakSection = section(tr('msg.risk_exit_peak_head', 'Maximum'), [
+        r.hwmAtMs != null && [tr('msg.risk_exit_peak_at',    'Maximum Zeitstempel'), fmtDateTimeLong(r.hwmAtMs)],
+        r.hwmUsdc != null && [tr('msg.risk_exit_peak_value', 'Maximum Betrag (absolut)'), usdc(r.hwmUsdc)],
+        r.hwmDeltaUsdc != null && [
+            tr('msg.risk_exit_peak_delta', 'Maximum Betrag Delta'),
+            `(${esc(fmtSigned(r.hwmPct, '%'))}) ${esc(fmtSigned(r.hwmDeltaUsdc))} USDC`,
+        ],
+    ]);
+    const exitSection = section(tr('msg.risk_exit_exit_head', 'Ausstieg'), [
+        r.exitStartedAtMs != null && [tr('msg.risk_exit_exit_begin',  'Ausstieg Beginn'), fmtDateTimeLong(r.exitStartedAtMs)],
+        r.exitCostUsdc    != null && [`${tr('msg.risk_exit_exit_cost', 'Ausstiegskosten')}*`, usdc(r.exitCostUsdc)],
+        r.exitAmountUsdc  != null && [tr('msg.risk_exit_exit_amount', 'Ausstieg Betrag'), usdc(r.exitAmountUsdc)],
+        r.closeTx         != null && [tr('msg.tx', 'TX'), txLink(r.closeTx)],
+    ]);
+    // Reinvests werden bewusst nicht einzeln aufgeführt (könnten pro Position beliebig
+    // viele sein) — stattdessen die Anzahl plus ein Link zur Position selbst: Solscan
+    // zeigt dort die vollständige On-Chain-Historie (jeder Fee-Claim/Reinvest referenziert
+    // die Position als Account), ohne dass FORGE jedes Event einzeln verlinken muss.
+    // Summe nur wenn mindestens einer der beiden Werte gemessen ist — fehlt einer,
+    // zählt er als 0 statt die Zeile ganz entfallen zu lassen (Vorgabe 2026-09-01).
+    const reinvestSum = (r.reinvestUsdc != null || r.bestPoolUsdc != null)
+        ? parseFloat(r.reinvestUsdc ?? 0) + parseFloat(r.bestPoolUsdc ?? 0)
+        : null;
+    const historySection = section(tr('msg.risk_exit_history_head', 'Reinvest'), [
+        r.reinvestUsdc != null && [tr('msg.risk_exit_claim_reinvest', 'Fees Auto Compounding'), usdc(r.reinvestUsdc)],
+        r.bestPoolUsdc != null && [tr('msg.risk_exit_best_pool', 'Cleanup > Bester Pool'), usdc(r.bestPoolUsdc)],
+        reinvestSum != null && [tr('msg.risk_exit_reinvest_sum', 'Summe'), usdc(reinvestSum)],
+        (r.nftMint != null && r.reinvestCount != null) && [
+            tr('msg.risk_exit_reinvests', 'Positionen'),
+            solscanLink(`account/${esc(r.nftMint)}`, tr('msg.risk_exit_position_link', '{n} ansehen', { n: r.reinvestCount })),
+        ],
+    ]);
 
     // Alles in EINEM Wrapper-Element zurückgeben, nicht als lose Geschwister-Tags:
     // .mc-pane-body ist ein Flex-Container (display:flex; flex-direction:column) —
@@ -890,12 +1048,13 @@ function riskExitHtml(r) {
     // Umgang mit genau diesem Grenzfall). Ein einzelner Wrapper-Div ist selbst das
     // Flex-Item, alles darin läuft in normalem Blockfluss.
     return `<div class="mc-risk-block">
-        ${scenarioHeading ? `<h2 class="mc-risk-heading">${esc(scenarioHeading)}</h2>` : ''}
-        ${r.pair ? `<h2 class="mc-risk-h2">${tr('msg.risk_exit_pool', 'Pool')}: ${esc(r.pair)}</h2>` : ''}
-        ${r.pnlUsdc != null ? `
-        <p class="mc-risk-result">${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${pnlClass}">${tr('msg.risk_exit_pnl', 'PnL')}: ${esc(r.pnlUsdc)} USDC${r.pnlPct != null ? ` / ${esc(r.pnlPct)}` : ''}</b></p>` : ''}
-        ${detailsTable ? `<h2 class="mc-risk-h2">${tr('msg.risk_exit_details', 'Details')}</h2><div class="mc-risk-details">${detailsTable}</div>` : ''}
-        ${r.actionText ? `<p class="mc-detail-text mc-risk-action">${esc(r.actionText)}</p>` : ''}
+        ${r.pair ? `<h1 class="mc-risk-h1">${tr('msg.risk_exit_pool', 'Pool')}: ${esc(r.pair)}</h1>` : ''}
+        ${summary.length ? `<ul class="mc-risk-summary">${summary.map(li => `<li>${li}</li>`).join('')}</ul>` : ''}
+        ${entrySection}
+        ${historySection}
+        ${peakSection}
+        ${exitSection}
+        ${(r.entryCostUsdc != null || r.exitCostUsdc != null) ? `<p class="mc-detail-text mc-risk-footnote">${esc(tr('msg.risk_exit_cost_footnote', '* Setzt sich zusammen aus Gebühren und Kursschwankungen; bei den Einstiegskosten zusätzlich aus Kapital, das nicht eingesetzt wurde und im Wallet liegen blieb.'))}</p>` : ''}
     </div>`;
 }
 
@@ -925,7 +1084,7 @@ function dailyReportHtml(d) {
             <td class="mc-num">${esc(row.reason ?? '–')}</td>
         </tr>`).join('');
 
-    const table = rowsHtml ? `<div class="mc-risk-details"><table class="mc-table">
+    const table = rowsHtml ? `<div class="mc-risk-details"><table class="mc-table mc-table-report mc-table-report-closed">
         <thead><tr>
             <th class="mc-center">${tr('msg.daily_report_col_time',   'Zeit')}</th>
             <th class="mc-center">${tr('msg.daily_report_col_pool',   'Pool')}</th>
@@ -963,7 +1122,7 @@ function dailyReportHtml(d) {
             <li>${tr('msg.daily_report_split', '{w} im Plus, {l} im Minus', { w: d.openWinners, l: d.openLosers })}</li>
             <li>${tr('msg.risk_exit_result', 'Ergebnis')}: <b class="${signClass(d.openSumSign)}">${esc(d.openSumText ?? '–')}</b></li>
         </ul>
-        <div class="mc-risk-details"><table class="mc-table">
+        <div class="mc-risk-details"><table class="mc-table mc-table-report mc-table-report-open">
         <thead><tr>
             <th class="mc-center">${tr('msg.daily_report_col_opened',   'Eröffnet')}</th>
             <th class="mc-center">${tr('msg.daily_report_col_pool',     'Pool')}</th>
@@ -1027,7 +1186,7 @@ async function openPremiumMessage(id) {
         <div class="mc-pane-head">
             <h1 class="mc-pane-title">${esc(m.payment
                 ? tr('msg.auto_premium_pay', 'Automatische Premium Zahlung')
-                : (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis')))}</h1>
+                : (m.summary || (m.direction === 'in' ? tr('msg.message_de', 'Nachricht') : tr('msg.event', 'Ereignis'))))}</h1>
             <div class="mc-pane-actions">
                 <button type="button" class="msg-icon-btn" id="msgDeleteBtn"
                     title="${tr('msg.delete', 'Löschen')}" aria-label="${tr('msg.delete', 'Löschen')}">🗑</button>
@@ -1039,7 +1198,7 @@ async function openPremiumMessage(id) {
                 [tr('msg.to',   'An'),  toHtml],
                 [tr('msg.date', 'Datum'), esc(fmtDateTimeLong(m.timestamp))],
             ])}
-            ${m.payment ? premiumPaymentHtml(m.payment) : `<div class="mc-detail-text">${esc(stripEmoji(m.detail))}</div>`}
+            ${m.payment ? premiumPaymentHtml(m.payment) : `<div class="mc-detail-text">${fenceToPre(esc(stripEmoji(m.detail)))}</div>`}
         </div>`;
 
     elPane.querySelector('#msgDeleteBtn').addEventListener('click', () => confirmDeleteMessage({

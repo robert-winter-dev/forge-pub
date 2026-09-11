@@ -119,12 +119,19 @@ export async function ensureWalletSol(db, keypair, connection, { minSol, targetS
             const swapFee  = await getTxFee(txSignature).catch(() => null);
             const price    = getTokenPrice(token.mint);
             const usdValue = price > 0 ? amount * price : null;
+            // usd_value_in/out (LIQ#0376 Teil 2): dieselben Preis-Reads, die usdValue
+            // (Eingang) schon nutzt, plus SOL-Preis aus derselben Snapshot-Quelle für die
+            // Ausgabeseite — kein Vor-/Nach-Swap-Vergleich.
+            const solPrice    = loadSolPrice(db);
+            const usdValueOut = solPrice > 0 ? amountOut * solPrice : null;
             insertTransaction(db, {
                 poolId:   null,
                 type:     'swap',
                 amountA:  amount,
                 amountB:  amountOut,
                 usdValue,
+                usdValueIn:  usdValue,
+                usdValueOut: usdValueOut,
                 txHash:   txSignature,
                 txFeeSol: swapFee,
                 note:     `sol-topup ${token.symbol}→SOL`,

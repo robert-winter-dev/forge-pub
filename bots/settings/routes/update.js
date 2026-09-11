@@ -63,6 +63,19 @@ function releasedAt() {
     }
 }
 
+// "VersionCode: <n>"-Zeile aus derselben VERSION-Datei wie releasedAt() — dieselbe
+// Herleitung wie bin/update-check.js installedVersion(), nur hier gebraucht, um eine
+// veraltete update-status.json zu erkennen (siehe unten).
+function installedVersionCode() {
+    try {
+        const content = readFileSync(path.join(PATHS.root, 'VERSION'), 'utf8');
+        const match = content.match(/^VersionCode:\s*(\d+)/m);
+        return match ? parseInt(match[1], 10) : null;
+    } catch {
+        return null;
+    }
+}
+
 // ── GET /status ────────────────────────────────────────────────────────────────
 router.get('/status', (_req, res) => {
     const base = { releasedAt: releasedAt() };
@@ -71,6 +84,20 @@ router.get('/status', (_req, res) => {
     }
     try {
         const status = JSON.parse(readFileSync(UPDATE_STATUS_PATH, 'utf8'));
+        // update-status.json wird nur von einem "Jetzt prüfen"-Lauf (bin/update-check.js,
+        // Cron oder Button) neu geschrieben — ein `setup.sh update` selbst räumt sie nicht
+        // auf. Direkt nach einem erfolgreichen Einspielen zeigte die Settings-Seite deshalb
+        // bis zum nächsten Cron-Slot (täglich 04:15) fälschlich "veraltet" mit rotem Kreuz,
+        // obwohl bereits genau die zuvor gemeldete Version lief (Betreiber-Fund 2026-08-29:
+        // installiert 0.9.11+10/VersionCode 12, update-status.json meldete noch
+        // latestVersionCode 12 als "verfügbar" — derselbe Code-Stand, nur vor dem Einspielen
+        // geschrieben). Hier deshalb bei jedem Abruf gegen den TATSÄCHLICH installierten
+        // Stand gegenprüfen, nicht blind der Datei vertrauen — exakt dieselbe Bedingung wie
+        // der clearUpdateStatus()-Zweig in bin/update-check.js (`versionCode <= installed`).
+        const installedCode = installedVersionCode();
+        if (installedCode !== null && Number.isFinite(status.latestVersionCode) && status.latestVersionCode <= installedCode) {
+            return res.json({ ...base, available: false });
+        }
         res.json({ ...base, available: true, ...status });
     } catch (err) {
         res.status(500).json({ ...base, available: false, error: err.message });
@@ -93,12 +120,12 @@ router.get('/result', (_req, res) => {
 // ── GET/POST /policy ─────────────────────────────────────────────────────────────
 router.get('/policy', (_req, res) => {
     if (!existsSync(POLICY_PATH)) {
-        return res.json({ autoApplyPatch: false });
+        return res.json({ autoApplyPatch: true });
     }
     try {
         res.json(JSON.parse(readFileSync(POLICY_PATH, 'utf8')));
     } catch {
-        res.json({ autoApplyPatch: false });
+        res.json({ autoApplyPatch: true });
     }
 });
 

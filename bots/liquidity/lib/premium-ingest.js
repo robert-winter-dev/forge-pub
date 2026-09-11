@@ -25,6 +25,7 @@ import { decryptBlob } from '../../../lib/premium-blob.js';
 import { insertPoolScoreHistory } from './db.js';
 import { DELIVERED_SCORES_PATH } from './invest-score-provider.js';
 import { writePoolOffers, loadPoolOffers } from './premium-offers-store.js';
+import { writeTsAdvice, TS_ADVICE_PATH } from './premium-ts-advice-store.js';
 import { PATHS } from '../../../config/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -149,6 +150,7 @@ function writeJsonAtomic(filePath, data) {
  * @param {string} [opts.deliveredScoresPath] - Default: DELIVERED_SCORES_PATH (die echte
  *   Naht aus invest-score-provider.js); überschreibbar für Tests.
  * @param {string} [opts.poolOffersPath] - Default: bots/liquidity/data/premium/pool-offers.json
+ * @param {string} [opts.tsAdvicePath]   - Default: bots/liquidity/data/premium/trailing-stop-advice.json
  *   (reine Ablage, siehe Kommentar unten); überschreibbar für Tests.
  * @returns {{ ingested: boolean, reason?: string, rows?: number, coveredPools?: string[], scoresWritten?: boolean, poolOffersWritten?: boolean }}
  */
@@ -156,6 +158,7 @@ export function ingestBlob(db, data, {
     scoresJsonPath = PATHS.liquidityScores,
     deliveredScoresPath = DELIVERED_SCORES_PATH,
     poolOffersPath = path.join(PATHS.liquidityData, 'premium', 'pool-offers.json'),
+    tsAdvicePath   = TS_ADVICE_PATH,
 } = {}) {
     const lastSequence = getLastSequence(db);
     const check = validateEnvelope(data, lastSequence);
@@ -243,7 +246,18 @@ export function ingestBlob(db, data, {
         poolOffersWritten = true;
     }
 
-    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], scoresWritten, poolOffersWritten };
+    // Trailing-Stop-Empfehlungen (LIQ#0351) — DER INGEST LEGT NUR AB. Wirksam werden sie
+    // erst über die Auto-Checkbox des Nutzers (`trailingStop.auto`) und auch dann nur,
+    // solange die Lieferung frisch ist (lib/ts-advice-provider.js). Drawdown-Werte lösen
+    // Exits aus, gehören also in dieselbe Klasse wie poolOffers: Ablage hier, Wirkung
+    // hinter einem eigenen Gate in einem eigenen Modul.
+    let tsAdviceWritten = false;
+    if (data.trailingStopAdvice) {
+        writeTsAdvice(data.trailingStopAdvice, data.trailingStopAdviceMeta ?? null, data.generatedAt, tsAdvicePath);
+        tsAdviceWritten = true;
+    }
+
+    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], scoresWritten, poolOffersWritten, tsAdviceWritten };
 }
 
 /**
@@ -278,9 +292,10 @@ export async function selfTest() {
     const scoresJsonPath = path.join(tmpdir(), `premium-ingest-selftest-${randomBytes(4).toString('hex')}.json`);
     const deliveredScoresPath = path.join(tmpdir(), `premium-ingest-selftest-delivered-${randomBytes(4).toString('hex')}.json`);
     const poolOffersPath = path.join(tmpdir(), `premium-ingest-selftest-offers-${randomBytes(4).toString('hex')}.json`);
+    const tsAdvicePath   = path.join(tmpdir(), `premium-ingest-selftest-tsadvice-${randomBytes(4).toString('hex')}.json`);
     const failures = [];
 
-    const sampleBlob = (sequence, ageMs = 0, withScores = false, withScoreHistory = false, withPoolOffers = false) => ({
+    const sampleBlob = (sequence, ageMs = 0, withScores = false, withScoreHistory = false, withPoolOffers = false, withTsAdvice = false) => ({
         schemaVersion: 1,
         generatedAt: new Date(Date.now() - ageMs).toISOString(),
         sequence,
@@ -311,18 +326,27 @@ export async function selfTest() {
                 lifecycle: { status: 'active', reason: null } }],
             poolOffersMeta: { generatedAt: new Date(Date.now() - ageMs).toISOString(), sequence, complete: true, count: 1 },
         } : {}),
+        ...(withTsAdvice ? {
+            trailingStopAdvice: {
+                pools:     { 'liq-sol-usdc': { thresholdPct: 2, thresholdPct2: 1, episodes: 30, reason: 'test' } },
+                poolTypes: { volatil_2:      { thresholdPct: 3, thresholdPct2: 2, episodes: 55, reason: 'test' } },
+            },
+            trailingStopAdviceMeta: { generatedAt: new Date(Date.now() - ageMs).toISOString(), sequence, computedTs: Date.now() - ageMs },
+        } : {}),
     });
 
     let db;
     try {
         db = openDatabase(dbPath);
 
-        const r1 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredScoresPath, poolOffersPath });
+        const r1 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredScoresPath, poolOffersPath, tsAdvicePath });
         if (!r1.ingested || r1.rows !== 1) failures.push(`erster Ingest fehlgeschlagen: ${JSON.stringify(r1)}`);
         if (r1.scoresWritten) failures.push('scoresWritten war true, obwohl der Blob keine scores enthielt');
         if (fs.existsSync(deliveredScoresPath)) failures.push('scores.json wurde ohne scores-Feld im Blob angelegt');
         if (r1.poolOffersWritten) failures.push('poolOffersWritten war true, obwohl der Blob keine poolOffers enthielt');
         if (fs.existsSync(poolOffersPath)) failures.push('pool-offers.json wurde ohne poolOffers-Feld im Blob angelegt');
+        if (r1.tsAdviceWritten) failures.push('tsAdviceWritten war true, obwohl der Blob keine trailingStopAdvice enthielt');
+        if (fs.existsSync(tsAdvicePath)) failures.push('trailing-stop-advice.json wurde ohne trailingStopAdvice-Feld im Blob angelegt');
 
         const rowCount1 = db.prepare(`SELECT COUNT(*) AS n FROM pool_score_history`).get().n;
         if (rowCount1 !== 1) failures.push(`erwartete 1 Zeile in pool_score_history, gefunden ${rowCount1}`);
@@ -338,11 +362,24 @@ export async function selfTest() {
         // Neuere Sequenz, frisch, MIT scores + scoreHistory + poolOffers → muss durchgehen,
         // scores.json schreiben, eine zusätzliche pool_score_history-Zeile anlegen UND
         // pool-offers.json als reine Ablage schreiben (keine DB-/pools.json-Wirkung).
-        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true), { scoresJsonPath, deliveredScoresPath, poolOffersPath });
+        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredScoresPath, poolOffersPath, tsAdvicePath });
         if (!r4.ingested) failures.push(`gültiger Folge-Ingest wurde abgelehnt: ${r4.reason}`);
         if (!r4.scoresWritten) failures.push('scoresWritten war false, obwohl der Blob scores enthielt');
         if (r4.scoreHistoryRows !== 1) failures.push(`erwartete 1 scoreHistoryRows, bekam ${r4.scoreHistoryRows}`);
         if (!r4.poolOffersWritten) failures.push('poolOffersWritten war false, obwohl der Blob poolOffers enthielt');
+        if (!r4.tsAdviceWritten) failures.push('tsAdviceWritten war false, obwohl der Blob trailingStopAdvice enthielt');
+        if (!fs.existsSync(tsAdvicePath)) {
+            failures.push('trailing-stop-advice.json wurde trotz trailingStopAdvice im Blob nicht geschrieben');
+        } else {
+            const adv = JSON.parse(fs.readFileSync(tsAdvicePath, 'utf8'));
+            if (adv.pools?.['liq-sol-usdc']?.thresholdPct !== 2) {
+                failures.push('gelieferte Pool-Empfehlung kam nicht unverändert in der Ablage an');
+            }
+            if (adv.poolTypes?.volatil_2?.thresholdPct2 !== 2) {
+                failures.push('gelieferte Pool-Typ-Empfehlung kam nicht unverändert in der Ablage an');
+            }
+            if (!adv.generatedAt) failures.push('generatedAt fehlt in der Ablage — der Provider könnte das Alter nicht prüfen');
+        }
         if (!fs.existsSync(poolOffersPath)) {
             failures.push('pool-offers.json wurde trotz poolOffers-Feld im Blob nicht geschrieben');
         } else {
@@ -384,6 +421,7 @@ export async function selfTest() {
         fs.rmSync(scoresJsonPath, { force: true });
         fs.rmSync(deliveredScoresPath, { force: true });
         fs.rmSync(poolOffersPath, { force: true });
+        fs.rmSync(tsAdvicePath, { force: true });
         for (const suffix of ['-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
     }
 

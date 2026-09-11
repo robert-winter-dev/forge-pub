@@ -53,8 +53,22 @@ archive_current_code() {
     fi
     mkdir -p "$dir"
     say "$(t DEPLOY_ARCHIVE_SAVING "$code" "$dir/app.tgz")"
-    tar czf "$dir/app.tgz" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")" --exclude=node_modules 2>/dev/null \
-        || tar czf "$dir/app.tgz" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")"
+    # Exit-Code 1 bei GNU tar heißt nur "Datei hat sich während des
+    # Archivierens geändert" (aktiv schreibender Bot) — Archiv ist trotzdem
+    # vollständig, siehe do_backup() oben für den identischen Fund. Der
+    # zweite tar-Aufruf (ohne --exclude) ist der Fallback für den Fall, dass
+    # --exclude selbst fehlschlägt (z.B. sehr alte tar-Version), nicht für
+    # den Schreibkollisions-Fall — sonst würde bei anhaltend aktivem Bot der
+    # zweite, teurere Lauf (inkl. node_modules) ebenfalls an derselben
+    # Kollision scheitern.
+    local rc=0
+    tar czf "$dir/app.tgz" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")" --exclude=node_modules 2>/dev/null || rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+        rc=0
+        tar czf "$dir/app.tgz" -C "$(dirname "$APP_DIR")" "$(basename "$APP_DIR")" || rc=$?
+    fi
+    [[ "$rc" -le 1 ]] || die "$(t DEPLOY_BACKUP_TAR_FAILED "$rc")"
+    [[ "$rc" -eq 1 ]] && c_warn "$(t DEPLOY_BACKUP_TAR_CHANGED_WARN)"
     chmod 600 "$dir/app.tgz"
     c_ok "$(t DEPLOY_ARCHIVE_CREATED "$dir/app.tgz" "$(du -h "$dir/app.tgz" | cut -f1)")"
 
@@ -135,7 +149,18 @@ do_backup() {
     } > "$stamp"
 
     say "$(t DEPLOY_BACKUP_SAVING "$file")"
-    tar czf "$file" -C "$BASE_DIR" local
+    # Exit-Code 1 bei GNU tar heißt laut Doku nur "Datei hat sich während des
+    # Archivierens geändert" (z.B. ein Bot schreibt gerade in seine SQLite-DB
+    # unter local/data/) — das Archiv ist trotzdem vollständig, nur die
+    # betroffene Datei spiegelt evtl. nicht den allerletzten Stand. Unter
+    # set -e würde das sonst das gesamte Update-Script abbrechen (beobachtet
+    # 2026-08-31, Rollout auf forge-pub1, v0.9.11+75). Exit-Code 2+ bleibt ein
+    # echter Fatal Error und bricht weiterhin ab.
+    tar czf "$file" -C "$BASE_DIR" local || {
+        local rc=$?
+        [[ "$rc" -eq 1 ]] || die "$(t DEPLOY_BACKUP_TAR_FAILED "$rc")"
+        c_warn "$(t DEPLOY_BACKUP_TAR_CHANGED_WARN)"
+    }
     chmod 600 "$file"
     rm -f "$stamp"
     c_ok "$(t DEPLOY_BACKUP_CREATED "$file" "$(du -h "$file" | cut -f1)")"

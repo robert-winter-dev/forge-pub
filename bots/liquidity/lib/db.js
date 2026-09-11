@@ -136,6 +136,7 @@ function initSchema(db) {
             fees_claimed_b        REAL    NOT NULL DEFAULT 0,
             lp_value_before_usdc  REAL,              -- LP-Wert unmittelbar VOR closePosition()
             lp_value_after_usdc   REAL,              -- deployedUsdc nach openPosition() + Reconcile
+            leftover_usdc         REAL,              -- freigesetztes Kapital, das NICHT reinvestiert wurde (liegt im Wallet)
             rebalanced_at         INTEGER NOT NULL   -- Unix-Timestamp (ms)
         );
 
@@ -163,7 +164,15 @@ function initSchema(db) {
             tx_hash         TEXT,
             tx_fee_sol      REAL,                    -- Solana TX-Fee in SOL
             note            TEXT,
-            created_at      INTEGER NOT NULL         -- Unix-Timestamp (ms)
+            created_at      INTEGER NOT NULL,        -- Unix-Timestamp (ms)
+            -- usd_value_in/usd_value_out (LIQ#0376 Teil 2, nur type='swap'): Eingangs-/
+            -- Ausgangswert EINES Swap-Legs, beide aus demselben Preis-Read. usd_value
+            -- meint bei 'swap' NICHT durchgehend dasselbe — mal die Eingabe-, mal die
+            -- Ausgabeseite (je nachdem, welche Seite zufällig USDC ist), siehe
+            -- insertTransaction()-Kopfkommentar. usd_value bleibt deshalb unverändert;
+            -- die neuen Spalten sind eigenständig und redundanzfrei. Bei Altzeilen NULL.
+            usd_value_in    REAL,
+            usd_value_out   REAL
         );
 
         -- Dashboard-Alerts (für Browser-Benachrichtigungen)
@@ -449,6 +458,56 @@ function initSchema(db) {
     `);
 }
 
+/**
+ * Tabellen des Trailing-Stop-Advisors (Ticket LIQ#0351).
+ *
+ * `ts_advisor_episodes` hält je abgeschlossener Position die verdichtete Wertreihe. Sie wird
+ * EINMAL geschrieben und nie neu berechnet: Die feinste Quelle (`ts_fast_checks`, 30-s-Takt)
+ * wird nach 14 Tagen gelöscht, `position_snapshots_archive` ist mit ~5 Min deutlich gröber.
+ * Ohne diese Festschreibung verlöre der Advisor seine beste Datenquelle laufend wieder.
+ * Gespeichert wird die Wertreihe, nicht das Ergebnis eines Schwellenrasters: Ein späteres,
+ * anderes Raster kann dieselbe Historie so erneut auswerten.
+ *
+ * Steht hier statt im Advisor-Modul, weil in FORGE alles Schema über migrateSchema() läuft
+ * (Konvention aus CLAUDE.md) — und weil ein Import aus dem Advisor hierher zirkulär wäre.
+ */
+export function ensureTsAdvisorTables(db) {
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS ts_advisor_episodes (
+            position_id  INTEGER PRIMARY KEY,
+            pool_id      TEXT    NOT NULL,
+            pool_type    TEXT,
+            opened_at    INTEGER NOT NULL,
+            closed_at    INTEGER NOT NULL,
+            source       TEXT    NOT NULL,   -- 'fast' (30 s) | 'snapshot' (~5 min)
+            point_count  INTEGER NOT NULL,
+            entry_usd    REAL,
+            peak_usd     REAL,
+            series_json  TEXT    NOT NULL,   -- [[tRelMs, valueUsd], ...]
+            flows_json   TEXT    NOT NULL,   -- [[tRelMs, usdcAmount], ...]
+            captured_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tsae_pool ON ts_advisor_episodes (pool_id);
+        CREATE INDEX IF NOT EXISTS idx_tsae_type ON ts_advisor_episodes (pool_type);
+
+        CREATE TABLE IF NOT EXISTS ts_advisor_log (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            computed_at    INTEGER NOT NULL,
+            scope_kind     TEXT    NOT NULL,   -- 'pool' | 'pool_type'
+            scope_id       TEXT    NOT NULL,
+            episodes       INTEGER NOT NULL,
+            threshold_pct  REAL,               -- NULL = keine belastbare Empfehlung
+            threshold_pct2 REAL,
+            baseline_pct   REAL,
+            baseline_pct2  REAL,
+            capture_gain   REAL,               -- Prozentpunkte gegenüber Vergleichswert
+            usd_gain       REAL,
+            reason         TEXT    NOT NULL    -- Begründung, auch bei "keine Empfehlung"
+        );
+        CREATE INDEX IF NOT EXISTS idx_tsal_scope ON ts_advisor_log (scope_kind, scope_id, computed_at DESC);
+    `);
+}
+
 /** Inkrementelle Schema-Migrationen für bestehende DBs. */
 function migrateSchema(db) {
     // Wertreihen-Archiv (2026-08-22, Ticket #0313). `clearPositionSnapshots()` löschte die
@@ -486,6 +545,18 @@ function migrateSchema(db) {
     const txCols = db.prepare(`PRAGMA table_info(transactions)`).all().map(c => c.name);
     if (!txCols.includes('tx_fee_sol')) {
         db.exec(`ALTER TABLE transactions ADD COLUMN tx_fee_sol REAL`);
+    }
+
+    // usd_value_in/usd_value_out (2026-09-04, LIQ#0376 Teil 2): Eingangs-/Ausgangswert
+    // eines Swap-Legs, beide aus demselben Preis-Read — siehe Schema-Kommentar oben und
+    // insertTransaction(). Altzeilen bleiben NULL, rückwirkend nicht rekonstruierbar.
+    if (!txCols.includes('usd_value_in')) {
+        db.exec(`ALTER TABLE transactions ADD COLUMN usd_value_in REAL`);
+        console.log('[db] Migration: transactions.usd_value_in hinzugefügt.');
+    }
+    if (!txCols.includes('usd_value_out')) {
+        db.exec(`ALTER TABLE transactions ADD COLUMN usd_value_out REAL`);
+        console.log('[db] Migration: transactions.usd_value_out hinzugefügt.');
     }
 
     // Invest-Guard (2026-08-20): Kandidaten, die TVL-Schutz/Score-Limit vor dem Sortieren
@@ -662,6 +733,12 @@ function migrateSchema(db) {
         db.exec(`ALTER TABLE rebalance_history ADD COLUMN lp_value_after_usdc REAL`);
         console.log('[db] Migration: rebalance_history.lp_value_after_usdc hinzugefügt.');
     }
+    // leftover_usdc: nicht reinvestiertes Kapital je Rebalance (LIQ#000558) — vor dieser
+    // Migration ging der Wert nur transient ins Log/die Notification, nie in die DB.
+    if (!rhCols.includes('leftover_usdc')) {
+        db.exec(`ALTER TABLE rebalance_history ADD COLUMN leftover_usdc REAL`);
+        console.log('[db] Migration: rebalance_history.leftover_usdc hinzugefügt.');
+    }
 
     // positions.hwm_usd / hwm_at — Trailing-Stop High-Water-Mark (pro offene Position)
     // pools: dynamische Betriebsfelder (Single Source of Truth = DB, nicht mehr pools.json).
@@ -696,6 +773,15 @@ function migrateSchema(db) {
     if (!poolCols.includes('pool_type')) {
         db.exec(`ALTER TABLE pools ADD COLUMN pool_type TEXT`);
         console.log('[db] Migration: pools.pool_type hinzugefügt.');
+    }
+    // notified_new_pool_at: Kante für die "neuer Pool verfügbar"-Premium-Nachricht
+    // (bin/notify-new-pool.js) — NULL heißt "noch nicht gemeldet". Beim Hinzufügen der
+    // Spalte werden ALLE bestehenden Pools sofort auf `now` gesetzt, sonst würde der
+    // erste Lauf nach dem Rollout die komplette Bestandsliste als "neu" verschicken.
+    if (!poolCols.includes('notified_new_pool_at')) {
+        db.exec(`ALTER TABLE pools ADD COLUMN notified_new_pool_at INTEGER`);
+        db.prepare(`UPDATE pools SET notified_new_pool_at = ? WHERE notified_new_pool_at IS NULL`).run(Date.now());
+        console.log('[db] Migration: pools.notified_new_pool_at hinzugefügt (Bestand rückwirkend als gemeldet markiert).');
     }
 
     const posCols = db.prepare(`PRAGMA table_info(positions)`).all().map(c => c.name);
@@ -734,6 +820,17 @@ function migrateSchema(db) {
     if (!posCols.includes('entry_flow_ratio')) {
         db.exec(`ALTER TABLE positions ADD COLUMN entry_flow_ratio REAL`);
         console.log('[db] Migration: positions.entry_flow_ratio hinzugefügt.');
+    }
+    // entry_cost_usdc — was der EINSTIEG selbst gekostet hat: Swap-Slippage, Protokoll-
+    // Gebühren, TX-Fees und der Rest, der nicht in die Position wanderte. Gemessen als
+    // (Wert der eingesetzten Mittel VOR dem Umtausch) − (tatsächlich eingezahltes Kapital),
+    // additiv über Nachlagen. Ausschließlich Anzeige: der PnL beginnt laut lib/pnl.js beim
+    // eingezahlten Kapital, diese Kosten liegen davor. NULL = nicht gemessen (Altbestand
+    // und alle Pfade, die den Bruttoeinsatz nicht kennen) — die Meldung lässt die Zeile
+    // dann weg, statt eine 0 zu behaupten (Konvention 1, notify-render.js).
+    if (!posCols.includes('entry_cost_usdc')) {
+        db.exec(`ALTER TABLE positions ADD COLUMN entry_cost_usdc REAL`);
+        console.log('[db] Migration: positions.entry_cost_usdc hinzugefügt.');
     }
     // d2_armed_at — Zeitpunkt, zu dem Stufe 2 scharf wurde. Ratchet: einmal gesetzt,
     // bleibt es für die Lebensdauer der Position stehen. Ein Zurückfallen auf die weite
@@ -893,6 +990,8 @@ function migrateSchema(db) {
         );
         CREATE INDEX IF NOT EXISTS idx_ts_fast_checks_pool_time ON ts_fast_checks (pool_id, checked_at);
     `);
+
+    ensureTsAdvisorTables(db);
 
     // tvl_executions: TVL-Schutz State-Machine (zweistufig, pro Position pro Stufe)
     if (!tables.includes('tvl_executions')) {
@@ -1677,6 +1776,33 @@ export function getOpenPosition(db, poolId) {
 }
 
 /**
+ * Die Position, zu der eine Exit-Ausführung gehört — auch wenn sie bereits geschlossen ist.
+ *
+ * 🔒 Warum das nötig ist: `getOpenPosition()` liefert beim WIEDERANLAUF nichts mehr. Ein
+ * Resume ab Step 'withdrawn' setzt genau dort an, wo die Position schon geschlossen wurde;
+ * die Abschlussmeldung stand dadurch ohne Kapital, ohne Höchststand und ohne PnL da
+ * (NATIX/USDC, 30.08.2026, Meldung 7804: „Invest: undefined, PnL: undefined").
+ *
+ * Bewusst zeitlich verankert und nicht einfach „die letzte geschlossene Position": Zwischen
+ * Auslösung und Wiederanlauf kann der Cleanup längst eine neue Position eröffnet und wieder
+ * geschlossen haben. Gesucht ist die, die zum Zeitpunkt der Auslösung offen war.
+ *
+ * @param {Database} db
+ * @param {string}   poolId
+ * @param {number}   triggeredAt  ts_executions.triggered_at
+ */
+export function getPositionForExit(db, poolId, triggeredAt) {
+    const open = getOpenPosition(db, poolId);
+    if (open) return open;
+    if (!Number.isFinite(triggeredAt)) return null;
+    return db.prepare(`
+        SELECT * FROM positions
+         WHERE pool_id = ? AND opened_at <= ? AND closed_at IS NOT NULL AND closed_at >= ?
+         ORDER BY closed_at ASC LIMIT 1
+    `).get(poolId, triggeredAt, triggeredAt) ?? null;
+}
+
+/**
  * Speichert eine neue Position nach dem Öffnen.
  * @param {Database} db
  * @param {Object}   pos
@@ -1704,6 +1830,22 @@ export function insertPosition(db, pos) {
  */
 export function updatePositionCapital(db, positionId, capitalUsdc) {
     db.prepare(`UPDATE positions SET capital_usdc = ? WHERE id = ?`).run(capitalUsdc, positionId);
+}
+
+/**
+ * Addiert die gemessenen Einstiegskosten einer Position (Swap-Slippage, Gebühren,
+ * nicht eingezahlter Rest). Additiv, weil eine Position über Nachlagen mehrfach
+ * befüllt wird und jede Befüllung eigene Kosten hat.
+ *
+ * Nur positive, endliche Werte werden gebucht: ein negativer Wert hieße, aus dem
+ * Einstieg wäre mehr Kapital geworden als eingesetzt — das ist ein Messfehler
+ * (veralteter Preis auf einer der beiden Seiten), keine Ersparnis.
+ */
+export function addPositionEntryCost(db, positionId, costUsdc) {
+    if (!Number.isFinite(costUsdc) || costUsdc <= 0) return;
+    db.prepare(
+        `UPDATE positions SET entry_cost_usdc = COALESCE(entry_cost_usdc, 0) + ? WHERE id = ?`
+    ).run(costUsdc, positionId);
 }
 
 /**
@@ -1740,6 +1882,52 @@ export function updatePositionHodl(db, positionId, deltaA, deltaB) {
 export function closePosition(db, positionId, closeTx) {
     db.prepare(`UPDATE positions SET closed_at = ?, close_tx = ? WHERE id = ?`)
       .run(Date.now(), closeTx, positionId);
+}
+
+/**
+ * Zählt Reinvest-Events (Fee-Claim → increaseLiquidity) im Zeitraum einer Position —
+ * für die Risk-Management-Abschlussmeldung (Message Center: "Reinvests (N)" mit Link
+ * zur Position auf dem Explorer, statt jedes einzelne Event in der Meldung aufzulisten).
+ * `transactions` hat keine `position_id`-Spalte, deshalb Abgrenzung über pool_id + Zeitfenster.
+ */
+export function countReinvestEvents(db, poolId, fromMs, toMs) {
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return 0;
+    const row = db.prepare(`
+        SELECT COUNT(*) AS n FROM transactions
+         WHERE pool_id = ? AND type IN ('reinvest', 'claim') AND created_at BETWEEN ? AND ?
+    `).get(poolId, fromMs, toMs);
+    return row?.n ?? 0;
+}
+
+/**
+ * Summiert transactions.usd_value im Zeitraum einer Position, optional gefiltert
+ * auf `type` und/oder einen `note`-Präfix — für die zwei Verlauf-Zeilen der
+ * Risk-Management-Abschlussmeldung ("Claim / Reinvest" und "Cleanup > Bester
+ * Pool", Vorgabe 2026-09-01):
+ *   - Claim/Reinvest:   { types: ['reinvest'] } — nur direkt in DIESE Position
+ *     zurückgeflossene Fees (increaseLiquidity), nicht `type='claim'` allein,
+ *     sonst zählt ein später per Cleanup reinvestierter Claim doppelt.
+ *   - Cleanup > Bester Pool: { types: ['deposit', 'open_position'], notePrefix:
+ *     'cleanup' } — was der Cleanup-Lauf ("Bester Pool"-Logik) in DIESE Position
+ *     eingezahlt hat. Woher das Kapital stammt, ist in `transactions` nicht
+ *     verknüpft (keine Quell-Pool-Spalte) — bewusst nicht versucht.
+ * `usd_value` ist nicht bei jeder Zeile gesetzt (z.B. Cleanup-Swaps ohne
+ * USDC-Referenz) — SUM() über NULL ist in SQLite ohnehin lückentolerant.
+ */
+export function sumTransactionUsdValue(db, poolId, fromMs, toMs, { types = null, notePrefix = null } = {}) {
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+    const conditions = ['pool_id = ?', 'created_at BETWEEN ? AND ?'];
+    const params = [poolId, fromMs, toMs];
+    if (types?.length) {
+        conditions.push(`type IN (${types.map(() => '?').join(',')})`);
+        params.push(...types);
+    }
+    if (notePrefix) {
+        conditions.push('note LIKE ?');
+        params.push(`${notePrefix}%`);
+    }
+    const row = db.prepare(`SELECT SUM(usd_value) AS s FROM transactions WHERE ${conditions.join(' AND ')}`).get(...params);
+    return row?.s ?? null;
 }
 
 /**
@@ -1866,15 +2054,16 @@ export function insertRebalanceHistory(db, event) {
             (pool_id, reason, old_position_id, new_position_id,
              old_tick_lower, old_tick_upper, new_tick_lower, new_tick_upper,
              price_at_event, cost_sol, fees_claimed_a, fees_claimed_b,
-             lp_value_before_usdc, lp_value_after_usdc, rebalanced_at)
+             lp_value_before_usdc, lp_value_after_usdc, leftover_usdc, rebalanced_at)
         VALUES
             (@poolId, @reason, @oldPositionId, @newPositionId,
              @oldTickLower, @oldTickUpper, @newTickLower, @newTickUpper,
              @priceAtEvent, @costSol, @feesClaimedA, @feesClaimedB,
-             @lpValueBefore, @lpValueAfter, @rebalancedAt)
+             @lpValueBefore, @lpValueAfter, @leftoverUsdc, @rebalancedAt)
     `).run({
         lpValueBefore: null,
         lpValueAfter:  null,
+        leftoverUsdc:  null,
         ...event,
         rebalancedAt: Date.now(),
     });
@@ -2170,28 +2359,43 @@ export function pruneAdvisorDecisions(db, keepDays = 730) {
  * des doppelten Betrags, Vorfall 2026-08-13 via tvl-protection-l1).
  * Deshalb wird ein negativer Wert hart abgelehnt statt still korrigiert.
  *
+ * 🔒 `usdValue` bedeutet bei type='swap' NICHT durchgehend dasselbe: die Aufrufer
+ * setzen ihn auf die exakte USDC-Seite des Swaps, und die ist je nach Richtung mal
+ * die Eingabe, mal die Ausgabe (z.B. cleanup swap USDC→ZEC: amount_a 200, usd_value
+ * 200 = Eingang; dust swap ZEC→USDC: amount_b 0,374, usd_value 0,374 = Ausgang).
+ * `usdValueIn`/`usdValueOut` (Spalten usd_value_in/usd_value_out, optional, nur für
+ * type='swap' befüllt) beheben das: beide IMMER eindeutig Eingangs- bzw. Ausgangswert,
+ * aus demselben Preis-Read berechnet (die Nicht-USD-Seite über einen einmalig gelesenen
+ * Preis, die USDC-Seite exakt mit Faktor 1 — nie ein Vor-Swap-Preis gegen einen andere
+ * Sekunden später gemessenen Wert). `usdValue` bleibt unangetastet — seine Bedeutung
+ * nachträglich zu vereinheitlichen würde bestehende Zeilen umdeuten (LIQ#0376 Teil 2,
+ * KB „Liquidity Bot/einstiegskosten-messung.md": genau diese Art impliziter Doppel-
+ * bedeutung hat entry_cost_usdc unbrauchbar gemacht).
+ *
  * @param {Database} db
- * @param {Object}   tx  { poolId, type, amountA, amountB, usdValue, txHash, note }
- * @throws {Error} wenn usdValue negativ ist
+ * @param {Object}   tx  { poolId, type, amountA, amountB, usdValue, usdValueIn?, usdValueOut?, txHash, note }
+ * @throws {Error} wenn usdValue, usdValueIn oder usdValueOut negativ ist
  */
 export function insertTransaction(db, tx) {
-    if (Number.isFinite(tx.usdValue) && tx.usdValue < 0) {
-        throw new Error(
-            `[db.insertTransaction] usd_value muss ein Betrag ≥ 0 sein (Richtung über type), ` +
-            `erhalten: ${tx.usdValue} für type='${tx.type}' pool='${tx.poolId}' note='${tx.note ?? ''}'`
-        );
+    for (const field of ['usdValue', 'usdValueIn', 'usdValueOut']) {
+        if (Number.isFinite(tx[field]) && tx[field] < 0) {
+            throw new Error(
+                `[db.insertTransaction] ${field} muss ein Betrag ≥ 0 sein (Richtung über type), ` +
+                `erhalten: ${tx[field]} für type='${tx.type}' pool='${tx.poolId}' note='${tx.note ?? ''}'`
+            );
+        }
     }
     db.prepare(`
         INSERT INTO transactions
-            (pool_id, type, amount_a, amount_b, usd_value, tx_hash, tx_fee_sol, note, created_at)
+            (pool_id, type, amount_a, amount_b, usd_value, usd_value_in, usd_value_out, tx_hash, tx_fee_sol, note, created_at)
         VALUES
-            (@poolId, @type, @amountA, @amountB, @usdValue, @txHash, @txFeeSol, @note, @createdAt)
+            (@poolId, @type, @amountA, @amountB, @usdValue, @usdValueIn, @usdValueOut, @txHash, @txFeeSol, @note, @createdAt)
     `)
     // createdAt ist normalerweise "jetzt" — nachgetragene Buchungen (lib/capital-reconcile.js)
     // müssen aber den echten Zeitpunkt der Transaktion setzen können. lib/pnl.js rollt den
     // Kapital-Anker `cap` entlang der Snapshot-Zeitachse: säße ein nachgetragener Fluss auf
     // "jetzt" statt auf seinem blockTime, bliebe die gesamte Kurve dazwischen falsch.
-    .run({ txFeeSol: null, createdAt: Date.now(), ...tx });
+    .run({ txFeeSol: null, usdValueIn: null, usdValueOut: null, createdAt: Date.now(), ...tx });
 }
 
 /**
@@ -2509,6 +2713,36 @@ export function updatePositionHwm(db, positionId, currentUsd) {
         return { hwmUsd: currentUsd, updated: true };
     }
     return { hwmUsd: prev, updated: false };
+}
+
+/**
+ * Der Positionswert, mit dem der Trailing Stop rechnet: LP-Wert **plus offene Fees** aus dem
+ * neuesten Snapshot — beide Komponenten desselben Snapshots, beide gemessen (`feesOwed`
+ * on-chain, nach der Plausibilitätsprüfung in `writePositionSnapshotFromState`).
+ *
+ * Warum die Fees dazugehören (Fall PUMP/SOL 2026-08-30): Der Exit claimt die offenen Fees
+ * immer mit (`prepareExitAndClaimFees`) — sie sind realisierbarer Positionswert. Ohne sie
+ * maß der Stop systematisch weniger als das Dashboard anzeigt (dort rechnet `lib/pnl.js`
+ * mit LP-Wert + Fees), und die Stufe-2-Scharfschaltung verfehlte ihre Schwelle, während die
+ * Anzeige sie längst überschritten hatte. Der Claim/Reinvest-Zyklus ist in dieser Summe
+ * neutral: geclaimte Fees wandern per Reinvest in den LP-Wert, nur der von der
+ * Wallet-Balance gekappte Rest (< `minClaimUsdc`, ~0,1 %) verlässt die Summe kurzzeitig.
+ *
+ * @returns {{ valueUsd: number, lpValueUsd: number, feesUsd: number, recordedAt: number }|null}
+ */
+export function latestStopValueUsd(db, poolId) {
+    const row = db.prepare(
+        `SELECT lp_value_usd, fees_pending_usd, recorded_at FROM position_snapshots
+          WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
+    ).get(poolId);
+    if (!row || !(row.lp_value_usd > 0)) return null;
+    const fees = row.fees_pending_usd > 0 ? row.fees_pending_usd : 0;
+    return {
+        valueUsd:   row.lp_value_usd + fees,
+        lpValueUsd: row.lp_value_usd,
+        feesUsd:    fees,
+        recordedAt: row.recorded_at,
+    };
 }
 
 /**

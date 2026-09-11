@@ -2,11 +2,18 @@
  * FORGE Liquidity – Trailing Stop
  *
  * Zieht den Stop-Wert über die Pool-Lebenszeit nach (monoton steigende
- * High-Water-Mark). Fällt der aktuelle lp_value_usd unter `hwm_usd * (1 -
+ * High-Water-Mark). Fällt der aktuelle Positionswert unter `hwm_usd * (1 -
  * thresholdPct/100)`, wird die Position sofort geschlossen (kein Bestätigungs-
  * fenster über mehrere Snapshots — bewusst so, seit 2026-07-24) und das
  * Kapital optional in USDC getauscht. Reine Absicherung — kein Wiedereinstieg,
  * kein Cooldown.
+ *
+ * 🔒 Der Positionswert ist seit 2026-08-30 `lp_value_usd + fees_pending_usd` (beides aus
+ * demselben Snapshot, siehe latestStopValueUsd() in lib/db.js): Der Exit claimt offene Fees
+ * immer mit, sie sind realisierbarer Wert. Ohne sie maß der Stop systematisch ~0,1–0,3 pp
+ * weniger als das Dashboard (lib/pnl.js rechnet mit Fees) — am 2026-08-30 verfehlte die
+ * Stufe-2-Scharfschaltung bei PUMP/SOL dadurch ihre Schwelle um 0,09 pp, während die Anzeige
+ * „+2,15 %" zeigte. „Nur gemessene Werte" gilt unverändert: feesOwed ist ein On-Chain-Read.
  *
  * HWM lebt pro Position:
  *   - wird nach jedem Per-Pool-Snapshot via updateHwm() nachgezogen
@@ -36,6 +43,17 @@
  *   Stufe 2 (`thresholdPct2`) – optional, enger. Schaltet scharf, sobald die HWM die
  *                               Einstiegsreferenz um Stufe 1 übertroffen hat, und sichert
  *                               ab da den erreichten Gewinn deutlich enger ab.
+ *
+ * Die Scharfschaltung kennt seit 2026-08-30 zwei Wege (ODER-verknüpft, siehe
+ * evaluateSecondStageArming): den gemessenen (HWM ≥ Einstieg × (1 + Stufe 1)) und den
+ * angezeigten (PnL-Höchststand seit Anker ≥ Einstieg × Stufe 1, via pnlPeakForPeriod aus
+ * lib/pnl.js — exakt die Zahl, die der „Hoch"-Tooltip im Dashboard zeigt). Grund: Messwelt
+ * und Anzeige trennen systematisch ~0,2–0,3 pp (Einstands-Anker-Differenz); peakt ein Pool
+ * genau dazwischen, sah der Nutzer „+2 % überschritten", der Stop schaltete aber nie scharf
+ * (PUMP/SOL 2026-08-30: Anzeige +2,15 %, Messwelt +1,91 %, Exit wäre bei ±0 statt +1,5 %
+ * gelaufen). Eine Scharfschaltung kann den Schutz nur ENGER machen, nie lockern — der
+ * Anzeige-Weg irrt deshalb in die sichere Richtung; die Drawdown-Messung selbst bleibt
+ * unverändert „nur gemessene Werte".
  * Beide messen denselben Abstand zur HWM, nur mit unterschiedlicher Weite. Beispiel
  * (Stufe 1 = 2 %, Stufe 2 = 1 %): Ein Anstieg auf +3 % schaltet Stufe 2 scharf (die +2 %
  * wurden überschritten); der Exit liegt danach bei HWM − 1 %, also bei +2 % Gewinn.
@@ -59,10 +77,13 @@ import { setPoolActive, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
-    getOpenPosition, closePosition as markPositionClosedInDb,
-    updatePositionHwm,
+    getOpenPosition, getPositionForExit, closePosition as markPositionClosedInDb,
+    updatePositionHwm, latestStopValueUsd, countReinvestEvents, sumTransactionUsdValue,
     createTsExecution, updateTsExecution, getIncompleteTsExecutions,
 } from './db.js';
+import { pnlPeakForPeriod } from '../../../lib/pnl.js';
+import { resolvePnlAnchorMs } from './pnl-anchor.js';
+import { loadTsAdvice } from './ts-advice-provider.js';
 import * as notify from './notify.js';
 import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, closePositionOrRescue, computeExitPnl, recordExitProceeds } from './exit-finalizer.js';
 import { PATHS } from '../../../config/paths.js';
@@ -70,7 +91,13 @@ import { PATHS } from '../../../config/paths.js';
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
 
-const DEFAULT_THRESHOLD_PCT = 10;
+// 1,75 % / 0,75 % seit 2026-08-30 abends (LIQ#0351): aus der Zitter-Messung — das größte
+// erholte Zittern der acht gemessenen Pools liegt bei 1,04–1,78 %, das 95-%-Zittern bei
+// sechs von acht unter 0,72 %. Der Vorwert 0,8/0,6 stammte aus dem verworfenen Backtest
+// und lag mitten im Rauschen. Muss mit POOL_SETTINGS_DEFAULTS.trailingStop in
+// lib/pool-settings-defaults.js übereinstimmen — siehe FALLBACK_TS_CONFIG unten.
+const DEFAULT_THRESHOLD_PCT = 1.75;
+const DEFAULT_THRESHOLD_PCT2 = 0.75;
 // 0,5 % ist die untere Grenze, nicht 1 %: bei schwach volatilen Paaren (besonders am
 // Wochenende) ist ein enger zweiter Drawdown sinnvoll. Tiefer geht bewusst nicht — die
 // Messgrößen selbst schwanken um rund einen Prozentpunkt (Orca-Quote vs. gemessener
@@ -90,14 +117,18 @@ const MAX_THRESHOLD_PCT     = 90;
  * 2026-08-01 bei PUMP/SOL (forge-pub1): Pool lief nach Reaktivierung ohne Stop.
  * Ein fehlender Eintrag darf nie „keine Absicherung" bedeuten.
  */
-const DEFAULT_COOLDOWN_HOURS = 1;
+// 6 h seit 2026-09-03 (LIQ#0359, vorher 1 h) — muss POOL_SETTINGS_DEFAULTS.trailingStop
+// .cooldownHours in lib/pool-settings-defaults.js entsprechen; Begründung dort.
+const DEFAULT_COOLDOWN_HOURS = 6;
 
 const FALLBACK_TS_CONFIG = {
     enabled:         true,
     thresholdPct:    DEFAULT_THRESHOLD_PCT,
-    // Zweite Stufe im Fallback bewusst aus: Ohne ausdrückliche Konfiguration darf der
-    // Schutz nicht enger sein, als der Nutzer erwartet.
-    thresholdPct2:   null,
+    // Zweite Stufe war hier bis zum 2026-08-30 bewusst aus, damit der Schutz ohne
+    // ausdrückliche Konfiguration nicht enger ist als erwartet. Mit dem neuen Fallback
+    // greift diese Begründung nicht mehr: 0,8 % / 0,6 % ist als Paar gemessen worden, die
+    // erste Stufe allein war in keiner der Auswertungen die bessere Wahl.
+    thresholdPct2:   DEFAULT_THRESHOLD_PCT2,
     minimumValueUsd: null,
     autoSwapToUSDC:  true,
     sendTo:          '',
@@ -109,7 +140,89 @@ const _fallbackLogged = new Set();
 
 // ─── Settings-DB lesen ────────────────────────────────────────────────────────
 
-export function loadTsConfig(poolId) {
+/**
+ * Wendet die Advisor-Empfehlung an, wenn der Pool auf „Auto" steht.
+ *
+ * Vorrang (Entscheidung 2026-08-30, Ticket LIQ#0351):
+ *   1. Auto ist an UND es liegt eine belastbare, frische Empfehlung vor → deren Werte.
+ *   2. Sonst: die vom Nutzer gesetzten Werte.
+ *   3. Sind auch die leer: TS_AUTO_FALLBACK (1,75 % / 0,75 %).
+ *
+ * 🔒 Punkt 3 ist bewusst eng. Ein Nutzer, der „Auto" einschaltet und nie eigene Werte
+ * gesetzt hat, darf nicht ungeschützt dastehen, wenn der Advisor nichts liefert — und der
+ * Rückfall muss STRENGER sein als der alte 10-%-Default, nicht lockerer. Genau dieser
+ * lockere Rückfall kostete am 2026-08-22 rund 69 USDC: Ein Pool ohne konfigurierte
+ * Schwelle fiel auf 10 % zurück und lief damit praktisch ohne wirksamen Stop.
+ * Ein Schutzmechanismus darf im Zweifel nur strenger werden, nie lockerer.
+ *
+ * ── Warum 1,75 % / 0,75 % (2026-08-30 abends, LIQ#0351) ──────────────────────
+ * Aus der Zitter-Messung des Advisors (erholte Rücksetzer, 14 Tage, 30-s-Takt): Stufe 1
+ * deckt das größte gemessene Zittern von sieben der acht Pools ab (1,04–1,78 %), Stufe 2
+ * liegt knapp über dem 95-%-Zittern von sechs der acht (unter 0,72 %). Der Wert davor
+ * (0,8 / 0,6, vormittags gesetzt) stammte aus dem verworfenen Backtest und lag mitten im
+ * Rauschen; die Historie dazu steht im Changelog vom 2026-08-30.
+ *
+ * ⚠️ Diese Konstante greift NUR, wenn „Auto" an ist und weder Advisor noch Nutzer Werte
+ * liefern. Pools mit eigener Konfiguration bleiben unberührt.
+ */
+export const TS_AUTO_FALLBACK = { thresholdPct: DEFAULT_THRESHOLD_PCT, thresholdPct2: DEFAULT_THRESHOLD_PCT2 };
+
+function applyAutoAdvice(ts, poolId, ctx) {
+    if (!ts?.auto) return ts;
+
+    // Empfehlung erst hier holen — für Pools ohne „Auto" fällt der Lookup ganz weg.
+    let advice = null;
+    if (ctx?.db) {
+        try { advice = loadTsAdvice(ctx.db, poolId, ctx.poolType ?? null)?.advice ?? null; }
+        catch { advice = null; }   // ein Advisor-Fehler darf den Stop nie ausfallen lassen
+    }
+
+    if (advice && Number.isFinite(Number(advice.thresholdPct))) {
+        return {
+            ...ts,
+            thresholdPct:  Number(advice.thresholdPct),
+            thresholdPct2: advice.thresholdPct2 == null ? null : Number(advice.thresholdPct2),
+            autoApplied:   true,
+            autoScope:     advice.scope,
+        };
+    }
+
+    // Auto an, aber nichts Belastbares geliefert → eigene Werte, sonst enger Rückfall.
+    const hasOwn = Number.isFinite(Number(ts.thresholdPct)) && Number(ts.thresholdPct) > 0;
+    if (hasOwn) return { ...ts, autoApplied: false, autoScope: null };
+
+    if (!_autoFallbackLogged.has(poolId)) {
+        _autoFallbackLogged.add(poolId);
+        console.warn(`[trailing-stop:${poolId}] „Auto" aktiv, aber keine belastbare Advisor-Empfehlung und keine eigenen Werte – Rückfall auf ${TS_AUTO_FALLBACK.thresholdPct} % / ${TS_AUTO_FALLBACK.thresholdPct2} %.`);
+    }
+    return { ...ts, ...TS_AUTO_FALLBACK, autoApplied: false, autoScope: null };
+}
+
+const _autoFallbackLogged = new Set();
+
+/**
+ * Nur für bin/test-trailing-stop-advisor.js: prüft die Auflösungsreihenfolge ohne
+ * settings.db. Die Reihenfolge ist eine Sicherheitszusage — sie muss gegen das Original
+ * geprüft werden, nicht gegen eine Nachbildung.
+ */
+export function applyAutoAdviceForTest(ts, poolId, ctx) {
+    return applyAutoAdvice(ts, poolId, ctx);
+}
+
+/**
+ * Baut den Kontext für loadTsConfig() aus dem, was an jeder Aufrufstelle ohnehin vorliegt.
+ * Der Pool-Typ heißt je nach Herkunft `pool_type` (DB-Zeile) oder `poolType` (pools.json).
+ */
+function tsCtx(db, pool) {
+    return { db, poolType: pool?.pool_type ?? pool?.poolType ?? null };
+}
+
+/**
+ * @param {Object}   [ctx]           optionaler Kontext für den „Auto"-Modus
+ * @param {Database} [ctx.db]        Bot-DB — ohne sie wird keine Empfehlung gesucht
+ * @param {string}   [ctx.poolType]  Pool-Typ, für den Rückfall auf die Typ-Empfehlung
+ */
+export function loadTsConfig(poolId, ctx = null) {
     try {
         const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
         const row = sdb.prepare(
@@ -120,7 +233,10 @@ export function loadTsConfig(poolId) {
         const ts = row ? (JSON.parse(row.settings)?.trailingStop ?? null) : null;
         // cooldownHours kam erst nachträglich dazu (2026-08-08) – Alt-Einträge ohne
         // dieses Feld sollen trotzdem den Default-Cooldown bekommen, nicht 0/ungeschützt.
-        if (ts) return { ...ts, cooldownHours: Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : DEFAULT_COOLDOWN_HOURS };
+        if (ts) return applyAutoAdvice({
+            ...ts,
+            cooldownHours: Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : DEFAULT_COOLDOWN_HOURS,
+        }, poolId, ctx);
 
         if (!_fallbackLogged.has(poolId)) {
             _fallbackLogged.add(poolId);
@@ -176,32 +292,111 @@ function resolveActiveThreshold(cfg, position) {
 }
 
 /**
- * Schaltet Stufe 2 scharf, sobald die HWM die Einstiegsreferenz um Stufe 1 übertroffen hat.
+ * Die reine Scharfschalt-Entscheidung für Stufe 2 — wie evaluateTsTrigger() bewusst frei
+ * von DB- und Settings-Zugriff, damit `bin/test-trailing-stop-sim.js` das Original prüft.
+ *
+ * Zwei Wege, ODER-verknüpft (Begründung im Modulkopf):
+ *   'hwm' — die gemessene Welt: HWM ≥ Einstieg × (1 + Stufe 1).
+ *   'pnl' — die angezeigte Welt: PnL-Höchststand seit Anker ≥ Einstieg × Stufe 1.
+ *           Greift auch, wenn die Messwelt die Schwelle knapp verfehlt (systematische
+ *           ~0,2–0,3-pp-Differenz der Anker). Ein fälschliches Scharfschalten verschärft
+ *           nur — die sichere Richtung.
+ *
+ * @param {number}      firstPct           Stufe-1-Schwelle in %
+ * @param {number|null} secondPct          Stufe-2-Schwelle in % (null = keine Stufe 2)
+ * @param {number}      hwmUsd             gemessener Höchststand (LP + Fees)
+ * @param {number}      entryUsd           gemessene Einstiegsreferenz
+ * @param {number|null} displayPeakPnlUsd  PnL-Höchststand seit Anker (lib/pnl.js) oder null,
+ *                                         wenn nicht berechenbar — dann zählt nur der hwm-Weg
+ * @returns {{ arm: boolean, via: 'hwm'|'pnl'|null }}
+ */
+export function evaluateSecondStageArming({ firstPct, secondPct, hwmUsd, entryUsd, displayPeakPnlUsd = null }) {
+    if (secondPct == null) return { arm: false, via: null };
+    if (!(entryUsd > 0))   return { arm: false, via: null };   // Referenz noch nicht etabliert
+
+    if (hwmUsd > 0 && hwmUsd >= entryUsd * (1 + firstPct / 100)) return { arm: true, via: 'hwm' };
+    if (displayPeakPnlUsd != null && displayPeakPnlUsd >= entryUsd * (firstPct / 100)) {
+        return { arm: true, via: 'pnl' };
+    }
+    return { arm: false, via: null };
+}
+
+// PnL-Ausfälle nur einmal pro Pool und Prozesslaufzeit loggen — die Prüfung läuft jeden Zyklus.
+const _peakPnlWarnLogged = new Set();
+
+/**
+ * PnL-Höchststand seit Anker — exakt die Zahl des „Hoch"-Tooltips im Dashboard: derselbe
+ * Anker (resolvePnlAnchorMs: letzte externe Einzahlung / manueller Reset / Eröffnung, wie
+ * bin/export.js) und dieselbe Kurve (pnlPeakForPeriod, lib/pnl.js — hier ist KEINE eigene
+ * PnL-Mathematik, nur der Aufruf der zentralen Bibliothek).
+ *
+ * null bei jedem Fehler: Die Scharfschaltung darf am PnL-Pfad nie scheitern, der
+ * hwm-Weg in evaluateSecondStageArming() bleibt dann allein maßgeblich.
+ */
+function _displayPeakPnlUsd(db, poolId, position) {
+    try {
+        const dep = db.prepare(
+            `SELECT MAX(created_at) AS t FROM capital_flows
+              WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?`
+        ).get(poolId, position.opened_at ?? 0);
+        const fromMs = resolvePnlAnchorMs(dep?.t, position.pnl_anchor_reset_at, position.opened_at);
+        const peak   = pnlPeakForPeriod(db, { flavor: config.botId, scope: poolId, fromMs });
+        return Number.isFinite(peak?.pnlUsd) ? peak.pnlUsd : null;
+    } catch (err) {
+        if (!_peakPnlWarnLogged.has(poolId)) {
+            _peakPnlWarnLogged.add(poolId);
+            console.warn(`[trailing-stop:${poolId}] PnL-Höchststand nicht berechenbar (${err.message}) – Stufe-2-Scharfschaltung nutzt nur den gemessenen Weg.`);
+        }
+        return null;
+    }
+}
+
+/**
+ * Schaltet Stufe 2 scharf, sobald einer der beiden Wege aus evaluateSecondStageArming()
+ * erreicht ist.
  *
  * Läuft im Snapshot-Pfad direkt nach dem HWM-Update und liest die Position bewusst frisch —
  * das übergebene Objekt stammt vom Zyklusbeginn und kennt die gerade geschriebene HWM nicht.
  *
  * Einmal gesetzt, bleibt `d2_armed_at` stehen (Ratchet, siehe Modulkopf).
+ *
+ * @param {Object} [opts]
+ * @param {number|null} [opts.displayPeakPnlUsd]  PnL-Höchststand injizieren (Simulator);
+ *        ohne Angabe wird er über lib/pnl.js berechnet.
  */
-export function armSecondStageIfReached(db, poolId, positionId, cfg) {
+export function armSecondStageIfReached(db, poolId, positionId, cfg, opts = {}) {
     const firstPct  = normalizeThreshold(cfg.thresholdPct);
     const secondPct = resolveSecondThreshold(cfg, firstPct);
     if (secondPct == null) return;   // keine zweite Stufe konfiguriert
 
     const row = db.prepare(
-        `SELECT hwm_usd, entry_usd, d2_armed_at FROM positions WHERE id = ?`
+        `SELECT hwm_usd, entry_usd, d2_armed_at, opened_at, pnl_anchor_reset_at FROM positions WHERE id = ?`
     ).get(positionId);
     if (!row || row.d2_armed_at) return;                       // schon scharf
-    if (!(row.hwm_usd > 0) || !(row.entry_usd > 0)) return;     // Referenzen noch nicht etabliert
+    if (!(row.entry_usd > 0)) return;                          // Referenz noch nicht etabliert
 
-    const armAt = row.entry_usd * (1 + firstPct / 100);
-    if (row.hwm_usd < armAt) return;
+    // Den (teureren) PnL-Weg nur rechnen, wenn der gemessene Weg allein nicht reicht.
+    let verdict = evaluateSecondStageArming({
+        firstPct, secondPct, hwmUsd: row.hwm_usd ?? 0, entryUsd: row.entry_usd,
+    });
+    if (!verdict.arm) {
+        const peakPnlUsd = 'displayPeakPnlUsd' in opts
+            ? opts.displayPeakPnlUsd
+            : _displayPeakPnlUsd(db, poolId, row);
+        verdict = evaluateSecondStageArming({
+            firstPct, secondPct, hwmUsd: row.hwm_usd ?? 0, entryUsd: row.entry_usd,
+            displayPeakPnlUsd: peakPnlUsd,
+        });
+        if (verdict.arm) {
+            console.log(`[trailing-stop:${poolId}] Stufe 2 scharf (Anzeige-Weg): PnL-Höchststand ${peakPnlUsd.toFixed(2)} USDC erreicht ${firstPct}% des Einstiegs (${row.entry_usd.toFixed(2)} USDC); Messwelt-Höchststand ${(row.hwm_usd ?? 0).toFixed(2)} lag knapp darunter. Drawdown-Schwelle ab jetzt ${secondPct}% statt ${firstPct}%.`);
+        }
+    } else {
+        const gainPct = ((row.hwm_usd - row.entry_usd) / row.entry_usd) * 100;
+        console.log(`[trailing-stop:${poolId}] Stufe 2 scharf: Höchststand ${row.hwm_usd.toFixed(2)} USDC liegt ${gainPct.toFixed(2)}% über dem Einstieg (${row.entry_usd.toFixed(2)} USDC, Schwelle ${firstPct}%). Drawdown-Schwelle ab jetzt ${secondPct}% statt ${firstPct}%.`);
+    }
+    if (!verdict.arm) return;
 
-    const now = Date.now();
-    db.prepare(`UPDATE positions SET d2_armed_at = ? WHERE id = ?`).run(now, positionId);
-
-    const gainPct = ((row.hwm_usd - row.entry_usd) / row.entry_usd) * 100;
-    console.log(`[trailing-stop:${poolId}] Stufe 2 scharf: Höchststand ${row.hwm_usd.toFixed(2)} USDC liegt ${gainPct.toFixed(2)}% über dem Einstieg (${row.entry_usd.toFixed(2)} USDC, Schwelle ${firstPct}%). Drawdown-Schwelle ab jetzt ${secondPct}% statt ${firstPct}%.`);
+    db.prepare(`UPDATE positions SET d2_armed_at = ? WHERE id = ?`).run(Date.now(), positionId);
 }
 
 // ─── HWM-Update (wird nach jedem Per-Pool-Snapshot aufgerufen) ────────────────
@@ -209,16 +404,19 @@ export function armSecondStageIfReached(db, poolId, positionId, cfg) {
 /**
  * Zieht die High-Water-Mark der offenen Position nach.
  * Wird vom Bot-Loop direkt nach writePositionSnapshotFromState gerufen.
+ *
+ * @param {number} valueUsd  gemessener Positionswert — LP-Wert plus offene Fees
+ *                           (latestStopValueUsd), siehe Modulkopf
  */
-export function updateHwm(db, pool, position, lpValueUsd) {
-    if (!position || !(lpValueUsd > 0)) return;
-    updatePositionHwm(db, position.id, lpValueUsd);
+export function updateHwm(db, pool, position, valueUsd) {
+    if (!position || !(valueUsd > 0)) return;
+    updatePositionHwm(db, position.id, valueUsd);
 
     // Direkt danach prüfen, ob die zweite Stufe scharf wird. Reine DB-Arbeit, kein API-Call.
     // Ein Settings-Fehler darf den Snapshot-Pfad nicht abbrechen — im Zweifel bleibt Stufe 1
     // aktiv, das ist die sichere Richtung.
     try {
-        const cfg = loadTsConfig(pool.id);
+        const cfg = loadTsConfig(pool.id, tsCtx(db, pool));
         if (cfg?.enabled) armSecondStageIfReached(db, pool.id, position.id, cfg);
     } catch (err) {
         console.warn(`[trailing-stop:${pool.id}] Stufe-2-Prüfung übersprungen: ${err.message}`);
@@ -237,10 +435,13 @@ export function updateHwm(db, pool, position, lpValueUsd) {
  * Keine Aktion wenn:
  *   - kein Flag gesetzt
  *   - keine offene Position
- *   - kein gültiger lp_value_usd verfügbar
+ *   - kein gültiger Positionswert verfügbar
  *   - Flag älter als hwm_at (Reset bereits berücksichtigt)
+ *
+ * `valueUsd` ist der Stop-Wert (LP + offene Fees, latestStopValueUsd) — derselbe Maßstab,
+ * auf dem HWM und Trigger rechnen.
  */
-export function processHwmResetIfRequested(db, pool, position, lpValueUsd) {
+export function processHwmResetIfRequested(db, pool, position, valueUsd) {
     if (!position) return false;
 
     let cfg;
@@ -266,13 +467,13 @@ export function processHwmResetIfRequested(db, pool, position, lpValueUsd) {
         return false;
     }
 
-    if (!(lpValueUsd > 0)) return false;
+    if (!(valueUsd > 0)) return false;
 
     // targetUsd: vom UI mitgeschickter Zielwert (Wert zum Klick-Zeitpunkt).
-    // Fallback auf lpValueUsd wenn kein Zielwert gespeichert (ältere Requests).
+    // Fallback auf valueUsd wenn kein Zielwert gespeichert (ältere Requests).
     // Wir nehmen den kleineren der beiden, damit ein Preisanstieg zwischen Klick
     // und Verarbeitung den Reset nicht wirkungslos macht.
-    const targetUsd = (cfg.resetTargetUsd > 0) ? Math.min(cfg.resetTargetUsd, lpValueUsd) : lpValueUsd;
+    const targetUsd = (cfg.resetTargetUsd > 0) ? Math.min(cfg.resetTargetUsd, valueUsd) : valueUsd;
 
     // Hard-Reset: hwm_usd auf Zielwert setzen.
     //
@@ -290,7 +491,7 @@ export function processHwmResetIfRequested(db, pool, position, lpValueUsd) {
     db.prepare(
         `UPDATE positions SET hwm_usd = ?, hwm_at = ?, entry_usd = ?, entry_flow_ratio = NULL, d2_armed_at = NULL, pnl_anchor_reset_at = ? WHERE id = ?`
     ).run(targetUsd, resetAt, targetUsd, resetAt, position.id);
-    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, lp=${lpValueUsd.toFixed(2)}); Einstiegsreferenz mit zurückgesetzt, Stufe 2 wieder entschärft, PnL-Anker auf jetzt gesetzt.`);
+    console.log(`[trailing-stop:${pool.id}] Referenzwert manuell auf ${targetUsd.toFixed(2)} USDC zurückgesetzt (Request ${new Date(requestedAt).toISOString()}, target=${cfg.resetTargetUsd?.toFixed(2) ?? 'n/a'}, wert=${valueUsd.toFixed(2)}); Einstiegsreferenz mit zurückgesetzt, Stufe 2 wieder entschärft, PnL-Anker auf jetzt gesetzt.`);
 
     clearResetFlag(pool.id);
     return true;
@@ -373,11 +574,12 @@ function clearResetFlag(poolId) {
  *
  * @param {Object} cfg          Trailing-Stop-Konfiguration des Pools
  * @param {Object} position     offene Position (braucht `hwm_usd`, `d2_armed_at`)
- * @param {number} lpValueUsd   aktueller (gemessener) Positionswert
+ * @param {number} valueUsd     aktueller (gemessener) Positionswert — LP-Wert plus offene
+ *                              Fees, siehe latestStopValueUsd() und Modulkopf
  * @returns {{ trigger: boolean, reason: 'drawdown'|'minimum'|null, drawdownPct: number,
  *             thresholdPct: number, stage: 1|2, triggerAt: number }}
  */
-export function evaluateTsTrigger(cfg, position, lpValueUsd) {
+export function evaluateTsTrigger(cfg, position, valueUsd) {
     const none = { trigger: false, reason: null, drawdownPct: 0, thresholdPct: 0, stage: 1, triggerAt: 0 };
     if (!cfg?.enabled || !position) return none;
 
@@ -385,19 +587,19 @@ export function evaluateTsTrigger(cfg, position, lpValueUsd) {
 
     const hwmUsd = position.hwm_usd ?? 0;
     if (!(hwmUsd > 0)) return none;          // HWM noch nicht etabliert
-    if (!(lpValueUsd > 0)) return none;      // kein verwertbarer Messwert
+    if (!(valueUsd > 0)) return none;        // kein verwertbarer Messwert
 
     const triggerAt   = hwmUsd * (1 - thresholdPct / 100);
-    const drawdownPct = ((hwmUsd - lpValueUsd) / hwmUsd) * 100;
+    const drawdownPct = ((hwmUsd - valueUsd) / hwmUsd) * 100;
     const base        = { drawdownPct, thresholdPct, stage, triggerAt };
 
-    if (lpValueUsd < triggerAt) return { ...base, trigger: true, reason: 'drawdown' };
+    if (valueUsd < triggerAt) return { ...base, trigger: true, reason: 'drawdown' };
 
     // Pool-Mindestwert: absoluter USDC-Boden, unabhängig vom Drawdown.
     // Guard: nur prüfen wenn der HWM jemals >= Minimum war — verhindert sofortigen
     // Exit bei Positionen, die von Anfang an unter dem Mindestwert eröffnet wurden.
     const minValueUsd = Number(cfg.minimumValueUsd) || 0;
-    if (minValueUsd > 0 && hwmUsd >= minValueUsd && lpValueUsd < minValueUsd) {
+    if (minValueUsd > 0 && hwmUsd >= minValueUsd && valueUsd < minValueUsd) {
         return { ...base, trigger: true, reason: 'minimum' };
     }
 
@@ -409,7 +611,7 @@ export function evaluateTsTrigger(cfg, position, lpValueUsd) {
  * Kein API-Call – nur DB-Lookups; die Entscheidung selbst trifft evaluateTsTrigger().
  */
 export function shouldTriggerTs(pool, db) {
-    const cfg = loadTsConfig(pool.id);
+    const cfg = loadTsConfig(pool.id, tsCtx(db, pool));
     if (!cfg?.enabled) return false;
 
     const position = getOpenPosition(db, pool.id);
@@ -417,12 +619,8 @@ export function shouldTriggerTs(pool, db) {
 
     // Sofort-Trigger: keine Mehrfach-Bestätigung mehr — der neueste Snapshot
     // entscheidet direkt. Bewusst so gewünscht (kein verzögerter Stop-Loss).
-    const row = db.prepare(
-        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
-         ORDER BY recorded_at DESC LIMIT 1`
-    ).get(pool.id);
-
-    return evaluateTsTrigger(cfg, position, row?.lp_value_usd ?? 0).trigger;
+    const snap = latestStopValueUsd(db, pool.id);
+    return evaluateTsTrigger(cfg, position, snap?.valueUsd ?? 0).trigger;
 }
 
 // ─── State-Machine: Withdraw-Step ────────────────────────────────────────────
@@ -468,13 +666,13 @@ async function stepWithdraw(pool, db, execId, exec = null) {
         );
         if (position) markPositionClosedInDb(db, position.id, exec.decrease_tx_hash ?? null);
         updateTsExecution(db, execId, { step: 'withdrawn' });
-        return { tsCoinsA: knownA, tsCoinsB: knownB, closePending: null };
+        return { tsCoinsA: knownA, tsCoinsB: knownB, closePending: null, closeTx: exec.decrease_tx_hash ?? null };
     }
 
     if (!position) {
         console.log(`${logPfx} Keine offene Position mehr – überspringe Withdraw`);
         updateTsExecution(db, execId, { step: 'withdrawn', ts_coins_a: 0, ts_coins_b: 0 });
-        return { tsCoinsA: 0, tsCoinsB: 0, closePending: null };
+        return { tsCoinsA: 0, tsCoinsB: 0, closePending: null, closeTx: null };
     }
 
     // SOL-Vorsicherung + Fee-Claim (letzterer entfällt bei knappem SOL).
@@ -512,6 +710,7 @@ async function stepWithdraw(pool, db, execId, exec = null) {
     return {
         tsCoinsA: coinsA, tsCoinsB: coinsB,
         closePending: closePending && { ...closePending, coinsA, coinsB },
+        closeTx: closeTxHash,
     };
 }
 
@@ -551,7 +750,7 @@ async function stepTransfer(pool, db, execId, cfg, tsCoinsA, tsCoinsB, swappedUs
  *        messbar bleibt.
  */
 export async function executeTs(pool, db, { source = 'tick' } = {}) {
-    const cfg = loadTsConfig(pool.id);
+    const cfg = loadTsConfig(pool.id, tsCtx(db, pool));
     if (!cfg?.enabled) return;
 
     const position     = getOpenPosition(db, pool.id);
@@ -559,11 +758,8 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
 
     const { pct: thresholdPct, stage } = resolveActiveThreshold(cfg, position);
 
-    const row = db.prepare(
-        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
-         ORDER BY recorded_at DESC LIMIT 1`
-    ).get(pool.id);
-    const currentUsd = row?.lp_value_usd ?? 0;
+    // Derselbe Wert wie in shouldTriggerTs(): LP-Wert + offene Fees des neuesten Snapshots.
+    const currentUsd = latestStopValueUsd(db, pool.id)?.valueUsd ?? 0;
     const drawdownPct = hwmUsd > 0 ? ((hwmUsd - currentUsd) / hwmUsd) * 100 : 0;
 
     const minValueUsd      = Number(cfg.minimumValueUsd) || 0;
@@ -577,6 +773,10 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
     await waitForCleanupToFinish();
     acquireSlLock();
 
+    // Beginn des Ausstiegs — dieselbe Zeit, die als ts_executions.triggered_at landet.
+    // Die Meldung braucht sie getrennt vom Abschlusszeitpunkt: zwischen Auslösung und
+    // letztem Swap liegen Entnahme, Verkauf und ggf. Transfer.
+    const exitStartedAt = Date.now();
     const execId = createTsExecution(db, {
         poolId:         pool.id,
         hwmUsd,
@@ -586,9 +786,21 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
         triggerSource:  source,
     });
 
-    // Beschreibt Kapital, das die Position bereits verlassen hat. Ab dem Moment ist ein
-    // Fehler weiter unten ein Fehler MIT Geld im Wallet — das entscheidet über die Meldung.
+    // `partial` beschreibt ausschließlich ein liegengebliebenes Position-NFT (closePending)
+    // und steuert die Erfolgsmeldung ganz unten.
     let partial = null;
+    // `capitalOut` beschreibt Kapital, das die Position verlassen hat. Ab diesem Moment ist
+    // JEDER Fehler weiter unten ein Fehler MIT Geld im Wallet — das entscheidet über die
+    // Sichtbarkeit der Fehlermeldung.
+    //
+    // 🔒 Bis 30.08.2026 taten beide Aufgaben dieselbe Variable, und sie wurde nur gesetzt,
+    // wenn das SCHLIESSEN scheiterte. Gelang das Schließen und scheiterte erst der Verkauf,
+    // blieb sie null — der Fehlschlag lief über notify.liq.trailing_stop_error, und der
+    // steht auf LOG_ONLY mit der Begründung „es wurde nichts bewegt". Bewegt worden war
+    // aber alles: bei NATIX/USDC lagen 125 277 NATIX ungeschützt im Wallet, während fünf
+    // Fehlversuche spurlos im Nexus-Journal verschwanden. Dieselbe Fehlerklasse wie
+    // LIQ#0312, eine Station weiter — deshalb jetzt zwei getrennte Variablen.
+    let capitalOut = null;
 
     try {
         // Pool sofort inaktiv → verhindert Re-Open im nächsten Tick (Idempotenz)
@@ -601,8 +813,13 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
 
         // Phase 2: Withdraw. Ein liegengebliebenes NFT (closePending) hält den Exit nicht
         // mehr auf — der Verkauf unten schützt das Kapital, das NFT ist nur noch Rent.
-        const { tsCoinsA, tsCoinsB, closePending } = await stepWithdraw(pool, db, execId);
+        const { tsCoinsA, tsCoinsB, closePending, closeTx } = await stepWithdraw(pool, db, execId);
         partial = closePending;
+        // Ab hier ist das Kapital draußen — unabhängig davon, ob das NFT sauber geschlossen
+        // wurde. Der decreaseTxHash steht nur im closePending-Fall zur Verfügung.
+        if (tsCoinsA > 0 || tsCoinsB > 0) {
+            capitalOut = closePending ?? { coinsA: tsCoinsA, coinsB: tsCoinsB, decreaseTxHash: null };
+        }
 
         // Phase 3: Swap (optional)
         let swappedUsdc = null;
@@ -634,7 +851,23 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
         }
         await notify.rmExecuted(pool, execLabel, {
             lpValueUsd: currentUsd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc, pnlUsdc,
-            entryUsd: position?.entry_usd ?? null, hwmUsd, openedAtMs: position?.opened_at ?? null,
+            hwmUsd, openedAtMs: position?.opened_at ?? null,
+            capitalUsdc:   position?.capital_usdc ?? null,
+            entryCostUsdc: position?.entry_cost_usdc ?? null,
+            hwmAtMs:       position?.hwm_at ?? null,
+            exitStartedAtMs: exitStartedAt,
+            openTx:  position?.open_tx ?? null,
+            closeTx: closeTx ?? null,
+            nftMint: position?.nft_mint ?? null,
+            reinvestCount: position
+                ? countReinvestEvents(db, pool.id, position.opened_at, exitStartedAt)
+                : null,
+            reinvestUsdc: position
+                ? sumTransactionUsdValue(db, pool.id, position.opened_at, exitStartedAt, { types: ['reinvest'] })
+                : null,
+            bestPoolUsdc: position
+                ? sumTransactionUsdValue(db, pool.id, position.opened_at, exitStartedAt, { types: ['deposit', 'open_position'], notePrefix: 'cleanup' })
+                : null,
         }).catch(() => {});
 
         // Mindestwert nach Mindestwert-Exit nullen, damit eine Wiedereröffnung nicht
@@ -654,7 +887,7 @@ export async function executeTs(pool, db, { source = 'tick' } = {}) {
     } catch (err) {
         console.error(`[trailing-stop:${pool.id}] FEHLER: ${err.message}`);
         updateTsExecution(db, execId, { error_msg: err.message });
-        await notifyExitFailure(pool, err, partial);
+        await notifyExitFailure(pool, err, capitalOut);
         throw err;
     } finally {
         releaseSlLock();
@@ -714,12 +947,24 @@ export async function resumePendingTsExecutions(db) {
         // Vor dem Withdraw lesen (wie in executeTs()) — danach ist die Position
         // geschlossen und resolveActiveThreshold()/computeExitPnl() bräuchten sie
         // für die Erfolgsmeldung unten sonst vergeblich.
-        const position = getOpenPosition(db, exec.pool_id);
+        //
+        // 🔒 Beim Resume ab 'withdrawn' ist sie das bereits: dieser Lauf schließt nichts
+        // mehr, das hat der vorherige getan. getOpenPosition() allein lieferte hier null
+        // und die Abschlussmeldung kam ohne Kapital, Höchststand und PnL heraus.
+        const position = getPositionForExit(db, exec.pool_id, exec.triggered_at);
         const hwmUsd   = position?.hwm_usd ?? 0;
 
-        // Kapital, das die Position schon verlassen hat — aus diesem Lauf oder, bei
-        // 'drained', aus einem früheren. Entscheidet unten über die Meldung.
-        let partial = exec.step === 'drained'
+        // Kapital, das die Position schon verlassen hat — aus diesem Lauf oder aus einem
+        // früheren. Entscheidet unten über die Sichtbarkeit der Fehlermeldung.
+        //
+        // 🔒 Ab 'withdrawn' entnimmt dieser Lauf gar nichts mehr (der Block unten wird
+        // übersprungen), die Entnahme ist aber längst passiert. Bis 30.08.2026 stand hier
+        // nur 'drained', weshalb ein Resume, der am Verkauf scheitert, ohne jede sichtbare
+        // Meldung endete — genau der NATIX/USDC-Fall: fünf Wiederanläufe, fünfmal
+        // LOG_ONLY, 125 277 NATIX ungeschützt im Wallet. Deshalb JEDER Schritt ab
+        // 'drained', nicht nur der eine.
+        const CAPITAL_OUT_STEPS = ['drained', 'withdrawn', 'swapped', 'transferred'];
+        let partial = CAPITAL_OUT_STEPS.includes(exec.step)
             ? { coinsA: exec.ts_coins_a ?? 0, coinsB: exec.ts_coins_b ?? 0, decreaseTxHash: exec.decrease_tx_hash }
             : null;
 
@@ -727,6 +972,11 @@ export async function resumePendingTsExecutions(db) {
             let tsCoinsA    = exec.ts_coins_a ?? 0;
             let tsCoinsB    = exec.ts_coins_b ?? 0;
             let swappedUsdc = exec.swapped_usdc ?? null;
+            // Bereits gesetzt, falls ein früherer Lauf das Schließen schon erledigt hat
+            // (dann steht close_tx längst in der DB-Zeile, die getPositionForExit oben
+            // gelesen hat) — stepWithdraw() unten überschreibt das nur, wenn dieser Lauf
+            // selbst noch schließt.
+            let closeTx = position?.close_tx ?? null;
 
             // 'drained' verhält sich hier wie 'preparing' — nur überspringt stepWithdraw()
             // dann Fee-Claim, Entnahme und Burn und rechnet mit den persistierten Mengen.
@@ -734,7 +984,12 @@ export async function resumePendingTsExecutions(db) {
                 const result = await stepWithdraw(pool, db, exec.id, exec);
                 tsCoinsA = result.tsCoinsA;
                 tsCoinsB = result.tsCoinsB;
-                partial  = result.closePending;
+                closeTx  = result.closeTx ?? closeTx;
+                // Nicht `= result.closePending`: gelingt das Schließen, ist das Kapital
+                // trotzdem draußen (siehe capitalOut in executeTs).
+                partial  = (tsCoinsA > 0 || tsCoinsB > 0)
+                    ? (result.closePending ?? { coinsA: tsCoinsA, coinsB: tsCoinsB, decreaseTxHash: null })
+                    : result.closePending;
             }
 
             if (['preparing', 'drained', 'withdrawn'].includes(exec.step) && cfg.autoSwapToUSDC) {
@@ -772,7 +1027,23 @@ export async function resumePendingTsExecutions(db) {
             }
             await notify.rmExecuted(pool, execLabel, {
                 lpValueUsd: exec.current_usd, coinsA: tsCoinsA, coinsB: tsCoinsB, swappedUsdc, pnlUsdc,
-                entryUsd: position?.entry_usd ?? null, hwmUsd, openedAtMs: position?.opened_at ?? null,
+                hwmUsd, openedAtMs: position?.opened_at ?? null,
+                capitalUsdc:   position?.capital_usdc ?? null,
+                entryCostUsdc: position?.entry_cost_usdc ?? null,
+                hwmAtMs:       position?.hwm_at ?? null,
+                exitStartedAtMs: exec.triggered_at ?? null,
+                openTx:  position?.open_tx ?? null,
+                closeTx: closeTx ?? null,
+                nftMint: position?.nft_mint ?? null,
+                reinvestCount: position
+                    ? countReinvestEvents(db, exec.pool_id, position.opened_at, exec.triggered_at ?? Date.now())
+                    : null,
+                reinvestUsdc: position
+                    ? sumTransactionUsdValue(db, exec.pool_id, position.opened_at, exec.triggered_at ?? Date.now(), { types: ['reinvest'] })
+                    : null,
+                bestPoolUsdc: position
+                    ? sumTransactionUsdValue(db, exec.pool_id, position.opened_at, exec.triggered_at ?? Date.now(), { types: ['deposit', 'open_position'], notePrefix: 'cleanup' })
+                    : null,
             }).catch(() => {});
             if (triggeredByMin) clearMinimumValue(exec.pool_id);
 

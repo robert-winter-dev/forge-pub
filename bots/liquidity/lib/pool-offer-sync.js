@@ -205,6 +205,7 @@ const STRUCTURAL_FIELDS = [
     { path: 'usdcIsTokenA',     from: o => o.poolShape?.usdcIsTokenA,     label: 'USDC-Seite des Pools' },
     { path: 'volatilePair',     from: o => o.poolShape?.volatilePair,     label: 'Volatiles Paar (IL-Behandlung)' },
     { path: 'quotePricePoolId', from: o => o.poolShape?.quotePricePoolId, label: 'Referenzpool für die USD-Bewertung' },
+    { path: 'quoteTokenMint',   from: o => o.poolShape?.quoteTokenMint,   label: 'Quote-Token-Mint für die USD-Bewertung' },
 ];
 
 const IDENTITY_FIELDS = ['address', 'tokenA', 'tokenB', 'decimalsA', 'decimalsB', 'feeTier', 'tickSpacing'];

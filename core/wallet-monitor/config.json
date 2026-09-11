@@ -149,6 +149,66 @@
       "symbol": "ZBCN",
       "mint": "ZBCNpuD7YMXzTHB2fhGkGi78MNsHGLRXUhRewNRm9RU",
       "decimals": 6
+    },
+    {
+      "symbol": "STONK",
+      "mint": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+      "decimals": 9
+    },
+    {
+      "symbol": "NATIX",
+      "mint": "FRySi8LPkuByB7VPSCCggxpewFUeeJiwEGRKKuhwpKcX",
+      "decimals": 6
+    },
+    {
+      "symbol": "SKR",
+      "mint": "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3",
+      "decimals": 6
+    },
+    {
+      "symbol": "GEOD",
+      "mint": "7JA5eZdCzztSfQbJvS8aVVxMFfd81Rs9VvwnocV1mKHu",
+      "decimals": 9
+    },
+    {
+      "symbol": "PLTRx",
+      "mint": "XsoBhf2ufR8fTyNSjqfU71DYGaE6Z3SUGAidpzriAA4",
+      "decimals": 8
+    },
+    {
+      "symbol": "GMEx",
+      "mint": "Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc",
+      "decimals": 8
+    },
+    {
+      "symbol": "KOx",
+      "mint": "XsaBXg8dU5cPM6ehmVctMkVqoiRG2ZjMo1cyBJ3AykQ",
+      "decimals": 8
+    },
+    {
+      "symbol": "MCDx",
+      "mint": "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2",
+      "decimals": 8
+    },
+    {
+      "symbol": "BONK",
+      "mint": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
+      "decimals": 5
+    },
+    {
+      "symbol": "xSOL",
+      "mint": "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs",
+      "decimals": 6
+    },
+    {
+      "symbol": "RAY",
+      "mint": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+      "decimals": 6
+    },
+    {
+      "symbol": "SILV",
+      "mint": "SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L",
+      "decimals": 6
     }
   ],
   "retainDays": 30

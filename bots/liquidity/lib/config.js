@@ -498,6 +498,34 @@ outOfRangeMinutes:     optionalPositiveInt('OUT_OF_RANGE_ALERT_MINUTES', 30),
 export const config = loadConfig();
 
 /**
+ * Löst ein per CLI übergebenes `--pool`-Argument gegen `pools.all` auf.
+ *
+ * 🔒 Seit LIQ#0467 können mehrere Pools denselben `pair`-String tragen (z.B. zwei
+ * unabhängige Orca-Whirlpools für HYPE/USDC oder SOL/Fartcoin bei unterschiedlichem
+ * Fee-Tier). Ein simples `pools.find(p => p.pair === arg)` nimmt in diesem Fall
+ * stillschweigend den ERSTEN Treffer — bei deposit.js/withdraw.js liefe eine echte
+ * Kapitalbewegung damit gegen den falschen Pool, ohne dass Fehler oder Warnung
+ * erscheint. Deshalb: erst eindeutiger `id`-Treffer, sonst `pair`-Treffer nur, wenn
+ * er eindeutig ist — bei Mehrdeutigkeit `ambiguous:true` + Kandidaten-Ids zurück,
+ * statt zu raten.
+ *
+ * @param {Array<object>} pools  z.B. config.pools.all
+ * @param {string} arg           Wert von --pool (id oder pair)
+ * @returns {{ pool: object|null, ambiguous: boolean, candidates: string[] }}
+ */
+export function resolvePoolArg(pools, arg) {
+    const byId = pools.find(p => p.id === arg);
+    if (byId) return { pool: byId, ambiguous: false, candidates: [] };
+
+    const byPair = pools.filter(p => p.pair === arg);
+    if (byPair.length === 1) return { pool: byPair[0], ambiguous: false, candidates: [] };
+    if (byPair.length > 1) {
+        return { pool: null, ambiguous: true, candidates: byPair.map(p => p.id) };
+    }
+    return { pool: null, ambiguous: false, candidates: [] };
+}
+
+/**
  * Liest den aktuellen CLEANUP_MODE frisch aus der .env-Datei.
  * Wichtig: process.env kann im laufenden Bot-Prozess veraltet sein, weil
  * bots/settings/Score-Limit-Flow die .env zur Laufzeit ändern. Der Cleanup

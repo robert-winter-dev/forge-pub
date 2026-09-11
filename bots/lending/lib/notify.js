@@ -276,4 +276,18 @@ export async function positionVanished(pool, amount) {
     });
 }
 
+/**
+ * Gegenstück zu positionVanished() (LEN#0329): Das Protokoll meldet wieder
+ * Kapital für ein Protokoll, das in der DB als geschlossen (closed_at) galt —
+ * z.B. nach einem manuellen Re-Stake, der den Reconciliation-Schritt im
+ * Bot-Tick nicht durchlaufen hat. Der Bot legt die Position selbst neu an,
+ * Kostenbasis = aktueller Wert (kein rückwirkender Fake-Gewinn/-Verlust).
+ * Bewusst 'info': nichts zu tun, der Bot hat sich selbst korrigiert.
+ */
+export async function positionReconciled(pool, amount) {
+    await send('info', 'system', 'notify.len.position_reconciled', {
+        pool, amount, _action: ACTION.selfHealed,
+    });
+}
+
 export { ACTION };

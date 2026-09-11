@@ -23,6 +23,10 @@ TimeoutStopSec=60
 Restart=on-failure
 RestartSec=15
 
+# Weiche Speicherbremse (Reclaim/Throttling, kein Kill) – kein MemoryMax, siehe CORE#000463.
+# Großzügig bemessen: der Bot hat normale, sägezahnartige Lastspitzen bis ~640 MB.
+MemoryHigh=1024M
+
 StandardOutput=journal
 StandardError=journal
 StandardInput=null

@@ -74,7 +74,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyAgainstTrustAnchor } from '../lib/update-verify.js';
@@ -87,6 +87,15 @@ const BASE_DIR = process.env.FORGE_PUB_BASE_DIR || path.join(APP_DIR, '..');
 const LOCAL_DIR = path.join(BASE_DIR, 'local');
 const TRUST_ANCHOR_PATH = path.join(LOCAL_DIR, 'trust/trust-anchor.json');
 const STAGING_DIR = path.join(BASE_DIR, 'staging');
+// Ab diesem Alter gilt ein Staging-Verzeichnis als verwaist (siehe sweepStaleStaging()
+// unten) — deutlich über der Dauer eines einzelnen Laufs, damit ein noch aktiver
+// zweiter Prozess nie mitten im Lauf weggeräumt wird.
+const STAGING_STALE_MS = 24 * 60 * 60 * 1000;
+// Zeigt während der Entpack-/Anwendungsphase auf das gerade aktive Staging-
+// Verzeichnis dieses Laufs — einzige Aufgabe: dem SIGINT/SIGTERM-Handler ganz
+// unten im File sagen, was bei einem Abbruch sofort aufzuräumen ist (Ctrl+C bei
+// einem manuellen Testlauf, siehe sweepStaleStaging()-Kommentar).
+let activeStageTarget = null;
 const SETUP_SH = path.join(APP_DIR, 'bin/setup.sh');
 const SERVICES = ['forge-nexus', 'forge-premium', 'forge-settings', 'forge-settings-daemon', 'forge-liquiditybot', 'forge-lendingbot'];
 // FORGE_PUB_NEXUS_URL nur für lokale Tests außerhalb einer echten Installation
@@ -211,6 +220,40 @@ async function notify(level, category, msgKey, params, actionKey) {
     }
 }
 
+/**
+ * Räumt verwaiste Staging-Verzeichnisse auf, egal wodurch sie liegen geblieben
+ * sind (Absturz, kill, Ctrl+C bei einem manuellen Testlauf, ein künftiger Bug).
+ * Läuft bei JEDEM Aufruf ganz am Anfang, bevor der aktuelle Lauf sein eigenes
+ * Verzeichnis anlegt — alles, was zu diesem Zeitpunkt schon existiert und älter
+ * als STAGING_STALE_MS ist, kann nur Debris eines früheren, nicht sauber
+ * beendeten Laufs sein. Der reguläre cleanupStaging()-Pfad weiter unten greift
+ * nur bei normaler Rückkehr aus main() — bei einem Abbruch mittendrin (kein
+ * try/finally, kein Signal-Handler zum Zeitpunkt des Funktionsdesigns) blieb
+ * das Verzeichnis bislang für immer liegen.
+ *
+ * Fund 2026-08-29: 28 Staging-Verzeichnisse auf forge-pub1, ~650 MB, alle vom
+ * 20.–28.08. und allesamt im Besitz des lokalen SSH-Nutzers statt `root` —
+ * stammten aus manuellen Testläufen während der Auto-Update-Entwicklung, nicht aus dem
+ * täglichen Cron (der räumt nachweislich korrekt auf). Dieser Sweep heilt
+ * jede künftige Wiederholung binnen spätestens einem Tag selbst, unabhängig
+ * von der genauen Ursache.
+ */
+function sweepStaleStaging() {
+    if (!existsSync(STAGING_DIR)) return;
+    const now = Date.now();
+    for (const name of readdirSync(STAGING_DIR)) {
+        const entryPath = path.join(STAGING_DIR, name);
+        let st;
+        try { st = statSync(entryPath); } catch { continue; }
+        if (!st.isDirectory()) continue;
+        if (now - st.mtimeMs < STAGING_STALE_MS) continue;
+        try {
+            rmSync(entryPath, { recursive: true, force: true });
+            log(t('cli.upd.stale_staging_removed', { dir: entryPath }));
+        } catch { /* kein Blocker */ }
+    }
+}
+
 function installedVersion() {
     const versionPath = path.join(APP_DIR, 'VERSION');
     if (!existsSync(versionPath)) return { code: null, version: null };
@@ -229,8 +272,8 @@ function readUpdateConfig() {
 
 function readPolicy() {
     const policyPath = path.join(LOCAL_DIR, 'update-policy.json');
-    if (!existsSync(policyPath)) return { autoApplyPatch: false };
-    try { return JSON.parse(readFileSync(policyPath, 'utf8')); } catch { return { autoApplyPatch: false }; }
+    if (!existsSync(policyPath)) return { autoApplyPatch: true };
+    try { return JSON.parse(readFileSync(policyPath, 'utf8')); } catch { return { autoApplyPatch: true }; }
 }
 
 // Siehe FORGE_PUB_UPDATE_TOKEN im Kopfkommentar — Env-Var hat Vorrang (für
@@ -455,6 +498,8 @@ async function fetchRelease({ repo, channel, sourceDir }) {
 }
 
 async function main() {
+    sweepStaleStaging();
+
     const argv = process.argv.slice(2);
     const sourceIdx = argv.indexOf('--source');
     const sourceDir = sourceIdx >= 0 ? path.resolve(argv[sourceIdx + 1]) : null;
@@ -551,6 +596,7 @@ async function main() {
     const stageTarget = path.join(STAGING_DIR, manifest.version);
     if (existsSync(stageTarget)) rmSync(stageTarget, { recursive: true, force: true });
     mkdirSync(stageTarget, { recursive: true });
+    activeStageTarget = stageTarget;
     const tarPath = path.join(STAGING_DIR, manifest.artifact.name);
     writeFileSync(tarPath, tarballBuf);
     // Kein --strip-components mehr nötig (Fund 2026-08-06): das Artefakt-Tarball
@@ -567,6 +613,7 @@ async function main() {
         process.exitCode = EXIT.rejected;
         await notify('error', CAT.integrity, 'notify.upd.symlinks', { version: manifest.version }, ACTION.discarded);
         rmSync(stageTarget, { recursive: true, force: true });
+        activeStageTarget = null;
         return;
     }
     log(`✓ ${t('cli.upd.unpacked', { dir: stageTarget })}`);
@@ -579,7 +626,10 @@ async function main() {
     // der eine neuere, nicht-Patch-Version findet, kehrte bislang zurück, ohne den
     // gerade entpackten Release je zu löschen). Fund 2026-08-20: 23 bzw. 13 liegen-
     // gebliebene Staging-Verzeichnisse auf forge-pub1/forge-pub2, 524 MB / 283 MB.
-    const cleanupStaging = () => { try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker */ } };
+    const cleanupStaging = () => {
+        try { rmSync(stageTarget, { recursive: true, force: true }); } catch { /* kein Blocker */ }
+        activeStageTarget = null;
+    };
 
     if (dryRun) { log(t('cli.upd.dry_run_end')); cleanupStaging(); return; }
 
@@ -665,6 +715,20 @@ async function main() {
         writeLastUpdateResult({ status: 'rollback-failed', version: manifest.version, versionCode: manifest.versionCode, hasMigrations: false, problems: regressed });
         await notify('error', CAT.rollback, 'notify.upd.rollback_failed', { version: manifest.version, services: regressed.join(', ') }, ACTION.urgent);
     }
+}
+
+// Sofort-Cleanup bei Abbruch (Ctrl+C bei einem manuellen Testlauf, `kill` von
+// außen): ohne diesen Handler bleibt activeStageTarget einfach liegen, bis der
+// nächste Lauf es über sweepStaleStaging() findet — funktional harmlos (siehe
+// dort), aber unnötig für einen interaktiven Testlauf, der sofort wieder von
+// vorn beginnen will. rmSync ist synchron, läuft also sicher vor dem Exit durch.
+for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+        if (activeStageTarget) {
+            try { rmSync(activeStageTarget, { recursive: true, force: true }); } catch { /* kein Blocker */ }
+        }
+        process.exit(EXIT.unexpected);
+    });
 }
 
 main().catch((err) => {

@@ -12,8 +12,8 @@
  *   SPERRE (Altbestand). Pools, die vor 2026-08-21 über den damaligen Klickpfad
  *   übernommen wurden, tragen `cleanup.rankingEligible:false` und sind gesperrt. Für sie
  *   ist der Probelauf weiterhin ein echtes Gate: erst ein `passed` lässt
- *   `POST .../toggle-enabled` (pools-actions.js) die Kapitalfreigabe zu. Verhalten
- *   unverändert.
+ *   `POST .../mode` (pools-actions.js, vormals toggle-enabled, LIQ#0365) die
+ *   Kapitalfreigabe zu. Verhalten unverändert.
  *
  *   DIAGNOSE (Automatik-Bestand). Seit 2026-08-21 importierte Pools sind sofort
  *   freigegeben; über Kapital entscheidet allein das Score-Ranking (Begründung in

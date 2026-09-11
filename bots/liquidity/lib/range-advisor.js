@@ -14,6 +14,8 @@
  * Explizit ausgeschlossen: cbBTC/WBTC (festes Range-Override, anderes Kostenmodell).
  */
 
+import { effectiveFeePct } from '../../../lib/effective-fee.js';
+
 const ORCA_V2_BASE = 'http://127.0.0.1:3100/orcav2';
 
 // ─── Modell-Parameter ────────────────────────────────────────────────────────
@@ -69,6 +71,42 @@ export function getPoolTypeConfig(pool) {
         );
     }
     return cfg;
+}
+
+// ─── Stufenversatz (LIQ#0371) ────────────────────────────────────────────────
+
+/**
+ * Verschiebt eine rohe Advisor-Empfehlung um `offsetSteps` Stufen auf der
+ * CANDIDATE_RANGES-Leiter, begrenzt auf die für den Pool-Typ zulässigen Stufen
+ * (getPoolTypeConfig — dieselben Grenzen, die analyzePool() schon zur
+ * Kandidatenauswahl verwendet). Reine Funktion, keine DB, kein Netzwerk — das ist
+ * der Mechanismus, mit dem eine Strategie ihre Risikohaltung ausdrückt (KB
+ * Strategien/strategie-auswahl.md, „Wie eine Strategie die Range ausdrückt").
+ *
+ * `offsetSteps === 0` (oder `null`/`undefined`) ist echte Identität — `rawRangePct` wird
+ * unverändert zurückgegeben, ohne auf die Leiter einzurasten. Nur bei einem Versatz
+ * ungleich 0 wird zunächst die nächstliegende zulässige Stufe zu `rawRangePct` gesucht
+ * und von dort verschoben.
+ *
+ * @param {Object} pool          Pool-Konfiguration aus pools.json (mit poolType)
+ * @param {number} rawRangePct   Rohe Empfehlung, i.d.R. advice.recommendation.rangePct
+ * @param {number} offsetSteps   Stufenversatz (ganzzahlig, positiv = breiter)
+ * @returns {number}
+ */
+export function applyRangeStepOffset(pool, rawRangePct, offsetSteps) {
+    if (!offsetSteps) return rawRangePct;
+
+    const classCfg = getPoolTypeConfig(pool);
+    const bounded  = CANDIDATE_RANGES.filter(r => r >= classCfg.min && r <= classCfg.max);
+    if (bounded.length === 0) return rawRangePct; // Konfig-Lücke — Advisor-Wert unangetastet
+
+    let nearestIdx = 0, bestDist = Infinity;
+    for (let i = 0; i < bounded.length; i++) {
+        const d = Math.abs(bounded[i] - rawRangePct);
+        if (d < bestDist) { bestDist = d; nearestIdx = i; }
+    }
+    const shiftedIdx = Math.min(bounded.length - 1, Math.max(0, nearestIdx + offsetSteps));
+    return bounded[shiftedIdx];
 }
 
 // ─── Mathematik-Helfer ───────────────────────────────────────────────────────
@@ -224,11 +262,25 @@ function getSolUsd(db) {
  * @param {Object}   pool           Pool-Konfig (id, feeTier, pair/displayPair)
  * @param {number}   capitalUsdc    Positionskapital (USDC)
  * @param {Object}   [opts]
- * @param {number}   [opts.tvl]     Pool-TVL (USDC); fehlt → letzter pool_stats-Wert
+ * @param {number}   [opts.tvl]        Pool-TVL (USDC); fehlt → letzter pool_stats-Wert
+ * @param {number}   [opts.feeTierPct] Effektiver Fee-Satz (%); fehlt → 24h-Ist-Satz aus pool_stats
  * @returns {{ avgCostUsdc:number, sampleSize:number, isFallback:boolean, source:'model'|'fallback', breakdown:Object|null }}
  *          sampleSize = Anzahl realer Rebalances (30d, Kapital ≥ MIN_REAL_CAPITAL_USDC) —
  *          Datenverfügbarkeits-Signal für Regelkreise, NICHT mehr eine Kosten-Stichprobe.
  */
+/**
+ * Fees/Volumen der letzten 24 h aus dem jüngsten pool_stats-Eintrag — Grundlage des
+ * effektiven Fee-Satzes. Der Bot schreibt beide Werte pro Zyklus mit; kein API-Call.
+ */
+function getCachedFeeStats(db, poolId) {
+    const row = db.prepare(`
+        SELECT fees_24h_usd, volume_24h_usd FROM pool_stats
+        WHERE pool_id = ? AND fees_24h_usd IS NOT NULL
+        ORDER BY recorded_at DESC LIMIT 1
+    `).get(poolId);
+    return { fees24hUsd: row?.fees_24h_usd ?? null, volume24hUsd: row?.volume_24h_usd ?? null };
+}
+
 export function estimateRebalanceCost(db, pool, capitalUsdc, opts = {}) {
     const since  = Date.now() - 30 * 24 * 3_600_000;
     const rebals = db.prepare(`
@@ -259,10 +311,16 @@ export function estimateRebalanceCost(db, pool, capitalUsdc, opts = {}) {
         return { avgCostUsdc: SWAP_COST_USDC, sampleSize, isFallback: true, source: 'fallback', breakdown: null };
     }
 
+    // Effektiver statt konfigurierter Fee-Satz: bei Adaptive-Fee-Pools liegt der reale
+    // Satz über dem Tier aus pools.json (LIQ#0394, siehe lib/effective-fee.js).
+    const feePct = Number.isFinite(opts.feeTierPct)
+        ? opts.feeTierPct
+        : effectiveFeePct(pool.feeTier, getCachedFeeStats(db, pool.id)).pct;
+
     const swapAmount  = capitalUsdc * REBAL_SWAP_FRACTION;
     const depthFactor = isCorrelatedPair(pool) ? DEPTH_CORRELATED : DEPTH_VOLATILE;
     const slippagePct = (swapAmount / (tvl * depthFactor)) * 100;
-    const swapFeeUsdc = swapAmount * (pool.feeTier / 100);
+    const swapFeeUsdc = swapAmount * (feePct / 100);
     const slipUsdc    = swapAmount * (slippagePct / 100);
     const avgCostUsdc = txFeeUsdc + swapFeeUsdc + slipUsdc;
 
@@ -278,6 +336,7 @@ export function estimateRebalanceCost(db, pool, capitalUsdc, opts = {}) {
             slippagePct: +slippagePct.toFixed(4),
             swapAmount:  +swapAmount.toFixed(2),
             depthFactor,
+            feePct:      +feePct.toFixed(4),
         },
     };
 }
@@ -470,6 +529,7 @@ export async function analyzePool(pool, db, opts = {}) {
 
     // ── Orca-Daten ────────────────────────────────────────────────────────────
     let tvl = 0, vol24h = 0, currentPrice = 0, change24hPct = 0;
+    let fees24h = null;
     let orcaError = null;
     try {
         const resp = await fetch(`${ORCA_V2_BASE}/solana/pools/${pool.address}`, {
@@ -481,6 +541,9 @@ export async function analyzePool(pool, db, opts = {}) {
             vol24h       = parseFloat(d?.stats?.['24h']?.volume)       || 0;
             currentPrice = parseFloat(d?.price)                        || 0;
             change24hPct = parseFloat(d?.stats?.['24h']?.priceDelta) * 100 || 0;
+            // Ist-Fees derselben Antwort — Grundlage des effektiven Fee-Satzes (LIQ#0394)
+            fees24h      = parseFloat(d?.stats?.['24h']?.fees);
+            if (!Number.isFinite(fees24h)) fees24h = null;
         } else {
             orcaError = `Orca API ${resp.status}`;
         }
@@ -505,12 +568,25 @@ export async function analyzePool(pool, db, opts = {}) {
     // ── Modellierte Rebalancing-Kosten + Modell-Drift ─────────────────────────
     // Kosten aus estimate-costs-Modell (cost_sol + Swap-Fee + TVL-basierte Slippage),
     // Drift range-unabhängig aus Dwell-Zeiten. Beide unkonditional berechenbar.
-    const empiricalRebalCost = estimateRebalanceCost(db, pool, capitalUsdc, { tvl });
+    // ── Effektiver Fee-Satz ───────────────────────────────────────────────────
+    // Nicht der konfigurierte feeTier: Adaptive-Fee-Pools rechnen real darüber ab.
+    // Quelle ist der 24h-Ist-Satz (Live-Antwort oben, sonst pool_stats) — für eine
+    // Range-Empfehlung ist der Durchschnitt das richtige Fenster, der Momentanwert
+    // wäre hier zu kurzatmig (LIQ#0394).
+    const feeInfo = effectiveFeePct(
+        pool.feeTier,
+        (fees24h != null && vol24h > 0)
+            ? { fees24hUsd: fees24h, volume24hUsd: vol24h }
+            : getCachedFeeStats(db, pool.id),
+    );
+    const feeTierPct = feeInfo.pct ?? pool.feeTier;
+
+    const empiricalRebalCost = estimateRebalanceCost(db, pool, capitalUsdc, { tvl, feeTierPct });
     const modelDrift = getModelDrift(db, pool.id, sigmaHourlyPct);
 
     // ── Kandidaten-Scan ───────────────────────────────────────────────────────
     const empiricalCostUsdc = empiricalRebalCost.isFallback ? null : empiricalRebalCost.avgCostUsdc;
-    const scanParams = { vol24h, tvl, feeTierPct: pool.feeTier, sigmaHourlyPct, capitalUsdc,
+    const scanParams = { vol24h, tvl, feeTierPct, sigmaHourlyPct, capitalUsdc,
                          empiricalCostUsdc, driftFactor: modelDrift?.driftFactor ?? null };
 
     const candidates = CANDIDATE_RANGES
@@ -584,7 +660,12 @@ export async function analyzePool(pool, db, opts = {}) {
             modelDrift,
         },
 
-        marketData: { tvlUsdc: tvl, vol24h, currentPrice, change24hPct, orcaError },
+        marketData: {
+            tvlUsdc: tvl, vol24h, currentPrice, change24hPct, orcaError,
+            // Verwendeter Fee-Satz: 'stats24h' = gemessener Ist-Satz (Adaptive Fee
+            // eingerechnet), 'static' = konfigurierter Tier aus pools.json.
+            feeTierPct, baseFeeTierPct: pool.feeTier ?? null, feeSource: feeInfo.source,
+        },
         candidates,
     };
 }

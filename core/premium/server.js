@@ -167,6 +167,10 @@ function classifyPremiumCommand(text) {
         // pro 10-Min-Zustellung"-Spam-Quelle ab, siehe Kommentar bei premium-blob-sealed
         // weiter unten (subscribeDirectMessages) und core/premium/blob-health-check.js.
         'premium-autopay-enabled', 'premium-autopay-disabled', 'premium-pay-failed', 'premium-outage',
+        // Fällt Premium weg, schaltet die aktive Strategie auf Standard zurück und nimmt
+        // ihre Felder zurück (LIQ#0382, bots/settings/lib/strategy-apply.js
+        // rollbackStrategyOnPremiumLoss()) — rein lokales Ereignis wie 'premium-payment'.
+        'premium-strategy-rollback',
         // Versions-Gate (2026-08-06): Fork meldet bei jedem premium-pay.js-Lauf seine
         // Softwareversion, Master antwortet nur, wenn sie unter der Mindestversion liegt.
         'premium-version-check', 'premium-version-too-old',
@@ -192,6 +196,10 @@ function classifyPremiumCommand(text) {
         // informativ — der Fork ändert daraufhin NICHTS an seinem Zustand und sendet
         // weiter. Genau das ist die Voraussetzung dafür, dass er von selbst zurückkommt.
         'health-share-lapsed', 'health-share-resumed',
+        // Master → Kunde: kurze System-Info ohne Zustandswechsel (z.B. "neuer Pool
+        // verfügbar", core/premium/broadcast-message.js). Klartext kommt wie bei
+        // health-share-approved/-revoked als summary/detail mit der Nachricht selbst.
+        'premium-system-message',
     ]);
     if (parsed && typeof parsed === 'object' && KNOWN_COMMANDS.has(parsed.cmd)) return parsed;
     return null;
@@ -261,6 +269,9 @@ function humanizePremiumMessage(direction, cmd) {
             return direction === 'in'
                 ? { summary: cmd.summary ?? 'Systemdaten-Freigabe widerrufen', detail: cmd.detail ?? 'Deine Systemdaten-Freigabe wurde widerrufen.' }
                 : sd('health_share_revoked_out');
+        // Sendet nur der Master (broadcast-message.js), 'out' fällt hier daher nie an.
+        case 'premium-system-message':
+            return { summary: cmd.summary ?? 'Premium-Info', detail: cmd.detail ?? '' };
         case 'health-share-report':
             return sd(direction === 'in' ? 'health_share_report_in' : 'health_share_report_out');
         case 'health-share-lapsed':
@@ -306,6 +317,12 @@ function humanizePremiumMessage(direction, cmd) {
                 : sd('pay_failed', { detail: cmd.detail ?? t('msg.premium.unknown_error') });
         case 'premium-outage':
             return sd(cmd.state === 'recovered' ? 'outage_over' : 'outage');
+        case 'premium-strategy-rollback':
+            return sd('strategy_rollback', {
+                strategyId: cmd.strategyId ?? '?',
+                reverted:   cmd.reverted   ?? 0,
+                skipped:    cmd.skipped    ?? 0,
+            });
         case 'premium-version-check':
             return direction === 'in'
                 ? sd('version_in', { version: cmd.version ?? '?' })

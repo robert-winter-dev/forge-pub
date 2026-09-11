@@ -23,6 +23,7 @@ import { t } from '../../../lib/i18n.js';
 import { renderReason } from '../../../lib/pool-reason.js';
 import { POOL_SETTINGS_DEFAULTS, POOL_SESSION_FIELDS, diffFromDefaults, diffChangedFields }
     from '../../../lib/pool-settings-defaults.js';
+import { HISTORY_SOURCES, ensureSourceColumn } from '../../../lib/migrations/_settings-history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,15 +54,21 @@ function loadTrailingStopStatus() {
             `SELECT pool_id, hwm_usd, hwm_at, entry_usd, d2_armed_at FROM positions WHERE closed_at IS NULL`
         ).all();
         const latestSnap = db.prepare(
-            `SELECT lp_value_usd, recorded_at FROM position_snapshots
+            `SELECT lp_value_usd, fees_pending_usd, recorded_at FROM position_snapshots
              WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
         );
         for (const p of positions) {
             const snap = latestSnap.get(p.pool_id);
+            // Der Bot vergleicht seit 2026-08-30 LP-Wert + offene Fees gegen die HWM
+            // (latestStopValueUsd in bots/liquidity/lib/db.js) — das Modal muss denselben
+            // Wert zeigen, sonst weicht der angezeigte Puffer vom echten ab.
+            const currentUsd = snap?.lp_value_usd != null
+                ? snap.lp_value_usd + (snap.fees_pending_usd > 0 ? snap.fees_pending_usd : 0)
+                : null;
             map[p.pool_id] = {
                 hwmUsd:     p.hwm_usd ?? null,
                 hwmAt:      p.hwm_at  ?? null,
-                currentUsd: snap?.lp_value_usd ?? null,
+                currentUsd,
                 snapshotAt: snap?.recorded_at  ?? null,
                 // Zweistufiger Trailing Stop: Das UI muss die tatsächlich geltende Schwelle
                 // anzeigen, nicht immer Stufe 1 — sonst stünde im Modal ein Liquidationswert,
@@ -201,6 +208,26 @@ function loadPoolTvls() {
 }
 
 /**
+ * Trailing-Stop-Advisor-Empfehlung je Pool aus data.json (LIQ#0351).
+ *
+ * Quelle ist bewusst data.json und nicht die Bot-DB: Auf dem Fork gibt es die
+ * Advisor-Tabellen gar nicht, die Empfehlung kommt dort über den Premium-Kanal. Der
+ * Export legt beides auf denselben Lesepfad — genau wie bei `scoreSource`.
+ */
+function loadTsAdvice() {
+    try {
+        const data = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
+        const map  = {};
+        for (const p of data.pools ?? []) {
+            if (p.id && p.tsAdvice) map[p.id] = p.tsAdvice;
+        }
+        return map;
+    } catch {
+        return {};
+    }
+}
+
+/**
  * Liest die letzten n invest_score_history-Einträge je Pool aus liquiditybot.db (read-only).
  * Gibt { poolId: [{ score, exitScore, recorded_at }, ...] } zurück (neueste zuerst).
  * exitScore fällt auf score zurück, wenn exit_score (Spalte seit 2026-07-03) noch
@@ -274,17 +301,31 @@ const POOL_TYPES = ['rebalance_free', 'volatil_1', 'volatil_2', 'volatil_3', 'rw
 
 // Default für den "Pool Typen"-Tab: nur Buchhaltung des zuletzt eingetragenen Bulk-Werts,
 // nicht der tatsächliche (danach ggf. wieder abweichende) Zustand der Einzel-Pools.
+//
+// Bewusst NICHT enthalten: trailingStop.minimumValueUsd und tvlProtection.level1.thresholdUsd —
+// beide hängen eng an der konkreten Kapitalgröße/Historie eines einzelnen Pools und ergeben
+// pool-typ-weit keinen Sinn (Festlegung LIQ-Pool-Typen-Refactor 2026-08-30).
 const DEFAULT_POOL_TYPE_SETTINGS = {
-    trailingStop: { thresholdPct: null, thresholdPct2: null },
+    trailingStop: {
+        enabled: true, thresholdPct: null, thresholdPct2: null,
+        auto: false, autoSwapToUSDC: true, sendTo: '',
+        // Nicht duplizieren: der TS-Cooldown-Default (6 h seit LIQ#0359) lebt in
+        // lib/pool-settings-defaults.js, dieselbe Quelle wie der Liquidity Bot.
+        cooldownHours: POOL_SETTINGS_DEFAULTS.trailingStop.cooldownHours,
+    },
     tvlProtection: {
-        level1: { thresholdUsd: null },
+        level1: { enabled: true, withdrawPct: 100 },
+        swapToUsdc: true, sendTo: '', cooldownHours: 12,
+    },
+    scoreLimit: {
+        enabled: false, minScore: 30, swapToUsdc: true, sendTo: '', cooldownHours: 1,
     },
     enabled: true,
 };
 
 // ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
-function openDb() {
+export function openDb() {
     const db = new Database(SETTINGS_DB);
     db.exec(`
         CREATE TABLE IF NOT EXISTS pool_settings (
@@ -307,11 +348,18 @@ function openDb() {
             field      TEXT NOT NULL,   -- Punkt-Pfad, z.B. 'trailingStop.thresholdPct2'
             old_value  TEXT,            -- JSON-kodiert (unterscheidet null von "null"/0/false)
             new_value  TEXT,
-            changed_at INTEGER NOT NULL
+            changed_at INTEGER NOT NULL,
+            source     TEXT NOT NULL DEFAULT 'user'   -- HISTORY_SOURCES, lib/migrations/_settings-history.js
         );
         CREATE INDEX IF NOT EXISTS idx_settings_history_scope
             ON settings_history (bot_id, scope, scope_id, changed_at);
     `);
+    // Spalte `source` auf einer bestehenden Tabelle nachrüsten (LIQ#0366) — idempotent, wie
+    // das CREATE TABLE darüber. Ausgeliefert wird der Schritt formal von
+    // lib/migrations/0007-settings-history-source.js; diese Zeile ist die Selbstheilung für
+    // den Fall, dass bin/migrate.js (noch) nicht gelaufen ist — ohne sie schlägt der erste
+    // Save mit „no such column: source" fehl.
+    try { ensureSourceColumn(db); } catch { /* readonly o.ä. → der Schreibpfad meldet es */ }
     return db;
 }
 
@@ -327,18 +375,26 @@ function openDb() {
  * Session-Felder (POOL_SESSION_FIELDS, z.B. tvlAtActivation) sind bewusst ausgenommen —
  * das ist Bot-Zustand, keine Nutzer-Entscheidung, und würde die Historie mit
  * Positions-Rauschen zumüllen.
+ *
+ * 🔒 `source` ist Pflichtparameter und wird geprüft (LIQ#0366). Der Spalten-Default
+ * `'user'` gilt ausschließlich für Altzeilen aus der Zeit vor der Spalte — neuer Code
+ * darf sich nie darauf verlassen, sonst schreibt die erste Schreibstelle, die ihn
+ * vergisst, wieder eine falsche Nutzerentscheidung in die Historie.
  */
-function recordSettingsHistory(db, botId, scope, scopeId, before, after) {
+export function recordSettingsHistory(db, botId, scope, scopeId, before, after, source) {
+    if (!HISTORY_SOURCES.includes(source)) {
+        throw new Error(`recordSettingsHistory: source muss einer von ${HISTORY_SOURCES.join(' | ')} sein (erhalten: ${JSON.stringify(source)})`);
+    }
     const changes = diffChangedFields(before, after, { skipPaths: POOL_SESSION_FIELDS });
     if (!changes.length) return;
     const changedAt = Date.now();
     const insert = db.prepare(`
-        INSERT INTO settings_history (bot_id, scope, scope_id, field, old_value, new_value, changed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO settings_history (bot_id, scope, scope_id, field, old_value, new_value, changed_at, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertAll = db.transaction(rows => {
         for (const c of rows) {
-            insert.run(botId, scope, scopeId, c.path, JSON.stringify(c.oldValue), JSON.stringify(c.newValue), changedAt);
+            insert.run(botId, scope, scopeId, c.path, JSON.stringify(c.oldValue), JSON.stringify(c.newValue), changedAt, source);
         }
     });
     insertAll(changes);
@@ -395,13 +451,13 @@ function loadLastExitTriggerTimes() {
  * Überlagerungsschritt zeigte Settings veraltete active/enabled-Werte aus der Datei an,
  * obwohl der Bot längst nach dem DB-Wert arbeitet.
  */
-function loadPools() {
+export function loadPools() {
     const pools = JSON.parse(fs.readFileSync(POOLS_JSON, 'utf8'));
 
     let db;
     try {
         db = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
-        const rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct, enabled_changed_at, enabled_reason FROM pools`).all();
+        const rows = db.prepare(`SELECT id, active, enabled, range_override_fixed_pct, enabled_changed_at, enabled_reason, pool_type FROM pools`).all();
         const byId = new Map(rows.map(r => [r.id, r]));
         for (const p of pools) {
             const row = byId.get(p.id);
@@ -414,6 +470,13 @@ function loadPools() {
             // Freigabe zuletzt geändert (siehe setPoolEnabled() in lib/config.js).
             p.enabledChangedAt = row.enabled_changed_at ?? null;
             p.enabledReason    = renderReason(row.enabled_reason);
+            // pool_type ist seit LIQ#0332 DB-autoritativ (Vola-Drift-Check schreibt ihn
+            // täglich still um) — analog zu applyPoolDynamics() in bots/liquidity/lib/db.js.
+            // Ohne diese Überlagerung rechnete der Settings-Server nach einem Drift mit dem
+            // veralteten pools.json-Typ (Effektiv-Settings UND Bulk-Write, LIQ#0378).
+            if (row.pool_type !== null && row.pool_type !== undefined) {
+                p.poolType = row.pool_type;
+            }
             if (row.range_override_fixed_pct !== null && row.range_override_fixed_pct !== undefined
                 && p.rangeOverride && typeof p.rangeOverride === 'object') {
                 p.rangeOverride.fixedPct = row.range_override_fixed_pct;
@@ -460,15 +523,35 @@ function loadNonDefaults(db, botId, pool) {
         if (pool.poolType) {
             const pt = loadPoolTypeSettings(db, botId, pool.poolType);
             const fromType = {
+                'trailingStop.enabled':               pt.trailingStop?.enabled,
                 'trailingStop.thresholdPct':          pt.trailingStop?.thresholdPct,
                 'trailingStop.thresholdPct2':         pt.trailingStop?.thresholdPct2,
+                'trailingStop.auto':                  pt.trailingStop?.auto,
+                'trailingStop.autoSwapToUSDC':        pt.trailingStop?.autoSwapToUSDC,
+                'trailingStop.sendTo':                pt.trailingStop?.sendTo,
+                'trailingStop.cooldownHours':         pt.trailingStop?.cooldownHours,
                 'tvlProtection.level1.thresholdUsd':  pt.tvlProtection?.level1?.thresholdUsd,
+                'tvlProtection.level1.enabled':        pt.tvlProtection?.level1?.enabled,
+                'tvlProtection.level1.withdrawPct':    pt.tvlProtection?.level1?.withdrawPct,
+                'tvlProtection.swapToUsdc':            pt.tvlProtection?.swapToUsdc,
+                'tvlProtection.sendTo':                pt.tvlProtection?.sendTo,
+                'tvlProtection.cooldownHours':         pt.tvlProtection?.cooldownHours,
+                'scoreLimit.enabled':                  pt.scoreLimit?.enabled,
+                'scoreLimit.minScore':                 pt.scoreLimit?.minScore,
+                'scoreLimit.swapToUsdc':               pt.scoreLimit?.swapToUsdc,
+                'scoreLimit.sendTo':                   pt.scoreLimit?.sendTo,
+                'scoreLimit.cooldownHours':            pt.scoreLimit?.cooldownHours,
             };
             // Nur übernehmen, wenn der Pool-Typ überhaupt gepflegt ist: ein ungepflegter
             // Typ liefert dieselben lauter-null-Werte wie ein bewusst auf „keine Schwelle"
-            // gesetzter. Ist mindestens ein Wert belegt, gilt die Zeile als gespeichert –
-            // dann zählt auch ein null als Standard (z.B. „Stufe 2 ohne Schwelle").
-            if (Object.values(fromType).some(v => v != null)) {
+            // gesetzter. Signal dafür sind ausschließlich die drei Felder, die ohne
+            // gespeicherte Zeile null bleiben (thresholdPct/thresholdPct2/thresholdUsd) —
+            // die übrigen Felder haben non-null-Defaults (z.B. enabled: true) und wären
+            // sonst IMMER „belegt", auch ohne je gespeicherte Pool-Typ-Zeile.
+            const isConfigured = pt.trailingStop?.thresholdPct != null
+                || pt.trailingStop?.thresholdPct2 != null
+                || pt.tvlProtection?.level1?.thresholdUsd != null;
+            if (isConfigured) {
                 Object.assign(overrides, fromType);
             }
         }
@@ -478,7 +561,7 @@ function loadNonDefaults(db, botId, pool) {
     }
 }
 
-function loadSettings(db, botId, poolId) {
+export function loadSettings(db, botId, poolId) {
     const row = db.prepare(
         `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
     ).get(botId, poolId);
@@ -518,8 +601,11 @@ function loadPoolTypeSettings(db, botId, poolType) {
         return {
             trailingStop: { ...DEFAULT_POOL_TYPE_SETTINGS.trailingStop, ...(saved.trailingStop ?? {}) },
             tvlProtection: {
+                ...DEFAULT_POOL_TYPE_SETTINGS.tvlProtection,
+                ...(saved.tvlProtection ?? {}),
                 level1: { ...DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.level1, ...(saved.tvlProtection?.level1 ?? {}) },
             },
+            scoreLimit: { ...DEFAULT_POOL_TYPE_SETTINGS.scoreLimit, ...(saved.scoreLimit ?? {}) },
             enabled: saved.enabled ?? DEFAULT_POOL_TYPE_SETTINGS.enabled,
         };
     } catch {
@@ -582,8 +668,32 @@ const roundPct = v => Math.round(v * 10 ** TS_DECIMALS) / 10 ** TS_DECIMALS;
  *   - Stufe 2 ohne Stufe 1 ergibt keinen Sinn: die Scharfschaltung von Stufe 2 wird an
  *     Stufe 1 gemessen, ohne sie gäbe es keinen Auslösepunkt
  */
-function validateTrailingStop(merged) {
+/**
+ * Darf „Auto" für diesen Pool eingeschaltet werden? (LIQ#0351)
+ *
+ * Zwei Bedingungen, beide notwendig:
+ *   1. Es liegt eine belastbare Empfehlung vor (`tsAdvice.available`). Ein Schalter, der
+ *      nichts bewirkt, darf nicht einschaltbar sein.
+ *   2. Die Empfehlung stammt aus einer Quelle, die es hier wirklich gibt — auf dem Fork
+ *      heißt das Premium ('delivered'), auf dem Master rechnet der Advisor selbst ('local').
+ *      'none' ist beides nicht.
+ *
+ * 🔒 Diese Prüfung gehört auf den Server, nicht nur ins UI: Ein `disabled`-Attribut im
+ * Browser ist Bedienkomfort, keine Absicherung — ein direkter PUT umginge es.
+ */
+function canEnableTsAuto(poolId) {
+    const advice = loadTsAdvice()[poolId];
+    return !!advice?.available && (advice.source === 'local' || advice.source === 'delivered');
+}
+
+function validateTrailingStop(merged, poolId = null) {
     const inRange = v => Number.isFinite(v) && v >= TS_MIN_PCT && v <= TS_MAX_PCT;
+
+    // „Auto" nur zulassen, wenn es auch etwas zu übernehmen gibt.
+    merged.auto = !!merged.auto;
+    if (merged.auto && poolId && !canEnableTsAuto(poolId)) {
+        throw new Error(t('api.pools.trailing_auto_unavailable'));
+    }
 
     const p1 = Number(merged.thresholdPct);
     if (!inRange(p1)) throw new Error(t('api.pools.trailing_drawdown_range'));
@@ -601,7 +711,14 @@ function validateTrailingStop(merged) {
     merged.thresholdPct2 = roundPct(p2);
 }
 
-function saveSettings(db, botId, poolId, partial) {
+/**
+ * @param {{source: 'user'|'strategy'|'migration'|'bot'}} opts  Herkunft der Änderung,
+ *        landet in settings_history. Bewusst ohne Default (LIQ#0366): ein
+ *        stillschweigendes `'user'` würde einen Bulk-Write der künftigen
+ *        Strategie-Auswahl als Hand-Änderung verbuchen und `userTouched()` verfälschen.
+ */
+export function saveSettings(db, botId, poolId, partial, opts = {}) {
+    const { source } = opts;
     const current = loadSettings(db, botId, poolId);
     const before  = structuredClone(current);
     // Nur bekannte Sektionen übernehmen
@@ -609,7 +726,7 @@ function saveSettings(db, botId, poolId, partial) {
     if (partial.scoreLimit   !== undefined) current.scoreLimit   = { ...current.scoreLimit,   ...partial.scoreLimit   };
     if (partial.trailingStop !== undefined) {
         const merged = { ...current.trailingStop, ...partial.trailingStop };
-        validateTrailingStop(merged);
+        validateTrailingStop(merged, poolId);
         current.trailingStop = merged;
     }
     if (partial.cleanup      !== undefined) current.cleanup      = { ...current.cleanup,      ...partial.cleanup      };
@@ -650,7 +767,7 @@ function saveSettings(db, botId, poolId, partial) {
         ON CONFLICT(bot_id, pool_id) DO UPDATE SET settings = excluded.settings
     `).run(botId, poolId, JSON.stringify(current));
 
-    recordSettingsHistory(db, botId, 'pool', poolId, before, current);
+    recordSettingsHistory(db, botId, 'pool', poolId, before, current, source);
 
     return current;
 }
@@ -673,6 +790,7 @@ router.get('/liquidity', (req, res) => {
         const trendStates    = loadTrendStates();
         const scoreState     = loadScoreState();
         const poolTvls       = loadPoolTvls();
+        const tsAdviceMap    = loadTsAdvice();
         const activationTvls = loadActivationTvls();
         const capitalUsdc     = loadCapitalUsdc();
         const recentScores   = loadRecentScores(pools.map(p => p.id), 5);
@@ -739,6 +857,10 @@ router.get('/liquidity', (req, res) => {
                 enabledChangedAt:   pool.enabledChangedAt ?? null,
                 enabledReason:      pool.enabledReason    ?? null,
                 btcPricePoolId:     pool.btcPricePoolId  ?? null,
+                // Herkunftsmarker: true nur für per Pool-Offer übernommene Pools (LIQ#0380,
+                // s. bot-liquidity.js isOfferPool) — NICHT dasselbe wie cleanup.rankingEligible,
+                // das der Nutzer auch über den Modus "Cleanup inaktiv" selbst setzen kann.
+                premiumOffer:       !!pool.premiumOffer,
                 usdcIsTokenA:       pool.usdcIsTokenA    ?? false,
                 volatilePair:       pool.volatilePair     ?? false,
                 uiDepositDisabled:  pool.uiDepositDisabled ?? false,
@@ -748,6 +870,9 @@ router.get('/liquidity', (req, res) => {
                 trendState:         trendStates[pool.id]  ?? null,
                 scoreSource:        scoreState.source,
                 scoreStale:         scoreState.stale,
+                // Advisor-Empfehlung + Begründung; steuert die Auto-Checkbox im
+                // Trailing-Stop-Tab (verfügbar / gesperrt mit Grund).
+                tsAdvice:           tsAdviceMap[pool.id]  ?? { available: false, source: 'none', reason: null },
                 currentTvl:         poolTvls[pool.id]     ?? null,
                 // Vorbefüllungs-Defaults für den TVL-Schutz (aus pools.json)
                 tvlWarnDefault:     pool.tvlWarnThreshold ?? null,
@@ -890,12 +1015,20 @@ router.get('/liquidity/pool-types', (req, res) => {
 });
 
 // ── PUT /liquidity/pool-types/:poolType ────────────────────────────────────────────
-// Body: { trailingStop: { thresholdPct }, tvlProtection: { level1: { thresholdUsd } }, enabled? }
+// Body: {
+//   trailingStop:  { enabled, thresholdPct, thresholdPct2, auto, autoSwapToUSDC, sendTo, cooldownHours },
+//   tvlProtection: { level1: { enabled, withdrawPct }, swapToUsdc, sendTo, cooldownHours },
+//   scoreLimit:    { enabled, minScore, swapToUsdc, sendTo, cooldownHours },
+//   enabled?: boolean,  // Kapitalannahme des ganzen Typs (unabhängig von den drei Sektionen oben)
+// }
 // Schreibt die Werte SOFORT in die individuellen Settings ALLER Pools dieses Typs
 // (echter Bulk-Write, kein Template/Override-Konzept — Bestätigung dazu liegt im UI).
-// `withdrawPct` der TVL-Stufe wird nicht angefasst (nicht Teil dieser Tabelle); scheitert
-// validateTvlProtection() dennoch für einen einzelnen Pool, landet er in `failed` statt
-// die ganze Aktion abzubrechen.
+// `trailingStop.minimumValueUsd` und `tvlProtection.level1.thresholdUsd` werden NIE
+// angefasst (nicht Teil dieser Sektionen — pool-individuell, siehe DEFAULT_POOL_TYPE_SETTINGS-
+// Kommentar). Scheitert validateTvlProtection()/validateTrailingStop() dennoch für einen
+// einzelnen Pool (z.B. TVL-Schutz aktiviert, aber der Pool hat nie eine eigene Schwelle
+// gesetzt → thresholdUsd bleibt null), landet er in `failed` statt die ganze Aktion
+// abzubrechen.
 router.put('/liquidity/pool-types/:poolType', (req, res) => {
     const { poolType } = req.params;
     if (!POOL_TYPES.includes(poolType)) {
@@ -930,14 +1063,37 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             return res.status(400).json({ error: t('api.pools.trailing_drawdown2_order') });
         }
     }
-    {
-        const raw = body.tvlProtection?.level1?.thresholdUsd;
-        if (raw !== undefined && raw !== null && raw !== '') {
-            const v = Number(raw);
-            if (!Number.isFinite(v) || v <= 0) {
-                return res.status(400).json({ error: t('api.pools.tvl_threshold_level', { level: 'level1' }) });
+    const validateCooldown = (raw, errKey) => {
+        if (raw === undefined) return undefined;
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v < 1 || v > 24) {
+            throw new Error(t(errKey));
+        }
+        return v;
+    };
+    const validateStep10 = (raw, errKey) => {
+        if (raw === undefined) return undefined;
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v < 0 || v > 100 || v % 10 !== 0) {
+            throw new Error(t(errKey));
+        }
+        return v;
+    };
+    let tsCooldown, tvlCooldown, tvlPct, slCooldown, slMinScore;
+    try {
+        tsCooldown  = validateCooldown(body.trailingStop?.cooldownHours,  'api.pools.cooldown_range');
+        tvlCooldown = validateCooldown(body.tvlProtection?.cooldownHours, 'api.pools.cooldown_range');
+        slCooldown  = validateCooldown(body.scoreLimit?.cooldownHours,    'api.pools.cooldown_range');
+        tvlPct      = validateStep10(body.tvlProtection?.level1?.withdrawPct, 'api.pools.tvl_pct_step_l1');
+        const rawScore = body.scoreLimit?.minScore;
+        if (rawScore !== undefined) {
+            slMinScore = Number(rawScore);
+            if (!Number.isFinite(slMinScore) || slMinScore < 0 || slMinScore > 100) {
+                throw new Error(t('api.pools.score_limit_range'));
             }
         }
+    } catch (err) {
+        return res.status(400).json({ error: err.message });
     }
     if (body.enabled !== undefined && typeof body.enabled !== 'boolean') {
         return res.status(400).json({ error: t('api.pools.enabled_boolean') });
@@ -964,11 +1120,29 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         const oldTypeSettings = loadPoolTypeSettings(db, 'liquidity', poolType);
         const newTypeSettings = {
             trailingStop: {
-                thresholdPct:  thresholdPctRaw != null && thresholdPctRaw !== '' ? Number(thresholdPctRaw) : null,
-                thresholdPct2: threshold2Raw   != null && threshold2Raw   !== '' ? Number(threshold2Raw)   : null,
+                enabled:        body.trailingStop?.enabled ?? DEFAULT_POOL_TYPE_SETTINGS.trailingStop.enabled,
+                thresholdPct:   thresholdPctRaw != null && thresholdPctRaw !== '' ? Number(thresholdPctRaw) : null,
+                thresholdPct2:  threshold2Raw   != null && threshold2Raw   !== '' ? Number(threshold2Raw)   : null,
+                auto:           !!body.trailingStop?.auto,
+                autoSwapToUSDC: body.trailingStop?.autoSwapToUSDC ?? DEFAULT_POOL_TYPE_SETTINGS.trailingStop.autoSwapToUSDC,
+                sendTo:         body.trailingStop?.sendTo ?? '',
+                cooldownHours:  tsCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.trailingStop.cooldownHours,
             },
             tvlProtection: {
-                level1: { thresholdUsd: Number(body.tvlProtection?.level1?.thresholdUsd) || null },
+                level1: {
+                    enabled:     !!body.tvlProtection?.level1?.enabled,
+                    withdrawPct: tvlPct ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.level1.withdrawPct,
+                },
+                swapToUsdc:    body.tvlProtection?.swapToUsdc ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.swapToUsdc,
+                sendTo:        body.tvlProtection?.sendTo ?? '',
+                cooldownHours: tvlCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.cooldownHours,
+            },
+            scoreLimit: {
+                enabled:       !!body.scoreLimit?.enabled,
+                minScore:      slMinScore ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.minScore,
+                swapToUsdc:    body.scoreLimit?.swapToUsdc ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.swapToUsdc,
+                sendTo:        body.scoreLimit?.sendTo ?? '',
+                cooldownHours: slCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.cooldownHours,
             },
             enabled: body.enabled ?? true,
         };
@@ -976,28 +1150,56 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             INSERT INTO pool_type_settings (bot_id, pool_type, settings) VALUES (?, ?, ?)
             ON CONFLICT(bot_id, pool_type) DO UPDATE SET settings = excluded.settings
         `).run('liquidity', poolType, JSON.stringify(newTypeSettings));
-        recordSettingsHistory(db, 'liquidity', 'pool_type', poolType, oldTypeSettings, newTypeSettings);
+        recordSettingsHistory(db, 'liquidity', 'pool_type', poolType, oldTypeSettings, newTypeSettings, 'user');
 
-        // ── Bulk-Write Trailing-Stop/TVL in die individuellen Pool-Settings ──
+        // ── Bulk-Write Trailing-Stop/TVL/Score-Limit in die individuellen Pool-Settings ──
         const updated = [];
         const failed  = [];
         for (const pool of pools) {
             try {
                 const partial = {};
-                if (thresholdPctRaw !== undefined) {
+                if (body.trailingStop !== undefined) {
+                    // "Drawdown Auto" ist zwingend pool-gebunden (canEnableTsAuto() braucht
+                    // eine belastbare Advisor-Empfehlung FÜR DIESEN Pool) — beim Bulk-Write
+                    // über einen ganzen Typ hat das selten jeder Pool. Ein hartes Scheitern
+                    // des gesamten Pools nur wegen dieses einen Feldes wäre unverhältnismäßig
+                    // (Drawdown/Swap/Senden-an/Cooldown würden sonst mit-verworfen) und
+                    // erzeugte einen unübersichtlichen Sammel-Fehler-Toast (LIQ#0354,
+                    // Befund Rollout 30.08.). Für nicht-qualifizierte Pools wird "auto"
+                    // still auf false geklemmt, ohne eigene Rückmeldung — das Info-Icon am
+                    // Feld erklärt bereits dauerhaft, wann es greift; ein Toast bei jedem
+                    // Speichern wäre reine Wiederholung, und
+                    // sichtbar bleibt es ohnehin über den "weicht vom Typ-Default ab"-Hinweis
+                    // im Pool-Modal.
+                    const autoAllowed = !newTypeSettings.trailingStop.auto || canEnableTsAuto(pool.id);
                     partial.trailingStop = {
-                        thresholdPct:  Number(thresholdPctRaw),
-                        thresholdPct2: (threshold2Raw != null && threshold2Raw !== '') ? Number(threshold2Raw) : null,
+                        enabled:        newTypeSettings.trailingStop.enabled,
+                        thresholdPct:   Number(thresholdPctRaw),
+                        thresholdPct2:  newTypeSettings.trailingStop.thresholdPct2,
+                        auto:           autoAllowed && newTypeSettings.trailingStop.auto,
+                        autoSwapToUSDC: newTypeSettings.trailingStop.autoSwapToUSDC,
+                        sendTo:         newTypeSettings.trailingStop.sendTo,
+                        cooldownHours:  newTypeSettings.trailingStop.cooldownHours,
+                        // minimumValueUsd bewusst nicht gesetzt — bleibt beim Pool-individuellen Wert.
                     };
                 }
                 if (body.tvlProtection !== undefined) {
-                    const l1Usd = Number(body.tvlProtection?.level1?.thresholdUsd) || null;
                     partial.tvlProtection = {
-                        level1: { enabled: l1Usd != null && l1Usd > 0, thresholdUsd: l1Usd },
+                        level1: {
+                            enabled:     newTypeSettings.tvlProtection.level1.enabled,
+                            withdrawPct: newTypeSettings.tvlProtection.level1.withdrawPct,
+                            // thresholdUsd bewusst nicht gesetzt — bleibt beim Pool-individuellen Wert.
+                        },
+                        swapToUsdc:    newTypeSettings.tvlProtection.swapToUsdc,
+                        sendTo:        newTypeSettings.tvlProtection.sendTo,
+                        cooldownHours: newTypeSettings.tvlProtection.cooldownHours,
                     };
                 }
+                if (body.scoreLimit !== undefined) {
+                    partial.scoreLimit = { ...newTypeSettings.scoreLimit };
+                }
                 if (Object.keys(partial).length > 0) {
-                    saveSettings(db, 'liquidity', pool.id, partial);
+                    saveSettings(db, 'liquidity', pool.id, partial, { source: 'user' });
                 }
                 updated.push(pool.id);
             } catch (err) {
@@ -1094,7 +1296,7 @@ router.put('/liquidity/:poolId', (req, res) => {
         }
 
         const db      = openDb();
-        const updated = saveSettings(db, 'liquidity', pool.id, partial);
+        const updated = saveSettings(db, 'liquidity', pool.id, partial, { source: 'user' });
         db.close();
 
         res.json({ ok: true, settings: updated });

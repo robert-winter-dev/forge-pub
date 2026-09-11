@@ -112,6 +112,12 @@ const deSign = (n, d = 2) => (n == null || !Number.isFinite(n))
     ? '—' : (n > 0 ? '+' : '') + de(n, d);
 const clock = t => new Date(t).toLocaleTimeString('de-DE',
     { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+// Uhrzeit mit Datum NUR wenn der Zeitpunkt vor dem Berichtstag liegt. Innerhalb des Tages
+// ist das Datum redundant (es steht in der Überschrift, Vorgabe 31.08.2026) — davor trägt
+// es die entscheidende Information, sonst liest sich ein Trade vom Vortag als Uhrzeit von
+// heute. Betrifft Ketten, die über Mitternacht laufen.
+const clockDay = t => (t < from ? `${new Date(t).toLocaleDateString('de-DE',
+    { timeZone: TZ, day: '2-digit', month: '2-digit' })} ` : '') + clock(t);
 const dayDe = t => new Date(t).toLocaleDateString('de-DE',
     { timeZone: TZ, day: '2-digit', month: '2-digit', year: 'numeric' });
 
@@ -142,17 +148,12 @@ function exitReason(poolId, closedAt, openedAt) {
     const ts = one(`SELECT triggered_at, drawdown_pct, config_snapshot, trigger_source, error_msg
                       FROM ts_executions WHERE pool_id = ? AND triggered_at BETWEEN ? AND ?
                      ORDER BY triggered_at DESC LIMIT 1`, poolId, closedAt, openedAt);
+    // Schwelle selbst steht nicht mehr in der Exit-Grund-Zelle (Vorgabe 31.08.2026 — der
+    // %-Satz sprengte die Spaltenbreite und war für die Übersicht nicht nötig, "Trailing
+    // Stop" reicht). Die Rohdaten (config_snapshot, drawdown_pct) bleiben für andere
+    // Auswertungen wie ts-what-if.js unberührt in der DB.
     if (ts) {
-        let thr = null;
-        try {
-            const c  = JSON.parse(ts.config_snapshot);
-            const t1 = Number(c.thresholdPct);
-            const t2 = c.thresholdPct2 != null ? Number(c.thresholdPct2) : null;
-            // Die engere Stufe war aktiv, wenn der Drawdown sie überschritt, aber Stufe 1 nicht.
-            thr = (t2 != null && ts.drawdown_pct != null && ts.drawdown_pct < t1) ? t2 : t1;
-        } catch { /* ohne Schnappschuss ohne Schwelle */ }
-        return { kind: 'Trailing Stop', detail: thr != null ? `${de(thr, 2)} %` : null,
-                 failed: !!ts.error_msg };
+        return { kind: 'Trailing Stop', detail: null, failed: !!ts.error_msg };
     }
 
     // TVL-Schutz — die unterschrittene Schwelle in USDC, plus die Stufe (L1 teilweise, L2 voll).
@@ -225,23 +226,71 @@ const closed = db.prepare(
        FROM positions WHERE closed_at >= ? AND closed_at < ? ORDER BY closed_at`
 ).all(from, to);
 
-const rows = closed.map(p => {
-    const reason = exitReason(p.pool_id, p.closed_at, p.opened_at);
-    // 🔒 PnL zentral. Fenster = Lebensdauer genau dieser Position; Ein-/Auszahlungen rechnet
-    // lib/pnl.js selbst heraus, sie sind per Definition kein Gewinn.
+// ─── Segmentierung des Berichtstags (Befund 31.08.2026) ──────────────────────
+// 🔒 Der Tag wird pro Pool ausschließlich an ECHTEN AUSSTIEGEN geschnitten. Ein
+// Rebalancing schließt die Position zwar technisch, ist aber ein Umzug in eine neue
+// Range — der Trade läuft weiter (siehe exitReason(), Kommentar oben). Schnitte man
+// auch dort, fiele das Teilstück VOR dem Umzug komplett aus dem Bericht: es steht in
+// keiner der beiden Tabellen, wird aber vom Status-PnL mitgezählt.
+// Belegt am 30.08.2026: ZEC/USDC machte an dem Tag +12,62 USDC, sichtbar waren nur
+// +5,78 — die ersten 17,5 Stunden endeten in einem Rebalancing und verschwanden.
+// Der Status-Kopf zeigte -4,18 USDC, die Tabellen summierten sich auf -16,46 USDC.
+// Da die Segmente den Tag damit lückenlos und überschneidungsfrei kacheln, gilt jetzt
+// garantiert: Summe(Exits) + Summe(Offene) = Status-PnL.
+const closedWithReason = closed.map(p => ({ p, reason: exitReason(p.pool_id, p.closed_at, p.opened_at) }));
+
+const exitBoundaries = new Map();          // poolId → aufsteigende echte Ausstiegszeitpunkte
+for (const { p, reason } of closedWithReason) {
+    if (reason.isRebalance) continue;
+    if (!exitBoundaries.has(p.pool_id)) exitBoundaries.set(p.pool_id, []);
+    exitBoundaries.get(p.pool_id).push(p.closed_at);
+}
+for (const list of exitBoundaries.values()) list.sort((a, b) => a - b);
+
+// Beginn des Segments, das bei `endMs` endet: das Ende des vorherigen echten Ausstiegs
+// desselben Pools, sonst der Tagesbeginn.
+function segmentStart(poolId, endMs) {
+    let start = from;
+    for (const t of exitBoundaries.get(poolId) ?? []) {
+        if (t >= endMs) break;
+        if (t > start) start = t;
+    }
+    return start;
+}
+
+// Bezugsgröße für den Prozentwert: der Einsatz, mit dem der Trade in dieses Segment
+// gestartet ist — also die ERSTE Position der Kette, nicht die letzte. Sonst bezöge sich
+// ein über mehrere Range-Wechsel gelaufenes Ergebnis auf den Einstieg des letzten Umzugs.
+const chainFirstStmt = db.prepare(
+    `SELECT opened_at, entry_usd, capital_usdc FROM positions
+       WHERE pool_id = ? AND opened_at < ? AND (closed_at IS NULL OR closed_at > ?)
+      ORDER BY opened_at ASC LIMIT 1`);
+const chainFirst = (poolId, startMs, endMs) => chainFirstStmt.get(poolId, endMs, startMs) ?? null;
+function segmentBase(poolId, startMs, endMs) {
+    const c = chainFirst(poolId, startMs, endMs);
+    if (!c) return null;
+    return c.entry_usd > 0 ? c.entry_usd : (c.capital_usdc > 0 ? c.capital_usdc : null);
+}
+
+const rows = closedWithReason.map(({ p, reason }) => {
+    // 🔒 PnL zentral. Fenster = das Segment dieses Trades am Berichtstag, also vom Ende des
+    // vorherigen echten Ausstiegs (ersatzweise Tagesbeginn) bis zu diesem Ausstieg.
+    // Ein-/Auszahlungen rechnet lib/pnl.js selbst heraus, sie sind per Definition kein Gewinn.
+    // Rebalancing-Zeilen bekommen bewusst keinen Wert: sie sind keine Segmentgrenze, ihr
+    // Ergebnis steckt im nachfolgenden Ausstieg und wäre hier eine Doppelzählung.
+    const segFrom = segmentStart(p.pool_id, p.closed_at);
     let pnlUsd = null;
-    try {
+    if (!reason.isRebalance) try {
         pnlUsd = pnlForPeriod(db, { flavor: 'liquidity', scope: p.pool_id,
-                                    fromMs: p.opened_at, toMs: p.closed_at });
+                                    fromMs: segFrom, toMs: p.closed_at });
     } catch { /* kein PnL ermittelbar */ }
     // 🔒 Ohne Wertreihe liefert die PnL-Kurve exakt 0 — das heißt „keine Messpunkte", nicht
     // „kein Gewinn". Als 0,00 USDC ausgegeben wäre es eine erfundene Zahl, und weil bis zum
     // Archiv-Fix (#0313) die Reihe bei jedem Reopen gelöscht wurde, betrifft das etliche
     // Positionen. Deshalb: keine Messpunkte ⇒ kein Wert.
     if (pnlUsd != null && Math.abs(pnlUsd) < 0.005 && !hasSeries(p)) pnlUsd = null;
-    // Bezugsgröße für den Prozentwert: die Einstiegsreferenz der Position, ersatzweise das
-    // eingesetzte Kapital. Ohne belastbaren Bezug lieber keine Prozentangabe als eine falsche.
-    const base   = p.entry_usd > 0 ? p.entry_usd : (p.capital_usdc > 0 ? p.capital_usdc : null);
+    // Ohne belastbaren Bezug lieber keine Prozentangabe als eine falsche.
+    const base   = segmentBase(p.pool_id, segFrom, p.closed_at);
     const pnlPct = (pnlUsd != null && base) ? (pnlUsd / base) * 100 : null;
     return {
         id: p.id, pool: p.pool_id, pair: displayPair(p.pool_id),
@@ -275,19 +324,25 @@ const open = db.prepare(
 ).all(to, to);
 
 const openRows = open.map(p => {
-    // 🔒 PnL zentral, wie bei den geschlossenen Trades oben. Fenster = seit Eröffnung
-    // bis zur Tagesgrenze `to` — nicht bis "jetzt", damit der Bericht für einen
-    // bestimmten Tag reproduzierbar bleibt, egal wann er erzeugt/angesehen wird.
+    // 🔒 PnL zentral, gleiche Segmentlogik wie bei den geschlossenen Trades oben: vom Ende
+    // des letzten echten Ausstiegs dieses Pools (ersatzweise Tagesbeginn) bis zur Tagesgrenze
+    // `to` — nicht bis "jetzt", damit der Bericht für einen bestimmten Tag reproduzierbar
+    // bleibt, egal wann er erzeugt/angesehen wird, und nicht erst ab `opened_at`, sonst fehlt
+    // der vor einem Rebalancing gelaufene Teil des Trades.
+    const segFrom = segmentStart(p.pool_id, to);
     let pnlUsd = null;
     try {
         pnlUsd = pnlForPeriod(db, { flavor: 'liquidity', scope: p.pool_id,
-                                    fromMs: p.opened_at, toMs: to });
+                                    fromMs: segFrom, toMs: to });
     } catch { /* kein PnL ermittelbar */ }
-    const base   = p.entry_usd > 0 ? p.entry_usd : (p.capital_usdc > 0 ? p.capital_usdc : null);
+    const base   = segmentBase(p.pool_id, segFrom, to);
     const pnlPct = (pnlUsd != null && base) ? (pnlUsd / base) * 100 : null;
+    // Eröffnung = Anfang der Kette, nicht der letzte Range-Wechsel — sonst zeigte die
+    // Spalte einen Zeitpunkt, der nicht zum Fenster des daneben stehenden PnL passt.
     return {
         id: p.id, pool: p.pool_id, pair: displayPair(p.pool_id),
-        openedAt: p.opened_at, share: base, pnlUsd, pnlPct,
+        openedAt: chainFirst(p.pool_id, segFrom, to)?.opened_at ?? p.opened_at,
+        share: base, pnlUsd, pnlPct,
     };
 });
 const openMeasured = openRows.filter(r => r.pnlUsd != null);
@@ -314,6 +369,28 @@ const statusBaseUsd = db.prepare(
     ).get(from)?.total_usd
     ?? null;
 const statusPnlPct = (statusPnlUsd != null && statusBaseUsd) ? (statusPnlUsd / statusBaseUsd) * 100 : null;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔒 SELBSTPRÜFUNG — die Tabellen müssen den Status-Kopf ergeben
+//
+// Weil die Segmente den Tag pro Pool lückenlos und überschneidungsfrei kacheln, gilt:
+//     Summe(Exits) + Summe(Offene) = Status-PnL
+// Das ist keine Näherung, sondern eine Identität der Methodik. Bricht sie, ist eine
+// Kapitalbewegung aus dem Bericht gefallen — genau der Fehler vom 30.08.2026, der zwei
+// Wochen unbemerkt blieb, weil ihn nichts geprüft hat. Ein Kommentar hätte ihn nicht
+// gefunden, eine scheiternde Prüfung schon (Projektregel „Text oder Test?").
+//
+// Nur gültig, wenn alle Beträge messbar waren: fehlende Wertreihen (noData) lassen
+// bewusst Lücken, die dann keine Aussage über die Identität erlauben.
+const RECONCILE_TOL_USD = 0.05;   // reine Rundung; die Anzeige rundet auf 2 Stellen
+const reconcileGap = (statusPnlUsd == null || noData > 0)
+    ? null : statusPnlUsd - (sumUsd + openSumUsd);
+const reconcileBroken = reconcileGap != null && Math.abs(reconcileGap) > RECONCILE_TOL_USD;
+if (reconcileBroken) {
+    console.error(`[daily-report] ⚠️  Abstimmung ${ymd} gescheitert: Status ${statusPnlUsd.toFixed(2)} ` +
+                  `≠ Exits ${sumUsd.toFixed(2)} + Offene ${openSumUsd.toFixed(2)} ` +
+                  `(Differenz ${reconcileGap.toFixed(2)} USDC)`);
+}
 
 // Erhaltene Fees: geclaimte LP-Fees des Tages, bereits in USDC (fee_history.usd_value).
 const feesReceivedUsd = db.prepare(
@@ -349,6 +426,13 @@ function buildReport() {
     L.push(`- Erhaltene Fees: ${de(feesReceivedUsd)} USDC`);
     L.push(`- PnL: ${statusPnlUsd == null ? '—' : deSign(statusPnlUsd)} USDC` +
            (statusPnlPct != null ? ` / ${deSign(statusPnlPct, 1)} %` : ''));
+    // Die Warnung gehört sichtbar in den Bericht, nicht nur ins Log: Wer die Zahlen liest,
+    // muss erfahren, dass sie sich gerade nicht zusammenrechnen lassen.
+    if (reconcileBroken) {
+        L.push(`- ⚠️ Achtung: Die Tabellen unten ergeben zusammen ${deSign(sumUsd + openSumUsd)} USDC ` +
+               `und weichen damit um ${de(Math.abs(reconcileGap))} USDC vom PnL oben ab. ` +
+               `Im Bericht fehlt eine Kapitalbewegung — bitte prüfen.`);
+    }
     L.push('');
 
     if (exits.length === 0) {
@@ -356,44 +440,44 @@ function buildReport() {
         if (rebalances.length) {
             L.push(`(${rebalances.length}x Rebalancing — das ist ein Range-Wechsel, kein Ausstieg.)`);
         }
-        return L.join('\n');
-    }
-
-    L.push(`Am ${dayLabel} ${exits.length === 1 ? 'wurde 1 Position' : `wurden ${exits.length} Positionen`} geschlossen.`);
-    // Fett wie das Ergebnis in der Trailing-Stop-Meldung (Vorgabe 2026-08-24, gleiches
-    // Prinzip: die Kernzahl soll ohne Suchen ins Auge fallen) — *…* wird von
-    // inlineMarkdown() (js/message.js) zu <strong>, Telegram interpretiert es nativ als fett.
-    L.push(`*Ergebnis zusammen: ${deSign(sumUsd)} USDC* (${winners} im Plus, ${losers} im Minus).`);
-    // Ohne diesen Hinweis liest sich die Summe wie das Tagesergebnis aller Exits.
-    if (noData) L.push(`Bei ${noData} davon fehlt die Wertreihe — sie sind in der Summe NICHT enthalten.`);
-    L.push('');
-
-    // Pipe-Tabelle: Das Message Center rendert daraus eine echte Tabelle mit Spalten und
-    // Linien, Telegram zeigt einen Monospace-Block. `---:` = rechtsbündige Zahlenspalte.
-    L.push('```');
-    L.push('| Zeit | Pool | PnL | Exit-Grund |');
-    L.push('|------|------|----:|------------|');
-    for (const r of exits) {
-        const pnl = r.pnlUsd == null ? '—'
-            : `${deSign(r.pnlUsd)} USDC${r.pnlPct != null ? ` (${deSign(r.pnlPct, 1)} %)` : ''}`;
-        // Kurzer Marker statt Fließtext in der Zelle (der frühere Zusatz "(Ausfuehrung
-        // fehlgeschlagen)" sprengte die Spaltenbreite und blieb für sich genommen unklar —
-        // "fehlgeschlagen" klang nach einem offenen Problem, dabei ist die Position ja
-        // geschlossen). Die Erklärung dazu steht einmalig in der Fußnote unten.
-        const grund = [r.reason.kind, r.reason.detail].filter(Boolean).join(' ')
-            + (r.reason.failed ? ' *' : '');
-        L.push(`| ${dayDe(r.closedAt)} ${clock(r.closedAt)} Uhr | ${r.pair} | ${pnl} | ${grund} |`);
-    }
-    L.push('```');
-
-    if (failed) {
+    } else {
+        L.push(`Am ${dayLabel} ${exits.length === 1 ? 'wurde 1 Position' : `wurden ${exits.length} Positionen`} geschlossen.`);
+        // Fett wie das Ergebnis in der Trailing-Stop-Meldung (Vorgabe 2026-08-24, gleiches
+        // Prinzip: die Kernzahl soll ohne Suchen ins Auge fallen) — *…* wird von
+        // inlineMarkdown() (js/message.js) zu <strong>, Telegram interpretiert es nativ als fett.
+        L.push(`*Ergebnis zusammen: ${deSign(sumUsd)} USDC* (${winners} im Plus, ${losers} im Minus).`);
+        // Ohne diesen Hinweis liest sich die Summe wie das Tagesergebnis aller Exits.
+        if (noData) L.push(`Bei ${noData} davon fehlt die Wertreihe — sie sind in der Summe NICHT enthalten.`);
         L.push('');
-        L.push(`* ${failed === 1 ? 'Bei diesem Ausstieg ist' : `Bei ${failed} dieser Ausstiege ist`} der erste Versuch ` +
-               'fehlgeschlagen — der Bot hat es automatisch erneut versucht und die Position damit doch geschlossen.');
-    }
-    if (rebalances.length) {
-        L.push('');
-        L.push(`Zusätzlich ${rebalances.length}x Rebalancing (Range-Wechsel, kein Ausstieg) — nicht in der Tabelle.`);
+
+        // Pipe-Tabelle: Das Message Center rendert daraus eine echte Tabelle mit Spalten und
+        // Linien, Telegram zeigt einen Monospace-Block. `---:` = rechtsbündige Zahlenspalte.
+        L.push('```');
+        L.push('| Zeit | Pool | PnL | Exit-Grund |');
+        L.push('|------|------|----:|------------|');
+        for (const r of exits) {
+            const pnl = r.pnlUsd == null ? '—'
+                : `${deSign(r.pnlUsd)} USDC${r.pnlPct != null ? ` (${deSign(r.pnlPct, 1)} %)` : ''}`;
+            // Kurzer Marker statt Fließtext in der Zelle (der frühere Zusatz "(Ausfuehrung
+            // fehlgeschlagen)" sprengte die Spaltenbreite und blieb für sich genommen unklar —
+            // "fehlgeschlagen" klang nach einem offenen Problem, dabei ist die Position ja
+            // geschlossen). Die Erklärung dazu steht einmalig in der Fußnote unten.
+            const grund = [r.reason.kind, r.reason.detail].filter(Boolean).join(' ')
+                + (r.reason.failed ? ' *' : '');
+            L.push(`| ${clock(r.closedAt)} Uhr | ${r.pair} | ${pnl} | ${grund} |`);
+        }
+        L.push('```');
+
+        if (failed) {
+            L.push('');
+            L.push(`* ${failed === 1 ? 'Bei diesem Ausstieg ist' : `Bei ${failed} dieser Ausstiege ist`} der erste Versuch ` +
+                   'fehlgeschlagen — der Bot hat es automatisch erneut versucht und die Position damit doch geschlossen.');
+        }
+        if (rebalances.length) {
+            L.push('');
+            L.push(`Zusätzlich ${rebalances.length}x Rebalancing (Range-Wechsel, kein Ausstieg) — keine eigene Zeile, ` +
+                   `das Ergebnis steckt im jeweils darauf folgenden Trade.`);
+        }
     }
 
     if (openRows.length) {
@@ -409,7 +493,7 @@ function buildReport() {
             const share = r.share == null ? '—' : `${de(r.share)} USDC`;
             const pnl = r.pnlUsd == null ? '—'
                 : `${deSign(r.pnlUsd)} USDC${r.pnlPct != null ? ` (${deSign(r.pnlPct, 1)} %)` : ''}`;
-            L.push(`| ${dayDe(r.openedAt)} ${clock(r.openedAt)} Uhr | ${r.pair} | ${share} | ${pnl} |`);
+            L.push(`| ${clockDay(r.openedAt)} Uhr | ${r.pair} | ${share} | ${pnl} |`);
         }
         L.push('```');
     }
@@ -441,7 +525,7 @@ function buildReportData() {
         sumText: `${deSign(sumUsd)} USDC`,
         sumSign: sumUsd > 0 ? 1 : (sumUsd < 0 ? -1 : 0),
         rows: exits.map(r => ({
-            timeText: `${dayDe(r.closedAt)} ${clock(r.closedAt)} Uhr`,
+            timeText: `${clock(r.closedAt)} Uhr`,
             pair: r.pair,
             pnlUsdText: r.pnlUsd == null ? null : `${deSign(r.pnlUsd)} USDC`,
             pnlPctText: r.pnlPct == null ? null : `${deSign(r.pnlPct, 1)} %`,
@@ -455,7 +539,7 @@ function buildReportData() {
         openSumText: `${deSign(openSumUsd)} USDC`,
         openSumSign: openSumUsd > 0 ? 1 : (openSumUsd < 0 ? -1 : 0),
         openRows: openRows.map(r => ({
-            openedText: `${dayDe(r.openedAt)} ${clock(r.openedAt)} Uhr`,
+            openedText: `${clockDay(r.openedAt)} Uhr`,
             pair: r.pair,
             shareText: r.share == null ? null : `${de(r.share)} USDC`,
             pnlUsdText: r.pnlUsd == null ? null : `${deSign(r.pnlUsd)} USDC`,
@@ -475,12 +559,14 @@ if (DO_NOTIFY) {
     // Message Center > Einstellungen: Tagesbericht ist standardmäßig AN, kann pro
     // FORGE-Installation abgeschaltet werden (feature_daily_report in nexus.db).
     const featureEnabled = await isDailyReportEnabled();
-    // 🔒 Keine „nichts passiert"-Meldung: Ein Tag ohne Exit erzeugt keine Nachricht. Sonst
-    // gewöhnt man sich an eine tägliche Meldung ohne Inhalt und übersieht die mit Inhalt.
+    // 🔒 Keine „nichts passiert"-Meldung: Weder Exits noch offene Positionen erzeugen keine
+    // Nachricht (LIQ#0347). Status-Kopf (Fees/PnL) und Tabelle „Offene Trades" liefern seit
+    // 25.08.26 aber eigenständigen Inhalt, auch ohne Exit — nur ein wirklich leerer Tag
+    // (kein Exit, keine offene Position) bleibt ohne Meldung.
     if (!featureEnabled) {
         console.log('[daily-report] Feature in Einstellungen deaktiviert — keine Meldung.');
-    } else if (exits.length === 0) {
-        console.log('[daily-report] Keine geschlossene Position — keine Meldung (wie vorgesehen).');
+    } else if (exits.length === 0 && openRows.length === 0) {
+        console.log('[daily-report] Keine Exits, keine offenen Positionen — keine Meldung (wie vorgesehen).');
     } else {
         const notify = await import('../lib/notify.js');
         await notify.dailyReport(dayDe(from + 12 * 3600 * 1000), buildReport(), buildReportData());

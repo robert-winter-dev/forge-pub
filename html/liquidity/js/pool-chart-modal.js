@@ -1,14 +1,17 @@
-// pool-chart-modal.js v20260526n
+// pool-chart-modal.js v20260909a
 // Kurs-Charts fuer Pools.
 // Datenquelle 1 (bevorzugt): lokale price-history.json aus pool_stats-DB
 // Datenquelle 2 (Fallback): GeckoTerminal API (CORS: access-control-allow-origin: *)
 // Lazy-geladen beim ersten Klick - kein Nexus, kein Backend noetig.
+// Pro Tab zusaetzlich ein Link auf den GeckoTerminal-Chart (extern, TradingView-artig),
+// wenn GeckoTerminal fuer diese Kombination einen Pool kennt - sonst kein Link.
 
 const USDC_MINT     = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const GECKO_BASE    = 'https://api.geckoterminal.com/api/v2';
 const CJS_CDN       = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js';
 const GECKO_HEADERS = { Accept: 'application/json;version=20230302' };
 const RANGES        = [{ l: '1D', n: 24 }, { l: '1W', n: 168 }, { l: '1M', n: 720 }];
+const geckoPoolUrl  = addr => 'https://www.geckoterminal.com/solana/pools/' + addr;
 
 let _modal     = null;
 let _cjsLoad   = null;
@@ -16,6 +19,7 @@ let _phLoad    = null;   // price-history.json laden (einmalig)
 let _ph        = null;   // gecachte price-history
 let _charts    = {};
 let _cache     = new Map();   // `${source}_${key}_${limit}` -> [{x,y}]
+let _tokenPoolCache = new Map(); // mint -> { address, tokenParam } | null (GeckoTerminal-USDC-Pool je Token)
 let _pool      = null;
 let _tabs      = [];
 let _activeTab = 0;
@@ -187,6 +191,9 @@ function buildTabsDOM() {
             '<canvas id="poolChartCanvas' + i + '"></canvas>' +
             '<div class="pool-chart-overlay" id="poolChartLoading' + i + '">Lade Daten...</div>' +
             '<div class="pool-chart-overlay" id="poolChartEmpty' + i + '" style="display:none">Keine Daten verfuegbar</div>' +
+            '</div>' +
+            '<div class="pool-chart-gecko-link-row">' +
+            '<a class="pool-chart-gecko-link" id="poolChartLink' + i + '" href="#" target="_blank" rel="noopener" style="display:none">GeckoTerminal ↗</a>' +
             '</div>';
         panels.appendChild(panel);
     });
@@ -289,6 +296,57 @@ async function loadAndRender(tabIdx, forceRefetch) {
     if (canvas) canvas.style.display = '';
 
     renderChart(tabIdx, ohlcv, tab.label);
+    updateGeckoLink(tabIdx, tab);
+}
+
+// -- Externer Chart-Link (GeckoTerminal) --------------------------------------
+
+// Sucht den Pool, in dem `mint` gegen USDC gehandelt wird (fuer den externen
+// Link UND als OHLCV-Fallback genutzt - ein Ergebnis, ein Cache).
+async function findTokenUsdcPool(mint) {
+    if (!mint || mint === USDC_MINT) return null;
+    if (_tokenPoolCache.has(mint)) return _tokenPoolCache.get(mint);
+
+    let result = null;
+    try {
+        const r = await fetch(
+            GECKO_BASE + '/networks/solana/tokens/' + mint + '/pools?page=1',
+            { headers: GECKO_HEADERS }
+        );
+        if (r.ok) {
+            const { data: pools = [] } = await r.json();
+            for (const pool of pools) {
+                const addr    = pool.attributes?.address;
+                const baseId  = pool.relationships?.base_token?.data?.id  ?? '';
+                const quoteId = pool.relationships?.quote_token?.data?.id ?? '';
+                if (!addr) continue;
+                if (baseId.includes(mint) && quoteId.includes(USDC_MINT))  { result = { address: addr, tokenParam: 'base'  }; break; }
+                if (quoteId.includes(mint) && baseId.includes(USDC_MINT))  { result = { address: addr, tokenParam: 'quote' }; break; }
+            }
+        }
+    } catch { /* offline/CORS - Link bleibt einfach weg */ }
+
+    _tokenPoolCache.set(mint, result);
+    return result;
+}
+
+// Loest fuer einen Tab die GeckoTerminal-Pool-Adresse auf, wenn vorhanden.
+async function resolveTabGeckoUrl(tab) {
+    if (tab.type === 'pair') return tab.address ? geckoPoolUrl(tab.address) : null;
+    const found = await findTokenUsdcPool(tab.mint);
+    return found ? geckoPoolUrl(found.address) : null;
+}
+
+// Zeigt/versteckt den Link je Tab-Panel - laeuft parallel zum Chart-Rendering,
+// blockiert es also nicht.
+function updateGeckoLink(tabIdx, tab) {
+    const linkEl = document.getElementById('poolChartLink' + tabIdx);
+    if (!linkEl) return;
+    resolveTabGeckoUrl(tab).then(url => {
+        if (_activeTab !== tabIdx) return; // Tab inzwischen gewechselt
+        if (url) { linkEl.href = url; linkEl.style.display = ''; }
+        else       linkEl.style.display = 'none';
+    });
 }
 
 // -- GeckoTerminal-Calls (Fallback) ------------------------------------------
@@ -310,26 +368,8 @@ async function fetchPairOhlcv(poolAddress, limit) {
 }
 
 async function fetchTokenUsdOhlcv(tokenMint, limit) {
-    if (!tokenMint || tokenMint === USDC_MINT) return null;
-
-    const r = await fetch(
-        GECKO_BASE + '/networks/solana/tokens/' + tokenMint + '/pools?page=1',
-        { headers: GECKO_HEADERS }
-    );
-    if (!r.ok) return null;
-
-    const { data: pools = [] } = await r.json();
-    for (const pool of pools) {
-        const addr    = pool.attributes?.address;
-        const baseId  = pool.relationships?.base_token?.data?.id  ?? '';
-        const quoteId = pool.relationships?.quote_token?.data?.id ?? '';
-        if (!addr) continue;
-        if (baseId.includes(tokenMint) && quoteId.includes(USDC_MINT))
-            return fetchOhlcv(addr, limit, 'base');
-        if (quoteId.includes(tokenMint) && baseId.includes(USDC_MINT))
-            return fetchOhlcv(addr, limit, 'quote');
-    }
-    return null;
+    const found = await findTokenUsdcPool(tokenMint);
+    return found ? fetchOhlcv(found.address, limit, found.tokenParam) : null;
 }
 
 // -- Chart.js-Rendering ------------------------------------------------------

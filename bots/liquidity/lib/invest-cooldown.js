@@ -25,8 +25,11 @@ import { loadTsConfig }                    from './trailing-stop.js';
 import { loadTvlConfig }                   from './tvl-protection.js';
 import { loadConfig as loadScoreLimitCfg } from './score-limit.js';
 
-/** Fällt ein Pool ohne (gültige) cooldownHours-Angabe an, gilt diese Untergrenze. */
-const DEFAULT_COOLDOWN_HOURS = 1;
+/** Fällt ein Pool ohne (gültige) cooldownHours-Angabe an, gilt diese Untergrenze.
+ *  6 h seit 2026-09-03 (LIQ#0359) — gleicher Wert wie der Trailing-Stop-Default in
+ *  lib/pool-settings-defaults.js; TVL-Schutz (12 h) und Score-Limit (1 h) tragen ihre
+ *  Werte in jeder Pool-Zeile explizit, dieser Fallback greift nur bei fehlendem Feld. */
+const DEFAULT_COOLDOWN_HOURS = 6;
 
 /**
  * `key` ist maschinenlesbar und geht ins Dashboard (die Oberfläche ist zweisprachig und

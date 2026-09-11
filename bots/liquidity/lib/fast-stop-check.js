@@ -34,7 +34,7 @@
  * sind das 6 Reads/Minute — gegen ~1700 Upstream-Calls/Stunde heute vernachlässigbar.
  */
 
-import { getOpenPosition, getIncompleteTsExecutions, insertTsFastCheck } from './db.js';
+import { getOpenPosition, getIncompleteTsExecutions, insertTsFastCheck, latestStopValueUsd } from './db.js';
 import { loadTsConfig, evaluateTsTrigger, updateHwm } from './trailing-stop.js';
 import { computeLpValueFromState, writePositionSnapshotFromState } from './refresh-state.js';
 import { refreshReferencePrices } from './reference-prices.js';
@@ -93,13 +93,19 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
             }, price);
             if (!(lpValueUsd > 0)) continue;
 
-            const verdict = evaluateTsTrigger(cfg, position, lpValueUsd);
+            // Offene Fees aus dem letzten Snapshot dazunehmen — der Stop rechnet seit
+            // 2026-08-30 mit LP-Wert + Fees (siehe latestStopValueUsd). Zwischen zwei
+            // Snapshots können Fees nur wachsen; der ≤5 Min alte Wert untertreibt also
+            // höchstens → im Zweifel ein Trigger mehr, den die Vollmessung dann prüft.
+            const stopValueUsd = lpValueUsd + (latestStopValueUsd(db, pool.id)?.feesUsd ?? 0);
+
+            const verdict = evaluateTsTrigger(cfg, position, stopValueUsd);
             summary.checked++;
 
             let confirmed = null;
             if (verdict.trigger) {
                 summary.triggered++;
-                log(`[fast-stop:${pool.id}] Schnellprüfung: ${lpValueUsd.toFixed(2)} USDC liegt ${verdict.drawdownPct.toFixed(2)} % unter dem Höchststand ${position.hwm_usd.toFixed(2)} (Schwelle ${verdict.thresholdPct} %, Stufe ${verdict.stage}) – bestätigende Messung`);
+                log(`[fast-stop:${pool.id}] Schnellprüfung: ${stopValueUsd.toFixed(2)} USDC (inkl. Fees) liegt ${verdict.drawdownPct.toFixed(2)} % unter dem Höchststand ${position.hwm_usd.toFixed(2)} (Schwelle ${verdict.thresholdPct} %, Stufe ${verdict.stage}) – bestätigende Messung`);
                 confirmed = await _confirmAndExit(db, pool, position, cfg, adapter, onConfirmedTrigger, log) ? 1 : 0;
                 if (confirmed) summary.confirmed++;
             }
@@ -108,7 +114,9 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
                 poolId:       pool.id,
                 positionId:   position.id,
                 price,
-                lpValueUsd,
+                // lp_value_usd trägt den Entscheidungswert (inkl. Fees) — die Spalte
+                // protokolliert, wogegen evaluateTsTrigger() tatsächlich verglichen hat.
+                lpValueUsd:   stopValueUsd,
                 hwmUsd:       position.hwm_usd,
                 drawdownPct:  verdict.drawdownPct,
                 thresholdPct: verdict.thresholdPct,
@@ -140,21 +148,20 @@ async function _confirmAndExit(db, pool, position, cfg, adapter, onConfirmedTrig
         log(`[fast-stop:${pool.id}] Bestätigungs-Snapshot verworfen (Stale-Guard) – kein Exit`);
         return false;
     }
-    const snap = db.prepare(
-        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
-    ).get(pool.id);
-    const lpUsd = snap?.lp_value_usd ?? 0;
-    if (!(lpUsd > 0)) return false;
+    // Stop-Wert (LP + offene Fees) aus dem soeben geschriebenen Snapshot — derselbe
+    // Maßstab wie im Tick-Pfad (bot.js _takeSnapshot).
+    const stopUsd = latestStopValueUsd(db, pool.id)?.valueUsd ?? 0;
+    if (!(stopUsd > 0)) return false;
 
-    updateHwm(db, pool, position, lpUsd);
+    updateHwm(db, pool, position, stopUsd);
 
     const fresh   = getOpenPosition(db, pool.id);
-    const verdict = evaluateTsTrigger(cfg, fresh, lpUsd);
+    const verdict = evaluateTsTrigger(cfg, fresh, stopUsd);
     if (!verdict.trigger) {
-        log(`[fast-stop:${pool.id}] Bestätigende Messung ${lpUsd.toFixed(2)} USDC (${verdict.drawdownPct.toFixed(2)} % unter Höchststand ${(fresh?.hwm_usd ?? 0).toFixed(2)}) liegt über der Schwelle – kein Exit`);
+        log(`[fast-stop:${pool.id}] Bestätigende Messung ${stopUsd.toFixed(2)} USDC (${verdict.drawdownPct.toFixed(2)} % unter Höchststand ${(fresh?.hwm_usd ?? 0).toFixed(2)}) liegt über der Schwelle – kein Exit`);
         return false;
     }
-    log(`[fast-stop:${pool.id}] Bestätigt: ${lpUsd.toFixed(2)} USDC, ${verdict.drawdownPct.toFixed(2)} % Drawdown – Exit wird ausgeführt`);
+    log(`[fast-stop:${pool.id}] Bestätigt: ${stopUsd.toFixed(2)} USDC, ${verdict.drawdownPct.toFixed(2)} % Drawdown – Exit wird ausgeführt`);
     const ran = await onConfirmedTrigger(pool);
     return ran !== false;
 }

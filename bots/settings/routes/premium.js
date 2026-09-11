@@ -2,7 +2,7 @@
  * /api/premium – FORGE public Premium-Service verwalten (Liquidity → Premium → Verwalten)
  *
  * GET  /status    → Wallet-Adresse, Guthaben, Restlaufzeit, Preis, Aktivierungsstatus,
- *                    Ein/Aus-Zustand. Läuft auf Master UND Fork (geteilte Datei!) —
+ *                    Ein/Aus-Zustand (`enabled`) und Berechtigung (`entitled`, LIQ#0388). Läuft auf Master UND Fork (geteilte Datei!) —
  *                    auf dem Master liefert sie { available: false }, kein Fehler.
  * POST /enable     → schaltet die stündliche Auto-Zahlung frei (premium-pay.js darf
  *                    dann per Cron laufen) UND stößt sofort eine Zahlung für die
@@ -26,7 +26,9 @@ import { walletExists, getPremiumPublicKey, fetchPremiumBalances, remainingServi
 import { getCurrentPricing } from '../../../lib/premium-pricing-store.js';
 import { getMyActivationToken } from '../../../lib/premium-token-store.js';
 import { isAutoPayEnabled, setAutoPayEnabled, setPayFailureNotified } from '../../../lib/premium-auto-pay-store.js';
+import { hasPremiumEntitlement } from '../../../lib/premium-entitlement.js';
 import { recordPremiumMessage } from '../../../core/premium/messages-db.js';
+import { rollbackStrategyOnPremiumLoss } from '../lib/strategy-apply.js';
 import { t } from '../../../lib/i18n.js';
 
 const execFileAsync = promisify(execFile);
@@ -72,8 +74,18 @@ async function triggerImmediatePayment() {
 router.get('/status', async (_req, res) => {
     if (!isForkInstance()) {
         // Kein Fehler — der Master hat schlicht kein Premium-Wallet. Das Frontend
-        // blendet den Menüpunkt in diesem Fall aus (siehe bot-liquidity.js).
-        return res.json({ available: false });
+        // blendet den Menüpunkt in diesem Fall aus (siehe bot-liquidity.js), weil das
+        // dort weiterhin an `available` hängt.
+        //
+        // enabled: true ist bewusst gesetzt (LIQ#0381, Variante A, 04.09.2026):
+        // der Master ist der Urheber der Strategien, ein Premium-Gate gegen sich selbst
+        // ist sinnlos. bot-liquidity.js _strategyRowHtml() sperrt die Strategie-Auswahl
+        // NUR über `enabled` (nicht zusätzlich über `available`, siehe Kommentar dort) —
+        // diese eine Zeile reicht deshalb aus, um den Master ohne Premium-Wallet
+        // freizuschalten, ohne das Fork-Gate anzufassen. Die Master-Ausnahme hängt
+        // bewusst an derselben isForkInstance()-Invariante wie oben, nicht an einem
+        // neuen Schalter — sonst ließe sie sich auf einem Fork setzen.
+        return res.json({ available: false, enabled: true, entitled: true });
     }
     if (!walletExists()) {
         return res.json({ available: true, walletConfigured: false });
@@ -104,6 +116,12 @@ router.get('/status', async (_req, res) => {
             lowBalanceWarnHours: pricing?.lowBalanceWarnHours ?? null,
             lowBalanceCriticalHours: pricing?.lowBalanceCriticalHours ?? null,
             enabled: isAutoPayEnabled(),
+            // LIQ#0388: `enabled` ist der AUTOPAY-Schalter (zahlt dieser Host?), `entitled`
+            // die BERECHTIGUNG (darf dieser Host Premium nutzen?). Die Premium-Verwalten-
+            // Seite zeigt weiterhin `enabled` — sie schaltet ja genau diesen Schalter. Die
+            // Strategie-Auswahl hängt dagegen an `entitled`: forge-pub1 ist über die
+            // Systemdaten-Freigabe berechtigt, ohne zu zahlen.
+            entitled: hasPremiumEntitlement().entitled,
         });
     } catch (err) {
         res.status(500).json({ available: true, error: err.message });
@@ -126,7 +144,23 @@ router.post('/disable', (_req, res) => {
     if (!isForkInstance()) return res.status(403).json({ error: t('api.premium.fork_only') });
     setAutoPayEnabled(false);
     recordPremiumMessage(JSON.stringify({ cmd: 'premium-autopay-disabled' }));
-    res.json({ ok: true, enabled: false });
+    // LIQ#0382: sofort auslösen statt bis zu 10 Min auf den nächsten premium-pay.js-Cron-
+    // Tick zu warten. Best-effort, darf das eigentliche Abschalten nie verhindern.
+    //
+    // 🔒 LIQ#0388: Dieser Aufruf ist seither in aller Regel ein NO-OP und soll es sein.
+    // Das Abschalten der Zahlung ist kein Berechtigungsende — die zuletzt bezahlte bzw.
+    // gelieferte Stunde deckt weiter, und danach läuft der Nachlauf aus
+    // lib/premium-entitlement.js. Die Rücknahme kommt dann vom premium-pay.js-Cron, sobald
+    // die Deckung wirklich abgelaufen ist. Der Aufruf bleibt trotzdem stehen: Er ist
+    // idempotent, kostenlos, und deckt den Fall ab, dass die Berechtigung zum Zeitpunkt des
+    // Abschaltens ohnehin schon beendet war.
+    let rollback = null;
+    try {
+        rollback = rollbackStrategyOnPremiumLoss();
+    } catch (err) {
+        console.warn(`[premium disable] Strategie-Rücknahme fehlgeschlagen: ${err.message}`);
+    }
+    res.json({ ok: true, enabled: false, strategyRollback: rollback });
 });
 
 export default router;

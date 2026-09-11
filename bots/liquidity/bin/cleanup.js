@@ -55,7 +55,9 @@ import { checkInvestEligibility, remainingInvestCapacity } from '../lib/invest-e
 import { investCooldownBlockedPools } from '../lib/invest-cooldown.js';
 import { parseTrendGate, loadTrendStates, checkTrendGate } from '../lib/trend-indicators.js';
 import { calculateRange } from '../lib/range.js';
+import { applyStrategyOffsetToComputedRange } from '../lib/strategy-range-offset.js';
 import { PATHS } from '../../../config/paths.js';
+import { getStrategy, poolRankingEligible, trendGateForPool } from '../../../lib/strategies.js';
 
 // ─── --help ────────────────────────────────────────────────────────────────
 // Muss vor jedem Modul-Level-Seiteneffekt (DB/Wallet/Connection weiter unten)
@@ -284,6 +286,28 @@ function withoutReservedTokens(tokens, reserved, logPrefix) {
 }
 
 /**
+ * Mints, deren eigener Pool aktiv ist, aber gerade keine offene Position hat (LIQ#0355).
+ *
+ * Genau der Zustand zwischen einem Close und der nächsten erfolgreichen Wiedereröffnung:
+ * der Bot baut das Kapital dafür oft schrittweise über mehrere Zyklen per Pre-Swap auf
+ * (siehe _openNewPosition in bot.js), bevor die 30-%-Mindestschwelle erreicht ist. Der
+ * Dust-Sweep kannte diesen Zustand bisher nicht und hat den frisch pre-geswappten Rest
+ * beim nächsten Lauf sofort wieder zu USDC zurückgetauscht — dadurch kam das Kapital nie
+ * über die Schwelle (ZEC/USDC auf pub1, 29./30.08.2026: der Bot retryte seit dem Vorabend
+ * ergebnislos, weil jeder stündliche Cleanup-Lauf den Pre-Swap rückgängig machte und das
+ * so freigewordene Geld einem anderen Pool zuwies statt es für ZEC/USDC liegen zu lassen).
+ */
+function loadAccumulatingPoolMints(db) {
+    const mints = new Map();
+    for (const pool of config.pools.all) {
+        if (!pool.active || getOpenPosition(db, pool.id)) continue;
+        if (pool.tokenA !== WSOL_MINT && pool.tokenA !== USDC_MINT) mints.set(pool.tokenA, pool.id);
+        if (pool.tokenB !== WSOL_MINT && pool.tokenB !== USDC_MINT) mints.set(pool.tokenB, pool.id);
+    }
+    return mints;
+}
+
+/**
  * Findet einen Orca-Pool in der Config, dessen beide Token exakt {inputMint, outputMint}
  * sind — unabhängig von `active`. Dient dem direkten-Orca-Swap-Fallback in swapTo:
  * reine-Orca-Token (xStocks) haben nur in ihrem eigenen Whirlpool Liquidität.
@@ -326,10 +350,19 @@ async function swapTo(token, amount, outputMint, outputDecimals, outputSymbol, k
             const inputPrice = getTokenUsdPrice(token.mint, db);
             if (inputPrice > 0) usdValue = amount * inputPrice;
         }
+        // usd_value_in/out (LIQ#0376 Teil 2): unabhängig von usdValue (das oben die
+        // USDC-Seite meint, mal Eingang mal Ausgang) — immer Eingang bzw. Ausgang, jeweils
+        // exakt bei USDC, sonst über getTokenUsdPrice (derselbe Preis-Helfer, ein Read je
+        // Seite, keine Zeit dazwischen).
+        const priceOf = (mint) => mint === USDC_MINT ? 1 : (getTokenUsdPrice(mint, db) || null);
+        const pIn  = priceOf(token.mint);
+        const pOut = priceOf(outputMint);
         insertTransaction(db, {
             poolId, type: 'swap',
             amountA: amount, amountB: amountOut,
             usdValue, txHash: txSignature,
+            usdValueIn:  pIn  != null ? amount    * pIn  : null,
+            usdValueOut: pOut != null ? amountOut * pOut : null,
             txFeeSol: swapFee, note: `${noteLabel} swap ${label}`,
         });
     };
@@ -424,8 +457,16 @@ async function sweepDust(db, keypair, connection) {
     // hätte Position 336 nicht anfassen können — aber die „Notbremse" nach
     // CLEANUP_STUCK_HOURS swappt auch Beträge oberhalb des Deckels, und ein Exit auf
     // einer kleinen Position liegt ohnehin im Dust-Fenster.
+    const accumulatingMints = loadAccumulatingPoolMints(db);
+    const candidateTokens = getRelevantTokens(config.pools.all).filter(token => {
+        const ownerPoolId = accumulatingMints.get(token.mint);
+        if (!ownerPoolId) return true;
+        console.log(`[cleanup:dust] ${token.symbol} gehört zum aktiven Pool ${ownerPoolId}, der `
+            + `gerade Kapital für eine Wiedereröffnung aufbaut – nicht angefasst.`);
+        return false;
+    });
     const relevantTokens = withoutReservedTokens(
-        getRelevantTokens(config.pools.all),
+        candidateTokens,
         loadReservedMints(db, '[cleanup:dust]'),
         '[cleanup:dust]',
     );
@@ -568,6 +609,22 @@ function _loadRankingIneligiblePools() {
 }
 
 /**
+ * Liest die aktive Strategie (LIQ#0369) aus `strategy_state` in settings.db.
+ * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
+ * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Filter.
+ */
+function _loadActiveStrategyId() {
+    try {
+        const sdb = new Database(SETTINGS_DB, { readonly: true });
+        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
+        sdb.close();
+        return row?.strategy_id ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Pools, die sich gerade in der Cooldown-Phase eines der drei Risk-Management-Exits
  * (Trailing Stop, TVL-Schutz, Score-Limit) befinden, werden vom Ranking-Cleanup
  * übersprungen — sonst würde frisch befreites Kapital sofort wieder in denselben
@@ -679,11 +736,18 @@ async function runCleanupInvestPool(targetPoolId, db, keypair, connection, { ski
     // wirkungslos), CLEANUP_MODE='pool:<id>' läuft aber direkt hier herein. Bewusst
     // kein Ausweichen auf einen anderen Pool — bei einem fest gewählten Ziel ist
     // Nichtstun die einzig richtige Antwort (gleiche Entscheidung wie beim Guard).
-    if (CLEANUP_TREND_GATE.length) {
+    //
+    // LIQ#0383: Ist eine Strategie aktiv und liegt der Pool in ihrem Geltungsbereich,
+    // deklariert sie den geltenden Wert selbst (trendGateForPool) — sonst gilt unverändert
+    // CLEANUP_TREND_GATE aus der .env. "Standard" liefert immer null, also byte-identisch zu
+    // heute.
+    const activeStrategy = getStrategy(_loadActiveStrategyId());
+    const effectiveTrendGate = trendGateForPool(activeStrategy, targetPool) ?? CLEANUP_TREND_GATE;
+    if (effectiveTrendGate.length) {
         // config.pools.all statt nur des Ziel-Pools: bei volatilePair-Pools braucht die
         // USD-Korb-Herleitung die Kursreihe des Quote-Pools (liq-sol-usdc & Co.).
         const gate = checkTrendGate(
-            loadTrendStates(db, config.pools.all).get(targetPoolId), CLEANUP_TREND_GATE);
+            loadTrendStates(db, config.pools.all).get(targetPoolId), effectiveTrendGate);
         if (!gate.ok) {
             console.log(`[cleanup:invest] ${t('cli.cl.guard_blocked', { pool: targetPool.pair, reason: gate.reason })}`);
             return;
@@ -819,9 +883,16 @@ async function runCleanupByRanking(db, keypair, connection) {
     const configuredIds = new Set(config.pools.all.map(p => p.id));
     const ineligible    = _loadRankingIneligiblePools();
     const cooldownBlocked = _loadCleanupCooldownBlockedPools(db);
+    // LIQ#0369: Die Typ-Zulassung der aktiven Strategie IST der Ranking-Filter
+    // (strategie-auswahl.md, Entscheidung 9.1). `strategy` ist null bei "Standard" –
+    // poolRankingEligible() lässt dann jeden Pool durch, das Verhalten bleibt unverändert.
+    const strategy = getStrategy(_loadActiveStrategyId());
 
     if (ineligible.size > 0) {
         console.log(`[cleanup:ranking] ${ineligible.size} Pool(s) per Settings ausgeschlossen: ${[...ineligible].join(', ')}`);
+    }
+    if (strategy) {
+        console.log(`[cleanup:ranking] Strategie "${strategy.id}" aktiv – Typ-Zulassung filtert das Ranking.`);
     }
 
     // Opportunity Scores aus data.json laden (dieselbe Quelle wie Dashboard-Tabelle)
@@ -838,11 +909,19 @@ async function runCleanupByRanking(db, keypair, connection) {
     const excluded = [];   // vom Guard verworfene Kandidaten (mit Grund) – fürs Decision-Log
     const poolById = new Map(config.pools.all.map(p => [p.id, p]));
 
+    // LIQ#0383: Eine aktive Strategie deklariert ihren eigenen Trend-Gate-Wert (kein
+    // Schreibvorgang, siehe lib/strategies.js) und ersetzt damit CLEANUP_TREND_GATE für
+    // jeden Kandidaten – poolRankingEligible() oben hat den Geltungsbereich bereits
+    // durchgesetzt, jeder Kandidat, der die Schleife unten erreicht, gehört also schon zur
+    // Strategie. "Standard" (strategy === null) liefert null: unverändert CLEANUP_TREND_GATE.
+    const declaredTrendGate = strategy?.trendGate ?? null;
+    const effectiveTrendGate = declaredTrendGate ?? CLEANUP_TREND_GATE;
+
     // Trend-Gate: Zustände einmal für alle Pools laden (eine pool_stats-Abfrage
     // statt einer je Kandidat). Ohne konfiguriertes Gate wird gar nicht geladen.
-    const trendStates = CLEANUP_TREND_GATE.length ? loadTrendStates(db, config.pools.all) : null;
+    const trendStates = effectiveTrendGate.length ? loadTrendStates(db, config.pools.all) : null;
     if (trendStates) {
-        console.log(`[cleanup:ranking] ${t('cli.cl.trend_gate_active', { timeframes: CLEANUP_TREND_GATE.join(', ') })}`);
+        console.log(`[cleanup:ranking] ${t('cli.cl.trend_gate_active', { timeframes: effectiveTrendGate.join(', ') })}${declaredTrendGate ? ` (deklariert von Strategie "${strategy.id}")` : ''}`);
     }
     for (const poolId of configuredIds) {
         if (ineligible.has(poolId)) continue;
@@ -853,12 +932,22 @@ async function runCleanupByRanking(db, keypair, connection) {
         const sc = scoreByPool.get(poolId);
         if (!sc) continue;
 
+        // LIQ#0369: Pool außerhalb des Geltungsbereichs der aktiven Strategie – kein neues
+        // Kapital dorthin. Rührt an nichts, was eine offene Position schließen könnte
+        // (poolRankingEligible() kennt den Positionsstatus nicht, siehe lib/strategies.js).
+        if (!poolRankingEligible(strategy, poolById.get(poolId))) {
+            const reason = `außerhalb des Geltungsbereichs der Strategie "${strategy.id}"`;
+            excluded.push({ id: poolId, score: sc.value, rule: 'strategy_scope', reason });
+            console.log(`[cleanup:ranking] ${t('cli.cl.guard_excluded', { pool: poolId, reason })}`);
+            continue;
+        }
+
         // Trend-Gate vor dem Invest-Guard: kein Kapital in einen Pool, dessen Trend
         // auf einer geforderten Zeitebene nicht aufwärts zeigt. Wie beim Guard filtert
         // das VOR dem Sortieren — scored[0] bleibt damit per Konstruktion der beste
         // zulässige Pool, es gibt kein „Platz 1 überspringen" als Sonderfall.
         if (trendStates) {
-            const gate = checkTrendGate(trendStates.get(poolId), CLEANUP_TREND_GATE);
+            const gate = checkTrendGate(trendStates.get(poolId), effectiveTrendGate);
             if (!gate.ok) {
                 excluded.push({ id: poolId, score: sc.value, rule: 'trend_gate', reason: gate.reason,
                                 failing: gate.failing, unknown: gate.unknown });
@@ -953,9 +1042,15 @@ async function _investStandard(targetPool, db, keypair, connection, { skipCap = 
     // zugerechnet. Die bestehende Sperre in deposit-lib.js greift dagegen nicht: sie
     // prüft den Ziel-Pool (hier liq-pump-sol), nicht den Pool mit den gestrandeten Token
     // (liq-orca-sol) — und sie greift erst im Deposit, also nach diesem Swap.
+    // LIQ#0355: Token eines anderen aktiven Pools, der gerade selbst Kapital für eine
+    // Wiedereröffnung aufbaut, sind hier ebenfalls kein "Fremd-Token" — sonst nimmt
+    // dieser Invest-Pfad genau das Pre-Swap-Kapital weg, das der eigene Bot des Tokens
+    // im nächsten Zyklus braucht (siehe Begründung an loadAccumulatingPoolMints()).
+    const accumulatingMintsStd = loadAccumulatingPoolMints(db);
     const foreignTokens = withoutReservedTokens(
         getRelevantTokens(allPools).filter(t =>
             t.mint !== USDC_MINT && t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+            && !accumulatingMintsStd.has(t.mint)
         ),
         loadReservedMints(db, '[cleanup:invest]'),
         '[cleanup:invest]',
@@ -1186,9 +1281,13 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
     // ─── 1. Fremd-Tokens → USDC ────────────────────────────────────────────
     // 🔒 LIQ#0310: Token eines laufenden Exits bleiben unangetastet (siehe
     // ausführliche Begründung im gleichen Schritt in _investStandard()).
+    // LIQ#0355: siehe Begründung in _investStandard() – Token eines anderen aktiv
+    // akkumulierenden Pools zählen hier nicht als Fremd-Token.
+    const accumulatingMintsVol = loadAccumulatingPoolMints(db);
     const foreignTokens = withoutReservedTokens(
         getRelevantTokens(allPools).filter(t =>
             t.mint !== targetPool.tokenA && t.mint !== targetPool.tokenB
+            && !accumulatingMintsVol.has(t.mint)
         ),
         loadReservedMints(db, '[cleanup:invest]'),
         '[cleanup:invest]',
@@ -1247,7 +1346,13 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
             const effectiveRange = targetPool.rangeOverride
                 ? { ...config.range, ...targetPool.rangeOverride }
                 : config.range;
-            const range = calculateRange(targetPool, poolPrice, effectiveRange, db);
+            const rawRange = calculateRange(targetPool, poolPrice, effectiveRange, db);
+            // LIQ#0377: Strategie-Versatz auf denselben Rohwert, den openVolatilePairPosition()
+            // gleich für die tatsächliche Eröffnung berechnet — sonst peilt dieser Pre-Swap ein
+            // anderes Verhältnis an als die Position dann bekommt.
+            const range = applyStrategyOffsetToComputedRange(
+                _loadActiveStrategyId(), targetPool, poolPrice, db, rawRange,
+            ) ?? rawRange;
             priceLower = range.priceLower;
             priceUpper = range.priceUpper;
         }
@@ -1305,6 +1410,14 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
     const deficitBUsd     = Math.max(0, targetBUsd - walletBUsd);
     const totalDeficitUsd = deficitAUsd + deficitBUsd;
 
+    // Bruttoeinsatz dieser Befüllung: Pool-Token, die schon im Wallet liegen, plus das
+    // USDC, das gleich in Pool-Token getauscht wird — alles bewertet VOR dem Umtausch.
+    // Die Differenz zum später tatsächlich eingezahlten Kapital sind die Einstiegskosten
+    // (Swap-Slippage, Gebühren, TX-Fees, liegen gebliebener Rest); siehe
+    // recordEntryCost() in lib/deposit-lib.js. Nur ERFOLGREICHE Swaps zählen: bei einem
+    // fehlgeschlagenen Swap bleibt das USDC im Wallet und ist kein Einsatz.
+    let grossInvestUsd = walletAUsd + walletBUsd;
+
     if (walletUsdc >= MIN_USDC_AMOUNT && totalDeficitUsd > 0) {
         const cappedUsdc = Math.min(walletUsdc, (!skipCap && CLEANUP_MAX_DEPOSIT > 0) ? CLEANUP_MAX_DEPOSIT : Infinity, remainingCapacity);
         if (cappedUsdc < walletUsdc) {
@@ -1317,11 +1430,15 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
 
         if (usdcForA >= MIN_USDC_AMOUNT) {
             console.log(`[cleanup:invest] ${usdcForA.toFixed(2)} USDC → ${tokenASymbol}`);
-            await swapTo(USDC_TOKEN, usdcForA, targetPool.tokenA, targetPool.decimalsA, tokenASymbol, keypair, connection, targetPool.id);
+            if (await swapTo(USDC_TOKEN, usdcForA, targetPool.tokenA, targetPool.decimalsA, tokenASymbol, keypair, connection, targetPool.id)) {
+                grossInvestUsd += usdcForA;
+            }
         }
         if (usdcForB >= MIN_USDC_AMOUNT) {
             console.log(`[cleanup:invest] ${usdcForB.toFixed(2)} USDC → ${tokenBSymbol}`);
-            await swapTo(USDC_TOKEN, usdcForB, targetPool.tokenB, targetPool.decimalsB, tokenBSymbol, keypair, connection, targetPool.id);
+            if (await swapTo(USDC_TOKEN, usdcForB, targetPool.tokenB, targetPool.decimalsB, tokenBSymbol, keypair, connection, targetPool.id)) {
+                grossInvestUsd += usdcForB;
+            }
         }
     }
 
@@ -1388,7 +1505,7 @@ async function _investVolatilePair(targetPool, db, keypair, connection, { skipCa
         );
         return;
     }
-    await deposit(targetPool, null, keypair, db, getAdapter(targetPool), { note: 'cleanup volatilePair', quotePrice });
+    await deposit(targetPool, null, keypair, db, getAdapter(targetPool), { note: 'cleanup volatilePair', quotePrice, grossInvestUsd });
 }
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────

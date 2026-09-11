@@ -36,7 +36,7 @@
  */
 
 import { parseArgs }   from 'node:util';
-import { config, setPoolActive } from '../lib/config.js';
+import { config, setPoolActive, resolvePoolArg } from '../lib/config.js';
 import {
     openDatabase, syncPools, getOpenPosition,
     insertTransaction, updatePositionCapital, updatePositionHodl, insertCapitalFlow,
@@ -283,7 +283,10 @@ const keypair = getKeypair();
 
 syncPools(db, config.pools.all);
 
-const pool = config.pools.all.find(p => p.pair === args.pool);
+const { pool, ambiguous, candidates } = resolvePoolArg(config.pools.all, args.pool);
+if (ambiguous) {
+    abort(t('cli.liq.pool_ambiguous', { pool: args.pool, ids: candidates.join(', ') }));
+}
 if (!pool) {
     const available = config.pools.all.map(p => p.pair).join(', ');
     abort(t('cli.liq.pool_not_found_list', { pool: args.pool, list: available }));

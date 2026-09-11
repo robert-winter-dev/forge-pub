@@ -22,6 +22,11 @@ const SLIPPAGE_BPS = 50;
 const DEFAULT_RETRIES = 3;
 const RETRY_BACKOFF_MS = [1000, 3000, 8000];
 
+// Solana-Hardlimit für eine (versionierte) Transaktion. Jupiter liefert gelegentlich eine
+// Multi-Hop-Route, deren Encoding darüber liegt — die TX wird dann vom RPC abgelehnt, bevor
+// sie überhaupt simuliert wird (CORE#000537). Vorabprüfung statt eines sicheren Fehlschlags.
+const MAX_TX_BYTES = 1232;
+
 function headers(apiKey) {
     const h = { 'Content-Type': 'application/json' };
     if (apiKey) h['x-api-key'] = apiKey;
@@ -50,9 +55,18 @@ export function isRetryableSwapError(err) {
     if (msg.includes('TransactionExpired'))         return true;
     if (msg.includes('HTTP 5'))                     return true;
     if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) return true;
+    if (msg.includes('Jupiter-Route zu groß'))      return true;
     // Bei unbekannten Fehlern lieber retrien als sofort scheitern — Jupiter-Routen
     // sind so volatil, dass die meisten transiens-Fehler beim 2. Versuch verschwinden.
     return true;
+}
+
+// TX überschreitet das Solana-Größenlimit (siehe MAX_TX_BYTES) — wird von _doSwapOnce
+// VOR dem Senden geworfen, es gab also keinen echten Sendeversuch. Workaround: nächster
+// Versuch mit onlyDirectRoutes=true (kürzere, garantiert kleinere Route).
+export function isTxTooLargeError(err) {
+    const msg = err?.message ?? String(err);
+    return msg.includes('Jupiter-Route zu groß');
 }
 
 // Orca-Whirlpool-Error 6024 (0x1788) "InvalidTokenMintOrder": Jupiters Transaktions-Builder
@@ -170,11 +184,12 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
                                    retries = DEFAULT_RETRIES }) {
     let lastErr;
     let excludeDexes = null;
+    let onlyDirectRoutes = false;
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
             return await _doSwapOnce({
                 inputMint, outputMint, inputDecimals, outputDecimals,
-                amount, wallet, connection, apiKey, slippageBps, excludeDexes,
+                amount, wallet, connection, apiKey, slippageBps, excludeDexes, onlyDirectRoutes,
             });
         } catch (err) {
             lastErr = err;
@@ -183,6 +198,10 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
                 if (!excludeDexes && isWhirlpoolMintOrderError(err)) {
                     excludeDexes = 'Whirlpool';
                     console.warn('[swap] Whirlpool-Routing-Fehler (0x1788) erkannt — nächster Versuch ohne Whirlpool-Route');
+                }
+                if (!onlyDirectRoutes && isTxTooLargeError(err)) {
+                    onlyDirectRoutes = true;
+                    console.warn('[swap] Route zu groß für eine Solana-TX — nächster Versuch mit onlyDirectRoutes=true');
                 }
                 const wait = RETRY_BACKOFF_MS[attempt - 1] ?? 8000;
                 console.warn(`[swap] Versuch ${attempt}/${retries} fehlgeschlagen (${err.message}) — Retry in ${wait}ms`);
@@ -196,7 +215,8 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
 }
 
 async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimals,
-                              amount, wallet, connection, apiKey, slippageBps, excludeDexes = null }) {
+                              amount, wallet, connection, apiKey, slippageBps, excludeDexes = null,
+                              onlyDirectRoutes = false }) {
     const inAmount = Math.round(amount * 10 ** inputDecimals);
 
     // 1. Quote holen — jeder Retry-Versuch holt frisches Quote (Routes invalidieren schnell)
@@ -205,7 +225,7 @@ async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimal
         outputMint,
         amount:           String(inAmount),
         slippageBps:      String(slippageBps),
-        onlyDirectRoutes: 'false',
+        onlyDirectRoutes: String(onlyDirectRoutes),
     });
     if (excludeDexes) quoteParams.set('excludeDexes', excludeDexes);
 
@@ -248,12 +268,19 @@ async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimal
     const tx    = VersionedTransaction.deserialize(txBuf);
     tx.sign([wallet]);
 
+    // Vorabprüfung gegen Solanas Hardlimit — vermeidet den sicheren, aber unnötigen
+    // ersten Fehlversuch auf der Chain bei Multi-Hop-Routen (CORE#000537).
+    const serialized = tx.serialize();
+    if (serialized.length > MAX_TX_BYTES) {
+        throw new Error(`Jupiter-Route zu groß: ${serialized.length} bytes (max ${MAX_TX_BYTES}) — würde von Solana abgelehnt`);
+    }
+
     // Unbestätigter Ausgang ist KEIN Fehlschlag: erst on-chain nachsehen, dann
     // entscheiden. Ohne diese Klärung würde der Retry in swapTokens denselben
     // Tausch ein zweites Mal ausführen (siehe resolveUnconfirmedSwap).
     let sig;
     try {
-        sig = await submitAndConfirm(tx.serialize());
+        sig = await submitAndConfirm(serialized);
     } catch (err) {
         if (!err?.unconfirmed || !err?.signature) throw err;
 

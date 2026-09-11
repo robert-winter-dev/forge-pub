@@ -5,7 +5,7 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260826a';
+import { initNav, initFooter, setLastUpdate, isLanAccess } from '../../js/nav.js?v=20260910a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -42,20 +42,23 @@ function $(id) { return document.getElementById(id); }
 //
 // WICHTIG für alle UI-Beschriftungen mit Pool-Namen:
 //   - `pos.pair` / `pool.pair` ist das INTERNE Pair, entsprechend tokenA/tokenB-
-//     Reihenfolge auf der Chain. Wird für Datenfilterung, data-pool-pair-Attribute
-//     und Spalten-Labels von amountA/amountB-Werten verwendet.
+//     Reihenfolge auf der Chain. Wird für Spalten-Labels von amountA/amountB-Werten
+//     verwendet.
 //   - `displayPair` ist die UI-Schreibweise (wie auf Orca). Pools können hier
 //     vertauschte Token-Reihenfolge haben (z.B. pair="SOL/HYPE" → display="HYPE/SOL").
+//   - Datenfilterung und data-pool-id-Attribute laufen über `poolId`/`pool.id` —
+//     `pair` ist bei gleichnamigen Pools (z.B. zwei Fee-Tiers) nicht eindeutig
+//     (LIQ#0471).
 //
 // Faustregel: JEDER user-sichtbare Pool-Name (Modal-Titel, Toast, Tooltip-Text,
 // Notification-Label) MUSS durch displayPairOf() laufen. Direktes Einsetzen von
 // pos.pair in einen Text führt bei flipped-Pools zu falsch herum stehenden Namen
 // — historischer Bug (2026-05-19) betraf TVL/VOL/Composition/Fee-Claims-/Range-
 // Modals + Pool-Tx-Liste.
-function displayPairOf(data, pair) {
-    return data?.positions?.find(p => p.pair === pair)?.displayPair
-        ?? data?.pools?.find(p => p.pair === pair)?.displayPair
-        ?? pair;
+function displayPairOf(data, poolId) {
+    return data?.positions?.find(p => p.poolId === poolId)?.displayPair
+        ?? data?.pools?.find(p => p.id === poolId)?.displayPair
+        ?? poolId;
 }
 
 // Unter dieser SOL-Reserve eröffnet der Bot keine neuen Positionen mehr
@@ -463,15 +466,17 @@ function formatPremiumCountdown(coveredUntilMs) {
  *
  * Bedeutung steht im Tooltip, nie allein im Symbol.
  */
+const _trendTfLabel = tf => ({
+    '1h': tr('liq.trend_tf_1h', '1 Stunde'),
+    '4h': tr('liq.trend_tf_4h', '4 Stunden'),
+    '1d': tr('liq.trend_tf_1d', '1 Tag'),
+}[tf] ?? tf);
+
 function _cleanupWinnerIcon(pool) {
     const w = pool?.cleanupWinner;
     if (!w) return '';
 
-    const tfLabel = tf => ({
-        '1h': tr('liq.trend_tf_1h', '1 Stunde'),
-        '4h': tr('liq.trend_tf_4h', '4 Stunden'),
-        '1d': tr('liq.trend_tf_1d', '1 Tag'),
-    }[tf] ?? tf);
+    const tfLabel = _trendTfLabel;
 
     const lines = [tr('liq.cw_score', 'Opportunity Score {score} ≥ Minimum {min}')
         .replace('{score}', w.score).replace('{min}', w.minScore)];
@@ -495,59 +500,136 @@ function _cleanupWinnerIcon(pool) {
 }
 
 /**
- * Pool liegt im Invest-Cooldown (z.B. Trailing-Stop-Drawdown-Schutz): Schlaf-Icon
- * hinter dem Poolnamen.
+ * Pool hat den Score für „Bester Pool" erreicht, wird aber von genau einem Tor
+ * zurückgehalten (Trend-Gate, Risk-Management-Cooldown, TVL-Schutz/Score-Limit/
+ * Max-Investment): Schlaf-Icon hinter dem Poolnamen — „temporär nicht berücksichtigt",
+ * kein Fehler. Datenquelle `pool.cleanupBlocked` aus bin/export.js — dieselbe
+ * Prüfreihenfolge, die dort auch den Gewinner ermittelt, damit Icon und
+ * tatsächlicher Ausschlussgrund nie auseinanderlaufen.
  *
- * Reaktiviert am 2026-08-26 — beim Umstieg auf das Hammer-Icon (92ca0817, 2026-08-24)
- * ist die Cooldown-Anzeige mit den anderen zwei Zustands-Icons weggefallen, war aber
- * weiterhin nötig: ohne sie ist ein Pool, der wegen eines aktiven Trailing-Stop/TVL-
- * Schutz/Score-Limit-Cooldowns von „Bester Pool" übersprungen wird, nicht von einem
- * schlicht schwächeren Pool zu unterscheiden. Das Hammer-Icon zeigt nur den Gewinner,
- * nicht warum die anderen ausgeschlossen sind — beide Icons ergänzen sich.
+ * Ersetzt seit 2026-08-31 (LIQ#0351-Folge) drei mögliche Einzel-Icons durch eines:
+ * beim ersten Anlauf (drei Zustands-Icons nebeneinander) hatte sich am 2026-08-24
+ * gezeigt, dass zu viele gleichzeitige Symbole mehr verwirren als erklären (siehe
+ * Kommentar bei _cleanupWinnerIcon) — deshalb blieb danach nur noch das Hammer-Icon
+ * für den Gewinner übrig. Diese Variante behält die Reduktion auf zwei Symbole bei:
+ * der Hammer für „das hier wäre der Gewinner" und das Schlaf-Icon für „das hier
+ * hätte es sonst geschafft" — welches der drei Tore genau greift, steht
+ * ausschließlich im Tooltip. Ein erster Anlauf mit einem grauen Info-Kreis-Icon
+ * war zum Verwechseln ähnlich mit dem Info-Button links vom Poolnamen (derselbe
+ * Kreis-i) — das Schlaf-Icon (zuvor schon für den reinen Cooldown-Fall im Einsatz)
+ * ist davon eindeutig unterscheidbar.
  *
- * Die Restzeit wird hier gerechnet, nicht in export.js: data.json wird im Minutentakt
- * geschrieben, ein exportierter Minutenwert wäre beim Lesen schon veraltet.
- *
- * Bedeutung steht im Tooltip, nie allein in Farbe oder Symbol.
+ * Bedeutung steht im Tooltip, nie allein im Symbol.
  */
-function _investCooldownIcon(pool) {
-    const now = Date.now();
-    const active = (pool?.investCooldowns ?? [])
-        .filter(c => Number(c?.untilMs) > now)
-        .sort((a, b) => b.untilMs - a.untilMs);
-    if (!active.length) return '';
+function _cleanupBlockedIcon(pool) {
+    const rule = pool?.cleanupBlocked;
+    if (!rule) return '';
 
-    const srcLabel = key => ({
-        trailingStop:  tr('liq.cooldown_src_trailing_stop', 'Trailing Stop'),
-        tvlProtection: tr('liq.cooldown_src_tvl',           'TVL-Schutz'),
-        scoreLimit:    tr('liq.cooldown_src_score_limit',   'Score-Limit'),
-    }[key] ?? key);
+    const title = tr('liq.blocked_title', 'Nicht bei „Bester Pool" berücksichtigt');
 
-    const fmtRemaining = ms => {
-        const totalMin = Math.max(1, Math.ceil(ms / 60_000));
-        const h = Math.floor(totalMin / 60);
-        const m = totalMin % 60;
-        const hStr = tr('liq.unit_hours_short', 'Std.');
-        const mStr = tr('liq.unit_minutes_short', 'Min.');
-        if (h && m) return `${h} ${hStr} ${m} ${mStr}`;
-        if (h)      return `${h} ${hStr}`;
-        return `${m} ${mStr}`;
-    };
+    // Ein Grund pro Listenzeile — bewusst kurz (ein Halbsatz), damit ein zweiter
+    // Grund sich später einfach als weiterer Bullet ergänzen lässt, ohne den
+    // Tooltip neu zu strukturieren. Aktuell liefert bin/export.js immer genau
+    // einen Grund (den ersten greifenden Tor), das Array ist trotzdem der Rahmen
+    // dafür, falls das später mehrere gleichzeitig werden.
+    const bullets = [];
 
-    const note = tr('liq.cooldown_note', 'Solange wird hier nicht investiert, der Pool rankt danach automatisch wieder mit.');
-    let text;
-    if (active.length === 1) {
-        text = tr('liq.cooldown_single', '{source} hat hier zuletzt Kapital freigegeben. Noch {time} gesperrt.')
-            .replace('{source}', srcLabel(active[0].key))
-            .replace('{time}', fmtRemaining(active[0].untilMs - now))
-            + ' ' + note;
+    if (rule === 'cooldown') {
+        const now = Date.now();
+        const active = (pool.investCooldowns ?? [])
+            .filter(c => Number(c?.untilMs) > now)
+            .sort((a, b) => b.untilMs - a.untilMs);
+        const srcLabel = key => ({
+            trailingStop:  tr('liq.cooldown_src_trailing_stop', 'Trailing Stop'),
+            tvlProtection: tr('liq.cooldown_src_tvl',           'TVL-Schutz'),
+            scoreLimit:    tr('liq.cooldown_src_score_limit',   'Score-Limit'),
+        }[key] ?? key);
+        const fmtRemaining = ms => {
+            const totalMin = Math.max(1, Math.ceil(ms / 60_000));
+            const h = Math.floor(totalMin / 60);
+            const m = totalMin % 60;
+            const hStr = tr('liq.unit_hours_short', 'Std.');
+            const mStr = tr('liq.unit_minutes_short', 'Min.');
+            if (h && m) return `${h} ${hStr} ${m} ${mStr}`;
+            if (h)      return `${h} ${hStr}`;
+            return `${m} ${mStr}`;
+        };
+        for (const c of active) {
+            bullets.push(tr('liq.blocked_cooldown', '{source}-Cooldown, noch {time}')
+                .replace('{source}', srcLabel(c.key)).replace('{time}', fmtRemaining(c.untilMs - now)));
+        }
+    } else if (rule === 'trend_gate') {
+        const failing = pool.trendGate?.failing ?? [];
+        bullets.push(tr('liq.blocked_trend', 'Der {timeframes}-Trend ist aktuell negativ')
+            .replace('{timeframes}', failing.map(_trendTfLabel).join(', ')));
     } else {
-        text = tr('liq.cooldown_multi', 'Mehrere Sperren laufen gleichzeitig:') + '\n'
-            + active.map(c => `• ${srcLabel(c.key)}: ${tr('liq.cooldown_still', 'noch')} ${fmtRemaining(c.untilMs - now)}`).join('\n')
-            + '\n' + note;
+        // tvl / tvl_unknown / score_limit / max_investment — Detail aus derselben Quelle,
+        // aus der bin/cleanup.js schon vor dem Invest sperrt (lib/invest-eligibility.js).
+        const d = pool.investBlocked ?? {};
+        const fmtUsd = v => Number(v).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 0 });
+        const byRule = {
+            tvl:            () => tr('liq.blocked_tvl', 'TVL unter Schutz-Schwelle ({tvl} < {threshold} USDC)')
+                .replace('{tvl}', fmtUsd(d.tvl)).replace('{threshold}', fmtUsd(d.threshold)),
+            tvl_unknown:    () => tr('liq.blocked_tvl_unknown', 'Kein aktueller TVL-Messwert'),
+            score_limit:    () => tr('liq.blocked_score_limit', 'Exit-Score unter Score-Limit ({exitScore} < {minScore})')
+                .replace('{exitScore}', d.exitScore).replace('{minScore}', d.minScore),
+            max_investment: () => tr('liq.blocked_max_investment', 'Max Investment erreicht ({cap} USDC)')
+                .replace('{cap}', fmtUsd(d.capUsdc)),
+        };
+        bullets.push(byRule[rule]?.() ?? tr('liq.blocked_generic', 'Durch eine Risk-Management-Regel gesperrt'));
     }
-    const title = tr('liq.cooldown_title', 'Cooldown aktiv');
+
+    const text = bullets.map(b => `• ${b}`).join('\n');
     return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">\u{1F4A4}</span>`;
+}
+
+/**
+ * Aktiver Trailing Stop mit Premium-Drawdown-Werten: Hammer-Icon hinter dem Poolnamen in
+ * „Operative Metriken" (aktive Positionen). Nicht in der Anteil-Spalte, weil dort bereits
+ * der PnL-Tooltip hängt — zwei Hover-Ziele unmittelbar nebeneinander wären verwirrend.
+ *
+ * Nur sichtbar wenn Premium-Daten geliefert werden (hasPremiumAccess — auch auf pub1 der
+ * Fall) UND der Bot für diesen Pool tatsächlich einen Trailing Stop fährt. Datenquelle
+ * `pos.trailingStop` aus bin/export.js, berechnet mit derselben evaluateTsTrigger()-
+ * Funktion, die auch der Bot für den echten Exit nutzt — Icon und Auslöseverhalten können
+ * so nie auseinanderlaufen.
+ *
+ * Bedeutung steht im Tooltip, nie allein im Symbol.
+ */
+function _fmtPctPlain(v, dec = 2) {
+    return v == null ? '–' : Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec });
+}
+
+function _trailingStopIcon(pos, data) {
+    const ts = pos?.trailingStop;
+    if (!ts?.enabled || !hasPremiumAccess(data)) return '';
+
+    const title = tr('liq.ts_title', 'Trailing Stop ({t1} % / {t2} %)')
+        .replace('{t1}', _fmtPctPlain(ts.thresholdPct)).replace('{t2}', _fmtPctPlain(ts.thresholdPct2));
+
+    const _pnlUsdSigned = ts.liquidatePnlUsd != null
+        ? (ts.liquidatePnlUsd >= 0 ? '+' : '') + fmtUsdc(ts.liquidatePnlUsd)
+        : '–';
+    // Zeilenumbruch vor der Klammer bleibt Teil desselben Listenpunkts (kein eigenes „•").
+    // Einrückung per NBSP statt normaler Leerzeichen — das Tooltip-Markup rendert
+    // reinen (escapeten) Text, normale Leerzeichen würden vom Browser kollabiert.
+    const _tsIndent = '  ';
+    const liquidateLine = ts.liquidatePnlUsd != null
+        ? tr('liq.ts_liquidate_at', 'Schutz tritt ein ab: {usd} USDC')
+            .replace('{usd}', ts.liquidateAtUsd != null ? fmtUsdc(ts.liquidateAtUsd) : '–')
+          + '\n' + _tsIndent + tr('liq.ts_liquidate_pnl', '({pnlUsd} USDC / {pnlPct})')
+            .replace('{pnlUsd}', _pnlUsdSigned).replace('{pnlPct}', fmtPct(ts.liquidatePnlPct))
+        : tr('liq.ts_liquidate_at', 'Schutz tritt ein ab: {usd} USDC')
+            .replace('{usd}', ts.liquidateAtUsd != null ? fmtUsdc(ts.liquidateAtUsd) : '–');
+
+    // Listen-Konvention wie _cleanupBlockedIcon: "• " je Zeile, initTooltips() wandelt
+    // \n unabhängig davon in <br> um (keine <li>/<ul>, das ist im Tooltip-System nicht
+    // vorgesehen — data-tooltip-type bleibt "text").
+    const drawdownLine = tr('liq.ts_drawdown', 'Aktueller Drawdown: {cur} / {active} %')
+        .replace('{cur}', _fmtPctPlain(ts.drawdownPct)).replace('{active}', _fmtPctPlain(ts.activeThresholdPct));
+    const text = `• ${drawdownLine}\n• ${liquidateLine}`;
+
+    return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">🔨</span>`;
 }
 
 function renderOpportunityScores(data) {
@@ -586,7 +668,7 @@ function renderOpportunityScores(data) {
             if (!el) return;
             const pool = (_lastData?.pools ?? []).find(p => p.id === el.dataset.poolId);
             if (!pool) return;
-            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20260720a');
+            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20260909b');
             openPoolChartModal(pool);
         });
     }
@@ -744,7 +826,7 @@ function renderOpportunityScores(data) {
                    : _oppPoolFilter === 'inactive' ? !p.active : true)
         .filter(p => _oppTypeFilter === 'all' || p.poolType === _oppTypeFilter)
         .filter(p => !_searchQ ||
-            (p.displayPair ?? p.pair ?? '').toLowerCase().includes(_searchQ));
+            (p.displayLabel ?? p.displayPair ?? p.pair ?? '').toLowerCase().includes(_searchQ));
 
     let table = container.querySelector('.opp-score-table');
     if (!table) {
@@ -793,8 +875,8 @@ function renderOpportunityScores(data) {
             return dir * (aVal - bVal);
         }
         return comparePoolSortKeys(
-            poolSortKey(a.pool.investScore, a.pool.sortRank, a.pool.displayPair ?? a.pool.pair),
-            poolSortKey(b.pool.investScore, b.pool.sortRank, b.pool.displayPair ?? b.pool.pair),
+            poolSortKey(a.pool.investScore, a.pool.sortRank, a.pool.displayLabel ?? a.pool.displayPair ?? a.pool.pair),
+            poolSortKey(b.pool.investScore, b.pool.sortRank, b.pool.displayLabel ?? b.pool.displayPair ?? b.pool.pair),
         );
     });
 
@@ -891,7 +973,7 @@ function renderOpportunityScores(data) {
     const fmtInvestScore = pool => {
         const is = pool.investScore;
         if (!is || is.value == null) return _noDataSpan(pool.id, '24h');
-        return `<span class="${isScoreCls(is.value)}">${is.value}</span>`;
+        return `<span class="${isScoreCls(is.value)}">${Math.round(is.value)}</span>`;
     };
 
     // Token-Info-Icon: Kategorien beider Tokens als Teaser, Details im Klick-Modal.
@@ -925,7 +1007,7 @@ function renderOpportunityScores(data) {
         <div class="opp-score-header">
             <span style="display:flex;align-items:center;gap:3px">${poolFilterSel}</span>
             <span class="has-tooltip" data-tooltip-title="Chart" data-tooltip-content="${tr('liq.tip.chart_open', 'Öffnet den Kurs- und Fee-Chart des Pools.')}" data-tooltip-type="text" style="cursor:default">Chart</span>
-            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('score',tr('liq.sort_score', 'Nach Score sortieren'))}<span class="has-tooltip" data-tooltip-title="Opportunity Score" data-tooltip-content="${tr('liq.tip.opp_score', 'Bewertet die aktuelle Investitionsqualität eines Pools (0–100). Hauptfaktor ist der PnL (verdient die Position gerade Geld), dazu Fee-APR, Preis-Trend und APR-Entwicklung. Die Gewichtung hängt vom Pool-Typ ab (z. B. zählt bei stabilen/RWA-Pools der PnL stärker, bei sehr volatilen die Fee-APR). Details je Pool im Score-Klick → Reiter „Bewertung“.\\n\\n≥ 60 – Gute Bedingungen, Position lohnt sich.\\n35–59 – Neutrale Lage, abwarten.\\n&lt; 35 – Ungünstige Bedingungen, kein Invest.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.score', 'Score')}</span></span>
+            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('score',tr('liq.sort_score', 'Nach Score sortieren'))}<span class="has-tooltip" data-tooltip-title="Opportunity Score" data-tooltip-content="${tr('liq.tip.opp_score', 'Bewertet die aktuelle Investitionsqualität eines Pools (0–100). Hauptfaktor ist der PnL (verdient die Position gerade Geld), dazu Fee-APR, Preis-Trend und APR-Entwicklung. Die Gewichtung hängt vom Pool-Typ ab (z. B. zählt bei stabilen/RWA-Pools der PnL stärker, bei sehr volatilen die Fee-APR).\\n\\n≥ 60 – Gute Bedingungen, Position lohnt sich.\\n35–59 – Neutrale Lage, abwarten.\\n&lt; 35 – Ungünstige Bedingungen, kein Invest.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.score', 'Score')}</span></span>
             <span style="display:flex;align-items:center;gap:3px">${_sortBtn('pnl',tr('liq.sort_pnl', 'Nach PnL sortieren'))}${pnlModeSel}</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('priceSlope',tr('liq.sort_price_slope', 'Nach Preis-Slope sortieren'))}Preis-Slope</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('aprSlope',tr('liq.sort_apr_slope', 'Nach APR-Slope sortieren'))}APR-Slope</span>
@@ -934,9 +1016,9 @@ function renderOpportunityScores(data) {
         <div class="opp-score-body">
         ${rows.map(({pool, s, trendPct}) => {
             const rowCls  = pool.active ? '' : ' inactive';
-            const pair    = escHtml(pool.displayPair ?? pool.pair ?? '—');
+            const pair    = escHtml(pool.displayLabel ?? pool.displayPair ?? pool.pair ?? '—');
             const winnerIcon = _cleanupWinnerIcon(pool);
-            const cooldownIcon = _investCooldownIcon(pool);
+            const blockedIcon = _cleanupBlockedIcon(pool);
             const isGated   = pool.investScore?.hopiumVeto === true;
             const isNewPool = (pool.investScore?.dataDays ?? 1) === 0;
             const badge   = isGated
@@ -998,7 +1080,7 @@ function renderOpportunityScores(data) {
             }
             return `
         <div class="opp-score-row${rowCls}">
-            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${winnerIcon}${cooldownIcon}${badge}${newPoolBadge}</span></span>
+            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${winnerIcon}${blockedIcon}${badge}${newPoolBadge}</span></span>
             <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg(_chartIconArrow(trendPct))}</button>
             <span><span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span></span>
             ${pnlCell}
@@ -1090,8 +1172,8 @@ function renderPools(data) {
             return dir * (aVal - bVal);
         }
         return comparePoolSortKeys(
-            poolSortKey(a.investScore, a.sortRank, a.displayPair ?? a.pair),
-            poolSortKey(b.investScore, b.sortRank, b.displayPair ?? b.pair),
+            poolSortKey(a.investScore, a.sortRank, a.displayLabel ?? a.displayPair ?? a.pair),
+            poolSortKey(b.investScore, b.sortRank, b.displayLabel ?? b.displayPair ?? b.pair),
         );
     });
     // Pool-Filter + Suche anwenden
@@ -1100,7 +1182,7 @@ function renderPools(data) {
         .filter(p => _poolsVisFilter === 'active'   ?  p.active
                    : _poolsVisFilter === 'inactive' ? !p.active : true)
         .filter(p => !_poolsSearchQ ||
-            (p.displayPair ?? p.pair ?? '').toLowerCase().includes(_poolsSearchQ));
+            (p.displayLabel ?? p.displayPair ?? p.pair ?? '').toLowerCase().includes(_poolsSearchQ));
 
     // Suchfeld-State synchronisieren (idempotent)
     const poolsSearchInput = document.getElementById('poolsSearchInput');
@@ -1211,10 +1293,10 @@ function renderPools(data) {
                 : _nd;
             return `
         <div class="pools-overview-row${rowCls}">
-            <span>${escHtml(pool.displayPair ?? pool.pair ?? '—')}</span>
-            <span class="col-r"><span class="pool-apr-clickable" data-pool-pair="${escHtml(pool.pair ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${aprVal}</span></span>
-            <span class="col-r"><span class="vol-clickable" data-pool-pair="${escHtml(pool.pair ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pool.volume24h == null ? _nd : fmtVol(pool.volume24h)}</span></span>
-            <span class="col-r"><span class="tvl-clickable${tvlCls}" data-pool-pair="${escHtml(pool.pair ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pool.tvl == null ? _nd : fmtTvl(pool.tvl)}</span></span>
+            <span>${escHtml(pool.displayLabel ?? pool.displayPair ?? pool.pair ?? '—')}</span>
+            <span class="col-r"><span class="pool-apr-clickable" data-pool-id="${escHtml(pool.id ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${aprVal}</span></span>
+            <span class="col-r"><span class="vol-clickable" data-pool-id="${escHtml(pool.id ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pool.volume24h == null ? _nd : fmtVol(pool.volume24h)}</span></span>
+            <span class="col-r"><span class="tvl-clickable${tvlCls}" data-pool-id="${escHtml(pool.id ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pool.tvl == null ? _nd : fmtTvl(pool.tvl)}</span></span>
         </div>`;
         }).join('')}`;
 
@@ -1293,23 +1375,23 @@ function renderActivePositions(data) {
     const positions = [...(data?.positions ?? [])].filter(p => p.active).sort((a, b) => {
         const pa = _poolsById[a.poolId], pb = _poolsById[b.poolId];
         return comparePoolSortKeys(
-            poolSortKey(pa?.investScore, pa?.sortRank, a.displayPair ?? a.pair),
-            poolSortKey(pb?.investScore, pb?.sortRank, b.displayPair ?? b.pair),
+            poolSortKey(pa?.investScore, pa?.sortRank, a.displayLabel ?? a.displayPair ?? a.pair),
+            poolSortKey(pb?.investScore, pb?.sortRank, b.displayLabel ?? b.displayPair ?? b.pair),
         );
     });
 
     // Suchfilter anwenden
     const _activeSearchQ = _activeSearchQuery.trim().toLowerCase();
     const filteredPositions = _activeSearchQ
-        ? positions.filter(p => (p.displayPair ?? p.pair ?? '').toLowerCase().includes(_activeSearchQ))
+        ? positions.filter(p => (p.displayLabel ?? p.displayPair ?? p.pair ?? '').toLowerCase().includes(_activeSearchQ))
         : positions;
 
     // Aktive Pools ohne offene Position → "Eröffnung ausstehend"-Zeilen
     const positionPoolIds = new Set(positions.map(p => p.poolId));
     const pendingPools = (data?.pools ?? [])
         .filter(p => p.active && !positionPoolIds.has(p.id))
-        .filter(p => !_activeSearchQ || (p.displayPair ?? p.pair ?? '').toLowerCase().includes(_activeSearchQ))
-        .sort((a, b) => (a.displayPair ?? a.pair ?? '').localeCompare(b.displayPair ?? b.pair ?? ''));
+        .filter(p => !_activeSearchQ || (p.displayLabel ?? p.displayPair ?? p.pair ?? '').toLowerCase().includes(_activeSearchQ))
+        .sort((a, b) => (a.displayLabel ?? a.displayPair ?? a.pair ?? '').localeCompare(b.displayLabel ?? b.displayPair ?? b.pair ?? ''));
 
     let table = container.querySelector('.active-pools-table');
     if (!table) {
@@ -1355,6 +1437,11 @@ function renderActivePositions(data) {
         <circle cx="7" cy="5" r="2" fill="currentColor"/>
     </svg>`;
 
+    const _editIconSvg = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M9.5 1.5L12.5 4.5L4.5 12.5H1.5V9.5L9.5 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+    </svg>`;
+    const _lan = isLanAccess();
+
     table.innerHTML = `
         <div class="active-pools-header">
             <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
@@ -1362,70 +1449,47 @@ function renderActivePositions(data) {
             <span class="col-r has-tooltip" data-tooltip-title="Rebalances" data-tooltip-content="${tr('liq.tip.rebalances', 'Anzahl der Rebalancings heute. Ein Rebalancing schließt die aktuelle Position und öffnet sie mit angepasster Kursrange neu.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.reb', 'Reb.')}</span>
             <span class="col-r">${tr('liq.fees', 'Fees')}</span>
             <span class="col-r">${tr('liq.share', 'Anteil')}</span>
+            <span class="pool-edit-col"></span>
         </div>
         ${filteredPositions.map(pos => {
-            const pair    = escHtml(pos.displayPair ?? pos.pair ?? '—');
+            const pair    = escHtml(pos.displayLabel ?? pos.displayPair ?? pos.pair ?? '—');
             const partVal = pos.myValue != null ? fmtUsdc(pos.myValue) + ' USDC' : '—';
             let partValCls = '';
             const rbCnt   = rebalanceCountByPool[pos.poolId] ?? 0;
             // Zahl immer klickbar — auch "0", damit Monatsstatistik der Pools
             // ohne heutige Rebalances erreichbar bleibt. Bei 0 visuell dezenter.
             const rbCls   = rbCnt > 0 ? '' : ' text-muted';
-            const rbHtml  = `<span class="rebalance-clickable${rbCls}" data-pool-id="${escHtml(pos.poolId ?? '')}" data-pool-pair="${escHtml(pos.pair ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${rbCnt}</span>`;
+            const rbHtml  = `<span class="rebalance-clickable${rbCls}" data-pool-id="${escHtml(pos.poolId ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${rbCnt}</span>`;
             const _claimCnt = pos.todayClaimCount ?? 0;
             const _claimUsd = pos.todayClaimUsd   ?? 0;
             const _feeTodayDate = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
             const _feeTtTitle   = `${pair}: Fees ${_feeTodayDate}`;
             const _feeTtContent = `${_claimCnt} Claims (${fmtUsdc(_claimUsd)} USDC)`;
-            const _pnlToday     = pos.todayPnlUsd;
-            const _pnlSign      = _pnlToday != null && _pnlToday >= 0 ? '+' : '';
-            const _pnlTodayDate = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
-            const _pnlPct       = _pnlToday != null && pos.myValue != null && pos.myValue !== 0 ? (_pnlToday / pos.myValue) * 100 : null;
-            const _pnlTodayBlock = `${_pnlTodayDate} (heute, ab 00:00 Uhr):\n${_pnlToday != null
-                ? `${_pnlSign}${fmtUsdc(_pnlToday)} USDC${_pnlPct != null ? ` (${fmtPct(_pnlPct)})` : ''}`
-                : '—'}`;
             const _pnlDep       = pos.sinceDepositPnlUsd;
-            const _pnlDepSign   = _pnlDep != null && _pnlDep >= 0 ? '+' : '';
             const _pnlDepPct    = _pnlDep != null && pos.myValue != null && pos.myValue !== 0 ? (_pnlDep / pos.myValue) * 100 : null;
-            if (_pnlDepPct != null) partValCls = _pnlDepPct > 1 ? 'value-good' : _pnlDepPct < -1 ? 'value-danger' : '';
-            const _pnlDepDate   = pos.sinceDepositAt != null
-                ? new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
-                : null;
-            const _pnlDepTime   = pos.sinceDepositAt != null
-                ? new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date(pos.sinceDepositAt))
-                : null;
-            // Label je nach tatsächlicher Anker-Quelle — ein manueller Reset ist keine
-            // Einzahlung, sah aber bis 2026-08-22 im Tooltip identisch aus (Fund: SOL/cbBTC
-            // Position 78 auf forge-pub1, Reset ohne Kapitalfluss wirkte wie eine Neueröffnung).
-            const _pnlDepLabel  = pos.sinceDepositSource === 'reset'  ? 'Höchststand zurückgesetzt'
-                                : pos.sinceDepositSource === 'opened' ? 'seit Eröffnung'
-                                : 'letzte Einzahlung';
-            const _pnlDepBlock  = _pnlDepDate != null
-                ? `${_pnlDepDate}, ${_pnlDepTime} Uhr (${_pnlDepLabel}):\n${_pnlDep != null
-                    ? `${_pnlDepSign}${fmtUsdc(_pnlDep)} USDC${_pnlDepPct != null ? ` (${fmtPct(_pnlDepPct)})` : ''}`
-                    : '—'}`
-                : null;
-            // "heute, ab 00:00 Uhr" entfällt, wenn die Position erst heute eröffnet/bestückt
-            // wurde — sonst zeigt der Block PnL für Kursbewegung VOR der Einzahlung, was
-            // irreführend ist (der Wert enthält Marktbewegung, die die Position nie erlebt hat).
-            const _isDepositToday = pos.sinceDepositAt != null && pos.sinceDepositAt >= _todayStart.getTime();
-            const _pnlTtTitle   = `${pair}: PnL`;
-            const _pnlTtContent = [_isDepositToday ? null : _pnlTodayBlock, _pnlDepBlock].filter(Boolean).join('\n\n');
+            // Vereinfachte Farbregel (LIQ#000532): kein neutrales Toleranzband mehr —
+            // jeder positive PnL grün, jeder negative rot.
+            if (_pnlDep != null) partValCls = _pnlDep > 0 ? 'value-good' : _pnlDep < 0 ? 'value-danger' : '';
+            const _pnlTipContent = _pnlDep != null
+                ? `${_pnlDep >= 0 ? '+' : '−'}${fmtUsdc(Math.abs(_pnlDep))} USDC${_pnlDepPct != null ? ' / ' + fmtPct(_pnlDepPct) : ''}`
+                : tr('liq.tip.share_pnl.no_data', 'Keine Daten');
+            const _tsIcon = _trailingStopIcon(pos, data);
             return `
         <div class="active-pools-row">
-            <span>${pair}</span>
-            <button class="range-icon-btn" data-pool-pair="${escHtml(pos.pair ?? '')}">${_rangeIconSvg}</button>
+            <span>${pair}${_tsIcon}</span>
+            <button class="range-icon-btn" data-pool-id="${escHtml(pos.poolId ?? '')}">${_rangeIconSvg}</button>
             <span class="col-r">${rbHtml}</span>
-            <span class="col-r"><span class="fees-clickable has-tooltip" data-pool-pair="${escHtml(pos.pair ?? '')}" data-tooltip-title="${escHtml(_feeTtTitle)}" data-tooltip-content="${escHtml(_feeTtContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pos.feesPendingUsd != null ? fmtUsdc(pos.feesPendingUsd) + ' USDC' : '—'}</span></span>
-            <span class="col-r"><span class="composition-clickable has-tooltip${partValCls ? ' ' + partValCls : ''}" data-pool-pair="${escHtml(pos.pair ?? '')}" data-tooltip-title="${escHtml(_pnlTtTitle)}" data-tooltip-content="${escHtml(_pnlTtContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${partVal}</span></span>
+            <span class="col-r"><span class="fees-clickable has-tooltip" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${escHtml(_feeTtTitle)}" data-tooltip-content="${escHtml(_feeTtContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pos.feesPendingUsd != null ? fmtUsdc(pos.feesPendingUsd) + ' USDC' : '—'}</span></span>
+            <span class="col-r"><span class="composition-clickable has-tooltip${partValCls ? ' ' + partValCls : ''}" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${tr('liq.tip.share_pnl.title', 'PnL')}" data-tooltip-content="${escHtml(_pnlTipContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${partVal}</span></span>
+            <span class="pool-edit-col">${_lan ? `<a class="pool-edit-link has-tooltip" href="https://${escHtml(window.location.hostname)}:3200/#liquidity/${encodeURIComponent(pos.poolId ?? '')}" data-tooltip-title="${tr('liq.tip.pool_settings', 'Pool-Einstellungen')}" data-tooltip-content="${tr('liq.tip.pool_settings_desc', 'Öffnet die Settings für diesen Pool.')}" data-tooltip-type="text">${_editIconSvg}</a>` : ''}</span>
         </div>`;
         }).join('')}
         ${pendingPools.map(pool => {
-            const pair = escHtml(pool.displayPair ?? pool.pair ?? '—');
+            const pair = escHtml(pool.displayLabel ?? pool.displayPair ?? pool.pair ?? '—');
             return `
         <div class="active-pools-row" style="opacity:0.5">
             <span>${pair}</span>
-            <span style="color:var(--text-secondary);font-size:0.75em;grid-column:2/6">${tr('liq.position_opening', 'Position wird eröffnet …')}</span>
+            <span style="color:var(--text-secondary);font-size:0.75em;grid-column:2/7">${tr('liq.position_opening', 'Position wird eröffnet …')}</span>
         </div>`;
         }).join('')}`;
 
@@ -2575,7 +2639,7 @@ function renderVolumeChart(data) {
         const newIds     = pools.map(p => p.id);
         if (JSON.stringify(currentIds) !== JSON.stringify(newIds)) {
             select.innerHTML = pools.map(p =>
-                `<option value="${escHtml(p.id)}">${escHtml(p.displayPair ?? p.pair ?? p.id)}</option>`
+                `<option value="${escHtml(p.id)}">${escHtml(p.displayLabel ?? p.displayPair ?? p.pair ?? p.id)}</option>`
             ).join('');
             if (!select.dataset.listenerAdded) {
                 select.addEventListener('change', () => {
@@ -2626,13 +2690,11 @@ let _compositionRange    = localStorage.getItem(LS_RANGE.composition) ?? '1W';
 let _compositionPool     = null;
 let _compositionResizeOb = null;
 
-function renderCompositionChart(data, poolPair, svgId = 'compositionChartSvg', emptyId = 'compositionChartEmptyMsg') {
+function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emptyId = 'compositionChartEmptyMsg') {
     const svg      = document.getElementById(svgId);
     const emptyMsg = document.getElementById(emptyId);
     if (!svg) return;
 
-    const pos     = (data?.positions ?? []).find(p => p.pair === poolPair);
-    const poolId  = pos?.poolId ?? null;
     const history = (data?.compositionHistory ?? []).filter(r => r.poolId === poolId);
     const filtered = filterByRange(history, _compositionRange, r => r.t)
         .sort((a, b) => a.t - b.t);
@@ -2645,7 +2707,7 @@ function renderCompositionChart(data, poolPair, svgId = 'compositionChartSvg', e
     svg.style.display      = 'block';
     emptyMsg.style.display = 'none';
 
-    const [symA, symB] = (displayPairOf(data, poolPair) ?? poolPair ?? 'A/B').split('/');
+    const [symA, symB] = (displayPairOf(data, poolId) ?? poolId ?? 'A/B').split('/');
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
     const H   = 220;
@@ -2780,19 +2842,19 @@ function renderCompositionChart(data, poolPair, svgId = 'compositionChartSvg', e
     }
 }
 
-function openCompositionModal(poolPair, data) {
-    _compositionPool = poolPair;
+function openCompositionModal(poolId, data) {
+    _compositionPool = poolId;
     const modal = $('compositionModal');
     if (!modal) return;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('compositionModalTitle').textContent = tr('liq.coin_distribution_prefix', 'Coin-Verteilung: ') + displayPairOf(data, poolPair);
+    $('compositionModalTitle').textContent = tr('liq.coin_distribution_prefix', 'Coin-Verteilung: ') + displayPairOf(data, poolId);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
     updateChartRangeBtns('compositionRangeBtns', data?.compositionHistory ?? [], r => r.t,
         () => _compositionRange,
         v  => { _compositionRange = v; localStorage.setItem(LS_RANGE.composition, v); },
         () => { if (_lastData && _compositionPool) renderCompositionChart(_lastData, _compositionPool); });
-    renderCompositionChart(data, poolPair);
+    renderCompositionChart(data, poolId);
 }
 
 function closeCompositionModal() {
@@ -2811,8 +2873,8 @@ function initCompositionModal() {
     document.addEventListener('click', e => {
         const link = e.target.closest('.composition-clickable');
         if (link) {
-            const poolPair = link.dataset.poolPair;
-            if (poolPair && _lastData) openPosValueModal(poolPair, _lastData);
+            const poolId = link.dataset.poolId;
+            if (poolId && _lastData) openPosValueModal(poolId, _lastData);
         }
     });
 }
@@ -2822,17 +2884,16 @@ function initCompositionModal() {
 let _posValueRange    = localStorage.getItem(LS_RANGE.posValue)    ?? '1W';
 let _posValueRangePnl = localStorage.getItem(LS_RANGE.posValuePnl) ?? '1W';
 let _posValuePool     = null;
-let _posValueTab      = 'mine';  // aktiver Tab: 'mine' | 'pnl'
+let _posValueTab      = 'value';  // aktiver Tab: 'value' | 'details'
 
 /**
  * Zeichnet den LP-Wert-Chart (Tab 1).
  */
-function renderPosValueChart(data, poolPair) {
+function renderPosValueChart(data, poolId) {
     const svg      = $('posValueChartSvg');
     const emptyMsg = $('posValueChartEmptyMsg');
     if (!svg) return;
 
-    const poolId  = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId ?? null;
     const history = poolId
         ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId)
         : [];
@@ -2911,14 +2972,13 @@ function renderPosValueChart(data, poolPair) {
 // ── PnL-Chart: rollende 24h-PnL für jeden Zeitpunkt ─────────────────────────
 // Y-Achse = "Was hat der Pool in den 24h vor diesem Zeitpunkt verdient/verloren?"
 // Endwert (rechts) = aktuelle PnL-1D = Spaltenwert. Konsistent über alle Ranges.
-function renderPnLChart(data, poolPair) {
+function renderPnLChart(data, poolId) {
     const svg      = $('posValueChartSvgPnl');
     const emptyMsg = $('posValueChartEmptyMsgPnl');
     if (!svg) return;
 
     const summaryEl = $('posValuePnlSummary');
 
-    const poolId  = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId ?? null;
     const fullHist = poolId ? (data?.pnlHistory ?? []).filter(r => r.poolId === poolId) : [];
 
     // Rolling-24h-PnL pro Punkt: rolling(t) = pnl(t) − pnl(t − 24h)
@@ -3020,16 +3080,15 @@ function renderPnLChart(data, poolPair) {
  * @param {string} svgId      Element-ID des SVG
  * @param {string} emptyId    Element-ID der Leer-Meldung
  * @param {object} data       Daten-Objekt (_lastData)
- * @param {string} poolPair   z.B. "SOL/USDC"
+ * @param {string} poolId     z.B. "liq-sol-usdc"
  * @param {string} tokenKey   'amountA' oder 'amountB'
  * @param {string} range      '1D' | '1W' | '1M'
  */
-function renderTokenAmountChart(svgId, emptyId, data, poolPair, tokenKey, range) {
+function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     const svg      = $(svgId);
     const emptyMsg = $(emptyId);
     if (!svg) return;
 
-    const poolId  = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId ?? null;
     const history = poolId
         ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId)
         : [];
@@ -3117,7 +3176,7 @@ function renderTokenAmountChart(svgId, emptyId, data, poolPair, tokenKey, range)
     svg.setAttribute('height', H);
 
     // Hover-Fadenkreuz mit Achsen-Labels
-    const symLabel = (displayPairOf(data, poolPair) ?? poolPair ?? 'A/B').split('/')[tokenKey === 'amountA' ? 0 : 1];
+    const symLabel = (displayPairOf(data, poolId) ?? poolId ?? 'A/B').split('/')[tokenKey === 'amountA' ? 0 : 1];
     attachHoverOverlay(svg, {
         tMin: minT, tMax: maxT, spanMs: maxT - minT,
         PAD_L: pad.left, cW: iW, PAD_T: pad.top, cH: iH,
@@ -3129,12 +3188,11 @@ function renderTokenAmountChart(svgId, emptyId, data, poolPair, tokenKey, range)
 /**
  * Zeichnet den Impermanent-Loss-Chart (Tab 4).
  */
-function renderILChart(data, poolPair) {
+function renderILChart(data, poolId) {
     const svg      = $('myAprChartSvgIL');
     const emptyMsg = $('myAprChartEmptyMsgIL');
     if (!svg) return;
 
-    const poolId  = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId ?? null;
     const history = poolId
         ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId && r.ilUsd != null)
         : [];
@@ -3225,12 +3283,11 @@ function renderILChart(data, poolPair) {
 }
 
 // ── Renders N-APR chart (Tab 3): pool_score_history.net_apr_pct in % p.a. ────
-function renderNPChart(data, poolPair) {
+function renderNPChart(data, poolId) {
     const svg      = $('myAprChartSvgNP');
     const emptyMsg = $('myAprChartEmptyMsgNP');
     if (!svg) return;
 
-    const poolId  = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId ?? null;
     const history = poolId
         ? (data?.scoreHistory ?? []).filter(r => r.poolId === poolId)
         : [];
@@ -3313,14 +3370,15 @@ function renderNPChart(data, poolPair) {
 }
 
 /**
- * Wechselt den aktiven Tab im Positionswert-Modal (Mein Anteil / PnL).
- * @param {'mine'|'pnl'} tab
+ * Wechselt den aktiven Tab im Positionswert-Modal (Wert USDC / PnL-Details).
+ * @param {'value'|'details'} tab
  */
 function _switchPosValueTab(tab) {
     _posValueTab = tab;
 
     const defs = [
-        { key: 'mine', btnId: 'posValueTabLp',  panelId: 'posValuePanelLp'  },
+        { key: 'value',   btnId: 'posValueTabValue',   panelId: 'posValuePanelLp'      },
+        { key: 'details', btnId: 'posValueTabDetails', panelId: 'posValuePanelDetails' },
     ];
     defs.forEach(({ key, btnId, panelId }) => {
         const isActive = key === tab;
@@ -3329,18 +3387,18 @@ function _switchPosValueTab(tab) {
     });
 
     if (!_lastData || !_posValuePool) return;
-    if (tab === 'mine')     renderPosValueChart(_lastData, _posValuePool);
-    else if (tab === 'pnl') renderPnLChart(_lastData, _posValuePool);
+    if (tab === 'value')        renderPosValueChart(_lastData, _posValuePool);
+    else if (tab === 'details') renderPosValueDetails(_lastData, _posValuePool);
 }
 
-function openPosValueModal(poolPair, data) {
-    _posValuePool = poolPair;
+function openPosValueModal(poolId, data) {
+    _posValuePool = poolId;
     const modal = $('posValueModal');
     if (!modal) return;
 
-    $('posValueModalTitle').textContent = tr('liq.my_share_prefix', 'Mein Anteil: ') + displayPairOf(data, poolPair);
+    $('posValueModalTitle').textContent = tr('liq.my_share_prefix', 'Mein Anteil: ') + displayPairOf(data, poolId);
 
-    _switchPosValueTab('mine');
+    _switchPosValueTab('value');
 
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
@@ -3351,7 +3409,104 @@ function openPosValueModal(poolPair, data) {
         v  => { _posValueRange = v; localStorage.setItem(LS_RANGE.posValue, v); },
         () => { if (_lastData && _posValuePool) renderPosValueChart(_lastData, _posValuePool); });
 
-    renderPosValueChart(data, poolPair);
+    renderPosValueChart(data, poolId);
+}
+
+/**
+ * Baut den Tab "PnL-Details" (Einzahlung / Maximum / Aktuell) im Positionswert-Modal.
+ * Alle Zahlen kommen fertig aus export.js/lib/pnl.js — hier nur Formatierung, keine
+ * eigene PnL-Berechnung (Ablösung des früheren Anteil-Tooltips, siehe _switchPosValueTab).
+ */
+function renderPosValueDetails(data, poolId) {
+    const container = $('posValueDetailsTable');
+    if (!container) return;
+
+    const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active)
+             ?? (data?.positions ?? []).find(p => p.poolId === poolId);
+    if (!pos) {
+        container.innerHTML = `<p class="chart-empty">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</p>`;
+        return;
+    }
+
+    const fmtDateTime = (ms) => {
+        if (ms == null) return '—';
+        const tz   = window.FORGE_TZ || 'Europe/Berlin';
+        const date = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: tz }).format(new Date(ms));
+        const time = new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(ms));
+        return `${date}, ${time} Uhr`;
+    };
+
+    const pnlLine = (usd, valueUsd) => {
+        if (usd == null) return '<span class="text-muted">—</span>';
+        const pct  = valueUsd != null && valueUsd !== 0 ? (usd / valueUsd) * 100 : null;
+        const cls  = usd > 0 ? 'value-good' : usd < 0 ? 'value-danger' : '';
+        const sign = usd >= 0 ? '+' : '';
+        return `<span class="${cls}">PnL ${sign}${fmtUsdc(usd)} USDC${pct != null ? ` / ${fmtPct(pct)}` : ''}</span>`;
+    };
+
+    // Mehr als eine Kapitalbewegung seit dem Anker (z.B. Cleanup-Nachschuss nach der
+    // letzten externen Einzahlung) → Label + Datum spiegeln das wider. Der Betrag
+    // (depositValueUsd) ist in beiden Fällen bereits korrekt, siehe export.js.
+    const _depMulti = (pos.depositCount ?? 0) > 1;
+    const _depLabel = _depMulti ? tr('liq.pnl_deposit_total', 'Einzahlung (gesamt)') : tr('liq.pnl_deposit', 'Einzahlung');
+    const _depDate  = _depMulti ? (pos.depositLatestAt ?? pos.sinceDepositAt) : pos.sinceDepositAt;
+
+    const cols = [
+        {
+            label: _depLabel,
+            date:  fmtDateTime(_depDate),
+            value: pos.depositValueUsd != null ? `${fmtUsdc(pos.depositValueUsd)} USDC` : '—',
+            pnl:   null,
+        },
+        {
+            label: tr('liq.pnl_maximum', 'Maximum'),
+            date:  fmtDateTime(pos.peakPnlAt),
+            value: pos.peakValueUsd != null ? `${fmtUsdc(pos.peakValueUsd)} USDC` : '—',
+            pnl:   pnlLine(pos.peakPnlUsd, pos.myValue),
+        },
+        {
+            label: tr('liq.pnl_current', 'Aktuell'),
+            date:  fmtDateTime(data?.timestamp ?? Date.now()),
+            value: pos.myValue != null ? `${fmtUsdc(pos.myValue)} USDC` : '—',
+            pnl:   pnlLine(pos.sinceDepositPnlUsd, pos.myValue),
+        },
+    ];
+
+    // Nicht reinvestierter Rebalance-Rest (LIQ#000558): eigene Zeile unter dem 3er-Grid,
+    // nicht als 4. Spalte — sonst brechen die Boxen bei schmaleren Modal-Breiten um.
+    // Bewusst kein Verlust-Framing (keine rote Farbe, kein "fehlt") — das Kapital liegt
+    // weiterhin im Wallet. Nur sichtbar, wenn seit dem Anker tatsächlich ein Rest anfiel.
+    let leftoverHtml = '';
+    if (pos.walletLeftoverUsd > 0) {
+        const n = pos.walletLeftoverRebalances ?? 0;
+        const sinceLabel = n === 1
+            ? tr('liq.pnl_leftover_since_one', 'seit {n} Rebalance', { n })
+            : tr('liq.pnl_leftover_since_many', 'seit {n} Rebalances', { n });
+        // 🧪 TEMPORÄR, siehe LIQ#000559 — Marker + eigener Tooltip für den Näherungs-Fallback
+        // in export.js. Entfällt zusammen mit walletLeftoverEstimated.
+        const estimatedBadge = pos.walletLeftoverEstimated
+            ? ` <span class="has-tooltip" data-tooltip-title="${escHtml(tr('liq.pnl_leftover_estimated', 'grob geschätzt'))}" data-tooltip-content="${escHtml(tr('liq.pnl_leftover_estimated_tooltip', 'Für Rebalances vor dieser Funktion wurde der Rest nicht exakt erfasst. Grob genähert aus Positionswert vor/nach dem Rebalance — verzerrt durch TX-Kosten, Slippage und Preisbewegung. Wird mit dem nächsten Rebalance durch den exakten Wert ersetzt.'))}" data-tooltip-type="text" style="cursor:default;color:var(--warning,#f59e0b)">⚠ ${escHtml(tr('liq.pnl_leftover_estimated', 'grob geschätzt'))}</span>`
+            : '';
+        leftoverHtml = `
+        <div class="pos-value-leftover">
+            <div class="pos-value-leftover-label">
+                ${escHtml(tr('liq.pnl_leftover', 'Im Wallet verblieben'))}
+                <span class="has-tooltip" data-tooltip-title="${escHtml(tr('liq.pnl_leftover', 'Im Wallet verblieben'))}" data-tooltip-content="${escHtml(tr('liq.pnl_leftover_tooltip', 'Nicht bei jedem Rebalance vollständig reinvestierter Betrag. Liegt im Wallet, ist Teil deines Kapitals, kein Verlust.'))}" data-tooltip-type="text" style="cursor:default">ⓘ</span>${estimatedBadge}
+            </div>
+            <div class="pos-value-leftover-row">
+                <span class="pos-value-leftover-since">${escHtml(sinceLabel)}</span>
+                <span class="pos-value-leftover-value">${fmtUsdc(pos.walletLeftoverUsd)} USDC<span class="pos-value-leftover-hint">${escHtml(tr('liq.pnl_leftover_note', 'gehört zu deinem Kapital'))}</span></span>
+            </div>
+        </div>`;
+    }
+
+    container.innerHTML = cols.map(c => `
+        <div class="pos-value-details-col">
+            <div class="pos-value-details-label">${escHtml(c.label)}</div>
+            <div class="pos-value-details-date">${escHtml(c.date)}</div>
+            <div class="pos-value-details-value">${c.value}</div>
+            ${c.pnl != null ? `<div class="pos-value-details-pnl">${c.pnl}</div>` : ''}
+        </div>`).join('') + leftoverHtml;
 }
 
 function closePosValueModal() {
@@ -3411,7 +3566,7 @@ function initVolChartModal() {
         const pools = (_lastData?.pools ?? []).filter(p => p.active);
         if (modalSelect) {
             modalSelect.innerHTML = pools.map(p =>
-                `<option value="${escHtml(p.id)}"${p.id === _volSelectedPool ? ' selected' : ''}>${escHtml(p.displayPair ?? p.pair ?? p.id)}</option>`
+                `<option value="${escHtml(p.id)}"${p.id === _volSelectedPool ? ' selected' : ''}>${escHtml(p.displayLabel ?? p.displayPair ?? p.pair ?? p.id)}</option>`
             ).join('');
             if (!modalSelect.dataset.listenerAdded) {
                 modalSelect.addEventListener('change', () => {
@@ -3464,14 +3619,11 @@ let _myAprUseMyApr = false;
 let _myAprTab      = 'apr';  // aktiver Tab: 'apr' | 'il' | 'np'
 let _myAprResizeOb = null;
 
-function renderMyAprChart(data, poolPair) {
+function renderMyAprChart(data, poolId) {
     const svg = document.getElementById('myAprChartSvg');
     if (!svg) return;
 
-    const openPos   = (data?.positions ?? []).find(p => p.pair === poolPair && !p.closedAt);
-    const poolId    = openPos?.poolId
-                   ?? (data?.pools ?? []).find(p => p.pair === poolPair)?.id
-                   ?? null;
+    const openPos   = (data?.positions ?? []).find(p => p.poolId === poolId && !p.closedAt);
     const myHistory = openPos && poolId ? (data?.myAprHistory ?? []).filter(r => r.poolId === poolId) : [];
     const useMyApr  = _myAprUseMyApr && myHistory.length >= 2;
     const history   = useMyApr
@@ -3578,15 +3730,12 @@ function _switchMyAprTab(tab) {
     renderMyAprChart(_lastData, _myAprPool);
 }
 
-function openMyAprModal(poolPair, data, initialTab = 'apr') {
-    _myAprPool = poolPair;
+function openMyAprModal(poolId, data, initialTab = 'apr') {
+    _myAprPool = poolId;
     const modal = $('myAprModal');
     if (!modal) return;
 
-    const openPos   = (data?.positions ?? []).find(p => p.pair === poolPair && !p.closedAt);
-    const poolId    = openPos?.poolId
-                   ?? (data?.pools ?? []).find(p => p.pair === poolPair)?.id
-                   ?? null;
+    const openPos   = (data?.positions ?? []).find(p => p.poolId === poolId && !p.closedAt);
     const myHistory = openPos && poolId ? (data?.myAprHistory ?? []).filter(r => r.poolId === poolId) : [];
     _myAprUseMyApr  = myHistory.length >= 2;
     const useMyApr  = _myAprUseMyApr;
@@ -3636,14 +3785,11 @@ let _tvlPool     = null;
 let _tvlData     = null;   // data bei Modal-Öffnung – hat tvlHistory garantiert
 let _tvlResizeOb = null;
 
-function renderTvlChart(data, poolPair) {
+function renderTvlChart(data, poolId) {
     const svg      = document.getElementById('tvlChartSvg');
     if (!svg) return;
 
-    const pool     = (data?.pools ?? []).find(p => p.pair === poolPair) ?? null;
-    const poolId   = (data?.positions ?? []).find(p => p.pair === poolPair)?.poolId
-                  ?? (data?.pools ?? []).find(p => p.pair === poolPair)?.id
-                  ?? null;
+    const pool     = (data?.pools ?? []).find(p => p.id === poolId) ?? null;
     const history  = poolId
         ? (data?.tvlHistory ?? []).filter(r => r.poolId === poolId)
         : [];
@@ -3776,17 +3922,17 @@ function _updateTvlRangeBtns() {
     syncRangeBtns('tvlRangeBtns', _tvlRange);
 }
 
-function openTvlModal(poolPair, data) {
-    _tvlPool = poolPair;
+function openTvlModal(poolId, data) {
+    _tvlPool = poolId;
     _tvlData = data;   // tvlHistory ist hier garantiert vorhanden
     const modal = $('tvlModal');
     if (!modal) return;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('tvlModalTitle').textContent = 'TVL: ' + displayPairOf(data, poolPair);
+    $('tvlModalTitle').textContent = 'TVL: ' + displayPairOf(data, poolId);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
     _updateTvlRangeBtns();
-    renderTvlChart(data, poolPair);
+    renderTvlChart(data, poolId);
 }
 
 function closeTvlModal() {
@@ -3805,8 +3951,8 @@ function initTvlModal() {
     document.addEventListener('click', e => {
         const link = e.target.closest('.tvl-clickable');
         if (link) {
-            const poolPair = link.dataset.poolPair;
-            if (poolPair && _lastData) openTvlModal(poolPair, _lastData);
+            const poolId = link.dataset.poolId;
+            if (poolId && _lastData) openTvlModal(poolId, _lastData);
         }
     });
 }
@@ -3822,13 +3968,12 @@ let _volModalRange    = localStorage.getItem(LS_RANGE.volModal) ?? '1W';
 let _volModalPool     = null;
 let _volModalResizeOb = null;
 
-function renderVolModalChart(data, poolPair) {
+function renderVolModalChart(data, poolId) {
     const svg = document.getElementById('volModalChartSvg');
     if (!svg) return;
 
-    const pool    = (data?.pools ?? []).find(p => p.pair === poolPair);
     const history = (data?.volumeHistory ?? [])
-        .filter(r => r.poolId === pool?.id && r.volume != null);
+        .filter(r => r.poolId === poolId && r.volume != null);
 
     const filtered = aggregateDailyVolume(
         filterByRange(history, _volModalRange, r => r.t)
@@ -3938,16 +4083,16 @@ function _updateVolModalRangeBtns(data) {
         b.classList.toggle('active', b.dataset.range === _volModalRange));
 }
 
-function openVolModal(poolPair, data) {
-    _volModalPool = poolPair;
+function openVolModal(poolId, data) {
+    _volModalPool = poolId;
     const modal = $('volModal');
     if (!modal) return;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('volModalTitle').textContent = tr('liq.vol24h_prefix', 'VOL 24h: ') + displayPairOf(data, poolPair);
+    $('volModalTitle').textContent = tr('liq.vol24h_prefix', 'VOL 24h: ') + displayPairOf(data, poolId);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
     _updateVolModalRangeBtns(data);
-    renderVolModalChart(data, poolPair);
+    renderVolModalChart(data, poolId);
 }
 
 function closeVolModal() {
@@ -3966,8 +4111,8 @@ function initVolModal() {
     document.addEventListener('click', e => {
         const link = e.target.closest('.vol-clickable');
         if (link) {
-            const poolPair = link.dataset.poolPair;
-            if (poolPair && _lastData) openVolModal(poolPair, _lastData);
+            const poolId = link.dataset.poolId;
+            if (poolId && _lastData) openVolModal(poolId, _lastData);
         }
     });
 }
@@ -3978,19 +4123,19 @@ let _rangeChartRange = localStorage.getItem(LS_RANGE.rangeChart) ?? '1D';
 let _rangeChartPool  = null;
 let _rangeResizeOb   = null;
 
-function renderRangeChart(data, poolPair) {
+function renderRangeChart(data, poolId) {
     const svg      = document.getElementById('rangeChartSvg');
     const emptyMsg = document.getElementById('rangeChartEmptyMsg');
     if (!svg) return;
 
-    const pos = (data?.positions ?? []).find(p => p.pair === poolPair && p.active);
+    const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active);
     if (!pos) {
         svg.style.display      = 'none';
         if (emptyMsg) emptyMsg.style.display = 'block';
         return;
     }
 
-    const { priceLower, priceUpper, priceNow, poolId } = pos;
+    const { priceLower, priceUpper, priceNow } = pos;
     // Einheit ist das Quote-Token des Pools (tokenB), NICHT pauschal USDC: bei SOL-Pools
     // ist der Kurs z.B. cbBTC pro SOL. Kommt fertig aus dem Export — `pair` ist ein
     // Label-Feld und bei einzelnen Pools invertiert, das darf das Frontend nicht raten.
@@ -4119,20 +4264,18 @@ function _switchRangeTab(tabKey) {
     }
 }
 
-function openRangeModal(poolPair, data) {
+function openRangeModal(poolId, data) {
     const modal = $('rangeModal');
     if (!modal) return;
 
-    _rangeChartPool = poolPair;
+    _rangeChartPool = poolId;
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('rangeModalTitle').textContent = displayPairOf(data, poolPair) ?? 'Pool';
-
-    const pos = (data?.positions ?? []).find(p => p.pair === poolPair && p.active);
+    $('rangeModalTitle').textContent = displayPairOf(data, poolId) ?? 'Pool';
 
     // Range-Buttons für Chart-Tab
     updateChartRangeBtns(
         'rangeChartRangeBtns',
-        (data?.priceHistory ?? []).filter(r => r.poolId === pos?.poolId), r => r.t,
+        (data?.priceHistory ?? []).filter(r => r.poolId === poolId), r => r.t,
         () => _rangeChartRange,
         v  => { _rangeChartRange = v; localStorage.setItem(LS_RANGE.rangeChart, v); },
         () => { if (_lastData && _rangeChartPool) renderRangeChart(_lastData, _rangeChartPool); }
@@ -4152,7 +4295,7 @@ function openRangeModal(poolPair, data) {
 
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
-    requestAnimationFrame(() => renderRangeChart(data, poolPair));
+    requestAnimationFrame(() => renderRangeChart(data, poolId));
 }
 
 function closeRangeModal() {
@@ -4178,10 +4321,10 @@ function initRangeModal() {
 
 // ── Pool-TX-Modal ─────────────────────────────────────────────────────────────
 
-function openPoolTxModal(poolPair, data, opts = {}) {
+function openPoolTxModal(poolId, data, opts = {}) {
     const modal = $('poolTxModal');
     if (!modal) return;
-    renderPoolTxList(poolPair, data, opts);
+    renderPoolTxList(poolId, data, opts);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
 }
@@ -4193,7 +4336,7 @@ function closePoolTxModal() {
     document.body.classList.remove('modal-open');
 }
 
-function renderPoolTxList(poolPair, data, opts = {}) {
+function renderPoolTxList(poolId, data, opts = {}) {
     const { typeFilter = null, titlePrefix = tr('liq.last_25_tx', 'Letzte 25 Transaktionen') } = opts;
     const titleEl = $('poolTxModalTitle');
     const listEl  = $('poolTxList');
@@ -4203,14 +4346,14 @@ function renderPoolTxList(poolPair, data, opts = {}) {
     listEl.style.maxHeight = '';
 
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    if (titleEl) titleEl.textContent = titlePrefix + ': ' + displayPairOf(data, poolPair);
+    if (titleEl) titleEl.textContent = titlePrefix + ': ' + displayPairOf(data, poolId);
 
     const isClaimsOnly = typeFilter?.length === 1 && typeFilter[0] === 'claim';
     const txSource = isClaimsOnly ? (data?.recentClaims ?? []) : (data?.transactions ?? []);
-    // Filter über interne pair (matcht data-pool-pair-Attribute). tx.pool ist der
-    // displayPair-Name, der bei gedrehten Pools (HYPE/SOL etc.) vom internen
-    // pair abweicht — daher hier explizit pair statt pool prüfen.
-    let txFiltered = txSource.filter(tx => (tx.pair ?? tx.pool) === poolPair);
+    // Filter über poolId (eindeutig, matcht data-pool-id-Attribute). Bei zwei
+    // gleichnamigen Pools (z.B. unterschiedliche Fee-Tiers) ist tx.pair/tx.pool
+    // nicht eindeutig — siehe LIQ#0471.
+    let txFiltered = txSource.filter(tx => tx.poolId === poolId);
     if (typeFilter && !isClaimsOnly) txFiltered = txFiltered.filter(tx => typeFilter.includes(tx.type));
     const allTx = txFiltered.slice(0, 25);
 
@@ -4289,8 +4432,8 @@ function renderPoolTxList(poolPair, data, opts = {}) {
 let _claimHistPool = null;
 let _claimHistData = null;
 
-function openPoolClaimHistoryModal(poolPair, data) {
-    _claimHistPool = poolPair;
+function openPoolClaimHistoryModal(poolId, data) {
+    _claimHistPool = poolId;
     _claimHistData = data;
 
     const modal   = $('poolTxModal');
@@ -4298,7 +4441,7 @@ function openPoolClaimHistoryModal(poolPair, data) {
     if (!modal) return;
 
     // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    if (titleEl) titleEl.textContent = `Fee Claims: ${displayPairOf(data, poolPair)}`;
+    if (titleEl) titleEl.textContent = `Fee Claims: ${displayPairOf(data, poolId)}`;
     _renderClaimHistTab('today');
 
     modal.classList.remove('hidden');
@@ -4312,9 +4455,9 @@ function _renderClaimHistTab(tab) {
     listEl.style.overflow  = 'visible';
     listEl.style.maxHeight = 'none';
 
-    const data     = _claimHistData;
-    const poolPair = _claimHistPool;
-    const now      = data?.timestamp ? new Date(data.timestamp) : new Date();
+    const data   = _claimHistData;
+    const poolId = _claimHistPool;
+    const now    = data?.timestamp ? new Date(data.timestamp) : new Date();
 
     const todayStart     = new Date(now); todayStart.setHours(0, 0, 0, 0);
     const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
@@ -4324,10 +4467,10 @@ function _renderClaimHistTab(tab) {
     // geschlossen und wiedereröffnet worden sein — die Claims der Vorgänger-Positionen gehören
     // nicht in dieses Modal (sie stehen in den Tagesaggregaten und im Profit-Chart).
     // Grenze: positionId (seit 2026-08-22 im Export), Fallback: Eröffnungszeitpunkt.
-    const curPos = (data?.positions ?? []).find(p => p.pair === poolPair && p.active)
-                ?? (data?.positions ?? []).find(p => p.pair === poolPair);
+    const curPos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active)
+                ?? (data?.positions ?? []).find(p => p.poolId === poolId);
     const allEntries       = (data?.claimHistory ?? []).filter(e => {
-        if (e.pair !== poolPair) return false;
+        if (e.poolId !== poolId) return false;
         if (!curPos) return true;
         if (e.positionId != null && curPos.positionId != null) return e.positionId === curPos.positionId;
         return !(curPos.openedAt > 0) || e.claimedAt >= curPos.openedAt;
@@ -4354,7 +4497,7 @@ function _renderClaimHistTab(tab) {
 
     const entries  = tabDefs.find(t => t.key === tab)?.entries ?? [];
     const isMonth  = tab === 'month';
-    const dp       = displayPairOf(data, poolPair) ?? poolPair ?? 'A/B';
+    const dp       = displayPairOf(data, poolId) ?? poolId ?? 'A/B';
     const tokenA   = dp.split('/')[0] ?? '?';
     const tokenB   = dp.split('/')[1] ?? '?';
     const isUsdcB  = tokenB === 'USDC' || tokenB === 'EURC';
@@ -4464,7 +4607,7 @@ function openPoolRebalanceModal(poolId, data) {
 
     // Titel zeigt displayPair via Pool-Lookup über poolId.
     const pool = (data?.pools ?? []).find(p => p.id === poolId);
-    const dispPair = pool?.displayPair ?? pool?.pair ?? poolId;
+    const dispPair = pool?.displayLabel ?? pool?.displayPair ?? pool?.pair ?? poolId;
     if (titleEl) titleEl.textContent = `Rebalance: ${dispPair}`;
     _renderRebalHistTab('today');
 
@@ -4639,16 +4782,16 @@ function initPoolTxModal() {
     $('activePoolsContainer')?.addEventListener('click', e => {
         const rangeBtn = e.target.closest('.range-icon-btn');
         if (rangeBtn) {
-            const poolPair = rangeBtn.dataset.poolPair;
-            if (poolPair && _lastData) openRangeModal(poolPair, _lastData);
+            const poolId = rangeBtn.dataset.poolId;
+            if (poolId && _lastData) openRangeModal(poolId, _lastData);
             return;
         }
         const feesLink = e.target.closest('.fees-clickable');
         if (feesLink) {
             // Mobile-Portrait: Modal ist zu breit für den Bildschirm → nicht öffnen.
             if (window.matchMedia('(max-width: 768px) and (orientation: portrait)').matches) return;
-            const poolPair = feesLink.dataset.poolPair;
-            if (poolPair && _lastData) openPoolClaimHistoryModal(poolPair, _lastData);
+            const poolId = feesLink.dataset.poolId;
+            if (poolId && _lastData) openPoolClaimHistoryModal(poolId, _lastData);
             return;
         }
         const rebalLink = e.target.closest('.rebalance-clickable');
@@ -4664,8 +4807,8 @@ function initPoolTxModal() {
     $('poolsContainer')?.addEventListener('click', e => {
         const aprLink = e.target.closest('.pool-apr-clickable');
         if (aprLink) {
-            const poolPair = aprLink.dataset.poolPair;
-            if (poolPair && _lastData) openMyAprModal(poolPair, _lastData);
+            const poolId = aprLink.dataset.poolId;
+            if (poolId && _lastData) openMyAprModal(poolId, _lastData);
         }
     });
 }
@@ -4693,7 +4836,7 @@ async function refresh() {
         const rebalanceNotifs = d.rebalances.map(r => ({
             ts:      r.rebalancedAt,
             level:   'info',
-            message: (r.reason === 'proactive' ? '⚡ Rebalancing ProAktiv' : '🔄 Rebalancing') + ` – ${r.displayPair ?? r.pair}`,
+            message: (r.reason === 'proactive' ? '⚡ Rebalancing ProAktiv' : '🔄 Rebalancing') + ` – ${r.displayLabel ?? r.displayPair ?? r.pair}`,
             pair:    r.pair,
         }));
         rebalanceToast.update(rebalanceNotifs);
@@ -4798,126 +4941,9 @@ function openInvestScoreModal(poolId, data) {
     const pool = (data?.pools ?? []).find(p => p.id === poolId);
     if (!pool) return;
 
-    const is   = pool.investScore;
-    const pair = pool.displayPair ?? pool.pair ?? poolId;
+    const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
     const titleEl = $('investScoreModalTitle');
     if (titleEl) titleEl.textContent = `Opportunity Score – ${pair}`;
-
-    // ── Bewertung-Panel ──────────────────────────────────────────────────────
-    const bewertungEl = $('oppScoreBewertungPanel');
-    if (bewertungEl) {
-        const _sc = v => v == null ? '' : v >= 60 ? 'value-good' : v < 35 ? 'value-danger' : '';
-        const _fmtPct = (v, unit) => {
-            if (v == null) return '<span style="color:#64748b;font-size:0.78em">no data</span>';
-            const sign = v >= 0 ? '+' : '';
-            const cls  = v >= 0 ? 'value-good' : 'value-danger';
-            return `<span class="${cls}">${sign}${v.toFixed(1)}&thinsp;${escHtml(unit)}</span>`;
-        };
-        const _scoreCell = (v, bold) => v == null
-            ? '<span style="color:#64748b;font-size:0.78em">no data</span>'
-            : `<span class="${_sc(v)}"${bold ? ' style="font-weight:700"' : ''}>${v}</span>`;
-
-        const isInactive = !pool.active;
-        const allMetrics = is?.metrics ?? [];
-        const metrics    = isInactive ? allMetrics.filter(m => !m.label.startsWith('PnL')) : allMetrics;
-        const visibleTotalWeight = metrics.reduce((s, m) => s + m.weight, 0) || 1;
-
-        // Column widths fixed so scrollable tbody aligns with thead
-        const colWidths = ['auto', '28%', '16%', '20%'];
-        const thStyle   = (i, extra = '') => `padding:4px 8px;font-weight:500${extra};width:${colWidths[i]}`;
-
-        const metricRows = metrics.map(m => {
-            const wPct = Math.round(m.weight / visibleTotalWeight * 100);
-            return `<tr style="display:table;width:100%;table-layout:fixed">
-                <td style="padding:5px 8px;color:#e2e8f0;width:${colWidths[0]}">${escHtml(m.label)}</td>
-                <td style="padding:5px 8px;text-align:right;width:${colWidths[1]}">${_fmtPct(m.pct, m.unit ?? '%')}</td>
-                <td style="padding:5px 8px;text-align:right;font-weight:600;width:${colWidths[2]}">${_scoreCell(m.score)}</td>
-                <td style="padding:5px 8px;text-align:right;color:#94a3b8;width:${colWidths[3]}">${wPct}%</td>
-            </tr>`;
-        }).join('');
-
-        // Volumen-Malus: separate Modifier-Zeile (keine gewichtete Metrik) – erklärt die
-        // Differenz zwischen dem gewichteten Blend und dem Gesamt-Score.
-        const volMalus = is?.volumeMalus ?? 0;
-        const volMalusRow = volMalus > 0 ? `<tr>
-                <td style="padding:6px 8px;color:#f59e0b;width:${colWidths[0]}">${tr('liq.volume_malus', 'Volumen-Malus')}<br><span style="font-size:0.72rem;color:#94a3b8">${volMalus} h ohne Handel (letzte 24 h)</span></td>
-                <td style="width:${colWidths[1]}"></td>
-                <td style="padding:6px 8px;text-align:right;font-weight:600;color:#f59e0b;width:${colWidths[2]}">−${volMalus}</td>
-                <td style="width:${colWidths[3]}"></td>
-            </tr>` : '';
-
-        // Trend-Feinsignal (Opportunity 2.0): separate Modifier-Zeile wie der Volumen-
-        // Malus – nur sichtbar, wenn der Pool-Typ das Signal überhaupt nutzt (weight > 0).
-        const tfs = is?.trendFineSignal;
-        const trendFineSignalRow = (tfs && tfs.weight > 0) ? `<tr>
-                <td style="padding:6px 8px;color:#94a3b8;width:${colWidths[0]}">${tr('liq.trend_fine_signal', 'Trend-Feinsignal')}<br><span style="font-size:0.72rem;color:#94a3b8">${tfs.composite == null ? tr('liq.trend_unknown', 'Trend nicht bestimmbar') : `EMA-Composite ${Math.round(tfs.composite)}%`}</span></td>
-                <td style="width:${colWidths[1]}"></td>
-                <td style="padding:6px 8px;text-align:right;font-weight:600;width:${colWidths[2]}"><span class="${tfs.offset > 0 ? 'value-good' : tfs.offset < 0 ? 'value-danger' : ''}">${tfs.offset > 0 ? '+' : ''}${tfs.offset.toFixed(1)}</span></td>
-                <td style="width:${colWidths[3]}"></td>
-            </tr>` : '';
-
-        const scrollable = metrics.length > 5;
-        const tbodyStyle = scrollable
-            ? 'display:block;max-height:155px;overflow-y:auto'
-            : 'display:block';
-
-        const confNote   = is?.confidence === 'low'
-            ? `<p style="color:#f59e0b;font-size:0.78rem;margin:8px 0 0">⚠ Nur ${is.dataDays ?? 0} Tag(e) Daten – Score mit Vorsicht verwenden</p>` : '';
-        const hopiumNote = is?.hopiumVeto
-            ? `<p style="color:#ef4444;font-size:0.78rem;margin:8px 0 0">🚫 6h-Warnsignal aktiv: Preis und APR fallen gleichzeitig. Score wurde auf max. 40 gedeckelt.</p>` : '';
-        const npVal24h   = pool.npWindows?.['24h'];
-        const npNote     = npVal24h != null
-            ? (() => {
-                const sign = npVal24h >= 0 ? '+' : '−';
-                const cls  = npVal24h >= 0 ? 'value-good' : 'value-danger';
-                const abs  = Math.abs(npVal24h).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-                return ` Simulierter Netto-Ertrag auf 1.000 USDC (NP 24h): <span class="${cls}">${sign}${abs} USDC</span>.`;
-            })()
-            : '';
-        const pnlNote    = isInactive
-            ? `<p style="color:#64748b;font-size:0.78rem;margin:4px 0 0">Kein PnL verfügbar (inaktiver Pool) – Score basiert ausschließlich auf Marktdaten. Wertebereich: 10–90.${npNote}</p>` : '';
-
-        const _typeInfo = {
-            rebalance_free: tr('liq.vol_norebal_desc', 'Rebalance-frei – PnL zählt stark, niedrige Fee-APR ist hier normal'),
-            volatil_1:      tr('liq.vol_low_desc', 'Gering volatil – PnL-betont'),
-            volatil_2:      tr('liq.vol_mid_desc', 'Mittel volatil – ausgewogen zwischen PnL und Fee-APR'),
-            volatil_3:      tr('liq.vol_high_desc', 'Stark volatil – Fee-APR-betont, PnL bewusst gedämpft'),
-            rwa:            tr('liq.vol_rwa_desc', 'RWA (Real-World-Asset) – PnL-betont, kein Krypto-Preistrend'),
-        };
-        const _typeNote = is?.poolType
-            ? `<p style="color:#94a3b8;font-size:0.75rem;margin:0 0 4px">${tr('liq.pool_type', 'Pool-Typ:')} <span style="color:#e2e8f0">${escHtml(is.poolType)}</span> – ${escHtml(_typeInfo[is.poolType] ?? tr('liq.type_weighting', 'typ-abhängige Gewichtung'))}</p>`
-            : '';
-
-        bewertungEl.innerHTML = `
-            <div style="padding:8px 0 0">
-            ${_typeNote}
-            <p style="color:#94a3b8;font-size:0.75rem;margin:0 0 8px">Score: 0 = sehr schlecht · 50 = neutral · 100 = sehr gut · Gewichtung je nach Pool-Typ</p>
-            <table style="width:100%;border-collapse:collapse;font-size:0.82rem;table-layout:fixed">
-                <thead style="display:table;width:100%;table-layout:fixed">
-                    <tr style="color:#94a3b8;text-transform:uppercase;font-size:0.72rem;letter-spacing:0.05em;border-bottom:1px solid #334155">
-                        <th style="${thStyle(0,';text-align:left')}">${tr('liq.designation', 'Bezeichnung')}</th>
-                        <th style="${thStyle(1,';text-align:right')}">${tr('liq.value', 'Wert')}</th>
-                        <th style="${thStyle(2,';text-align:right')}">${tr('liq.score', 'Score')}</th>
-                        <th style="${thStyle(3,';text-align:right')}">${tr('liq.weighting', 'Gewichtung')}</th>
-                    </tr>
-                </thead>
-                <tbody style="${tbodyStyle}">
-                    ${metricRows}
-                </tbody>
-                <tfoot style="display:table;width:100%;table-layout:fixed;border-top:1px solid #334155">
-                    ${volMalusRow}
-                    ${trendFineSignalRow}
-                    <tr>
-                        <td style="padding:6px 8px;font-weight:600;color:#e2e8f0;width:${colWidths[0]}">Gesamt</td>
-                        <td style="width:${colWidths[1]}"></td>
-                        <td style="padding:6px 8px;text-align:right;font-size:1rem;width:${colWidths[2]}">${_scoreCell(is?.value ?? null, true)}</td>
-                        <td style="padding:6px 8px;text-align:right;color:#94a3b8;width:${colWidths[3]}">100%</td>
-                    </tr>
-                </tfoot>
-            </table>
-            ${confNote}${hopiumNote}${pnlNote}
-            </div>`;
-    }
 
     // ── Chart-Panel + Range-Buttons ──────────────────────────────────────────
     const chartEl    = $('oppScoreChartPanel');
@@ -4955,29 +4981,6 @@ function openInvestScoreModal(poolId, data) {
         chartEl.innerHTML = `<svg class="opp-score-chart" width="100%" style="display:block;overflow:visible"></svg>`;
         requestAnimationFrame(renderChart);
     }
-
-    // ── Tab switching ────────────────────────────────────────────────────────
-    const tabsEl = $('oppScoreModalTabs');
-    if (tabsEl && !tabsEl.dataset.bound) {
-        tabsEl.dataset.bound = '1';
-        tabsEl.addEventListener('click', e => {
-            const btn = e.target.closest('.modal-tab-btn');
-            if (!btn) return;
-            const tab = btn.dataset.tab;
-            tabsEl.querySelectorAll('.modal-tab-btn').forEach(b =>
-                b.classList.toggle('active', b.dataset.tab === tab));
-            $('oppScoreChartPanel')?.classList.toggle('active',    tab === 'chart');
-            $('oppScoreBewertungPanel')?.classList.toggle('active', tab === 'bewertung');
-            // Range-Buttons nur beim Chart-Tab sichtbar
-            if (rangeBtns) rangeBtns.style.display = tab === 'chart' ? 'flex' : 'none';
-        });
-    }
-    // Reset to Chart tab on every open
-    tabsEl?.querySelectorAll('.modal-tab-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.tab === 'chart'));
-    $('oppScoreChartPanel')?.classList.add('active');
-    $('oppScoreBewertungPanel')?.classList.remove('active');
-    if (rangeBtns) rangeBtns.style.display = 'flex';
 
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
@@ -5113,7 +5116,7 @@ function openMetricChartModal(poolId, metric, data, oppTf) {
     }
 
     const meta = _METRIC_META[metric] ?? { label: metric, unit: '', zeroline: true };
-    const pair = pool.displayPair ?? pool.pair ?? poolId;
+    const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
     if (titleEl) titleEl.textContent = `${pair} – ${meta.label}`;
 
     const renderChart = () => {

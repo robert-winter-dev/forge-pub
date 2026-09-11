@@ -34,7 +34,7 @@
 import { t } from './i18n.js';
 
 /** Gibt true zurück wenn der Aufruf aus dem lokalen Netz kommt. */
-function isLanAccess() {
+export function isLanAccess() {
     const h = window.location.hostname;
     return /^192\.168\./.test(h)
         || /^10\./.test(h)

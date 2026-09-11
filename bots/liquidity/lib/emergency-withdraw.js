@@ -161,7 +161,7 @@ async function simulateLive() {
         PDAUtil,
         IGNORE_CACHE,
         decreaseLiquidityQuoteByLiquidityWithParams,
-        NO_TOKEN_EXTENSION_CONTEXT,
+        TokenExtensionUtil,
     } = await import('@orca-so/whirlpools-sdk');
     const { Percentage }    = await import('@orca-so/common-sdk');
     const { PublicKey }     = web3;
@@ -182,6 +182,11 @@ async function simulateLive() {
 
             const poolData = whirlpool.getData();
             const posData  = position.getData();
+            // Echter Extension-Kontext statt NO_TOKEN_EXTENSION_CONTEXT (LIQ#0276) — sonst
+            // zeigt die Dry-Run-Schätzung bei Token-2022-Transfer-Fee-Mints zu viel an.
+            const tokenExtCtx = await TokenExtensionUtil.buildTokenExtensionContextForPool(
+                adapter._ctx.fetcher, poolData.tokenMintA, poolData.tokenMintB, IGNORE_CACHE,
+            );
             const quote    = decreaseLiquidityQuoteByLiquidityWithParams({
                 liquidity:         posData.liquidity,
                 sqrtPrice:         poolData.sqrtPrice,
@@ -189,7 +194,7 @@ async function simulateLive() {
                 tickLowerIndex:    posData.tickLowerIndex,
                 tickUpperIndex:    posData.tickUpperIndex,
                 slippageTolerance: slippage,
-                tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                tokenExtensionCtx: tokenExtCtx,
             });
 
             const amountA = Number(quote.tokenMinA) / Math.pow(10, pos.decimals_a);

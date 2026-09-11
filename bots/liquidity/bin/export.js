@@ -30,7 +30,7 @@ import { readMaintenanceFlag, getMaintenanceWindows } from '../../../core/mainte
 import { getActiveProfile }       from '../lib/economic-scorer/config.js';
 // PnL: ausschließlich über die zentrale FORGE-Lib (Single Source of Truth).
 // Kein PnL-Code in diesem Bot — siehe FORGE/lib/pnl.js.
-import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows }
+import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows, pnlPeakForPeriod, feeLegForPeriod }
     from '../../../lib/pnl.js';
 import { loadOpportunityScores, loadInvestScores } from '../lib/invest-score-provider.js';
 import { resolvePnlAnchorMs, resolvePnlAnchorSource } from '../lib/pnl-anchor.js';
@@ -50,6 +50,9 @@ import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS a
 import { PATHS } from '../../../config/paths.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
 import { displayVersion } from '../../../lib/version.js';
+import { loadTsAdvice } from '../lib/ts-advice-provider.js';
+import { loadTsConfig, evaluateTsTrigger } from '../lib/trailing-stop.js';
+import { effectiveFeePct } from '../../../lib/effective-fee.js';
 
 // Zentraler Formatter für FORGE_TZ-Day-Keys (YYYY-MM-DD)
 const _dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ });
@@ -117,6 +120,7 @@ function buildTierOverview(poolsOverview) {
         tiers[tier].push({
             id:                 p.id,
             displayPair:        p.displayPair,
+            displayLabel:       p.displayLabel,
             active:             p.active,
             rankPos:            p.rankPos,
             rankOf:             p.rankOf,
@@ -144,12 +148,30 @@ function buildTierOverview(poolsOverview) {
 // ─── Daten aus DB lesen ───────────────────────────────────────────────────────
 
 // Alle Pools (aktive + inaktive → Dashboard zeigt verfügbare Pools)
-const pools = db.prepare(`SELECT * FROM pools`).all();
+// ORDER BY rowid: SQLite-interne Einfügereihenfolge (syncPools() erhält die rowid
+// bestehender Zeilen bei UPSERT) — einzig verfügbarer Proxy für "zuerst aufgenommen",
+// siehe displayLabelMap unten (LIQ#0470).
+const pools = db.prepare(`SELECT * FROM pools ORDER BY rowid`).all();
 
 // displayPair aus pools.json (Anzeige-Name, kann von pair abweichen, z.B. HYPE/SOL ↔ SOL/HYPE)
 const poolsConfigPath = resolve(__dirname, '..', 'config', 'pools.json');
 const poolsConfigRaw  = JSON.parse(readFileSync(poolsConfigPath, 'utf8'));
 const displayPairMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.displayPair ?? p.pair]));
+
+// displayLabel: wie displayPair, aber Namensdopplungen (zwei Pools mit demselben
+// Anzeigenamen, z.B. HYPE/USDC in unterschiedlichen Fee-Tiers) werden in Aufnahme-
+// reihenfolge durchnummeriert: "HYPE/USDC", "HYPE/USDC (2)", "HYPE/USDC (3)", ...
+// Eigenes Feld statt displayPair selbst zu ändern, weil das Frontend displayPair.split('/')
+// zur Ableitung der Token-Reihenfolge nutzt (siehe "Einheitlicher displayPair-Vertrag"
+// unten) — ein angehängtes " (2)" würde dort das zweite Token-Symbol verstümmeln.
+const _displayLabelSeen = new Map();
+const displayLabelMap   = {};
+for (const pool of pools) {
+    const base  = displayPairMap[pool.id] ?? pool.pair;
+    const count = (_displayLabelSeen.get(base) ?? 0) + 1;
+    _displayLabelSeen.set(base, count);
+    displayLabelMap[pool.id] = count === 1 ? base : `${base} (${count})`;
+}
 const volatilePairMap = Object.fromEntries(poolsConfigRaw.map(p => [p.id, !!p.volatilePair]));
 const usdcIsTokenAMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, !!p.usdcIsTokenA]));
 const poolTypeMap     = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.poolType ?? null]));
@@ -314,6 +336,7 @@ const poolsOverview = pools.map(pool => {
         protocol:         pool.protocol === 'orca' ? 'Orca Whirlpools' : pool.protocol,
         pair:             pool.pair,
         displayPair:      displayPairMap[pool.id] ?? pool.pair,
+        displayLabel:     displayLabelMap[pool.id] ?? pool.pair,
         poolType:         poolTypeMap[pool.id] ?? null,
         active:           activeFromConfig[pool.id] ?? (pool.active === 1),
         address:          pool.address,
@@ -583,7 +606,8 @@ const claimHistory = claimHistoryRows.map(r => {
     return ({
     claimedAt:   r.claimed_at,
     positionId:  r.position_id ?? null,
-    pair:        poolPairDbMap[r.pool_id] ?? r.pool_id,         // DB-Pair (für JS-Matching mit data-pool-pair)
+    poolId:      r.pool_id ?? null,                              // eindeutiges Filter-Matching (LIQ#0471)
+    pair:        poolPairDbMap[r.pool_id] ?? r.pool_id,          // DB-Pair, nur für Anzeige
     displayPair: displayPairMap[r.pool_id] ?? poolPairDbMap[r.pool_id] ?? r.pool_id,
     amountA:     round6(flip ? r.amount_b : r.amount_a),
     amountB:     round6(flip ? r.amount_a : r.amount_b),
@@ -1081,6 +1105,30 @@ for (const r of scoreHistoryRaw) latestNetAprByPool[r.pool_id] = r.net_apr_pct;
 // netAprPct auch in poolsOverview eintragen (für "Verfügbare Pools" N-APR 24H-Spalte)
 for (const po of poolsOverview) po.netAprPct = latestNetAprByPool[po.id] != null ? round2(latestNetAprByPool[po.id]) : null;
 
+// Trailing-Stop-Advisor-Empfehlung je Pool (LIQ#0351). Geht ins Dashboard-JSON, damit
+// ForgeSettings auf Master und Fork denselben Lesepfad hat — genau wie `scoreSource`.
+//
+// 🔒 „Zustand immer sichtbar": Die Oberfläche muss die Auto-Checkbox sperren können, wenn
+// keine belastbare Empfehlung vorliegt, UND begründen warum. Ein Schalter, den man
+// einschalten kann, ohne dass er wirkt, ist schlimmer als kein Schalter — dieselbe
+// Entscheidung wie beim Score-Limit (Commit bf8c723).
+for (const po of poolsOverview) {
+    let res = null;
+    try { res = loadTsAdvice(db, po.id, po.poolType); } catch { res = null; }
+    po.tsAdvice = res?.advice
+        ? {
+            available:     true,
+            source:        res.source,
+            thresholdPct:  res.advice.thresholdPct,
+            thresholdPct2: res.advice.thresholdPct2,
+            // 'pool' = gemessen · 'pool_model' = aus der Preisreihe modelliert · 'pool_type'
+            scope:         res.advice.scope,
+            episodes:      res.advice.episodes,
+            reason:        res.advice.reason,
+        }
+        : { available: false, source: res?.source ?? 'none', reason: null };
+}
+
 // Composition-Verlauf (Token-Anteile, letzte 30 Tage aus position_snapshots)
 const compHistRaw = db.prepare(`
     SELECT ps.pool_id, ps.amount_a, ps.amount_b, ps.price, ps.recorded_at
@@ -1216,7 +1264,8 @@ const mapTx = t => {
         type:      t.type,
         note:      t.note ?? null,
         pool:      displayPairMap[t.pool_id] ?? t.pair ?? null, // angezeigter Pool-Name (displayPair)
-        pair:      t.pair ?? null,                              // internes pair für Filter-Matching (data-pool-pair)
+        pair:      t.pair ?? null,                              // internes pair, nur für Anzeige/Spalten-Labels
+        poolId:    t.pool_id ?? null,                           // eindeutiges Filter-Matching (data-pool-id, LIQ#0471)
         amount:    round2(t.usd_value ?? _fallbackUsdValue(t)),
         amountA:   dispA != null ? round6(dispA) : null,
         amountB:   dispB != null ? (flip ? round6(dispB) : round2(dispB)) : null,
@@ -1262,6 +1311,7 @@ const rebalances = rebalanceRows.map(r => ({
     // pair = INTERNAL pair (für Frontend-Matching gegen pos.pair). displayPair separat.
     pair:            r.pair,
     displayPair:     displayPairMap[r.pool_id] ?? r.pair,
+    displayLabel:    displayLabelMap[r.pool_id] ?? r.pair,
     reason:          r.reason,
     priceAtEvent:    roundPrice(r.price_at_event),
     costSol:         round6(r.cost_sol),
@@ -1365,6 +1415,83 @@ const _sinceDepositPnlByPool = Object.fromEntries(
     })
 );
 
+// ─── Kapitalfluss-Zähler seit demselben Anker (PnL-Details-Tab, "Einzahlung (gesamt)") ──
+// Bewusst OHNE is_external-Filter: ein Cleanup-/Reconcile-Nachschuss (is_external=0) darf
+// den PnL-Anker selbst nicht verschieben (siehe pnl-anchor.js, dort verankert für
+// trailing-stop.js/exit-finalizer.js) — aber er soll in der Anzeige sichtbar werden, dass
+// seit dem Anker mehr als eine Kapitalbewegung stattfand. depositValueUsd (unten) erfasst
+// den Betrag ohnehin schon korrekt (Rückrechnung aus der bereits kapitalfluss-bereinigten
+// PnL-Kurve) — hier nur Zähler + letztes Datum für die Beschriftung.
+const _depositEventsByPool = Object.fromEntries(
+    openPositions.map(pos => {
+        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
+        const row = db.prepare(`
+            SELECT COUNT(*) AS cnt, MAX(created_at) AS latest
+              FROM capital_flows
+             WHERE pool_id = ? AND usdc_amount > 0 AND created_at >= ?
+        `).get(pos.pool_id, fromMs);
+        return [pos.pool_id, { count: row?.cnt ?? 0, latestAt: row?.latest ?? null }];
+    })
+);
+
+// ─── Nicht reinvestierter Rest seit Anker pro Pool (PnL-Details-Tab, LIQ#000558) ──
+// Bei jedem Rebalance kann ein Teil des freigesetzten Kapitals im Wallet liegen bleiben
+// (siehe bin/bot.js, insertRebalanceHistory: leftoverUsdc). Das ist KEIN Verlust — das
+// Kapital gehört weiterhin dem Nutzer, nur eben nicht in dieser Position. Summe seit
+// demselben PnL-Anker wie depositValueUsd, damit beide Zahlen zueinander passen (ein
+// Reopen/neue Einzahlung setzt beide zurück).
+const _leftoverSinceDepositByPool = Object.fromEntries(
+    openPositions.map(pos => {
+        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
+        const row = db.prepare(`
+            SELECT COALESCE(SUM(leftover_usdc), 0) AS sum, COUNT(*) AS n
+              FROM rebalance_history
+             WHERE pool_id = ? AND rebalanced_at >= ? AND leftover_usdc IS NOT NULL AND leftover_usdc > 0
+        `).get(pos.pool_id, fromMs);
+
+        if (row?.n > 0) return [pos.pool_id, { sumUsd: row.sum, rebalanceCount: row.n, estimated: false }];
+
+        // 🧪 TEMPORÄRER NÄHERUNGS-FALLBACK, siehe LIQ#000559 (Ticket: entfernen sobald
+        // reale leftover_usdc-Daten vorliegen). Für Rebalances VOR diesem Deploy fehlt
+        // leftover_usdc (NULL) — hier nur zur sofortigen visuellen Prüfung des Modal-Designs
+        // grob genähert aus lp_value_before/after. Verzerrt durch TX-Kosten/Slippage/
+        // Preisbewegung während des Rebalance (siehe Ticketrecherche LIQ#000558) — deshalb
+        // klar als "geschätzt" markiert, NIE als belastbare PnL-Zahl verwenden.
+        const approxRow = db.prepare(`
+            SELECT COALESCE(SUM(MAX(lp_value_before_usdc - lp_value_after_usdc, 0)), 0) AS sum, COUNT(*) AS n
+              FROM rebalance_history
+             WHERE pool_id = ? AND rebalanced_at >= ? AND leftover_usdc IS NULL
+               AND lp_value_before_usdc IS NOT NULL AND lp_value_after_usdc IS NOT NULL
+        `).get(pos.pool_id, fromMs);
+        return [pos.pool_id, { sumUsd: approxRow?.sum ?? 0, rebalanceCount: approxRow?.n ?? 0, estimated: (approxRow?.n ?? 0) > 0 }];
+    })
+);
+
+// ─── Historischer PnL-Höchststand seit Anker pro Pool (Tooltip-Zeile "Hoch") ──
+// Selber Anker (fromMs) wie oben — zeigt, wann/wie hoch der Pool prozentual am
+// weitesten im Plus stand. Hilft abzuschätzen, wo ein aktiver Trailing-Stop
+// (Referenz: positions.hwm_usd, siehe lib/trailing-stop.js) auslösen würde.
+const _peakPnlByPool = Object.fromEntries(
+    openPositions.map(pos => {
+        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
+        return [pos.pool_id, pnlPeakForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs })];
+    })
+);
+
+// ─── Fee-Leg / Preis-Leg pro Pool (LIQ#0360, Tooltip-Zerlegung) ──────────────
+// Fee-Leg = vereinnahmte Handelsgebühren (nie negativ), Preis-Leg = Rest von
+// pnlForPeriod. Zentrale Lib: feeLegForPeriod() aus lib/pnl.js — Preis-Leg wird
+// hier bewusst NICHT eigenständig berechnet, sondern nur als Differenz gebildet.
+const _todayFeeLegByPool = Object.fromEntries(
+    openPositions.map(pos => [pos.pool_id, feeLegForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: todayStartMs })])
+);
+const _sinceDepositFeeLegByPool = Object.fromEntries(
+    openPositions.map(pos => {
+        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
+        return [pos.pool_id, feeLegForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs })];
+    })
+);
+
 // ─── Positions-Objekte aufbauen ────────────────────────────────────────────────
 
 function buildPosition(pos, isActive) {
@@ -1411,24 +1538,107 @@ function buildPosition(pos, isActive) {
     const posAmtA = (flip ? posSnap?.amount_b : posSnap?.amount_a) ?? null;
     const posAmtB = (flip ? posSnap?.amount_a : posSnap?.amount_b) ?? null;
 
+    // Trailing-Stop-Status für das Hammer-Icon im Dashboard (Anteil-Spalte, Operative
+    // Metriken): dieselben Funktionen wie der Bot selbst (evaluateTsTrigger), damit Icon
+    // und tatsächliches Auslöseverhalten nie auseinanderlaufen. Nur für offene Positionen —
+    // eine geschlossene Position hat keinen aktiven Stop mehr.
+    let trailingStop = null;
+    if (isActive) {
+        try {
+            const cfg = loadTsConfig(pos.pool_id, { db, poolType: poolTypeMap[pos.pool_id] ?? null });
+            if (cfg?.enabled) {
+                const valueUsd = (posSnap?.lp_value_usd ?? 0) + Math.max(posSnap?.fees_pending_usd ?? 0, 0);
+                const trig = evaluateTsTrigger(cfg, pos, valueUsd);
+                const minValueUsd = Number(cfg.minimumValueUsd) || 0;
+                // Auslösung greift bei Unterschreiten des HÖHEREN der beiden Böden
+                // (Drawdown ODER absoluter Mindestwert, siehe evaluateTsTrigger).
+                const liquidateAtUsd = Math.max(trig.triggerAt ?? 0, minValueUsd);
+
+                // Projizierter PnL bei Auslösung: KEINE neue PnL-Formel — lib/pnl.js führt
+                // den PnL der offenen Session als `cumRealized + (Positionswert − Einstand)`
+                // (siehe lpValueAt/currentValue, Definition Modulkopf lib/pnl.js). Eine
+                // Änderung des Positionswerts um Δ verschiebt den PnL exakt um Δ, weil
+                // cumRealized und Einstand vom aktuellen Wert unabhängig sind. Also wird
+                // hier lediglich der bereits über pnlForPeriod() ermittelte
+                // `sinceDepositPnlUsd` um genau die Wertdifferenz zum Auslöse-Niveau
+                // verschoben — dieselbe Kurve, an einem hypothetischen Wert ausgewertet.
+                const sinceDepositPnlUsd = _sinceDepositPnlByPool[pos.pool_id] ?? null;
+                const liquidatePnlUsd = (liquidateAtUsd > 0 && sinceDepositPnlUsd != null)
+                    ? round2(sinceDepositPnlUsd + (liquidateAtUsd - valueUsd))
+                    : null;
+                const liquidatePnlPct = (liquidatePnlUsd != null && valueUsd > 0)
+                    ? round2((liquidatePnlUsd / valueUsd) * 100)
+                    : null;
+
+                trailingStop = {
+                    enabled:            true,
+                    thresholdPct:       Number.isFinite(cfg.thresholdPct) ? round2(cfg.thresholdPct) : null,
+                    thresholdPct2:      cfg.thresholdPct2 != null && Number.isFinite(Number(cfg.thresholdPct2)) ? round2(Number(cfg.thresholdPct2)) : null,
+                    activeStage:        trig.stage,
+                    activeThresholdPct: round2(trig.thresholdPct),
+                    drawdownPct:        round2(trig.drawdownPct),
+                    liquidateAtUsd:     liquidateAtUsd > 0 ? round2(liquidateAtUsd) : null,
+                    liquidatePnlUsd,
+                    liquidatePnlPct,
+                };
+            }
+        } catch { trailingStop = null; }
+    }
+
+    const myValueUsd = round2(posSnap?.lp_value_usd ?? null);
+
     return {
         id:                 pos.id,
         poolId:             pos.pool_id,
         protocol:           pos.protocol === 'orca' ? 'Orca Whirlpools' : pos.protocol,
         pair:               pos.pair,
         displayPair:        displayPairMap[pos.pool_id] ?? pos.pair,
+        displayLabel:       displayLabelMap[pos.pool_id] ?? pos.pair,
         apr24h:             poolApr,
         myApr,
-        myValue:            round2(posSnap?.lp_value_usd ?? null),
+        myValue:            myValueUsd,
         amountA:            posAmtA != null ? round6(posAmtA) : null,
         amountB:            posAmtB != null ? round6(posAmtB) : null,
         feesPendingUsd:     isActive ? round4(posSnap?.fees_pending_usd ?? null) : null,
         todayClaimCount:    (feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).length,
         todayClaimUsd:      round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).reduce((s, f) => s + (f.usd_value ?? 0), 0)),
         todayPnlUsd:        _todayPnlByPool[pos.pool_id] ?? null,
+        todayFeeLegUsd:     _todayFeeLegByPool[pos.pool_id] ?? null,
+        todayPriceLegUsd:   (_todayPnlByPool[pos.pool_id] != null && _todayFeeLegByPool[pos.pool_id] != null)
+                                ? round2(_todayPnlByPool[pos.pool_id] - _todayFeeLegByPool[pos.pool_id]) : null,
         sinceDepositAt:     resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at),
         sinceDepositSource: resolvePnlAnchorSource(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at),
+        // >1, wenn seit dem Anker mehr als eine Kapitalbewegung stattfand (z.B. Cleanup-
+        // Nachschuss nach der letzten externen Einzahlung) — steuert das "(gesamt)"-Label
+        // im PnL-Details-Tab. depositLatestAt ist das Datum der jüngsten davon (kann von
+        // sinceDepositAt abweichen, wenn diese Bewegung intern war).
+        depositCount:       _depositEventsByPool[pos.pool_id]?.count ?? null,
+        depositLatestAt:    _depositEventsByPool[pos.pool_id]?.latestAt ?? null,
+        // Summe der Rebalance-Reste seit dem Anker, die nicht reinvestiert wurden — liegen
+        // weiterhin im Wallet (siehe insertRebalanceHistory.leftoverUsdc). 0, wenn seit dem
+        // Anker noch kein Rebalance mit Rest stattfand (auch für Altbestände vor LIQ#000558,
+        // deren rebalance_history-Zeilen kein leftover_usdc kennen).
+        walletLeftoverUsd:      round2(_leftoverSinceDepositByPool[pos.pool_id]?.sumUsd ?? 0),
+        walletLeftoverRebalances: _leftoverSinceDepositByPool[pos.pool_id]?.rebalanceCount ?? 0,
+        // 🧪 TEMPORÄR, siehe LIQ#000559 — true, solange der Wert oben aus dem
+        // Näherungs-Fallback stammt (Altbestand ohne echtes leftover_usdc).
+        walletLeftoverEstimated: _leftoverSinceDepositByPool[pos.pool_id]?.estimated ?? false,
         sinceDepositPnlUsd: _sinceDepositPnlByPool[pos.pool_id] ?? null,
+        sinceDepositFeeLegUsd:   _sinceDepositFeeLegByPool[pos.pool_id] ?? null,
+        sinceDepositPriceLegUsd: (_sinceDepositPnlByPool[pos.pool_id] != null && _sinceDepositFeeLegByPool[pos.pool_id] != null)
+                                ? round2(_sinceDepositPnlByPool[pos.pool_id] - _sinceDepositFeeLegByPool[pos.pool_id]) : null,
+        // depositValueUsd = Gegenwert zum Einzahlungs-/Anker-Zeitpunkt, aus bereits von
+        // lib/pnl.js gelieferten Zahlen zurückgerechnet (myValue − PnL seit Anker) — KEINE
+        // eigene PnL-Berechnung, nur Differenzbildung zweier fertiger pnl.js-Werte. Für den
+        // Anteil-Modal-Tab "PnL-Details" (LIQ, Anteil-Tooltip-Ablösung).
+        depositValueUsd:    (myValueUsd != null && _sinceDepositPnlByPool[pos.pool_id] != null)
+                                ? round2(myValueUsd - _sinceDepositPnlByPool[pos.pool_id]) : null,
+        peakPnlUsd:         _peakPnlByPool[pos.pool_id]?.pnlUsd ?? null,
+        peakPnlAt:          _peakPnlByPool[pos.pool_id]?.atMs ?? null,
+        // peakValueUsd = Gegenwert am Höchststand, wieder nur Summe zweier fertiger
+        // pnl.js-Werte (depositValueUsd + peakPnlUsd), keine eigene PnL-Berechnung.
+        peakValueUsd:       (_peakPnlByPool[pos.pool_id]?.pnlUsd != null && myValueUsd != null && _sinceDepositPnlByPool[pos.pool_id] != null)
+                                ? round2((myValueUsd - _sinceDepositPnlByPool[pos.pool_id]) + _peakPnlByPool[pos.pool_id].pnlUsd) : null,
         inRange:            isActive ? (priceNow != null
                                 ? priceNow >= pos.price_lower && priceNow <= pos.price_upper
                                 : null)
@@ -1447,6 +1657,7 @@ function buildPosition(pos, isActive) {
         positionId:         pos.id,
         openedAt:           pos.opened_at,
         closedAt:           pos.closed_at ?? null,
+        trailingStop,
     };
 }
 
@@ -1458,6 +1669,25 @@ const positionsOut = [
 ];
 
 // ─── sortApr + geschätzter APR 24H für Pools mit eingefrorenem Orca-Wert ──────
+
+/**
+ * Effektiver Fee-Satz eines Pools in % für die APR-Schätzung — der gemessene
+ * 24h-Ist-Satz (`fees_24h_usd / volume_24h_usd`), sonst der konfigurierte Tier.
+ *
+ * ⚠️ Bei Adaptive-Fee-Pools ist `pools.fee_tier` nur die Untergrenze; eine APR-Schätzung
+ * auf der Konstante fällt dort systematisch zu niedrig aus (LIQ#0394, `lib/effective-fee.js`).
+ */
+function _effectiveFeeTier(poolId, staticPct) {
+    const row = db.prepare(`
+        SELECT fees_24h_usd, volume_24h_usd FROM pool_stats
+        WHERE pool_id = ? AND fees_24h_usd IS NOT NULL
+        ORDER BY recorded_at DESC LIMIT 1
+    `).get(poolId);
+    return effectiveFeePct(staticPct, {
+        fees24hUsd:   row?.fees_24h_usd   ?? null,
+        volume24hUsd: row?.volume_24h_usd ?? null,
+    }).pct;
+}
 
 // myApr je Pool aus aktiven Positionen sammeln
 const myAprByPool = {};
@@ -1494,7 +1724,7 @@ for (const po of poolsOverview) {
         // Variante 2: APR aus GeckoTerminal volume_hourly (für alle Pools, auch inaktive)
         if (selfApr == null) {
             const pool    = pools.find(p => p.id === po.id);
-            const feeTier = pool?.fee_tier ?? null;
+            const feeTier = _effectiveFeeTier(po.id, pool?.fee_tier ?? null);
             const tvl     = po.tvl ?? null;
             if (feeTier != null && tvl > 0) {
                 const volRows = db.prepare(
@@ -1527,7 +1757,7 @@ for (const po of poolsOverview) {
         apr1h = myApr;
     } else {
         const pool    = pools.find(p => p.id === po.id);
-        const feeTier = pool?.fee_tier ?? null;
+        const feeTier = _effectiveFeeTier(po.id, pool?.fee_tier ?? null);
         const tvl     = po.tvl ?? null;
         if (feeTier != null && tvl > 0) {
             const volRow = db.prepare(
@@ -1967,8 +2197,15 @@ for (const po of poolsOverview) {
     const classCfg  = getPoolTypeConfig(poolCfg);
     if (!sigmaHourlyPct || sigmaHourlyPct <= 0) sigmaHourlyPct = classCfg.volaDefault;
 
+    // Effektiver Fee-Satz aus demselben pool_stats-Eintrag statt der Konstante —
+    // bei Adaptive-Fee-Pools liegt der Ist-Satz darüber (LIQ#0394).
+    const npFeeTierPct = effectiveFeePct(poolCfg.feeTier, {
+        fees24hUsd:   latest.fees_24h_usd   ?? null,
+        volume24hUsd: latest.volume_24h_usd ?? null,
+    }).pct;
+
     const scanParams = { vol24h: latest.volume_24h_usd, tvl: latest.tvl_usd,
-                         feeTierPct: poolCfg.feeTier, sigmaHourlyPct, capitalUsdc: NP_CAPITAL,
+                         feeTierPct: npFeeTierPct, sigmaHourlyPct, capitalUsdc: NP_CAPITAL,
                          liqSpreadPct: classCfg.liqSpreadPct };
     const candidates = NP_CANDIDATES
         .filter(r => r >= classCfg.min && r <= classCfg.max)
@@ -2672,11 +2909,18 @@ try {
             const poolCfg = config.pools.all.find(p => p.id === po.id);
             if (!poolCfg || !isPoolEnabled(poolCfg)) return false;
             if (poolSettings[po.id]?.cleanup?.rankingEligible === false) return false;
-            if (po.investCooldowns?.length) return false;
-            if (cleanupTrendRequired.length && !po.trendGate?.ok) return false;
-            if (po.investBlocked) return false;
             if (po.investScore?.value == null) return false;
-            return po.investScore.value >= cleanupMinScoreNow;
+            if (po.investScore.value < cleanupMinScoreNow) return false;
+
+            // Ab hier hat der Pool den Score erreicht — ein Ausschluss ab jetzt ist für den
+            // Betreiber sonst nicht von einem schlicht schwächeren Pool zu unterscheiden.
+            // Grund merken (dieselbe Prüfreihenfolge wie die eigentliche Sperre unten), Basis
+            // für das graue Info-Icon in der Opportunity-Tabelle (2026-08-31, LIQ#0351-Folge —
+            // ersetzt das separate Cooldown-Icon, siehe app.js _cleanupBlockedIcon).
+            if (po.investCooldowns?.length) { po._cleanupBlockedRule = 'cooldown'; return false; }
+            if (cleanupTrendRequired.length && !po.trendGate?.ok) { po._cleanupBlockedRule = 'trend_gate'; return false; }
+            if (po.investBlocked) { po._cleanupBlockedRule = po.investBlocked.rule ?? 'invest_blocked'; return false; }
+            return true;
         }).sort((a, b) => b.investScore.value - a.investScore.value);
         cleanupWinnerPoolId = candidates[0]?.id ?? null;
     }
@@ -2684,6 +2928,10 @@ try {
         po.cleanupWinner = (po.id === cleanupWinnerPoolId)
             ? { score: po.investScore.value, minScore: cleanupMinScoreNow }
             : null;
+        po.cleanupBlocked = (po.id !== cleanupWinnerPoolId && po._cleanupBlockedRule)
+            ? po._cleanupBlockedRule
+            : null;
+        delete po._cleanupBlockedRule;
     }
 }
 

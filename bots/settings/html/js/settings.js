@@ -9,8 +9,8 @@ import { initNav, initFooter } from '/forge/js/nav.js?v=20260826a';
 import { showToast }           from '/forge/js/toast.js?v=20260722b';
 import { initMessageBell }     from '/forge/js/message-bell.js?v=20260825a';
 import { t as tr }             from '/forge/js/i18n.js?v=20260811a';
-import * as liquidity          from './bot-liquidity.js?v=20260827a';
-import * as lending            from './bot-lending.js?v=20260823c';
+import * as liquidity          from './bot-liquidity.js?v=20260910a';
+import * as lending            from './bot-lending.js?v=20260909a';
 import { initForgeTooltip }    from './tooltip.js?v=20260811a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────
@@ -45,9 +45,11 @@ const FULL_NAME = {
     'forge-nexus':       'Nexus',
 };
 
-// Aktiven Bot aus URL-Hash bestimmen (Standard: Liquidity Bot)
-const hash      = location.hash.slice(1);
-const activeSvc = HASH_TO_SVC[hash] || 'forge-liquiditybot';
+// Aktiven Bot aus URL-Hash bestimmen (Standard: Liquidity Bot).
+// Format: #<bot> oder #<bot>/<poolId> — Pool-Teil wird nur für Liquidity ausgewertet
+// (Deep-Link vom Stift-Icon in der Operative-Metriken-Tabelle, LIQ#000533).
+const [hashSvc, hashPoolId] = location.hash.slice(1).split('/');
+const activeSvc = HASH_TO_SVC[hashSvc] || 'forge-liquiditybot';
 
 initNav({ current: SVC_TO_NAV_ID[activeSvc] || 'settings', logout: '/api/auth/logout' });
 
@@ -90,6 +92,7 @@ function makeContext(svcId) {
         getHasCapital: (id) => botCapital[id ?? svcId] ?? false,
         showToast,
         refreshStatus: () => loadBots(),
+        presetPoolId: svcId === 'forge-liquiditybot' ? hashPoolId : undefined,
     };
 }
 

@@ -22,6 +22,10 @@
  *   --new             Neue Position erlauben wenn keine existiert
  *   --dry-run         Simulation: alle Checks + Berechnungen, keine On-Chain-TX
  *   --json            Maschinenlesbarer Output (für UI-Integration)
+ *   --no-trailing-stop-default  Trailing Stop bei Erst-Einzahlung deaktiviert anlegen (LIQ#0362)
+ *   --no-tvl-protection-default TVL-Schutz Stufe 1 bei Erst-Einzahlung deaktiviert anlegen (LIQ#0362)
+ *   (Beide Opt-outs greifen nur, solange die jeweilige Sektion noch nicht existiert —
+ *   siehe lib/settings-auto.js. Der automatische Cleanup-Pfad kennt sie bewusst nicht.)
  *
  * Mindestbeträge (Modus A):
  *   - bestehende Position, Standard:     5 USDC
@@ -39,7 +43,7 @@
  */
 
 import { parseArgs }   from 'node:util';
-import { config, setPoolActive, isPoolEnabled } from '../lib/config.js';
+import { config, setPoolActive, isPoolEnabled, resolvePoolArg } from '../lib/config.js';
 import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
          ensureTrailingStopDefaults } from '../lib/settings-auto.js';
 import {
@@ -51,6 +55,9 @@ import {
 // Performance-Segments seit v0.3.47 nicht mehr geschrieben — Baseline = netDeposited.
 import { getAdapter }        from '../lib/pool-adapter/index.js';
 import { calculateRange }    from '../lib/range.js';
+import { applyStrategyOffsetToComputedRange } from '../lib/strategy-range-offset.js';
+import Database               from 'better-sqlite3';
+import { PATHS }              from '../../../config/paths.js';
 import {
     getKeypair, getUsdcBalance, getUsableSolBalance, getTokenBalance,
     getTokenBalanceFresh, getUsableSolBalanceFresh, getSolBalanceFresh,
@@ -93,6 +100,37 @@ const MIN_USDC_DEPOSIT_STANDARD = 1.00;
 const MIN_USDC_DEPOSIT_BTCPAIR  = 2.00;
 const MIN_USDC_DEPOSIT_NEW      = 5.00;
 
+const SETTINGS_DB = PATHS.settingsDb;
+
+/**
+ * Liest die aktive Strategie (LIQ#0369/#0377) aus `strategy_state` in settings.db.
+ * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
+ * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
+ * Gleiches Muster wie `_loadActiveStrategyId()` in bin/bot.js und bin/cleanup.js.
+ */
+function _loadActiveStrategyId() {
+    try {
+        const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
+        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
+        sdb.close();
+        return row?.strategy_id ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Wendet den Strategie-Versatz (LIQ#0377) auf ein bereits berechnetes calculateRange()-
+ * Ergebnis an; fällt bei "Standard"/gesperrtem Pool/Versatz 0 unverändert auf `rawRange`
+ * zurück. Dünner Wrapper um applyStrategyOffsetToComputedRange() für die beiden --new-
+ * Aufrufstellen unten (Zeile ~530 und ~1294 im Original).
+ */
+function _rangeWithStrategyOffset(pool, currentPrice, db, rawRange) {
+    return applyStrategyOffsetToComputedRange(
+        _loadActiveStrategyId(), pool, currentPrice, db, rawRange,
+    ) ?? rawRange;
+}
+
 // ─── CLI-Args ─────────────────────────────────────────────────────────────────
 
 const { values: args } = parseArgs({
@@ -107,6 +145,8 @@ const { values: args } = parseArgs({
         new:       { type: 'boolean', default: false },
         'dry-run': { type: 'boolean', default: false },
         json:      { type: 'boolean', default: false },
+        'no-trailing-stop-default':  { type: 'boolean', default: false },
+        'no-tvl-protection-default': { type: 'boolean', default: false },
         help:      { type: 'boolean', default: false, short: 'h' },
     },
     strict: true,
@@ -175,6 +215,8 @@ const useModeB      = hasModeB;
 const useMaxPair    = hasMaxPair;
 const useModeBOrC   = useModeB || useMaxPair;  // gemeinsamer Branch: Modus B + Modus C
 const dryRun        = args['dry-run'];
+const armTrailingStop    = !args['no-trailing-stop-default'];
+const armTvlProtection   = !args['no-tvl-protection-default'];
 const modeBToken    = useModeB ? args.token : null;
 const modeBAmount   = useModeB ? parseFloat(args.amount) : NaN;
 const maxAArg       = useMaxPair ? parseFloat(args['max-a']) : NaN;
@@ -383,8 +425,11 @@ const keypair = getKeypair();
 
 syncPools(db, config.pools.all);
 
-// Pool anhand des Pairs suchen
-const pool = config.pools.all.find(p => p.pair === args.pool);
+// Pool anhand von id oder Pair suchen (id zuerst, siehe resolvePoolArg())
+const { pool, ambiguous, candidates } = resolvePoolArg(config.pools.all, args.pool);
+if (ambiguous) {
+    abort(t('cli.liq.pool_ambiguous', { pool: args.pool, ids: candidates.join(', ') }));
+}
 if (!pool) {
     const available = config.pools.all.map(p => p.pair).join(', ');
     abort(t('cli.liq.pool_not_found_list', { pool: args.pool, list: available }));
@@ -519,7 +564,8 @@ if (pool.volatilePair) {
 // Kapitals bleibt beim Deposit liegen (Orca nimmt nur die bindende Seite).
 // Fall B unten benutzt exakt diese Range weiter, deshalb wird sie hier einmal berechnet.
 const newRange = (!position && args.new)
-    ? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db)
+    ? _rangeWithStrategyOffset(pool, currentPrice, db,
+        calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db))
     : null;
 const planLower = position?.price_lower ?? newRange?.priceLower;
 const planUpper = position?.price_upper ?? newRange?.priceUpper;
@@ -1251,10 +1297,10 @@ if (position) {
         console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
     }
     ensureScoreLimitEnabled(pool.id);
-    ensureTrailingStopDefaults(pool.id, pool.poolType);
+    ensureTrailingStopDefaults(pool.id, pool.poolType, { arm: armTrailingStop });
     {
         const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
-        ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
+        ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold }, { arm: armTvlProtection });
     }
     ensureTrailingStopMinimumReset(pool.id);
 
@@ -1283,7 +1329,8 @@ if (position) {
 // zweiter Aufruf: der Pre-Swap muss zwingend mit genau der Range gerechnet haben,
 // die hier eröffnet wird, sonst passt der getauschte Token-Mix nicht zum Bedarf.
 const range = newRange
-    ?? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db);
+    ?? _rangeWithStrategyOffset(pool, currentPrice, db,
+        calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db));
 console.log(`[deposit] Range:   ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)} ${quoteSymbol(pool)}`);
 
 // Modus B/C: manualAmountA/B direkt, kein Wallet-Cap nötig (oben schon geprüft).
@@ -1507,10 +1554,10 @@ if (setPoolActive(pool.id, true)) {
     console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
 }
 ensureScoreLimitEnabled(pool.id);
-ensureTrailingStopDefaults(pool.id, pool.poolType);
+ensureTrailingStopDefaults(pool.id, pool.poolType, { arm: armTrailingStop });
 {
     const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
-    ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold });
+    ensureTvlProtectionDefaults(pool.id, tvlNow, { warn: pool.tvlWarnThreshold, exit: pool.tvlExitThreshold }, { arm: armTvlProtection });
 }
 ensureTrailingStopMinimumReset(pool.id);
 

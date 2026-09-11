@@ -9,6 +9,7 @@ import {
     getOpenPosition,
     updatePositionCapital, updatePositionHodl, insertTransaction,
     insertPosition, insertPositionSnapshot, insertCapitalFlow, clearPositionSnapshots,
+    addPositionEntryCost,
 } from './db.js';
 import { establishPositionBaseline, settleCapitalFlow, getQuotePriceUsd } from './refresh-state.js';
 import { isRebalancePending } from './cleanup-lock.js';
@@ -16,12 +17,34 @@ import { config, setPoolActive } from './config.js';
 import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
          ensureTrailingStopDefaults } from './settings-auto.js';
 import { calculateRange } from './range.js';
+import { applyStrategyOffsetToComputedRange } from './strategy-range-offset.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import Decimal from 'decimal.js';
 import BN     from 'bn.js';
+import Database from 'better-sqlite3';
 import * as notify from './notify.js';
 import { t }       from '../../../lib/i18n.js';
 import { foreignExitBlock } from './exit-reservation.js';
+import { PATHS } from '../../../config/paths.js';
+
+const SETTINGS_DB = PATHS.settingsDb;
+
+/**
+ * Liest die aktive Strategie (LIQ#0369/#0377) aus `strategy_state` in settings.db.
+ * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
+ * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
+ * Gleiches Muster wie `_loadActiveStrategyId()` in bin/bot.js und bin/cleanup.js.
+ */
+function _loadActiveStrategyId() {
+    try {
+        const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
+        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
+        sdb.close();
+        return row?.strategy_id ?? null;
+    } catch {
+        return null;
+    }
+}
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -60,6 +83,117 @@ export function clmmTokenAForDeposit(depositB, currentPrice, priceLower, priceUp
     const sqrtPb = Math.sqrt(priceUpper);
     const ratioUsdcPerA = (sqrtP - sqrtPa) * sqrtP * sqrtPb / (sqrtPb - sqrtP);
     return depositB / ratioUsdcPerA;
+}
+
+/**
+ * Zielkapital (USD) für einen Reopen — die Zahl, auf die sich Pre-Swap UND openPosition
+ * beziehen müssen.
+ *
+ * 🔒 LIQ#0344: Rechnen die beiden Schritte auf verschiedene Zielbeträge, kauft der
+ * Pre-Swap Token für Kapital, das die Position anschließend nicht annimmt; der
+ * Überschuss bleibt als volatiler Rest im Wallet liegen und wird 24 h später von der
+ * Dust-Notbremse wieder verkauft. Am 29.08.2026 bei ZEC/USDC: Pre-Swap 272,12 USDC → ZEC
+ * (50/50 von 544 USDC Vorposition), die Position nahm nach der Kappung auf
+ * CLEANUP_MAX_DEPOSIT = 200 USDC aber nur ~97 USDC ZEC — ~175 USDC blieben liegen.
+ * Deshalb ist die Reihenfolge hier EINMAL festgelegt und wird von beiden Aufrufern
+ * benutzt, statt an zwei Stellen gepflegt zu werden.
+ *
+ * Reihenfolge der Deckel:
+ *   1. freigesetztes Kapital (Rebalance) hat Vorrang vor der Historie
+ *   2. Kleinstpositions-Netz: war die Vorposition < minReopenCapitalUsd und die
+ *      Quote-Seite hat mehr, gilt die Quote-Seite (LIQ#0341)
+ *   3. nie mehr als real im Wallet verfügbar ist
+ *   4. nie mehr als die Max-Einzahlung pro Aktion (Ausnahme: Reopen kurz nach einem
+ *      Close stellt bestehendes Kapital wieder her, kein frischer Zufluss)
+ *
+ * @returns {number} Zielkapital in USD (0 = nichts zu tun)
+ */
+export function reopenTargetCapitalUsd({
+    targetCapitalUsd       = null,
+    lastPositionCapitalUsd = null,
+    quoteSideUsd           = 0,
+    walletTotalUsd         = 0,
+    maxDepositUsd          = 0,
+    isPreservationReopen   = false,
+    minReopenCapitalUsd    = 5.0,
+}) {
+    let capital;
+    if (targetCapitalUsd != null && targetCapitalUsd > 0) {
+        capital = targetCapitalUsd;
+    } else {
+        const hist = lastPositionCapitalUsd ?? quoteSideUsd;
+        capital = (hist < minReopenCapitalUsd && quoteSideUsd > hist)
+            ? quoteSideUsd
+            : Math.min(hist, walletTotalUsd);
+    }
+    if (maxDepositUsd > 0 && !isPreservationReopen) capital = Math.min(capital, maxDepositUsd);
+    return Math.max(0, capital);
+}
+
+/**
+ * Ausgleichsplan für ein volatilePair-Wallet: welche Seite muss wie viel abgeben, damit
+ * beide Token gleich viel USD wert sind? Ein 50/50-Mix ist die Voraussetzung dafür, dass
+ * `openPosition` überhaupt beide Seiten befüllen kann.
+ *
+ * 🔒 LIQ#0393: Der Soll-Mix bemisst sich am **deploybaren** Kapital
+ * (`min(Zielkapital, Wallet-Gesamtwert)`), nicht am vollen Zielkapital. Liegt weniger im
+ * Wallet als das Ziel (Teilbefüllung, Score-Limit-Rückfluss, Kursverfall seit dem Close),
+ * öffnen beide Aufrufer in `bin/bot.js` ohnehin eine proportional kleinere Position — sie
+ * deckeln `amountA`/`amountB` auf den realen Wallet-Bestand. Gegen das VOLLE Ziel gerechnet
+ * lagen dann aber beide Seiten unter 100 %, und `max(0, bal - targetToken)` kappte den
+ * Überschuss auf 0, obwohl die reichere Seite sehr wohl etwas abzugeben hatte. Der Aufrufer
+ * las das als Fehlschlag und deaktivierte den Pool nach 3 Versuchen (ZEC/SOL, 04.09.2026:
+ * beide Seiten bei 39–40 % des Ziels, zueinander also praktisch perfekt balanciert).
+ *
+ * Ist das Wallet größer als das Ziel, bleibt `targetUsdc` die Bemessungsgrundlage —
+ * Überschusskapital soll nicht zusätzlich in diesen Pool fließen.
+ *
+ * @returns {{action:'balanced'|'swap'|'dust', inSide:('A'|'B'|null), inAmount:number,
+ *            ratioA:number, ratioB:number, deployableUsd:number}}
+ *          `balanced` = nichts zu tun · `swap` = `inAmount` von `inSide` tauschen ·
+ *          `dust` = Ausgleich nötig, aber unterhalb der kleinsten sinnvollen Swap-Größe.
+ */
+export function pairBalanceSwapPlan({
+    tokenABal, tokenBBal,
+    usdPerA, usdPerB,
+    targetUsdc,
+    decimalsA, decimalsB,
+    tokenAIsSol = false,
+    tokenBIsSol = false,
+    solReserve  = 0.15,
+    imbalanceThreshold = 0.5,
+}) {
+    const totalWalletUsd = tokenABal * usdPerA + tokenBBal * usdPerB;
+    // targetUsdc = 0 heißt „kein Ziel bekannt" (echter Erststart): dann ist das ganze
+    // Wallet die Bemessungsgrundlage. Ohne diesen Zweig wären beide Ziel-Token 0, die
+    // Ratios würden auf 1 normalisiert und ein einseitiges Wallet bliebe unausgeglichen.
+    const deployableUsd = targetUsdc > 0 ? Math.min(targetUsdc, totalWalletUsd) : totalWalletUsd;
+    const halfTarget    = deployableUsd / 2;
+    const targetAToken  = usdPerA > 0 ? halfTarget / usdPerA : 0;
+    const targetBToken  = usdPerB > 0 ? halfTarget / usdPerB : 0;
+
+    const ratioA = targetAToken > 0 ? tokenABal / targetAToken : 1;
+    const ratioB = targetBToken > 0 ? tokenBBal / targetBToken : 1;
+    const base   = { ratioA, ratioB, deployableUsd };
+
+    if (ratioA >= imbalanceThreshold && ratioB >= imbalanceThreshold) {
+        return { action: 'balanced', inSide: null, inAmount: 0, ...base };
+    }
+
+    // Die reichere Seite gibt ab. 99 % des Überschusses als Slippage-Puffer; bei SOL
+    // zusätzlich die Gebühren-Reserve stehen lassen.
+    const richerIsA = ratioA > ratioB;
+    const bal       = richerIsA ? tokenABal : tokenBBal;
+    const targetTok = richerIsA ? targetAToken : targetBToken;
+    const isSol     = richerIsA ? tokenAIsSol : tokenBIsSol;
+    const inDec     = richerIsA ? decimalsA : decimalsB;
+    const cap       = isSol ? Math.max(0, bal - solReserve) : bal * 0.99;
+    const inAmount  = Math.min(Math.max(0, bal - targetTok) * 0.99, cap);
+
+    if (inAmount < 100 / Math.pow(10, inDec)) {
+        return { action: 'dust', inSide: richerIsA ? 'A' : 'B', inAmount, ...base };
+    }
+    return { action: 'swap', inSide: richerIsA ? 'A' : 'B', inAmount, ...base };
 }
 
 /**
@@ -213,6 +347,52 @@ async function _freshSideBalances(pool, keypair) {
 const RESIDUAL_SWEEP_MAX_ROUNDS = 4;
 
 /**
+ * Plant eine Sweep-Runde: Wie viel von jeder Seite soll eingezahlt werden, und welcher
+ * Ausgleichs-Swap ist dafür nötig? Rein rechnend, ohne Chain-Zugriff — damit genau diese
+ * Aufteilung testbar ist (`bin/test-residual-sweep.js`).
+ *
+ * Die Zielaufteilung kommt aus dem CLMM-Ratio der echten Range: ohne sie könnte nur so
+ * viel eingezahlt werden, wie die knappere Seite hergibt.
+ *
+ * 🔒 LIQ#0343 — die Zielmengen sind ABSOLUT aus dem Budget gerechnet, nie als Anteil des
+ * Wallets. Früher wurde das ganze Wallet mit `budget / walletUsd` skaliert. Der
+ * Ausgleichs-Swap tauscht aber physisch im ganzen Wallet, und die erneute anteilige
+ * Kappung danach ließ nur diesen Bruchteil des frisch gekauften Tokens in die Position
+ * wandern. Liegt viel Fremdkapital im Wallet, ist der Bruchteil winzig: NATIX/USDC am
+ * 29.08.2026 (Budget 250 USDC, Wallet ~1.700 USDC) kaufte über vier Runden NATIX für
+ * ~388 USDC, zahlte 198,65 USDC ein und ließ 297,76 USDC als volatilen Token liegen —
+ * gekauft, um ihn 24 h später über die Dust-Notbremse wieder zu verkaufen.
+ *
+ * Höchstens eine Seite kann fehlen: die Zielwerte summieren sich auf `budgetUsdc`, und
+ * `budgetUsdc <= walletUsd`. Der Überschuss der anderen Seite deckt das Defizit deshalb
+ * immer ab. Bewusst ohne Slippage-Puffer: fällt der Swap minimal zu knapp aus, bleibt der
+ * Rest auf der Seite liegen, aus der getauscht wurde (im Regelfall die USDC-nahe) statt
+ * als volatiler Token — und die nächste Runde zahlt ihn ohnehin nach.
+ *
+ * @param {{a:number,b:number}} bal        Wallet-Bestand je Seite (Token-Einheiten)
+ * @param {{a:number,b:number}} usd        USD-Wert je 1 Token der Seite
+ * @param {number} budgetUsdc              Was in dieser Runde eingesetzt werden soll
+ * @param {number} aPerB                   tokenA je 1 tokenB laut CLMM-Ratio der Range
+ * @returns {{needAUsd, needBUsd, weightA, swap: {fromA, valueUsd, amountIn}|null}}
+ */
+export function planResidualSweep({ bal, usd, budgetUsdc, aPerB }) {
+    const weightA  = (aPerB * usd.a) / (aPerB * usd.a + usd.b);
+    const needAUsd = budgetUsdc * weightA;
+    const needBUsd = budgetUsdc - needAUsd;
+
+    const gapAUsd = needAUsd - bal.a * usd.a;   // > 0: tokenA fehlt
+    const gapBUsd = needBUsd - bal.b * usd.b;   // > 0: tokenB fehlt
+    const valueUsd = Math.max(gapAUsd, gapBUsd);
+    if (valueUsd < RESIDUAL_SWAP_MIN_USDC) return { needAUsd, needBUsd, weightA, swap: null };
+
+    const fromA    = gapBUsd > gapAUsd;         // tokenB fehlt → aus tokenA nachkaufen
+    const amountIn = fromA
+        ? Math.min(valueUsd / usd.a, bal.a * 0.99)
+        : Math.min(valueUsd / usd.b, bal.b * 0.99);
+    return { needAUsd, needBUsd, weightA, swap: { fromA, valueUsd, amountIn } };
+}
+
+/**
  * Zahlt den nach einem Deposit im Wallet verbliebenen Rest in dieselbe Position nach.
  * Wirft nie — die Haupteinzahlung ist beim Aufruf bereits erfolgt; scheitert der Sweep,
  * bleibt der Rest schlicht liegen und der nächste Cleanup-Lauf verwertet ihn.
@@ -277,22 +457,18 @@ async function _sweepResidualOnce(pool, nftMint, {
             : pool.pair.split('/');
 
         let bal   = await _freshSideBalances(pool, keypair);
-        let total = bal.a * usd.a + bal.b * usd.b;
-        if (total < RESIDUAL_MIN_USDC) {
-            log(t('cli.ld.sweep_skip_small', { usdc: total.toFixed(2) }));
+        const walletUsd = bal.a * usd.a + bal.b * usd.b;
+        if (walletUsd < RESIDUAL_MIN_USDC) {
+            log(t('cli.ld.sweep_skip_small', { usdc: walletUsd.toFixed(2) }));
             return null;
         }
 
         // Nie mehr nachzahlen als vom vorgesehenen Budget übrig ist — im Wallet kann
         // Kapital liegen, das gar nicht für diese Einzahlung gedacht war.
-        let capFactor = 1;
-        if (total > budgetLeftUsdc) {
-            capFactor = budgetLeftUsdc / total;
-            total     = budgetLeftUsdc;
+        const total = Math.min(walletUsd, budgetLeftUsdc);
+        if (walletUsd > budgetLeftUsdc) {
             log(t('cli.ld.sweep_budget_capped', { usdc: budgetLeftUsdc.toFixed(2) }));
         }
-        let useA = bal.a * capFactor;
-        let useB = bal.b * capFactor;
 
         // Position muss in Range liegen — sonst nimmt increaseLiquidity nur eine Seite an
         // und der Rest bliebe trotz Extra-TX liegen.
@@ -306,17 +482,14 @@ async function _sweepResidualOnce(pool, nftMint, {
             return null;   // Zustand nicht lesbar → lieber nichts tun
         }
 
-        // Einseitigen Rest ausgleichen: Zielaufteilung aus dem CLMM-Ratio der echten Range.
-        // Ohne das könnte nur so viel eingezahlt werden, wie die knappere Seite hergibt.
-        const aPerB    = clmmTokenAForDeposit(1, currentPrice, priceLower, priceUpper);
-        const weightA  = (aPerB * usd.a) / (aPerB * usd.a + usd.b);
-        const surplusA = useA * usd.a - total * weightA;   // > 0: zu viel tokenA, < 0: zu wenig
-        if (Math.abs(surplusA) >= RESIDUAL_SWAP_MIN_USDC) {
-            const fromA    = surplusA > 0;
-            const valueIn  = Math.abs(surplusA);
-            const amountIn = fromA
-                ? Math.min(valueIn / usd.a, useA * 0.99)
-                : Math.min(valueIn / usd.b, useB * 0.99);
+        // Einseitigen Rest ausgleichen (Zielaufteilung + Ausgleichs-Swap): siehe
+        // planResidualSweep().
+        const aPerB = clmmTokenAForDeposit(1, currentPrice, priceLower, priceUpper);
+        const plan  = planResidualSweep({ bal, usd, budgetUsdc: total, aPerB });
+        const { needAUsd, needBUsd, swap } = plan;
+
+        if (swap) {
+            const { fromA, valueUsd: valueIn, amountIn } = swap;
             log(t('cli.ld.sweep_swap', {
                 amount: amountIn.toFixed(6), from: fromA ? symA : symB,
                 to: fromA ? symB : symA, usdc: valueIn.toFixed(2),
@@ -332,16 +505,15 @@ async function _sweepResidualOnce(pool, nftMint, {
                     connection:     getConnection(),
                     ...(swapSlippageBps ? { slippageBps: swapSlippageBps } : {}),
                 });
-                // Nach dem Swap frisch lesen und erneut auf das Budget kappen.
                 bal = await _freshSideBalances(pool, keypair);
-                const totalAfter = bal.a * usd.a + bal.b * usd.b;
-                const f = totalAfter > budgetLeftUsdc ? budgetLeftUsdc / totalAfter : 1;
-                useA = bal.a * f;
-                useB = bal.b * f;
             } catch (err) {
                 console.warn(`${logPrefix} ${pool.pair}: ${t('cli.ld.sweep_swap_failed', { error: err.message })}`);
             }
         }
+
+        // Einsatz je Seite: der Budget-Bedarf, gedeckelt auf das real Vorhandene.
+        const useA = Math.min(bal.a, usd.a > 0 ? needAUsd / usd.a : 0);
+        const useB = Math.min(bal.b, usd.b > 0 ? needBUsd / usd.b : 0);
 
         // Deckelung wie im Hauptpfad: tokenMax = amount × (1 + Slippage) muss unter der
         // Wallet-Balance bleiben, sonst schlägt der On-Chain-TransferChecked fehl.
@@ -503,6 +675,29 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
 }
 
 /**
+ * Einstiegskosten einer Befüllung buchen: was zwischen Wallet und Position verloren
+ * ging — Swap-Slippage, Protokoll-Gebühren, TX-Fees und der Rest, der auf der
+ * nicht-bindenden Seite liegen blieb.
+ *
+ * `grossInvestUsd` MUSS der Wert der Mittel VOR dem Umtausch sein und darf nur von
+ * einem Aufrufer kommen, bei dem feststeht, dass diese Mittel VOLLSTÄNDIG in die
+ * Position wandern sollten (Cleanup-volatilePair: „gesamter Wallet-Bestand beider
+ * Pool-Tokens"). Bei einem Pfad mit Budget-Deckel wäre die Differenz überwiegend
+ * nicht eingesetztes Kapital statt Kosten — dort bleibt der Wert bewusst undefiniert
+ * und die Meldung zeigt die Zeile gar nicht, statt eine zu hohe Zahl zu behaupten.
+ *
+ * Rein informativ: der PnL setzt laut lib/pnl.js am eingezahlten Kapital an, diese
+ * Kosten fallen davor an und sind deshalb NICHT Teil des PnL.
+ */
+function recordEntryCost(db, positionId, grossInvestUsd, depositedUsdc, logPrefix = '[deposit-lib]') {
+    if (!Number.isFinite(grossInvestUsd) || grossInvestUsd <= 0) return;
+    const cost = grossInvestUsd - depositedUsdc;
+    if (!(cost > 0)) return;
+    addPositionEntryCost(db, positionId, cost);
+    console.log(`${logPrefix} Einstiegskosten: ${cost.toFixed(2)} USDC (Einsatz ${grossInvestUsd.toFixed(2)} → eingezahlt ${depositedUsdc.toFixed(2)})`);
+}
+
+/**
  * usdcIsTokenA-Deposit (z.B. EURC/USDC): USDC-Budget → CLMM-Split → Pre-Swap USDC→tokenB → deposit.
  * Gibt eingezahlten USDC-Betrag zurück (0 bei Skip/Fehler).
  */
@@ -604,6 +799,10 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
                 amountA:  swapAmountFinal,
                 amountB:  preSwap.amountOut,
                 usdValue: swapAmountFinal,
+                // usd_value_in/out (LIQ#0376 Teil 2): USDC exakt (Eingang), tokenB über
+                // denselben currentPrice, der oben bereits swapAmountUsdc bestimmt hat.
+                usdValueIn:  swapAmountFinal,
+                usdValueOut: preSwap.amountOut / currentPrice,
                 txHash:   preSwap.txSignature,
                 txFeeSol: swapFee,
                 note:     `pre-swap USDC→${tokenBSymbol}`,
@@ -702,7 +901,7 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
  * Wird aufgerufen wenn kein offenes NFT existiert (Erstbefüllung oder nach Close).
  * Identischer Ablauf wie bin/deposit.js --new für volatilePair.
  */
-async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cleanup', quotePrice = 0 } = {}) {
+async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cleanup', quotePrice = 0, grossInvestUsd = null } = {}) {
     // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool
     // (geteilter Mint), keine neue Position öffnen — sonst würde fremdes
     // Exit-Kapital investiert.
@@ -740,7 +939,13 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     const effectiveRange = pool.rangeOverride
         ? { ...config.range, ...pool.rangeOverride }
         : config.range;
-    const range = calculateRange(pool, currentPrice, effectiveRange, db);
+    const rawRange = calculateRange(pool, currentPrice, effectiveRange, db);
+    // LIQ#0377: autoritativer Open-Pfad für frische volatilePair-Positionen (Erstbefüllung
+    // via Cleanup) — hier muss der Strategie-Versatz wirken, unabhängig davon, ob der
+    // Aufrufer bin/cleanup.js, bin/deposit.js oder bot.js (Reopen) ist.
+    const range = applyStrategyOffsetToComputedRange(
+        _loadActiveStrategyId(), pool, currentPrice, db, rawRange,
+    ) ?? rawRange;
     console.log(`[deposit-lib:open] ${pool.pair}: Range ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)}`);
 
     // ─── 3. Wallet-Bestände lesen ─────────────────────────────────────────────
@@ -797,7 +1002,7 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
 
     // ─── 6. DB-Einträge ───────────────────────────────────────────────────────
     clearPositionSnapshots(db, pool.id);
-    insertPosition(db, {
+    const positionId = insertPosition(db, {
         poolId:       pool.id,
         nftMint:      result.nftMint,
         tickLower:    range.tickLower,
@@ -812,6 +1017,7 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
         openTx:       result.txHash,
         openedAt:     Date.now(),
     });
+    recordEntryCost(db, positionId, grossInvestUsd, capitalUsdc, '[deposit-lib:open]');
     const openFee = await getTxFee(result.txHash);
     insertTransaction(db, {
         poolId:   pool.id,
@@ -900,11 +1106,11 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     return capitalUsdc;
 }
 
-export async function depositVolatilePair(pool, keypair, db, adapter, { note = 'volatilePair', quotePrice = 0 } = {}) {
+export async function depositVolatilePair(pool, keypair, db, adapter, { note = 'volatilePair', quotePrice = 0, grossInvestUsd = null } = {}) {
     const position = getOpenPosition(db, pool.id);
     if (!position) {
         // Keine existierende Position → neue eröffnen (z.B. Erstbefüllung via Cleanup)
-        return openVolatilePairPosition(pool, keypair, db, adapter, { note, quotePrice });
+        return openVolatilePairPosition(pool, keypair, db, adapter, { note, quotePrice, grossInvestUsd });
     }
 
     let state;
@@ -975,6 +1181,7 @@ export async function depositVolatilePair(pool, keypair, db, adapter, { note = '
     const addedTokenB   = result.tokenEstB + (sweep?.tokenEstB ?? 0);
 
     updatePositionCapital(db, position.id, (position.capital_usdc ?? 0) + depositedUsdc);
+    recordEntryCost(db, position.id, grossInvestUsd, depositedUsdc);
     updatePositionHodl(db, position.id, addedTokenA, addedTokenB);
     settleCapitalFlow(db, pool, position, {
         liquidityBefore: state.liquidity, legs: [result, sweep],

@@ -38,7 +38,7 @@ import { PublicKey } from '@solana/web3.js';
 import {
     insertPositionSnapshot, insertPortfolioSnapshot, updatePositionLiquidity,
     getOpenPosition, scaleReferencesForLiquidityChange, rebaseHwmForCapitalFlow,
-    scaleReferencesForQuotePriceChange, kvGet, kvSet,
+    scaleReferencesForQuotePriceChange, kvGet, kvSet, latestStopValueUsd,
 } from './db.js';
 import { updateHwm } from './trailing-stop.js';
 import {
@@ -491,15 +491,13 @@ export async function establishPositionBaseline(db, pool, adapter, nftMint, pric
         // Stale-Read-Guard steckt im Helper: bei lpValueUsd <= 0 wird nichts geschrieben.
         if (!writePositionSnapshotFromState(db, pool, position, state, price)) return false;
 
-        const snap = db.prepare(
-            `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
-             ORDER BY recorded_at DESC LIMIT 1`
-        ).get(pool.id);
-        const lpUsd = snap?.lp_value_usd ?? 0;
-        if (!(lpUsd > 0)) return false;
+        // Stop-Wert = LP + offene Fees (bei einer frischen Position i.d.R. ~0, beim
+        // Sweep-Pfad können bereits Fees anstehen) — derselbe Maßstab wie jeder Tick.
+        const stopUsd = latestStopValueUsd(db, pool.id)?.valueUsd ?? 0;
+        if (!(stopUsd > 0)) return false;
 
-        updateHwm(db, pool, position, lpUsd);
-        console.log(`${logPrefix} ${pool.id}: Referenzwert gemessen ${lpUsd.toFixed(2)} USDC – Höchststand und Einstiegsreferenz stehen ab sofort`);
+        updateHwm(db, pool, position, stopUsd);
+        console.log(`${logPrefix} ${pool.id}: Referenzwert gemessen ${stopUsd.toFixed(2)} USDC – Höchststand und Einstiegsreferenz stehen ab sofort`);
         return true;
     } catch (err) {
         console.warn(`${logPrefix} ${pool.id}: Referenzmessung fehlgeschlagen, Höchststand folgt beim nächsten Bot-Tick – ${err.message}`);
@@ -581,9 +579,9 @@ export function settleCapitalFlow(db, pool, position, { liquidityBefore, legs, f
     const written = writePositionSnapshotFromState(db, pool, position, state, last.priceExec);
     if (!written) return { mode: 'measured', factor: scaled.factor, lpUsd: null };
 
-    const lpUsd = db.prepare(
-        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
-    ).get(pool.id)?.lp_value_usd ?? 0;
+    // Stop-Wert (LP + offene Fees) aus dem soeben geschriebenen Snapshot — die Fees wurden
+    // oben aus dem Vorgänger übernommen, die Summe bleibt damit über den Fluss konsistent.
+    const lpUsd = latestStopValueUsd(db, pool.id)?.valueUsd ?? 0;
     if (lpUsd > 0) updateHwm(db, pool, position, lpUsd);
 
     const factorPct = scaled.factor != null ? ((scaled.factor - 1) * 100).toFixed(2) : 'n/a';

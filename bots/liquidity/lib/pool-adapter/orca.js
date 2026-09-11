@@ -37,7 +37,7 @@ import {
     swapQuoteByInputToken,
     collectFeesQuote,
     TickArrayUtil,
-    NO_TOKEN_EXTENSION_CONTEXT,
+    TokenExtensionUtil,
     MIN_SQRT_PRICE,
     MAX_SQRT_PRICE,
     IGNORE_CACHE,
@@ -87,6 +87,22 @@ function buildContext(connection, keypair) {
             computeBudgetOption: { type: 'fixed', priorityFeeLamports: ORCA_PRIORITY_FEE_LAMPORTS },
         },
     });
+}
+
+/**
+ * Token-Extension-Kontext für einen Pool (Transfer-Fee/Interest/Hook-Info beider Mints).
+ *
+ * 🔒 Nie `NO_TOKEN_EXTENSION_CONTEXT` an eine Quote-Funktion geben — der Name klingt nach
+ * "keine Extensions vorhanden", bedeutet aber "rechne so, ALS OB keine da wären". Bei einem
+ * Token-2022-Mint mit TransferFeeConfig unterschätzt das systematisch die tatsächlich
+ * bewegte Menge (Quote nimmt den Bruttobetrag an, der Vault bekommt nach Fee weniger) — exakt
+ * das under/over-funding-Risiko aus LIQ#0276. Ein einzelner extra Fetcher-Call pro Aufruf
+ * (Mint-Accounts beider Seiten), läuft über denselben `ctx.fetcher` wie der Rest der Reads.
+ */
+async function buildPoolTokenExtCtx(ctx, poolData) {
+    return TokenExtensionUtil.buildTokenExtensionContextForPool(
+        ctx.fetcher, poolData.tokenMintA, poolData.tokenMintB, IGNORE_CACHE,
+    );
 }
 
 // ─── Hilfsfunktionen ─────────────────────────────────────────────────────────
@@ -606,7 +622,7 @@ export class OrcaAdapter {
             position:        posData,
             tickLower:       tickLowerData,
             tickUpper:       tickUpperData,
-            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+            tokenExtensionCtx: await buildPoolTokenExtCtx(this._ctx, poolData),
         });
 
         const feesOwedA = fromRawAmount(feesQuote.feeOwedA, pool.decimalsA);
@@ -747,7 +763,7 @@ export class OrcaAdapter {
                 position:          posData,
                 tickLower:         tickLowerData,
                 tickUpper:         tickUpperData,
-                tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                tokenExtensionCtx: await buildPoolTokenExtCtx(ctx, poolData),
             });
 
             results.set(pool.id, {
@@ -831,16 +847,17 @@ export class OrcaAdapter {
         // da increaseLiquidityQuoteByInputToken diese nicht zurückgibt — ohne sie schlägt der
         // On-Chain-Check mit PriceSlippageOutOfBounds (0x17b5) fehl.
         const poolData = whirlpool.getData();
+        const tokenExtCtx = await buildPoolTokenExtCtx(this._ctx, poolData);
 
         const quoteB = increaseLiquidityQuoteByInputToken(
             new PublicKey(pool.tokenB),
             new Decimal(amountB),
-            tickLower, tickUpper, slippage, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+            tickLower, tickUpper, slippage, whirlpool, tokenExtCtx,
         );
         const quoteA = increaseLiquidityQuoteByInputToken(
             new PublicKey(pool.tokenA),
             new Decimal(amountA),
-            tickLower, tickUpper, slippage, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+            tickLower, tickUpper, slippage, whirlpool, tokenExtCtx,
         );
 
         // Bindenden Anker wählen: der mit weniger Liquidity bestimmt den tatsächlichen Einsatz.
@@ -949,6 +966,7 @@ export class OrcaAdapter {
 
         const poolData = whirlpool.getData();
         const posData  = position.getData();
+        const tokenExtCtx = await buildPoolTokenExtCtx(this._ctx, poolData);
 
         // Quote für vollständige Liquiditätsentnahme.
         //
@@ -972,7 +990,7 @@ export class OrcaAdapter {
             tickLowerIndex:   posData.tickLowerIndex,
             tickUpperIndex:   posData.tickUpperIndex,
             slippageTolerance: DEFAULT_SLIPPAGE,
-            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+            tokenExtensionCtx: tokenExtCtx,
         });
 
         // Liquidität vollständig entfernen (Fees müssen VOR dem Close geclaimed sein)
@@ -1016,7 +1034,7 @@ export class OrcaAdapter {
                             tickLowerIndex:    freshData.tickLowerIndex,
                             tickUpperIndex:    freshData.tickUpperIndex,
                             slippageTolerance: DEFAULT_SLIPPAGE,
-                            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                            tokenExtensionCtx: tokenExtCtx,
                         });
                         effectiveQuote = freshQuote;
                         await rpcLimiter.wait();
@@ -1078,9 +1096,19 @@ export class OrcaAdapter {
                 burnTxHash = await sendLeg('exit_burn', burnTx, `closePositionIx NFT=${positionNftMint}`);
                 console.log(`[orca] Position-NFT geburnt (Rent zurück): TX=${burnTxHash}`);
             } catch (err) {
-                // Stale read (Fall 2): posData zeigte liquidity=0, on-chain hat sie noch Liquidität
-                if (/0x1775|ClosePositionNotEmpty/i.test(err.message)) {
-                    console.log(`[orca] closePositionIx 0x1775 (stale read, on-chain noch Liquidität) – hole frische Daten: NFT=${positionNftMint}`);
+                // Stale read (Fall 2): posData zeigte liquidity=0, on-chain hat sie noch Liquidität.
+                // Stale read (Fall 4, LIQ#0322): closePositionIx nimmt selbst keine Liquiditätsdaten
+                // entgegen — 0x177f hier bedeutet nicht "zu viel entnommen" (das faengt der
+                // decreaseLiquidity-Zweig oben ab), sondern dass der vorangegangene decreaseLiquidity
+                // bereits gelandet ist und der Validator-Snapshot fuer die Simulation dieser TX nur
+                // noch nicht nachgezogen hat. In allen 17 beobachteten Faellen (23.08.–30.08.2026)
+                // war decreaseTxHash zu diesem Zeitpunkt schon gesetzt — die Liquiditaet ist also
+                // vermutlich schon 0, es fehlt nur ein frischer Read vor dem Retry. Deshalb dieselbe
+                // Behandlung wie bei 0x1775: frische Daten holen, bei echtem Rest zur Sicherheit noch
+                // abziehen, dann den Burn erneut senden.
+                if (/0x1775|ClosePositionNotEmpty|0x177f|LiquidityUnderflow/i.test(err.message)) {
+                    const code = /0x1775|ClosePositionNotEmpty/i.test(err.message) ? '0x1775' : '0x177f';
+                    console.log(`[orca] closePositionIx ${code} (stale read) – hole frische Daten: NFT=${positionNftMint}`);
                     await rpcLimiter.wait();
                     const freshPos  = await client.getPosition(posPda.publicKey, IGNORE_CACHE);
                     const freshData = freshPos.getData();
@@ -1094,7 +1122,7 @@ export class OrcaAdapter {
                             tickLowerIndex:    freshData.tickLowerIndex,
                             tickUpperIndex:    freshData.tickUpperIndex,
                             slippageTolerance: DEFAULT_SLIPPAGE,
-                            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                            tokenExtensionCtx: tokenExtCtx,
                         });
                         effectiveQuote = freshQuote;
                         await rpcLimiter.wait();
@@ -1287,18 +1315,19 @@ export class OrcaAdapter {
         const whirlpoolPubkey = posData.whirlpool;
         const whirlpool       = await client.getPool(whirlpoolPubkey, IGNORE_CACHE);
         const poolData        = whirlpool.getData();
+        const tokenExtCtx     = await buildPoolTokenExtCtx(this._ctx, poolData);
 
         // Fix 2: Dynamischer Anker-Token — beide Quotes berechnen, bindenden Engpass wählen.
         // Verhindert InsufficientFunds (0x1) wenn ein Token fast leer ist.
         const quoteB = increaseLiquidityQuoteByInputToken(
             new PublicKey(pool.tokenB), new Decimal(amountB),
             posData.tickLowerIndex, posData.tickUpperIndex,
-            slippage, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+            slippage, whirlpool, tokenExtCtx,
         );
         const quoteA = increaseLiquidityQuoteByInputToken(
             new PublicKey(pool.tokenA), new Decimal(amountA),
             posData.tickLowerIndex, posData.tickUpperIndex,
-            slippage, whirlpool, NO_TOKEN_EXTENSION_CONTEXT,
+            slippage, whirlpool, tokenExtCtx,
         );
         // Fix 3: quoteB darf nie mehr tokenA fordern als der Caller übergeben hat.
         // tokenEstA aus quoteB kann > amountA sein wenn USDC binding ist und der Pool
@@ -1413,6 +1442,7 @@ export class OrcaAdapter {
 
         const poolData = whirlpool.getData();
         const posData  = position.getData();
+        const tokenExtCtx = await buildPoolTokenExtCtx(this._ctx, poolData);
 
         // Aktuellen Positionswert in USDC berechnen
         const sqrtPrice = poolData.sqrtPrice;
@@ -1462,7 +1492,7 @@ export class OrcaAdapter {
             tickLowerIndex:    posData.tickLowerIndex,
             tickUpperIndex:    posData.tickUpperIndex,
             slippageTolerance: slippage,
-            tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+            tokenExtensionCtx: tokenExtCtx,
         });
 
         // Welche Quote die tatsächlich gesendete TX beschreibt (analog closePosition()):
@@ -1502,7 +1532,7 @@ export class OrcaAdapter {
                 tickLowerIndex:    posData.tickLowerIndex,
                 tickUpperIndex:    posData.tickUpperIndex,
                 slippageTolerance: retrySlippage,
-                tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                tokenExtensionCtx: tokenExtCtx,
             });
             effectiveQuote   = retryQuote;
             const freshPos   = await client.getPosition(posPda.publicKey, IGNORE_CACHE);

@@ -6,10 +6,10 @@
     <title data-i18n="liq.page_title">FORGE - public: Liquidity Bot</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260329a">
-    <link rel="stylesheet" href="css/layout.css?v=20260824a">
+    <link rel="stylesheet" href="css/layout.css?v=20260910a">
     <link rel="stylesheet" href="../css/shared.css?v=20260822a">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/components.css?v=20260805a">
+    <link rel="stylesheet" href="css/components.css?v=20260911a">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
@@ -343,12 +343,22 @@
                 <h3 id="posValueModalTitle" data-i18n="liq.my_share">Mein Anteil</h3>
                 <button class="modal-close" id="posValueModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
+            <!-- Tab-Navigation -->
+            <div class="modal-tabs" id="posValueModalTabs">
+                <button class="modal-tab-btn active" id="posValueTabValue" data-tab="value" data-i18n="liq.value_usdc">Wert USDC</button>
+                <button class="modal-tab-btn" id="posValueTabDetails" data-tab="details" data-i18n="liq.pnl_details">PnL-Details</button>
+            </div>
+            <!-- Tab: Wert USDC (Chart) -->
             <div class="modal-tab-panel active" id="posValuePanelLp">
                 <div class="chart-range-btns" id="posValueRangeBtns"></div>
                 <div style="position:relative;margin-top:0.5rem">
                     <svg id="posValueChartSvg" width="100%" style="display:none"></svg>
                     <p class="chart-empty" id="posValueChartEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
                 </div>
+            </div>
+            <!-- Tab: PnL-Details (Einzahlung / Maximum / Aktuell) -->
+            <div class="modal-tab-panel" id="posValuePanelDetails">
+                <div id="posValueDetailsTable" class="pos-value-details"></div>
             </div>
         </div>
     </div>
@@ -427,13 +437,8 @@
                 <h3 id="investScoreModalTitle" data-i18n="liq.tab.opportunity_score">Opportunity Score</h3>
                 <button class="modal-close" id="investScoreModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
-            <div class="modal-tabs" id="oppScoreModalTabs">
-                <button class="modal-tab-btn active" data-tab="chart" data-i18n="liq.tab.chart">Chart</button>
-                <button class="modal-tab-btn" data-tab="bewertung" data-i18n="liq.tab.rating">Bewertung</button>
-                <div id="oppScoreRangeBtns" style="margin-left:auto;display:flex;align-items:flex-end;gap:4px;padding-bottom:4px"></div>
-            </div>
+            <div id="oppScoreRangeBtns" class="chart-range-btns"></div>
             <div class="modal-tab-panel active" id="oppScoreChartPanel" style="min-height:240px"></div>
-            <div class="modal-tab-panel" id="oppScoreBewertungPanel" style="min-height:240px"></div>
         </div>
     </div>
 
@@ -541,6 +546,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260826b"></script>
+    <script type="module" src="js/app.js?v=20260911b"></script>
 </body>
 </html>

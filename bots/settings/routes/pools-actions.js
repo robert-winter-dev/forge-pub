@@ -12,7 +12,11 @@
  *
  * POST /api/pools/liquidity/:poolId/deposit
  *     Body: { mode, usdc?, tokenSymbol?, amount?, isNew? }
- *     → führt bin/deposit.js produktiv aus
+ *     → führt bin/deposit.js produktiv aus. Trailing Stop/TVL-Schutz eines Neuzugangs sind
+ *       hierüber nicht abschaltbar (Rückbau LIQ#0362, 03.09.2026: das Deposit-Modal zeigte
+ *       dafür Checkboxen, die denselben Wert wie Risk-Management ohne dessen übrige Werte
+ *       änderten — zweiter Bedienort für dieselbe Einstellung). Das Opt-out existiert weiter
+ *       ausschließlich über bin/deposit.js --no-trailing-stop-default/--no-tvl-protection-default.
  *
  * POST /api/pools/liquidity/:poolId/withdraw
  *     Body: { mode, usdc?, tokenSymbol?, amount?, swapToUsdc?, sendTo? }
@@ -34,6 +38,7 @@ import { PATHS }         from '../../../config/paths.js';
 import { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH, RPC_CONN_OPTS } from './wallet.js';
 import { t } from '../../../lib/i18n.js';
 import { renderReason, reasonPayload } from '../../../lib/pool-reason.js';
+import { openDb as openSettingsDb, saveSettings } from './pools.js';
 
 const __dirname        = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT       = PATHS.root;
@@ -573,45 +578,63 @@ router.post('/liquidity/:poolId/rebalance', (req, res) => {
     res.json({ ok: true, message: t('api.poolact.rebalance_queued') });
 });
 
-/** POST /api/pools/liquidity/:poolId/toggle-enabled
- * Setzt die Benutzer-Freigabe eines Pools (enabled true/false) in pools.json.
- *   Body: { enabled: boolean }
- * Regeln:
- *   - Deaktivieren ist nur erlaubt wenn der Pool KEINE offene Position hält
- *     („Pools mit Guthaben können nicht deaktiviert werden").
- *   - Aktivieren ist immer erlaubt.
+/** POST /api/pools/liquidity/:poolId/mode
+ * Setzt den Kapitalfluss-Modus eines Pools — fasst die Benutzer-Freigabe (enabled, in
+ * liquiditybot.db) und die Cleanup-Berücksichtigung (cleanup.rankingEligible, in
+ * settings.db) zu einer geordneten Skala zusammen (LIQ#0365, ersetzt den früheren
+ * getrennten toggle-enabled-Endpoint + das unerreichbare Ranking-Modal):
+ *
+ *   Body: { mode: 'disabled' | 'cleanup-inactive' | 'cleanup-active' }
+ *     disabled          → enabled = false
+ *     cleanup-inactive  → enabled = true,  cleanup.rankingEligible = false
+ *     cleanup-active    → enabled = true,  cleanup.rankingEligible = true
+ *
+ * Regeln (unverändert gegenüber dem alten toggle-enabled):
+ *   - Nach 'disabled' nur erlaubt wenn der Pool KEINE offene Position hält.
+ *   - Nach 'cleanup-inactive'/'cleanup-active' (jeweils enabled=true) nur erlaubt, wenn
+ *     das Dry-Run-Gate für eine aktuell gesetzte Cleanup-Sperre bereits bestanden ist.
  * Greift per Hot-Reload im nächsten Bot-/Cleanup-Zyklus ohne Neustart.
  */
-router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
+router.post('/liquidity/:poolId/mode', (req, res) => {
     const pool = findPool(req.params.poolId);
     if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
-    const enabled = req.body?.enabled;
-    if (typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: t('api.poolact.body_enabled_required') });
+    const mode = req.body?.mode;
+    if (!['disabled', 'cleanup-inactive', 'cleanup-active'].includes(mode)) {
+        return res.status(400).json({ error: t('api.poolact.body_mode_required') });
     }
 
-    if (enabled === false && hasOpenPosition(pool.id)) {
+    if (mode === 'disabled' && hasOpenPosition(pool.id)) {
         return res.status(409).json({
             error: t('api.poolact.pool_has_position'),
         });
     }
 
-    // Dry-Run-Gate (pool-offers.md Schritt 6): ein Pool mit gesetzter Cleanup-Sperre
-    // (cleanup.rankingEligible === false) darf erst Kapital erhalten, wenn
-    // pool-offers-dryrun.js einen erfolgreichen deposit.js --dry-run für ihn bestätigt
-    // hat. Ohne diese Sperre könnte „Pool aktivieren" einen technisch kaputten
-    // Deposit-Pfad (z.B. fehlendes volatilePair-Flag) erst beim ersten echten
-    // Einzahlversuch mit echtem Kapital aufdecken.
+    const poolSettings = loadPoolSettingsEntry(pool.id);
+
+    // Dry-Run-Gate (pool-offers.md Schritt 6): ein per Pool-Offer übernommener Pool
+    // (pool.premiumOffer) darf erst Kapital erhalten, wenn pool-offers-dryrun.js einen
+    // erfolgreichen deposit.js --dry-run für ihn bestätigt hat. Ohne diese Sperre könnte
+    // ein technisch kaputter Deposit-Pfad (z.B. fehlendes volatilePair-Flag) erst beim
+    // ersten echten Einzahlversuch mit echtem Kapital aufdecken.
     //
-    // Betrifft seit 2026-08-21 nur noch Bestandspools: der damals abgeschaffte
-    // Klick-Pfad legte diese Sperre an, der automatische Import tut es nicht mehr
-    // (Begründung in bots/liquidity/lib/pool-offer-adopt.js). Die Prüfung bleibt,
-    // solange solche Pools existieren — sie gilt für jede gesetzte Sperre, egal
-    // woher sie stammt.
-    if (enabled === true) {
-        const poolSettings = loadPoolSettingsEntry(pool.id);
-        if (poolSettings.cleanup?.rankingEligible === false && poolSettings.dryRunGate?.status !== 'passed') {
+    // Korrigiert 2026-09-04 (LIQ#0380): vorher lautete das Kriterium
+    // `cleanup.rankingEligible === false` — das trifft aber auch auf jeden Pool zu, den
+    // der Nutzer selbst über den Modus 'cleanup-inactive' gesperrt hat (kein Offer-Bezug).
+    // pool-offers-dryrun.js erzeugt für solche Pools nie ein Gate (prüft ausschließlich
+    // pool.premiumOffer, s. dort Zeile ~135), also blieb 'cleanup-active' für sie für immer
+    // verwehrt — Sackgasse ohne Ausweg (Fall liq-sol-usdc). Per settings.db-Check am
+    // 04.09.2026 bestätigt: die "Bestandspools", für die die alte, weitere Fassung gedacht
+    // war, existieren nicht mehr (der damalige Klick-Pfad, der cleanup.rankingEligible ohne
+    // premiumOffer setzte, ist abgeschafft; der automatische Import setzt es nicht mehr,
+    // s. bots/liquidity/lib/pool-offer-adopt.js). Das Kriterium ist jetzt deckungsgleich mit
+    // pool-offers-dryrun.js.
+    //
+    // Geprüft wird bewusst der VOR dem Schreiben gültige rankingEligible-Wert — sonst würde
+    // z.B. der Wechsel auf 'cleanup-active' das Gate umgehen, indem er die Sperre im selben
+    // Request erst setzt und dann sofort wieder aufhebt.
+    if (mode !== 'disabled') {
+        if (pool.premiumOffer && poolSettings.cleanup?.rankingEligible === false && poolSettings.dryRunGate?.status !== 'passed') {
             const gateStatus = poolSettings.dryRunGate?.status ?? 'pending';
             return res.status(409).json({
                 error: gateStatus === 'failed'
@@ -622,24 +645,39 @@ router.post('/liquidity/:poolId/toggle-enabled', (req, res) => {
         }
     }
 
-    const current = pool.enabled !== false; // Default fehlend = freigegeben
-    if (current === enabled) {
-        return res.json({ ok: true, enabled, message: t('api.poolact.already_in_state'), unchanged: true });
+    const currentEnabled  = pool.enabled !== false; // Default fehlend = freigegeben
+    const currentEligible = poolSettings.cleanup?.rankingEligible !== false;
+    const currentMode     = !currentEnabled ? 'disabled' : (currentEligible ? 'cleanup-active' : 'cleanup-inactive');
+    if (currentMode === mode) {
+        return res.json({ ok: true, mode, message: t('api.poolact.already_in_state'), unchanged: true });
     }
 
-    try {
-        writeEnabled(pool.id, enabled, reasonPayload(enabled ? 'reason.manual_enable' : 'reason.manual_disable'));
-    } catch (err) {
-        return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
+    const targetEnabled  = mode !== 'disabled';
+    const targetEligible = mode === 'cleanup-active';
+
+    if (targetEnabled !== currentEnabled) {
+        try {
+            writeEnabled(pool.id, targetEnabled, reasonPayload(targetEnabled ? 'reason.manual_enable' : 'reason.manual_disable'));
+        } catch (err) {
+            return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
+        }
+    }
+
+    if (mode !== 'disabled' && targetEligible !== currentEligible) {
+        try {
+            const sdb = openSettingsDb();
+            saveSettings(sdb, 'liquidity', pool.id, { cleanup: { rankingEligible: targetEligible } }, { source: 'user' });
+            sdb.close();
+        } catch (err) {
+            return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
+        }
     }
 
     triggerExport();
     res.json({
         ok: true,
-        enabled,
-        message: enabled
-            ? t('api.poolact.pool_enabled_msg', { pool: pool.displayPair ?? pool.pair })
-            : t('api.poolact.pool_disabled_msg', { pool: pool.displayPair ?? pool.pair }),
+        mode,
+        message: t('api.poolact.mode_set_msg', { pool: pool.displayPair ?? pool.pair, mode: t(`api.poolact.mode_label.${mode}`) }),
     });
 });
 

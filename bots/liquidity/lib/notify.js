@@ -42,6 +42,7 @@ import { getLang, t, numLocale } from '../../../lib/i18n.js';
 // Preisformatierung liegt unter html/js/, weil das Dashboard dieselbe Regel braucht und
 // nur der html/-Baum ausgeliefert wird — Begründung im Kopf des Moduls.
 import { formatPrice, quoteSymbol } from '../../../html/js/format-price.js';
+import { poolSides } from './pool-tokens.js';
 
 const NEXUS_URL      = 'http://127.0.0.1:3100';
 const BOT_ID         = config.botId;
@@ -550,22 +551,31 @@ export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
  * Handlungsaufforderung, weil das Kapital bei Ab- und Zufluss an verschiedenen Orten liegt.
  */
 const CAPITAL_UNCLEAR = {
-    /** Abfluss: Kapital ist in der Wallet, nur die Buchung fehlt. */
-    outflow_unbooked:     { key: 'notify.liq.capital_unclear_out', action: ACTION.inWallet },
+    /**
+     * Abfluss: Kapital ist in der Wallet, nur die Buchung fehlt. Level `info` statt
+     * `warn` (LIQ#0348, 2026-08-30): Der Reconciler trägt den Fall selbst nach, sobald
+     * er ihn on-chain wiederfindet — es ist strukturell dasselbe "erledigt, nichts zu
+     * tun" wie bei capitalFlowRecovered() oben, nur dass der Nachtrag hier noch
+     * aussteht statt schon erfolgt zu sein. Ein "Warnung"-Badge über einem Text, der
+     * mit ACTION.inWallet endet ("Es ist nichts zu tun"), verunsichert ohne Grund.
+     */
+    outflow_unbooked:     { key: 'notify.liq.capital_unclear_out', action: ACTION.inWallet, level: 'info' },
     /** Zufluss ohne brauchbare Snapshot-Klammer — Wert nicht belastbar bestimmbar. */
     inflow_no_valuation:  { key: 'notify.liq.capital_unclear_in',  action: ACTION.inPosition,
-                            reason: 'notify.liq.capital_reason_no_valuation' },
+                            reason: 'notify.liq.capital_reason_no_valuation', level: 'warn' },
     /** Zufluss on-chain, Positionswert stieg nicht mit — die Quellen widersprechen sich. */
     inflow_value_mismatch:{ key: 'notify.liq.capital_unclear_in',  action: ACTION.inPosition,
-                            reason: 'notify.liq.capital_reason_mismatch' },
+                            reason: 'notify.liq.capital_reason_mismatch', level: 'warn' },
 };
 
 export async function capitalFlowNeedsReview(pool, { txHash, whenMs, kind, params = {} }) {
     const spec = CAPITAL_UNCLEAR[kind];
     if (!spec) return;   // unbekannte Art: lieber nichts melden als Unverständliches
-    await send('warn', 'system', spec.key, {
+    await send(spec.level, 'system', spec.key, {
         pair: pool.displayPair ?? pool.pair,
-        tx:   txHash,
+        // Solscan-Link statt roher Signatur: linkifyUrls() im Message Center macht
+        // http(s)-URLs im Meldungstext automatisch klickbar (bots/settings/html/js/message.js).
+        tx:   `https://solscan.io/tx/${txHash}`,
         when: new Date(whenMs).toLocaleString('de-DE'),
         ...(spec.reason ? { reason: { k: spec.reason, p: params } } : {}),
         _action: spec.action,
@@ -664,13 +674,35 @@ export async function rmWarning(pool, scenarioLabel, lpValueUsd) {
  * Fehlende Werte (z.B. kein Snapshot verfügbar) lassen die jeweilige Zeile
  * automatisch entfallen (Konvention 1, notify-render.js) statt eine falsche
  * Zahl zu erfinden.
+ *
+ * Exportiert allein für bin/test-exit-message-consistency.js — die Bezugsgrößen
+ * dieser Funktion sind die Stelle, an der LIQ#0353 entstand; sie brauchen eine
+ * Prüfung, die anschlägt, keinen Absatz (CLAUDE.md, "Text oder Test?").
  */
-function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc, entryUsd, hwmUsd, openedAtMs } = {}) {
-    const [symA, symB] = pool.pair.split('/');
+export function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc, hwmUsd, openedAtMs,
+                                   capitalUsdc, entryCostUsdc, hwmAtMs, exitStartedAtMs,
+                                   openTx, closeTx, nftMint, reinvestCount, reinvestUsdc, bestPoolUsdc } = {}) {
+    // 🔒 coinsA/coinsB folgen tokenA/tokenB — die Symbole müssen es auch. pool.pair steht
+    // bei usdcIsTokenA-Pools in der umgekehrten Reihenfolge; die NATIX/USDC-Meldung 7804
+    // nannte deshalb „34,65 NATIX + 125 277 USDC" statt umgekehrt (siehe pool-tokens.js).
+    const { a: sideA, b: sideB } = poolSides(pool);
+    const symA = sideA.symbol, symB = sideB.symbol;
     const hasCoins = coinsA != null && coinsB != null;
-    const hwmPct = (hwmUsd != null && entryUsd != null && entryUsd !== 0)
-        ? ((hwmUsd - entryUsd) / entryUsd) * 100
+    // Bezugsgröße aller Prozentwerte ist das eingezahlte Kapital (positions.capital_usdc)
+    // — dieselbe Basis, auf der lib/pnl.js rechnet. 🔒 NICHT positions.entry_usd: das ist
+    // die Trailing-Stop-Referenz, ein über Kapitalflüsse hochskalierter Verhältniswert und
+    // kein Geldbetrag. Beide nebeneinander in derselben Tabelle ergaben am 30.08.2026 eine
+    // Meldung, die bei 409,04 „Start" und 411,05 „nach Exit" ein Minus auswies (LIQ#0353).
+    // 🔒 Ein Höchststand von 0 ist KEIN Höchststand, sondern eine fehlende Messung: die
+    // Aufrufer setzen `hwmUsd: position?.hwm_usd ?? 0`. Als Zahl durchgereicht wurde
+    // daraus die Zeile „Guthaben Betrag 0,00 USDC" (Meldung 7804) — eine Behauptung über
+    // einen Wert, den niemand gemessen hat. Fehlende Werte lassen ihre Zeile entfallen
+    // (Konvention 1, notify-render.js), sie erfinden keine Null.
+    const hwm = hwmUsd > 0 ? hwmUsd : null;
+    const hwmPct = (hwm != null && capitalUsdc != null && capitalUsdc !== 0)
+        ? ((hwm - capitalUsdc) / capitalUsdc) * 100
         : null;
+    const exitCostUsdc = (lpValueUsd != null && swappedUsdc != null) ? lpValueUsd - swappedUsdc : null;
     return {
         lpValue: lpValueUsd != null ? lpValueUsd.toFixed(2) : undefined,
         coinsA:  hasCoins ? coinsA.toFixed(6) : undefined,
@@ -685,38 +717,56 @@ function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlU
               } }
             : undefined,
         // Vorzeichen immer explizit (+/−), damit auf einen Blick klar ist, ob der
-        // Ausstieg ein Gewinn oder Verlust war. Prozent relativ zum Pool-Wert bei
-        // Schließung – dieselbe Bezugsgröße wie die PnL-%-Anzeige im Dashboard
-        // (html/liquidity/js/app.js: pnl / myValue), keine neue Konvention.
+        // Ausstieg ein Gewinn oder Verlust war. Prozent relativ zum eingezahlten
+        // Kapital — der Nenner, mit dem lib/pnl.js auch den Zähler bildet. Vorher
+        // war es der Poolwert bei Schließung: bei −0,23 USDC macht das keinen
+        // sichtbaren Unterschied, bei einem größeren Ergebnis schon.
         pnlLine: pnlUsdc != null
             ? { k: 'notify.liq.rm_pnl', p: {
                   pnl:    `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)}`,
-                  pnlPct: (lpValueUsd != null && lpValueUsd !== 0)
-                      ? ` / ${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / lpValueUsd * 100).toFixed(2)}%`
+                  pnlPct: (capitalUsdc != null && capitalUsdc !== 0)
+                      ? ` / ${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / capitalUsdc * 100).toFixed(2)}%`
                       : '',
               } }
             : undefined,
         // ── Tabellenlayout (nur notify.liq.rm_executed) ────────────────────────
         // Fertig formatierte Werte statt verschachtelter Katalog-Referenzen: eine
-        // Tabellenzeile ist eine Zeile, keine zwei. hwmPct relativ zum Einstieg
-        // (entryUsd) – zeigt, wie weit der Peak über dem Start lag, nicht relativ
-        // zum Poolwert bei Schließung (das ist pnlPct, andere Bezugsgröße).
-        entryValue: entryUsd != null ? `${entryUsd.toFixed(2)} USDC` : undefined,
-        hwmValue:   hwmUsd != null
-            ? `${hwmUsd.toFixed(2)} USDC${hwmPct != null ? ` (${hwmPct >= 0 ? '+' : ''}${hwmPct.toFixed(2)}%)` : ''}`
+        // Tabellenzeile ist eine Zeile, keine zwei. hwmPct relativ zum eingezahlten
+        // Kapital – zeigt, wie weit der Peak darüber lag, nicht relativ zum Poolwert
+        // bei Schließung (das ist pnlPct, andere Bezugsgröße).
+        investValue: capitalUsdc != null ? `${capitalUsdc.toFixed(2)} USDC` : undefined,
+        entryCostValue: entryCostUsdc != null ? `${entryCostUsdc.toFixed(2)} USDC` : undefined,
+        hwmValue:   hwm != null
+            ? `${hwm.toFixed(2)} USDC${hwmPct != null ? ` (${hwmPct >= 0 ? '+' : ''}${hwmPct.toFixed(2)}%)` : ''}`
             : undefined,
-        costValue:    (lpValueUsd != null && swappedUsdc != null) ? `${(lpValueUsd - swappedUsdc).toFixed(2)} USDC` : undefined,
+        costValue:    exitCostUsdc != null ? `${exitCostUsdc.toFixed(2)} USDC` : undefined,
         swappedValue: swappedUsdc != null ? `${swappedUsdc.toFixed(2)} USDC` : undefined,
         pnlValue: pnlUsdc != null
-            ? `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)} USDC${(lpValueUsd != null && lpValueUsd !== 0) ? ` (${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / lpValueUsd * 100).toFixed(2)}%)` : ''}`
+            ? `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)} USDC${(capitalUsdc != null && capitalUsdc !== 0) ? ` (${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / capitalUsdc * 100).toFixed(2)}%)` : ''}`
             : undefined,
         // Rohzahlen zusätzlich zu den fertig formatierten Strings oben: die
-        // Message-Center-Detailansicht (extractRiskExit()/riskExitHtml()) rechnet
-        // daraus eigene Kennzahlen (u.a. Ende-% relativ zum Start), die es in einer
-        // fertig zusammengesetzten Anzeigezeile nicht mehr geben würde.
-        entryUsdRaw: entryUsd ?? undefined,
-        hwmUsdRaw:   hwmUsd ?? undefined,
-        openedAtMs:  openedAtMs ?? undefined,
+        // Message-Center-Detailansicht (extractRiskExit()/riskExitHtml()) baut daraus
+        // ihre drei Tabellen (Einstieg / Maximum / Ausstieg) und braucht dafür Zahlen
+        // und Zeitpunkte einzeln, nicht als fertige Anzeigezeile.
+        capitalUsdcRaw:  capitalUsdc ?? undefined,
+        entryCostRaw:    entryCostUsdc ?? undefined,
+        hwmUsdRaw:       hwm ?? undefined,
+        // Ohne Höchststand auch keinen Zeitpunkt dazu — sonst stünde in der Tabelle
+        // „Guthaben Maximum <Datum>" ohne den Betrag, auf den er sich bezieht.
+        hwmAtMs:         hwm != null ? (hwmAtMs ?? undefined) : undefined,
+        exitStartedAtMs: exitStartedAtMs ?? undefined,
+        exitAmountRaw:   swappedUsdc ?? undefined,
+        exitCostRaw:     exitCostUsdc ?? undefined,
+        openedAtMs:      openedAtMs ?? undefined,
+        // Für die Nachvollziehbarkeit im Message Center (Solscan-Links Einstieg/
+        // Ausstieg/Reinvests) — reine Anzeigedaten, keine Kennzahl, deshalb hier nur
+        // durchgereicht statt oben mitverrechnet.
+        openTxRaw:       openTx ?? undefined,
+        closeTxRaw:      closeTx ?? undefined,
+        nftMintRaw:      nftMint ?? undefined,
+        reinvestCountRaw: reinvestCount ?? undefined,
+        reinvestUsdcRaw:  reinvestUsdc ?? undefined,
+        bestPoolUsdcRaw:  bestPoolUsdc ?? undefined,
     };
 }
 
@@ -851,7 +901,12 @@ export async function trailingStopError(pool, step, err) {
  */
 export async function trailingStopPartial(pool, err, partial) {
     const pair = pool.displayPair ?? pool.pair;
-    const [symA, symB] = pool.pair.split('/');
+    // 🔒 Symbole über poolSides(), nicht über pool.pair.split('/'): coinsA/coinsB folgen
+    // tokenA/tokenB, der Paarname bei usdcIsTokenA-Pools aber der umgekehrten Reihenfolge.
+    // Sonst benennt genau die Meldung, die das gestrandete Kapital sichtbar machen soll,
+    // die falschen Token — bei NATIX/USDC „34,65 NATIX + 125 277 USDC" statt umgekehrt.
+    const { a: sideA, b: sideB } = poolSides(pool);
+    const symA = sideA.symbol, symB = sideB.symbol;
     const { reason, detail, raw } = errorParts(err);
     await send('error', 'trailing-stop-partial', 'notify.liq.trailing_stop_partial', {
         pair,

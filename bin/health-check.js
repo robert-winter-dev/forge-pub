@@ -124,13 +124,38 @@ const INSERT = db.prepare(
 // als 17 Exabyte in jeder Speicher-Auswertung dominiert.
 const MEMORY_NOT_SET = '18446744073709551615';
 
+// LIQ#0531: `MemoryCurrent` (cgroup memory.current) zählt den reklamierbaren
+// Datei-Cache mit (Seiten, die der Kernel beim Lesen/Schreiben der SQLite-DB im
+// RAM hält, aber unter Speicherdruck jederzeit verwirft) – bei einer wachsenden
+// DB-Datei sieht das wie ein stetiges Speicherleck aus, ist aber keins. Der
+// Liquidity Bot zeigte am 09./10.09.2026 genau dieses Muster: MemoryCurrent
+// 113→379 MB, tatsächliche Prozess-RSS (`ps`) aber konstant ~150 MB; laut
+// `memory.stat` desselben Cgroups lag der Zuwachs zu ~90 % in `file`, nicht in
+// `anon` (belegt per `cat /sys/fs/cgroup<ControlGroup>/memory.stat`). `anon` ist
+// der Anteil, den der Kernel NICHT freiwillig zurückgibt (Heap, Stacks, Buffers)
+// und damit das richtige Signal für ein echtes Leck. Cgroup v2 vorausgesetzt
+// (auf allen vier FORGE-Hosts der Fall); ohne verfügbares `memory.stat` (Cgroup
+// v1, fehlende Rechte) fällt die Funktion auf `MemoryCurrent` zurück, damit die
+// Messung nicht ganz ausfällt.
+function readCgroupAnonBytes(controlGroup) {
+    if (!controlGroup) return null;
+    try {
+        const raw = readFileSync(`/sys/fs/cgroup${controlGroup}/memory.stat`, 'utf8');
+        const m = raw.match(/^anon (\d+)$/m);
+        return m ? Number(m[1]) : null;
+    } catch {
+        return null;
+    }
+}
+
 function parseSystemdProcessMetrics(raw) {
-    let memBytes = null, restarts = null, activeEnterMs = null;
+    let memBytes = null, restarts = null, activeEnterMs = null, controlGroup = null;
     for (const line of raw.trim().split('\n')) {
         const idx = line.indexOf('=');
         if (idx < 0) continue;
         const key   = line.slice(0, idx);
         const value = line.slice(idx + 1);
+        if (key === 'ControlGroup') controlGroup = value || null;
         if (key === 'MemoryCurrent' && value && value !== '[not set]' && value !== MEMORY_NOT_SET) {
             const n = Number(value);
             if (Number.isFinite(n)) memBytes = n;
@@ -152,6 +177,8 @@ function parseSystemdProcessMetrics(raw) {
         }
     }
     const uptimeSec = activeEnterMs != null ? Math.max(0, Math.round((Date.now() - activeEnterMs) / 1000)) : null;
+    const anonBytes = readCgroupAnonBytes(controlGroup);
+    if (anonBytes != null) memBytes = anonBytes;
     return { memBytes, restarts, uptimeSec };
 }
 
@@ -173,7 +200,7 @@ function checkSystemd(serviceId) {
         // Werte ohne sudo lesbar.
         const raw = execSync(
             `systemctl show ${serviceId} -p ActiveState -p LoadState -p UnitFileState `
-            + `-p MemoryCurrent -p NRestarts -p ActiveEnterTimestamp`,
+            + `-p MemoryCurrent -p ControlGroup -p NRestarts -p ActiveEnterTimestamp`,
             { timeout: 5000, encoding: 'utf8' },
         );
         for (const line of raw.trim().split('\n')) {

@@ -109,10 +109,21 @@ export function ensureTrailingStopMinimumReset(poolId) {
  * Neuzugang. Bestehende Fehlstände korrigiert die Migration
  * `lib/migrations/0004-trailing-stop-pool-type-defaults.js` (`node bin/migrate.js`).
  *
+ * Priorität zwischen CLI-Opt-out und Typ-Default (LIQ#0363, geklärt statt nebenbei
+ * entschieden): `opts.arm === false` ist eine explizite, einmalige Entscheidung für GENAU
+ * diese Einzahlung und schlägt immer. Ist er nicht gesetzt (Normalfall), entscheidet der
+ * Typ-Default, falls im Tab „Pool Typen" gepflegt; sonst bleibt es beim globalen Default
+ * (`true`). Es gibt kein Gegenstück, das `arm=true` gegen einen deaktivierten Typ erzwingt.
+ *
  * @param {string} poolId
  * @param {string|null} poolType  `pool.poolType` aus pools.json; ohne ihn bleibt es beim globalen Default
+ * @param {Object} [opts]
+ * @param {boolean} [opts.arm]  Default `true`. `false` (LIQ#0362, UI-Opt-out bei Erst-Einzahlung):
+ *   legt die Sektion trotzdem an, aber mit `enabled:false` — zählt danach als vorhandene
+ *   Sektion/Nutzerentscheidung und wird nie nachträglich scharf geschaltet.
  */
-export function ensureTrailingStopDefaults(poolId, poolType) {
+export function ensureTrailingStopDefaults(poolId, poolType, opts = {}) {
+    const arm = opts.arm !== false;
     try {
         const db = new Database(SETTINGS_DB);
         db.exec(`
@@ -135,10 +146,12 @@ export function ensureTrailingStopDefaults(poolId, poolType) {
             return;
         }
 
-        const fromType = poolType ? readPoolTypeTrailingStop(db, poolType) : null;
+        const fromType         = poolType ? readPoolTypeTrailingStop(db, poolType) : null;
+        const effectiveEnabled = !arm ? false : (fromType?.enabled ?? true);
         current.trailingStop = {
             ...POOL_SETTINGS_DEFAULTS.trailingStop,
             ...(fromType ?? {}),
+            enabled: effectiveEnabled,
         };
 
         db.prepare(`
@@ -148,16 +161,28 @@ export function ensureTrailingStopDefaults(poolId, poolType) {
 
         db.close();
         const src = fromType ? `Pool-Typ ${poolType}` : 'globaler Default';
-        console.log(`[settings-auto] ${poolId}: Trailing Stop eingerichtet aus ${src} – Drawdown 1 ${current.trailingStop.thresholdPct} %, Drawdown 2 ${current.trailingStop.thresholdPct2 ?? 'aus'}`);
+        if (!arm) {
+            console.log(`[settings-auto] ${poolId}: Trailing Stop bei Erst-Einzahlung per Opt-out deaktiviert angelegt`);
+        } else if (!effectiveEnabled) {
+            console.log(`[settings-auto] ${poolId}: Trailing Stop laut ${src} deaktiviert angelegt`);
+        } else {
+            console.log(`[settings-auto] ${poolId}: Trailing Stop eingerichtet aus ${src} – Drawdown 1 ${current.trailingStop.thresholdPct} %, Drawdown 2 ${current.trailingStop.thresholdPct2 ?? 'aus'}`);
+        }
     } catch (err) {
         console.warn(`[settings-auto] ${poolId}: Trailing-Stop-Default konnte nicht gesetzt werden: ${err.message}`);
     }
 }
 
 /**
- * Liest die im Tab „Pool Typen" gepflegten Drawdown-Schwellen eines Pool-Typs.
- * Gibt `null` zurück, wenn der Typ ungepflegt ist (beide Schwellen leer) — dann bleibt es
- * beim globalen Default, statt einen Pool mit lauter Nullwerten anzulegen.
+ * Liest die im Tab „Pool Typen" gepflegten Trailing-Stop-Werte eines Pool-Typs:
+ * Drawdown-Schwellen und `enabled` (LIQ#0363 — vorher fehlte `enabled` komplett, ein neuer
+ * Pool erbte nie die Typ-Deaktivierung). Gibt `null` zurück, wenn der Typ ungepflegt ist
+ * (weder Schwellen noch `enabled` gesetzt) — dann bleibt es beim globalen Default, statt
+ * einen Pool mit lauter Nullwerten anzulegen.
+ *
+ * Schwellen und `enabled` sind unabhängig gültig: ein Typ mit `enabled:false` aber ohne
+ * gepflegte Schwellen liefert `{ enabled: false }` ohne thresholdPct — sonst würde die
+ * Deaktivierung wieder verschluckt, sobald niemand die Schwellen angefasst hat.
  */
 export function readPoolTypeTrailingStop(db, poolType) {
     try {
@@ -168,13 +193,18 @@ export function readPoolTypeTrailingStop(db, poolType) {
 
         const ts = JSON.parse(row.settings)?.trailingStop ?? {};
         const p1 = Number(ts.thresholdPct);
-        if (!Number.isFinite(p1) || p1 <= 0) return null;
+        const hasThresholds = Number.isFinite(p1) && p1 > 0;
+        const hasEnabled    = typeof ts.enabled === 'boolean';
+        if (!hasThresholds && !hasEnabled) return null;
 
-        const p2 = Number(ts.thresholdPct2);
-        return {
-            thresholdPct:  p1,
-            thresholdPct2: (Number.isFinite(p2) && p2 > 0) ? p2 : null,
-        };
+        const result = {};
+        if (hasThresholds) {
+            const p2 = Number(ts.thresholdPct2);
+            result.thresholdPct  = p1;
+            result.thresholdPct2 = (Number.isFinite(p2) && p2 > 0) ? p2 : null;
+        }
+        if (hasEnabled) result.enabled = ts.enabled;
+        return result;
     } catch {
         return null;
     }
@@ -245,8 +275,14 @@ export function ensureScoreLimitEnabled(poolId) {
  * @param {string} poolId
  * @param {number} currentTvl   Aktueller Pool-TVL (USDC), z.B. aus pool_stats
  * @param {Object} [defaults]   { warn, exit } – pools.json-Schwellen zur Vorbefüllung
+ * @param {Object} [opts]
+ * @param {boolean} [opts.arm]  Default `true`. `false` (LIQ#0362, UI-Opt-out bei Erst-Einzahlung):
+ *   `level1.enabled` wird auf `false` erzwungen, statt aus dem Default zu übernehmen.
+ *   Gilt nur, solange noch keine `tvlProtection`-Sektion existiert — ist bereits eine
+ *   vorhanden, überschreibt diese Funktion `enabled` ohnehin nie (siehe unten).
  */
-export function ensureTvlProtectionDefaults(poolId, currentTvl, defaults = {}) {
+export function ensureTvlProtectionDefaults(poolId, currentTvl, defaults = {}, opts = {}) {
+    const arm = opts.arm !== false;
     try {
         const db = new Database(SETTINGS_DB);
         db.exec(`
@@ -263,12 +299,17 @@ export function ensureTvlProtectionDefaults(poolId, currentTvl, defaults = {}) {
         ).get(config.botId, poolId);
         const current = row ? JSON.parse(row.settings) : {};
 
-        const existing = current.tvlProtection ?? {};
+        const hadSection = current.tvlProtection && typeof current.tvlProtection === 'object';
+        const existing    = current.tvlProtection ?? {};
         const tp = {
             ...DEFAULT_TVL_PROTECTION,
             ...existing,
             level1: { ...DEFAULT_TVL_PROTECTION.level1, ...(existing.level1 ?? {}) },
         };
+
+        // Opt-out greift nur beim Neuanlegen — eine bestehende Sektion ist bereits eine
+        // Nutzerentscheidung (an oder aus) und wird hier wie zuvor nicht überschrieben.
+        if (!hadSection && !arm) tp.level1.enabled = false;
 
         // Schwelle vorbefüllen (nur wenn noch nicht gesetzt). Bewusst der Exit-Wert:
         // seit der Umstellung 2026-08-15 ist Stufe 1 die Voll-Exit-Stufe, und ein
@@ -286,7 +327,7 @@ export function ensureTvlProtectionDefaults(poolId, currentTvl, defaults = {}) {
         `).run(poolId, JSON.stringify(current));
 
         db.close();
-        console.log(`[settings-auto] ${poolId}: TVL-Schutz-Defaults gesichert (tvlAtActivation=${tp.tvlAtActivation ?? 'n/a'})`);
+        console.log(`[settings-auto] ${poolId}: TVL-Schutz-Defaults gesichert (tvlAtActivation=${tp.tvlAtActivation ?? 'n/a'}, level1.enabled=${tp.level1.enabled})`);
     } catch (err) {
         console.warn(`[settings-auto] ${poolId}: TVL-Schutz-Defaults konnten nicht gesetzt werden: ${err.message}`);
     }

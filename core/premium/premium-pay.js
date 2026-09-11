@@ -54,6 +54,7 @@ import { SimplePool } from 'nostr-tools';
 import Database from 'better-sqlite3';
 import { PATHS, envFile } from '../../config/paths.js';
 import { isForkInstance } from '../../lib/premium-identity-context.js';
+import { rollbackStrategyOnPremiumLoss } from '../../bots/settings/lib/strategy-apply.js';
 import { loadPremiumKeypair, fetchPremiumBalances } from '../../lib/premium-wallet.js';
 import { getCurrentPricing } from '../../lib/premium-pricing-store.js';
 import { getMyActivationToken } from '../../lib/premium-token-store.js';
@@ -280,6 +281,22 @@ async function main() {
 
     if (!isForkInstance()) {
         skip('läuft nur auf einem FORGE-public-Fork – auf dem Master gibt es kein Premium-Wallet.', { json });
+    }
+
+    // LIQ#0382: läuft auf JEDER Fork-Installation bei jedem Cron-Tick (config/cron-jobs.json,
+    // alle 10 Min), unabhängig davon, ob jemand das UI öffnet — genau die Voraussetzung aus
+    // dem Ticket. Best-effort: ein Fehler hier darf den eigentlichen Zahlungsversuch nie
+    // verhindern. Greift strukturell nie auf dem Master (isForkInstance()-Prüfung oben bereits
+    // bestanden; rollbackStrategyOnPremiumLoss() prüft sie zusätzlich selbst als allererstes).
+    try {
+        const rollback = rollbackStrategyOnPremiumLoss();
+        if (rollback.triggered && !json) {
+            console.log(`[premium-pay] Strategie "${rollback.strategyId}" auf Standard zurückgeschaltet ` +
+                `(Premium-Zahlung ausgeschaltet): ${rollback.summary.reverted} Feld(er) zurückgenommen, ` +
+                `${rollback.summary.skipped} stehen gelassen, ${rollback.summary.failed} fehlgeschlagen.`);
+        }
+    } catch (err) {
+        console.warn(`[premium-pay] Strategie-Rücknahme bei Premium-Ende fehlgeschlagen: ${err.message}`);
     }
 
     // Eigene Version melden (Versions-Gate, siehe core/premium/server.js

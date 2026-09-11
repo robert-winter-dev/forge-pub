@@ -32,6 +32,8 @@ import {
     getIncompleteScoreLimitExecutions,
     getOpenPosition,
     closePosition as markPositionClosedInDb,
+    countReinvestEvents,
+    sumTransactionUsdValue,
 } from './db.js';
 import * as notify from './notify.js';
 import { executeSwapStep, executeTransferStep, prepareExitAndClaimFees, closePositionOrRescue, computeExitPnl, recordExitProceeds } from './exit-finalizer.js';
@@ -255,11 +257,11 @@ async function stepWithdraw(pool, db, execId, cfg) {
             coins_b: coinsB,
             ...(closePending && { close_error: closePending.reason }),
         });
-        return { coinsA, coinsB };
+        return { coinsA, coinsB, closeTx: closeTxHash };
     } else {
         console.log(`[scoreLimit:${pool.id}] Keine offene Position mehr – überspringe Withdraw`);
         updateScoreLimitExecution(db, execId, { step: 'withdrawn', coins_a: 0, coins_b: 0 });
-        return { coinsA: 0, coinsB: 0 };
+        return { coinsA: 0, coinsB: 0, closeTx: null };
     }
 }
 
@@ -308,6 +310,8 @@ export async function executeScoreLimit(pool, db) {
     await waitForCleanupToFinish();
     acquireSlLock();
 
+    // Beginn des Ausstiegs für die Abschlussmeldung (analog trailing-stop.js).
+    const exitStartedAt = Date.now();
     let execId = null;
     try {
         const keypair    = getKeypair();
@@ -338,7 +342,7 @@ export async function executeScoreLimit(pool, db) {
             console.error(`[scoreLimit:${pool.id}] setPoolActive fehlgeschlagen: ${err.message}`);
         }
 
-        const { coinsA, coinsB } = await stepWithdraw(pool, db, execId, cfg);
+        const { coinsA, coinsB, closeTx } = await stepWithdraw(pool, db, execId, cfg);
 
         let swappedUsdc = null;
         if (cfg.swapToUsdc) {
@@ -362,6 +366,24 @@ export async function executeScoreLimit(pool, db) {
         }
         await notify.rmExecuted(pool, { k: 'notify.liq.rm_label_score', p: { score, min: minScore } }, {
             lpValueUsd: snap?.lp_value_usd ?? null, coinsA, coinsB, swappedUsdc, pnlUsdc,
+            hwmUsd:        positionForPnl?.hwm_usd ?? null,
+            openedAtMs:    positionForPnl?.opened_at ?? null,
+            capitalUsdc:   positionForPnl?.capital_usdc ?? null,
+            entryCostUsdc: positionForPnl?.entry_cost_usdc ?? null,
+            hwmAtMs:       positionForPnl?.hwm_at ?? null,
+            exitStartedAtMs: exitStartedAt,
+            openTx:  positionForPnl?.open_tx ?? null,
+            closeTx: closeTx ?? null,
+            nftMint: positionForPnl?.nft_mint ?? null,
+            reinvestCount: positionForPnl
+                ? countReinvestEvents(db, pool.id, positionForPnl.opened_at, exitStartedAt)
+                : null,
+            reinvestUsdc: positionForPnl
+                ? sumTransactionUsdValue(db, pool.id, positionForPnl.opened_at, exitStartedAt, { types: ['reinvest'] })
+                : null,
+            bestPoolUsdc: positionForPnl
+                ? sumTransactionUsdValue(db, pool.id, positionForPnl.opened_at, exitStartedAt, { types: ['deposit', 'open_position'], notePrefix: 'cleanup' })
+                : null,
         }).catch(() => {});
         triggerPoolTypeAdvisorAsync(pool.id);
 

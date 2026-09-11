@@ -12,6 +12,9 @@ ExecStart=/usr/bin/node server.js
 Restart=always
 RestartSec=5
 
+# Weiche Speicherbremse (Reclaim/Throttling, kein Kill) – kein MemoryMax, siehe CORE#000463.
+MemoryHigh=320M
+
 EnvironmentFile=-/opt/forge/local/env/premium.env
 StandardOutput=journal
 StandardError=journal

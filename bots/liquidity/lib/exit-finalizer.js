@@ -33,8 +33,9 @@ import * as notify from './notify.js';
 import { submitAndConfirm } from '../../../core/tx-queue-client.js';
 import { settle } from './settle-promise.js';
 import { config } from './config.js';
+import { poolSides, sellSideOf } from './pool-tokens.js';
 import { pnlForPeriod } from '../../../lib/pnl.js';
-import { resolvePnlAnchorMs } from './pnl-anchor.js';
+import { resolvePnlAnchorMs, chainStartOpenedAt } from './pnl-anchor.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
 const USDC_DECIMALS  = 6;
@@ -288,22 +289,29 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
 }
 
 /**
- * PnL der soeben geschlossenen Position seit der letzten externen Einzahlung
- * (oder seit Eröffnung, falls keine) – identische Herleitung wie das Tooltip
- * "PnL seit Einzahlung" in bin/export.js. Ausschließlich über lib/pnl.js
- * (CLAUDE.md-Pflicht) – hier steht keine eigene PnL-Mathematik.
+ * PnL der soeben geschlossenen Position seit der letzten externen Einzahlung (oder seit
+ * Beginn der Rebalancing-Kette, falls keine) – anders als das Tooltip "PnL seit
+ * Einzahlung" in bin/export.js geht der Anker hier über `chainStartOpenedAt()` durch
+ * alle Rebalancings dieser Kette zurück, nicht nur bis `position.opened_at` (=
+ * Zeitpunkt des letzten Rebalancings). Sonst verliert die Exit-Nachricht das Ergebnis
+ * der Kette vor dem letzten Rebalancing und widerspricht dem Tagesbericht, der dieselbe
+ * Kette schon seit 30./31.08.2026 korrekt zusammenhängend misst (Befund 01.09.2026,
+ * USELESS/SOL: Nachricht −5,31 USDC vs. Tagesbericht +2,44 USDC für denselben Exit).
+ * Ausschließlich über lib/pnl.js (CLAUDE.md-Pflicht) – hier steht keine eigene
+ * PnL-Mathematik.
  *
  * @param {object} db
  * @param {object} pool      braucht pool.id
- * @param {object} position  braucht position.opened_at (vor dem Withdraw gelesen)
+ * @param {object} position  braucht position.id und position.opened_at (vor dem Withdraw gelesen)
  * @returns {number|null}
  */
 export function computeExitPnl(db, pool, position) {
+    const chainStartMs = chainStartOpenedAt(db, position.id, position.opened_at);
     const lastDeposit = db.prepare(`
         SELECT MAX(created_at) AS t FROM capital_flows
          WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
-    `).get(pool.id, position.opened_at);
-    const fromMs = resolvePnlAnchorMs(lastDeposit?.t, position.pnl_anchor_reset_at, position.opened_at);
+    `).get(pool.id, chainStartMs);
+    const fromMs = resolvePnlAnchorMs(lastDeposit?.t, position.pnl_anchor_reset_at, chainStartMs);
     return pnlForPeriod(db, { flavor: config.botId, scope: pool.id, fromMs });
 }
 
@@ -736,7 +744,9 @@ export async function executeSwapStep(pool, opts) {
 
     const keypair    = getKeypair();
     const connection = getConnection();
-    const [symA]     = pool.pair.split('/');
+    // Symbole über poolSides(), nicht über pool.pair.split('/') — der Paarname steht bei
+    // usdcIsTokenA-Pools in der anderen Reihenfolge als tokenA/tokenB (siehe pool-tokens.js).
+    const sides      = poolSides(pool);
     let swappedUsdc  = 0;
     const useCoinsOnly = !!sendTo || forceCoins;
 
@@ -760,42 +770,57 @@ export async function executeSwapStep(pool, opts) {
             if (swapA > 0) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenA, decimals: pool.decimalsA },
-                    swapA, keypair, connection, symA, logPrefix, slippageBps,
+                    swapA, keypair, connection, sides.a.symbol, logPrefix, slippageBps,
                 );
                 swappedUsdc += r.amountOut;
             }
         }
         if (coinsB > 0) {
-            const [, symB] = pool.pair.split('/');
             const swapB = useCoinsOnly ? coinsB : await fetchBal(pool.tokenB, pool.decimalsB, coinsB);
             if (swapB > 0) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenB, decimals: pool.decimalsB },
-                    swapB, keypair, connection, symB, logPrefix, slippageBps,
+                    swapB, keypair, connection, sides.b.symbol, logPrefix, slippageBps,
                 );
                 swappedUsdc += r.amountOut;
             }
         }
     } else {
-        // Standard X/USDC: nur tokenA → USDC; tokenB ist bereits USDC.
-        // Gedeckelt auf coinsA wie im volatilePair-Zweig — betrifft z.B. cbBTC/USDC, das sich
-        // den Mint mit cbBTC/WBTC teilt.
-        const swapAmount = useCoinsOnly ? coinsA
+        // Standard X/USDC: nur die NICHT-USDC-Seite verkaufen, die andere ist schon USDC.
+        //
+        // 🔒 Welche Seite das ist, entscheidet der Mint (sellSideOf) — nicht die Annahme
+        // "tokenA ist der volatile Token". Bei usdcIsTokenA-Pools (NATIX/USDC, EURC/USDC,
+        // SPX/USDC) ist tokenA das USDC; der frühere feste Griff auf pool.tokenA schickte
+        // dort einen Tausch USDC→USDC an Jupiter, der ihn mit
+        // CIRCULAR_ARBITRAGE_IS_DISABLED ablehnte. Der Exit blieb hängen und das Kapital
+        // lag ungeschützt im Wallet (NATIX/USDC, 30.08.2026, ts_execution 126).
+        //
+        // Gedeckelt auf die entnommene Menge wie im volatilePair-Zweig — betrifft z.B.
+        // cbBTC/USDC, das sich den Mint mit cbBTC/WBTC teilt.
+        const { sell, sellIsA } = sellSideOf(pool);
+        const sellCoins = sellIsA ? coinsA : coinsB;
+        // Die andere Seite kam bereits als USDC aus der Position und wird nur addiert.
+        // Früher stand hier fest coinsB — bei vertauschten Seiten hätte das die
+        // Token-Menge der volatilen Seite als USDC verbucht (bei NATIX wären aus
+        // 125 277 Token ebenso viele USDC geworden).
+        const usdcCoins = sellIsA ? coinsB : coinsA;
+
+        const swapAmount = useCoinsOnly ? sellCoins
             : capToPosition(
-                pool.tokenA === WSOL_MINT
+                sell.mint === WSOL_MINT
                     ? await getUsableSolBalanceFresh(keypair.publicKey)
-                    : await getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA),
-                coinsA,
+                    : await getTokenBalanceFresh(keypair.publicKey, sell.mint, sell.decimals),
+                sellCoins,
               );
 
         if (swapAmount > 0) {
             const r = await adaptiveSwapToUsdc(
-                { mint: pool.tokenA === WSOL_MINT ? WSOL_MINT : pool.tokenA, decimals: pool.decimalsA },
-                swapAmount, keypair, connection, symA, logPrefix, slippageBps,
+                { mint: sell.mint, decimals: sell.decimals },
+                swapAmount, keypair, connection, sell.symbol, logPrefix, slippageBps,
             );
-            swappedUsdc = r.amountOut + coinsB; // coinsB ist bereits USDC
+            swappedUsdc = r.amountOut + usdcCoins;
         } else {
-            swappedUsdc = coinsB;
+            swappedUsdc = usdcCoins;
         }
     }
 
@@ -829,7 +854,10 @@ export async function executeTransferStep(pool, opts) {
 
     const keypair    = getKeypair();
     const connection = getConnection();
-    const [symA, symB] = pool.pair.split('/');
+    // Symbole über poolSides() — reine Logausgabe hier, aber dieselbe Falle wie oben
+    // (Paarname ≠ tokenA/tokenB bei usdcIsTokenA-Pools, siehe pool-tokens.js).
+    const { a: sideA, b: sideB } = poolSides(pool);
+    const symA = sideA.symbol, symB = sideB.symbol;
 
     let lastTxHash = null;
 

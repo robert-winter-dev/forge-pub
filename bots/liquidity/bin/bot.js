@@ -32,10 +32,10 @@ import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition
          carryEntryToRebalancedPosition,
          insertCapitalFlow, clearPositionSnapshots,
          insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet,
-         getIncompleteTsExecutions } from '../lib/db.js';
+         getIncompleteTsExecutions, latestStopValueUsd } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
 import { calculateRange }  from '../lib/range.js';
-import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
+import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig, applyRangeStepOffset } from '../lib/range-advisor.js';
 import { getKeypair, getSolBalance, getSolBalanceFresh, getUsdcBalance, getUsdcBalanceFresh, assertSufficientSol, getUsableSolBalance, getTokenBalance, getTokenBalanceFresh, getUsableSolBalanceFresh, getConnection, getTxFee } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
 import * as notify         from '../lib/notify.js';
@@ -47,7 +47,7 @@ import { shouldTriggerTs, executeTs, resumePendingTsExecutions, updateHwm, proce
 import { runFastStopRound } from '../lib/fast-stop-check.js';
 import { shouldTriggerTvlProtection, executeTvlProtection, resumePendingTvlExecutions } from '../lib/tvl-protection.js';
 import { processPoolRetirements, resumePendingRetireExecutions } from '../lib/pool-retirement.js';
-import { checkClmmRatio, CLMM_RATIO_MAX_PCT, getTokenUsdPrice } from '../lib/deposit-lib.js';
+import { checkClmmRatio, CLMM_RATIO_MAX_PCT, getTokenUsdPrice, reopenTargetCapitalUsd, pairBalanceSwapPlan } from '../lib/deposit-lib.js';
 import { foreignExitBlock } from '../lib/exit-reservation.js';
 import { assertTypeInvariants } from '../lib/invariants.js';
 import { syncDashboard }   from '../lib/sync.js';
@@ -75,6 +75,7 @@ import { refreshReferencePrices } from '../lib/reference-prices.js';
 import { settle } from '../lib/settle-promise.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
+import { getStrategy, rangeStepOffsetForPool, rangeHintsForPool } from '../../../lib/strategies.js';
 
 const __bot_dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -130,6 +131,23 @@ function _getFeeClaimSettings(poolId) {
 
 function isAutoCompoundEnabled(poolId) {
     return _getFeeClaimSettings(poolId)?.enabled !== false;
+}
+
+/**
+ * Liest die aktive Strategie (LIQ#0369/#0371) aus `strategy_state` in settings.db.
+ * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
+ * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
+ * Gleiches Muster wie `_loadActiveStrategyId()` in cleanup.js.
+ */
+function _loadActiveStrategyId() {
+    try {
+        const sdb = new Database(SETTINGS_DB_PATH, { readonly: true, fileMustExist: true });
+        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
+        sdb.close();
+        return row?.strategy_id ?? null;
+    } catch {
+        return null;
+    }
 }
 
 /**
@@ -409,6 +427,21 @@ async function retryStartupCall(fn, label, attempts = 20, delayMs = 30_000) {
 async function fetchInactivePoolStats(pools) {
     for (const pool of pools) {
         if (!running) break;
+
+        // Dashboard-Export zwischendurch: Fällt für viele Pools gleichzeitig die
+        // STATS_INTERVAL_MS-Schwelle, läuft diese Schleife am Stück ungebremst
+        // durch (ein `await` pro Pool, keine Pause) und blockiert damit die
+        // periodischen Export-Checks der Haupt-Loop (Zeile ~4210/4316) für die
+        // gesamte Sweep-Dauer. Live beobachtet (LIQ#0517): 10+ Minuten ohne
+        // "[sync] data.json exportiert", während der Bot ununterbrochen inaktive
+        // Pools abarbeitete — das Dashboard zeigte in dieser Zeit einen veralteten
+        // Stand (u.a. den Trailing-Stop-Hammer für einen Pool, dessen Trailing
+        // Stop zwischenzeitlich bereits deaktiviert worden war).
+        if (Date.now() - lastExport.ts >= config.exportIntervalMs) {
+            await syncDashboard();
+            lastExport.ts = Date.now();
+        }
+
         const now = Date.now();
         if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
             try {
@@ -888,13 +921,35 @@ async function processPool(pool, adapter, preloadedState = null) {
  * des anderen Tokens via Jupiter getauscht. Fix 2 (dynamischer Anker in orca.js)
  * dient als Sicherheitsnetz falls der Swap scheitert.
  *
- * Nur für Standard-Pools (tokenB = USDC). Überspringt usdcIsTokenA und volatilePair.
+ * Für Standard-Pools (tokenB = USDC) direkt hier; für usdcIsTokenA-Pools
+ * (tokenA = USDC) delegiert an das gespiegelte Pendant _preSwapUsdcIsTokenA.
+ * Überspringt weiterhin volatilePair (dafür ist _balanceWalletForPair zuständig).
  *
  * @param {Object} pool          Pool-Konfiguration aus pools.json
  * @param {number} currentPrice  Aktueller Preis (tokenA in tokenB, z.B. BTC-Kurs in USDC)
  */
+/**
+ * Reopen kurz nach einem Close derselben Position? Dann stellt die Einzahlung
+ * bestehendes Kapital wieder her (kein frischer Zufluss) und die Max-Einzahlung
+ * pro Aktion greift nicht.
+ *
+ * Bug-Historie: Ausgenommen war früher nur der manuelle `close-and-reopen`
+ * (note='manual-deposit'), wodurch automatische Rebalances fälschlich wie
+ * Cleanup-Erstdeposits gekappt wurden und Bestandskapital schrumpfte
+ * (TSLAx/USDC 693 → 100 USDC, 2026-07-08). Deshalb zählt heute jeder Close
+ * der letzten 30 Minuten, egal aus welchem Anlass.
+ */
+function _isPreservationReopen(poolId) {
+    return !!db.prepare(
+        `SELECT 1 FROM transactions
+          WHERE pool_id = ? AND type = 'close_position'
+            AND created_at > ? LIMIT 1`
+    ).get(poolId, Date.now() - 30 * 60_000);
+}
+
 async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA = 0, baseB = 0) {
-    if (pool.usdcIsTokenA || pool.volatilePair) return;
+    if (pool.volatilePair) return;
+    if (pool.usdcIsTokenA) return _preSwapUsdcIsTokenA(pool, currentPrice, targetCapital, baseA, baseB);
 
     // 🔒 LIQ#0316: Gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool
     // (geteilter Mint), kein Pre-Swap — sonst würde fremdes Exit-Kapital hier verswapt.
@@ -926,30 +981,19 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
     const availA = Math.max(0, tokenABal - baseA);
     const availB = Math.max(0, tokenBBal - baseB);
 
-    // Zielkapital: bevorzugt das durch den Rebalance freigesetzte Kapital
-    // (targetCapital). Fallback auf letzte DB-Position (inkl. bereits geschlossener).
-    // Sicherheitsnetz: war die letzte Position winzig (< 5 USDC) und das verfügbare
-    // Wallet hat deutlich mehr, wird das Wallet genutzt.
-    let halfCapital;
-    if (targetCapital != null && targetCapital > 0) {
-        halfCapital = targetCapital / 2;
-    } else {
-        const lastPos = db.prepare(
+    // Zielkapital: exakt dieselbe Rechnung wie im gleich folgenden _openNewPosition
+    // (LIQ#0344) — die Reihenfolge der Deckel steht in reopenTargetCapitalUsd().
+    const capital = reopenTargetCapitalUsd({
+        targetCapitalUsd:       targetCapital,
+        lastPositionCapitalUsd: db.prepare(
             `SELECT capital_usdc FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1`
-        ).get(pool.id);
-        const MIN_REOPEN_CAPITAL = 5.0;
-        const _histCapPre   = lastPos?.capital_usdc ?? availB;
-        // LIQ#0341: _histCapPre kann aus einer längst geschlossenen Position stammen,
-        // deren Kapital der Cleanup inzwischen in andere Pools verteilt hat (Wallet hat
-        // dann viel weniger als _histCapPre). Ohne Deckel auf das real verfügbare Kapital
-        // versucht der Pre-Swap, das gesamte Wallet auf ein 50/50-Ziel bezogen auf den
-        // stale Wert zu bringen und verswapt praktisch die komplette verfügbare Seite.
-        const totalAvailUsd = availB + availA * currentPrice;
-        const effectiveCapPre = (_histCapPre < MIN_REOPEN_CAPITAL && availB > _histCapPre)
-            ? availB
-            : Math.min(_histCapPre, totalAvailUsd);
-        halfCapital = effectiveCapPre / 2;
-    }
+        ).get(pool.id)?.capital_usdc ?? null,
+        quoteSideUsd:           availB,
+        walletTotalUsd:         availB + availA * currentPrice,
+        maxDepositUsd:          getCleanupMaxDepositFromEnv(),
+        isPreservationReopen:   _isPreservationReopen(pool.id),
+    });
+    const halfCapital = capital / 2;
     if (!halfCapital) return;
 
     // 50/50-Soll berechnen
@@ -991,6 +1035,10 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
                 poolId: pool.id, type: 'swap',
                 amountA: swapAmount, amountB: amountOut,
                 usdValue: swapAmount,   // tokenB = USDC → Eingabe ist der USD-Wert
+                // usd_value_in/out (LIQ#0376 Teil 2): USDC exakt (Eingang), tokenA über
+                // denselben currentPrice, mit dem oben targetA/walletTotalUsd gerechnet wurden.
+                usdValueIn:  swapAmount,
+                usdValueOut: amountOut * currentPrice,
                 txHash: txSignature,
                 txFeeSol: preSwapFee, note: `pre-swap ${symB}→${symA}`,
             });
@@ -1032,10 +1080,153 @@ async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA 
                 poolId: pool.id, type: 'swap',
                 amountA: swapAmount, amountB: amountOut,
                 usdValue: amountOut,    // tokenB = USDC → Ausgabe ist der USD-Wert
+                // usd_value_in/out (LIQ#0376 Teil 2): tokenA (Eingang) über denselben
+                // currentPrice, USDC (Ausgang) exakt.
+                usdValueIn:  swapAmount * currentPrice,
+                usdValueOut: amountOut,
                 txHash: txSignature,
                 txFeeSol: preSwapFee, note: `pre-swap ${symA}→${symB}`,
             });
             console.log(`[bot:${pool.id}] Pre-Swap OK: ${swapAmount.toFixed(8)} ${symA} → ${amountOut.toFixed(2)} ${symB} TX=${txSignature}`);
+        } catch (err) {
+            console.error(`[bot:${pool.id}] Pre-Swap fehlgeschlagen: ${err.message} — öffne trotzdem (Fix 2 als Fallback)`);
+        }
+    }
+}
+
+/**
+ * Gespiegeltes Pendant zu _preSwapIfNeeded für usdcIsTokenA-Pools (tokenA = USDC,
+ * tokenB = volatiles Asset, z.B. EURC/SPX/NATIX). Gleiche Baseline-Logik (Topf A
+ * bleibt unangetastet) und dieselben Schwellen — nur mit vertauschten Token-Rollen
+ * und dem Preis-Kehrwert aus _calcUsdValue (usdcIsTokenA: Wert = a + b/price, d.h.
+ * "volatiles Token je USDC" = price statt "USDC je volatiles Token").
+ *
+ * LIQ#0346: Ohne dieses Pendant brach _preSwapIfNeeded für usdcIsTokenA-Pools sofort
+ * ab. Nach einem einseitigen Rebalance-Close (nur USDC zurück, kein Volatil-Token,
+ * z.B. weil der Preis über die obere Range-Grenze lief) blieb das freigesetzte
+ * Kapital ungenutzt in der Wallet liegen — der Reopen konnte nur die vorhandenen
+ * Restbestände deployen und landete als Tiny-Position.
+ */
+async function _preSwapUsdcIsTokenA(pool, currentPrice, targetCapital, baseA, baseB) {
+    // 🔒 LIQ#0316: Gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool
+    // (geteilter Mint), kein Pre-Swap — sonst würde fremdes Exit-Kapital hier verswapt.
+    const block = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
+    if (block.blocked) {
+        console.log(`[bot:${pool.id}] Pre-Swap übersprungen: ${block.reason}`);
+        return;
+    }
+
+    const [symA, symB] = pool.pair.split('/');
+    const keypair = getKeypair();
+
+    // Frische Balances lesen (wichtig: nach eventuell vorherigem Position-Close)
+    const [usdcBal, volatileBal] = await Promise.all([
+        settle(getTokenBalanceFresh(keypair.publicKey, pool.tokenA, pool.decimalsA)),
+        settle(getTokenBalanceFresh(keypair.publicKey, pool.tokenB, pool.decimalsB)),
+    ]);
+
+    // Topf-A-Erhalt: nur Wallet-Bestand ÜBER der Baseline darf umgeschichtet werden.
+    const availUsdc     = Math.max(0, usdcBal - baseA);
+    const availVolatile = Math.max(0, volatileBal - baseB);
+
+    // Zielkapital: dieselbe Rechnung wie im Standard-Zweig (reopenTargetCapitalUsd).
+    const capital = reopenTargetCapitalUsd({
+        targetCapitalUsd:       targetCapital,
+        lastPositionCapitalUsd: db.prepare(
+            `SELECT capital_usdc FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1`
+        ).get(pool.id)?.capital_usdc ?? null,
+        quoteSideUsd:           availUsdc,
+        walletTotalUsd:         availUsdc + (currentPrice > 0 ? availVolatile / currentPrice : 0),
+        maxDepositUsd:          getCleanupMaxDepositFromEnv(),
+        isPreservationReopen:   _isPreservationReopen(pool.id),
+    });
+    const halfCapital = capital / 2;
+    if (!halfCapital) return;
+
+    // 50/50-Soll berechnen (price = volatiles Token je USDC, siehe _calcUsdValue)
+    const targetUsdc     = halfCapital;
+    const targetVolatile = halfCapital * currentPrice;
+
+    // Imbalance prüfen — Schwellwert: < 50% des Ziels → Swap nötig.
+    const THRESHOLD = 0.5;
+    const ratioUsdc     = targetUsdc > 0 ? availUsdc / targetUsdc : 1;
+    const ratioVolatile = targetVolatile > 0 ? availVolatile / targetVolatile : 1;
+
+    if (ratioUsdc >= THRESHOLD && ratioVolatile >= THRESHOLD) return;  // kein Handlungsbedarf
+
+    if (ratioVolatile < THRESHOLD) {
+        // Zu wenig Volatil-Token → USDC → Volatil tauschen (nur verfügbares USDC)
+        const deficitVolatile = targetVolatile - availVolatile;
+        const usdcNeeded      = currentPrice > 0 ? deficitVolatile / currentPrice : 0;
+        const swapAmount      = Math.min(usdcNeeded, availUsdc * 0.99);
+
+        if (swapAmount < 1.0) {
+            console.log(`[bot:${pool.id}] Pre-Swap: USDC-Betrag zu klein (${usdcNeeded.toFixed(2)} USDC) – überspringe`);
+            return;
+        }
+        console.log(`[bot:${pool.id}] Pre-Swap: ${swapAmount.toFixed(2)} ${symA} → ${symB} (Imbalance: ${(ratioVolatile * 100).toFixed(1)}% von Ziel)`);
+        try {
+            const { amountOut, txSignature } = await swapTokens({
+                inputMint:      pool.tokenA,
+                outputMint:     pool.tokenB,
+                inputDecimals:  pool.decimalsA,
+                outputDecimals: pool.decimalsB,
+                amount:         swapAmount,
+                wallet:         keypair,
+                connection:     getConnection(),
+            });
+            console.log(`[bot:${pool.id}] Pre-Swap OK: ${swapAmount.toFixed(2)} ${symA} → ${amountOut.toFixed(8)} ${symB} TX=${txSignature}`);
+            const preSwapFee = await getTxFee(txSignature);
+            insertTransaction(db, {
+                poolId: pool.id, type: 'swap',
+                amountA: swapAmount, amountB: amountOut,
+                usdValue: swapAmount,   // tokenA = USDC → Eingabe ist der USD-Wert
+                // usd_value_in/out (LIQ#0376 Teil 2): USDC exakt (Eingang), tokenB (Ausgang)
+                // über denselben currentPrice (= volatiles Token je USDC hier).
+                usdValueIn:  swapAmount,
+                usdValueOut: amountOut / currentPrice,
+                txHash: txSignature,
+                txFeeSol: preSwapFee, note: `pre-swap ${symA}→${symB}`,
+            });
+        } catch (err) {
+            console.error(`[bot:${pool.id}] Pre-Swap fehlgeschlagen: ${err.message} — öffne trotzdem (Fix 2 als Fallback)`);
+        }
+    } else {
+        // Zu wenig USDC → Volatil-Token → USDC tauschen (nur verfügbaren Volatil-Bestand)
+        const deficitUsdc       = targetUsdc - availUsdc;
+        const volatileNeeded    = deficitUsdc * currentPrice;
+        const volatileSwappable = availVolatile * 0.99;
+        const swapAmount        = Math.min(volatileNeeded, volatileSwappable);
+
+        const minSwapB = 1 / Math.pow(10, pool.decimalsB);
+        if (swapAmount < minSwapB * 100) {
+            console.log(`[bot:${pool.id}] Pre-Swap: ${symB}-Betrag zu klein (${volatileNeeded.toFixed(8)}) – überspringe`);
+            return;
+        }
+        console.log(`[bot:${pool.id}] Pre-Swap: ${swapAmount.toFixed(8)} ${symB} → ${symA} (Imbalance: ${(ratioUsdc * 100).toFixed(1)}% von Ziel)`);
+        try {
+            const { amountOut, txSignature } = await swapTokens({
+                inputMint:      pool.tokenB,
+                outputMint:     pool.tokenA,
+                inputDecimals:  pool.decimalsB,
+                outputDecimals: pool.decimalsA,
+                amount:         swapAmount,
+                wallet:         keypair,
+                connection:     getConnection(),
+            });
+            const preSwapFee = await getTxFee(txSignature);
+            insertTransaction(db, {
+                poolId: pool.id, type: 'swap',
+                amountA: amountOut, amountB: swapAmount,
+                usdValue: amountOut,    // tokenA = USDC → Ausgabe ist der USD-Wert
+                // usd_value_in/out (LIQ#0376 Teil 2): tokenB (Eingang) über denselben
+                // currentPrice, USDC (Ausgang) exakt.
+                usdValueIn:  swapAmount / currentPrice,
+                usdValueOut: amountOut,
+                txHash: txSignature,
+                txFeeSol: preSwapFee, note: `pre-swap ${symB}→${symA}`,
+            });
+            console.log(`[bot:${pool.id}] Pre-Swap OK: ${swapAmount.toFixed(8)} ${symB} → ${amountOut.toFixed(2)} ${symA} TX=${txSignature}`);
         } catch (err) {
             console.error(`[bot:${pool.id}] Pre-Swap fehlgeschlagen: ${err.message} — öffne trotzdem (Fix 2 als Fallback)`);
         }
@@ -1118,9 +1309,18 @@ async function _reconcileWalletIntoPosition(pool, adapter, newPosition, currentP
                 : inMint === pool.tokenA
                     ? _calcUsdValue(pool, db, currentPrice, amount, 0)
                     : _calcUsdValue(pool, db, currentPrice, 0, amount);
+            // usd_value_in/out (LIQ#0376 Teil 2): swapUsd ist hier bereits durchgehend der
+            // Eingangswert (immer `amount`, nie amountOut) — direkt übernehmen. Ausgangswert
+            // spiegelbildlich für amountOut/outMint, mit demselben currentPrice.
+            const swapUsdOut = outMint === USDC_FALLBACK_MINT
+                ? amountOut
+                : outMint === pool.tokenA
+                    ? _calcUsdValue(pool, db, currentPrice, amountOut, 0)
+                    : _calcUsdValue(pool, db, currentPrice, 0, amountOut);
             insertTransaction(db, {
                 poolId: pool.id, type: 'swap',
                 amountA: amount, amountB: amountOut, usdValue: swapUsd,
+                usdValueIn: swapUsd, usdValueOut: swapUsdOut,
                 txHash: txSignature, txFeeSol: fee, note: `reconcile-${label}`,
             });
             console.log(`[bot:${pool.id}] Reconcile-Swap (${label}): ${amount.toFixed(6)} → ${amountOut.toFixed(6)} TX=${txSignature}`);
@@ -1308,12 +1508,13 @@ async function _getAdvisedRange(pool, currentPrice, capitalUsdc) {
     try {
         const advice = await analyzePool(pool, db, { capitalUsdc });
         if (!advice) return null;
-        const rec  = advice.recommendation.rangePct;
+        const rawRec = advice.recommendation.rangePct;
+        const rec  = _applyStrategyRangeOffset(pool, rawRec);
         const net  = advice.rationale.optimalScore.netAprPct;
         const conf = advice.recommendation.confidence;
         const trend = advice.rationale.trend.direction;
         console.log(
-            `[advisor:${pool.id}] ±${rec}% | N-APR: ${net}% | Trend: ${trend} | Konfidenz: ${conf}`
+            `[advisor:${pool.id}] ±${rawRec}%${rec !== rawRec ? ` → Strategie ±${rec}%` : ''} | N-APR: ${net}% | Trend: ${trend} | Konfidenz: ${conf}`
         );
         return calculateRange(pool, currentPrice, { mode: 'fixed', fixedPct: rec }, db);
     } catch (err) {
@@ -1337,6 +1538,50 @@ function _nearestCandidateIndex(pct) {
 }
 
 /**
+ * Wendet den Stufenversatz der aktiven Strategie (LIQ#0371) auf eine rohe
+ * Advisor-Empfehlung an. Ohne aktive Strategie oder außerhalb ihres Geltungsbereichs:
+ * Identität, byte-genau (Entscheidung „Standard" in lib/strategies.js). Die eigentliche
+ * Ladder-Mathematik liegt in range-advisor.js (`applyRangeStepOffset`) — rein, ohne DB,
+ * und deshalb eigenständig testbar (bin/test-strategy-range-offset.js).
+ *
+ * 🔒 Aufgerufen an JEDER Stelle, an der `advice.recommendation.rangePct` gelesen wird
+ * (_getAdvisedRange, _advisorRebalanceCheck, _dailyAdvisorScan, _advisorRangeHintScan) —
+ * dieselbe reine Funktion auf denselben Rohwert angewendet liefert deterministisch
+ * dieselbe Zahl, ohne dass sich die vier Aufrufer Zustand teilen müssen. Das ist die
+ * Antwort auf LIQ#0371 Punkt (a): die Hysterese sieht dieselbe Zahl wie der tatsächlich
+ * angewendete Wert, weil beide durch denselben Filter laufen.
+ *
+ * @param {Object} pool
+ * @param {number} rawRangePct  advice.recommendation.rangePct (roh, ohne Versatz)
+ * @returns {number}
+ */
+function _applyStrategyRangeOffset(pool, rawRangePct) {
+    const strategyId = _loadActiveStrategyId();
+    if (strategyId == null) return rawRangePct; // "Standard" — keine Wirkung
+    const strategy = getStrategy(strategyId);
+    const offset = rangeStepOffsetForPool(strategy, pool);
+    return applyRangeStepOffset(pool, rawRangePct, offset);
+}
+
+/**
+ * Erlaubt die aktive Strategie für diesen Pool überhaupt einen Range-Hinweis bzw. eine
+ * automatische Range-Änderung durch den Advisor (LIQ#0461)? Ohne aktive Strategie oder
+ * außerhalb ihres Geltungsbereichs: `true` — byte-genau das heutige Verhalten.
+ *
+ * Aufgerufen an beiden Stellen, die eine solche Empfehlung in eine Aktion (Hinweis oder
+ * Schreiben) umsetzen können: `_advisorRebalanceCheck()` und `_advisorRangeHintScan()`.
+ *
+ * @param {Object} pool
+ * @returns {boolean}
+ */
+function _rangeHintsEnabledForPool(pool) {
+    const strategyId = _loadActiveStrategyId();
+    if (strategyId == null) return true; // "Standard" — keine Wirkung
+    const strategy = getStrategy(strategyId);
+    return rangeHintsForPool(strategy, pool);
+}
+
+/**
  * Konsultiert den Advisor beim Rebalancing und entscheidet per Hysterese, ob die
  * konfigurierte Range geändert wird. Schreibt das Ergebnis in advisor_decisions.
  *
@@ -1350,6 +1595,10 @@ function _nearestCandidateIndex(pct) {
 async function _advisorRebalanceCheck(pool, capitalUsdc) {
     const currentPct = pool.rangeOverride?.fixedPct ?? null;
     if (currentPct == null) return null; // ohne rangeOverride keine Advisor-Steuerung
+    if (!_rangeHintsEnabledForPool(pool)) {
+        console.log(`[advisor:${pool.id}] Rebalance-Check: Strategie deklariert rangeHints:false — kein automatisches Nachschärfen (LIQ#0461)`);
+        return null;
+    }
 
     let advice;
     try {
@@ -1360,7 +1609,7 @@ async function _advisorRebalanceCheck(pool, capitalUsdc) {
     }
     if (!advice) return null;
 
-    const recPct      = advice.recommendation.rangePct;
+    const recPct      = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
     const confidence  = advice.recommendation.confidence;
     const netRec      = advice.rationale.optimalScore?.netAprPct ?? null;
     const netCur      = advice.rationale.currentScore?.netAprPct ?? null;
@@ -1567,7 +1816,7 @@ async function _dailyAdvisorScan(activePools) {
         }
         if (!advice) continue;
 
-        const recPct     = advice.recommendation.rangePct;
+        const recPct     = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
         const confidence = advice.recommendation.confidence;
         if (confidence === 'low') continue;
 
@@ -1686,6 +1935,7 @@ async function _advisorRangeHintScan(activePools) {
 
     for (const pool of activePools) {
         if (pool.rangeOverride?.locked === true) { _rangeHintState.delete(pool.id); continue; }
+        if (!_rangeHintsEnabledForPool(pool)) { _rangeHintState.delete(pool.id); continue; } // LIQ#0461
 
         // Aktuelle Range bestimmen: Override-fixedPct, sonst reale Position-Ticks.
         let currentPct = pool.rangeOverride?.fixedPct ?? null;
@@ -1709,7 +1959,7 @@ async function _advisorRangeHintScan(activePools) {
         }
         if (!advice) continue;
 
-        const recPct     = advice.recommendation.rangePct;
+        const recPct     = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
         const confidence = advice.recommendation.confidence;
         if (confidence === 'low') { _rangeHintState.delete(pool.id); continue; }
 
@@ -2057,6 +2307,7 @@ async function _openNewPosition(pool, adapter) {
               `(kein Ziel bekannt${floorNote}) – kein Pre-Swap, Kapital reicht nicht für sinnvolle Position.`;
         console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: ${reason}`);
         await notify.error(pool.displayPair ?? pool.pair, new Error(`Position öffnen: ${reason}`));
+        _recordOpenPositionAbort(pool, reason);
         return null;
     }
 
@@ -2075,6 +2326,11 @@ async function _openNewPosition(pool, adapter) {
     const range = (await _getAdvisedRange(pool, currentPrice, checkTargetUsdc ?? 0))
                ?? calculateRange(pool, currentPrice, effectiveRange, db);
     let amountA, amountB;
+    // > 0 wenn ein CLEANUP_MAX_DEPOSIT-Deckel gegriffen hat → senkt auch die
+    // Tiny-Position-Guard-Referenz (deklariert hier, weil der Standard-Zweig unten
+    // den Deckel selbst erkennen muss statt sich auf den generischen Block danach
+    // zu verlassen, siehe LIQ#0344-Kommentar dort).
+    let depositCapApplied = 0;
 
     // Wallet-Cap: Orca-DEFAULT_SLIPPAGE = 1% → tokenMax wird mit (1+slippage) berechnet.
     // Wenn amountX = walletX, fordert die TX walletX × 1.01 → InsufficientFunds (0x1).
@@ -2094,6 +2350,7 @@ async function _openNewPosition(pool, adapter) {
             await notify.error(pool.displayPair ?? pool.pair,
                 new Error(`Position öffnen: Pre-Swap fehlgeschlagen: ${balanceRes.reason}. ` +
                           `Kapital im Wallet, nächster Bot-Tick versucht erneut.`));
+            _recordOpenPositionAbort(pool, `Wallet-Balance fehlgeschlagen: ${balanceRes.reason}`);
             return null;
         }
         // Cap auf targetUsdc – verhindert dass überschüssiges Wallet-Kapital
@@ -2133,16 +2390,35 @@ async function _openNewPosition(pool, adapter) {
             ? await getUsableSolBalanceFresh(getKeypair().publicKey)
             : await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA);
         const tokenBBal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB);
-        const _histCapB   = lastPos?.capital_usdc ?? tokenBBal;
-        // LIQ#0341: _histCapB gedeckelt auf real verfügbares Wallet-Kapital (siehe
-        // _preSwapIfNeeded) — sonst reißt der Split ein Ziel an, das größer ist als das,
+        // LIQ#0344: dieselbe Rechnung wie der Pre-Swap oben — inklusive Max-Einzahlung.
+        // Die Kappung erst weiter unten (über `scale`) vorzunehmen reichte nicht: der
+        // Pre-Swap hatte da längst zum ungekappten Ziel eingekauft.
+        // LIQ#0341 (in reopenTargetCapitalUsd): Ziel gedeckelt auf real verfügbares
+        // Wallet-Kapital — sonst reißt der Split ein Ziel an, das größer ist als das,
         // was seit dem letzten Close noch im Wallet liegt (Vorfall pub1 27.08.2026,
         // SOL/USDC: 217 USDC stale Ziel vs. 93 USDC real verfügbar → 0,89 USDC Mini-Position).
-        const totalAvailUsdB = tokenABal * currentPrice + tokenBBal;
-        const effectiveCapB = (_histCapB < MIN_REOPEN_CAPITAL && tokenBBal > _histCapB)
-            ? tokenBBal
-            : Math.min(_histCapB, totalAvailUsdB);
-        const halfCapital = effectiveCapB / 2;
+        const reopenArgsStd = {
+            lastPositionCapitalUsd: lastPos?.capital_usdc ?? null,
+            quoteSideUsd:           tokenBBal,
+            walletTotalUsd:         tokenABal * currentPrice + tokenBBal,
+            isPreservationReopen:   _isPreservationReopen(pool.id),
+            minReopenCapitalUsd:    MIN_REOPEN_CAPITAL,
+        };
+        const maxDepositUsdcStd = _isPreservationReopen(pool.id) ? 0 : getCleanupMaxDepositFromEnv();
+        // Ungekapptes Ziel separat ermitteln, um zu erkennen ob der Deckel unten
+        // tatsächlich gegriffen hat (siehe depositCapApplied-Kommentar am Guard).
+        const uncappedTargetStd = reopenTargetCapitalUsd({ ...reopenArgsStd, maxDepositUsd: 0 });
+        const halfCapital = reopenTargetCapitalUsd({ ...reopenArgsStd, maxDepositUsd: maxDepositUsdcStd }) / 2;
+        // 🔒 Vorfall 31.08.2026 (business, liq-btc-usdc): Reaktivierung mit
+        // CLEANUP_MAX_DEPOSIT=200 USDC gegen 30 % des historischen Ziels (1769,62 USDC,
+        // aus der vor 6 Tagen geschlossenen Position) verglichen → Guard griff fälschlich
+        // 3× und deaktivierte den Pool, obwohl 2.402,98 USDC im Wallet lagen und der
+        // Deckel selbst absichtlich klein war (gewollte schrittweise Reaktivierung).
+        // Ohne diese Erkennung bleibt der generische Cap-Block unten für diesen Zweig
+        // wirkungslos (LIQ#0344-Kommentar), weil amountA/amountB hier bereits gekappt sind.
+        if (maxDepositUsdcStd > 0 && maxDepositUsdcStd < uncappedTargetStd) {
+            depositCapApplied = maxDepositUsdcStd;
+        }
         amountA = Math.min(halfCapital / currentPrice, tokenABal * WALLET_CAP);
         amountB = Math.min(halfCapital, tokenBBal * WALLET_CAP);
     }
@@ -2159,26 +2435,22 @@ async function _openNewPosition(pool, adapter) {
     // Zufluss, nicht kappen. Bug-Historie: vor diesem Fix wurde nur 'manual-deposit'
     // ausgenommen, wodurch automatische Rebalances fälschlich wie Cleanup-Erstdeposits
     // gekappt wurden und Bestandskapital schrumpfte (TSLAx/USDC 693→100 USDC, 2026-07-08).
-    const maxDepositUsdc = getCleanupMaxDepositFromEnv();
-    let depositCapApplied = 0;   // > 0 wenn gekappt → senkt auch die Tiny-Position-Guard-Referenz
+    // LIQ#0344: Für Standard-Pools ist der Deckel oben schon in reopenTargetCapitalUsd()
+    // eingerechnet (der Pre-Swap muss ihn kennen) und depositCapApplied wird dort bereits
+    // gesetzt (siehe Vorfall 31.08.2026 oben) — hier bleibt der Block als Netz für die
+    // volatilePair- und usdcIsTokenA-Zweige stehen und ist im Standardfall ein No-Op.
+    const maxDepositUsdc = _isPreservationReopen(pool.id) ? 0 : getCleanupMaxDepositFromEnv();
     if (maxDepositUsdc > 0) {
-        const isPreservationReopen = !!db.prepare(
-            `SELECT 1 FROM transactions
-              WHERE pool_id = ? AND type = 'close_position'
-                AND created_at > ? LIMIT 1`
-        ).get(pool.id, Date.now() - 30 * 60_000);
-        if (!isPreservationReopen) {
-            const committedUsd = _calcUsdValue(pool, db, currentPrice, amountA, amountB);
-            if (committedUsd > maxDepositUsdc) {
-                const scale = maxDepositUsdc / committedUsd;
-                amountA *= scale;
-                amountB *= scale;
-                depositCapApplied = maxDepositUsdc;
-                console.log(
-                    `[bot:${pool.id}] Max-Einzahlung aktiv: Deposit auf ${maxDepositUsdc.toFixed(2)} USDC ` +
-                    `gekappt (von ${committedUsd.toFixed(2)} USDC) – Rest bleibt liquide für nächsten Cleanup-Zyklus`
-                );
-            }
+        const committedUsd = _calcUsdValue(pool, db, currentPrice, amountA, amountB);
+        if (committedUsd > maxDepositUsdc) {
+            const scale = maxDepositUsdc / committedUsd;
+            amountA *= scale;
+            amountB *= scale;
+            depositCapApplied = maxDepositUsdc;
+            console.log(
+                `[bot:${pool.id}] Max-Einzahlung aktiv: Deposit auf ${maxDepositUsdc.toFixed(2)} USDC ` +
+                `gekappt (von ${committedUsd.toFixed(2)} USDC) – Rest bleibt liquide für nächsten Cleanup-Zyklus`
+            );
         }
     }
 
@@ -2199,6 +2471,7 @@ async function _openNewPosition(pool, adapter) {
     if (!guardOpen.ok) {
         console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: ${guardOpen.reason}`);
         await notify.error(pool.displayPair ?? pool.pair, new Error(`Position öffnen: ${guardOpen.reason}`));
+        _recordOpenPositionAbort(pool, guardOpen.reason);
         return null;
     }
 
@@ -2590,59 +2863,112 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
             console.warn(`[bot:${pool.id}] Portfolio-Refresh nach Close fehlgeschlagen (ignoriert): ${err.message}`);
         }
     } catch (err) {
-        // Transiente Orca-Fehler: lösen sich im nächsten Zyklus selbst, kein Telegram-Alarm nötig.
-        // 0x177f = LiquidityUnderflow (stale RPC-Daten)
-        // 0x1782 = LiquidityTooHigh   (Preis-Tick-Grenze, selbstlösend)
-        // [object Object]: Orca common-sdk wraps Plain-Object TX-Errors via new Error(obj.toString())
-        //                  → immer transient (Slippage/Blockhash), selbstlösend.
-        const msg = typeof err.message === 'string' ? err.message : '';
-        const isTransient =
-            err.name === 'TransactionExpiredBlockheightExceededError' ||
-            msg.includes('Blockhash not found') ||
-            msg.includes('custom program error: 0x177f') ||
-            msg.includes('custom program error: 0x1782') ||
-            msg === '[object Object]';
-        if (isTransient) {
-            console.warn(`[bot:${pool.id}] closePosition transient (wird im nächsten Zyklus wiederholt): ${msg.split('\n')[0] || '(Details nicht lesbar)'}`);
-        } else {
-            const fails = (_closePositionFailCount.get(pool.id) ?? 0) + 1;
-            _closePositionFailCount.set(pool.id, fails);
-            if (fails >= 2) {
-                console.error(`[bot:${pool.id}] closePosition Fehler (${fails}× in Folge): ${msg || String(err)}`);
-                await notify.error(pool.displayPair ?? pool.pair, err);
-            } else {
-                console.warn(`[bot:${pool.id}] closePosition Fehler (1/2 – warte auf Bestätigung im nächsten Zyklus): ${msg.split('\n')[0] || String(err)}`);
-            }
-        }
+        // 🔒 Teilfehlschlag (LIQ#0348, analog closePositionOrRescue() in exit-finalizer.js
+        // für die vier Exit-Module Trailing-Stop/Score-Limit/TVL-Schutz/Retirement): Ist
+        // die Entnahme gelandet, hat orca.js's closePosition() `err.partialExit` gesetzt
+        // (decreaseTxHash + entnommene Mengen) — das Kapital liegt im Wallet, nur der
+        // NFT-Burn scheiterte (z.B. Stale-Read 0x1775, auch nach dem internen Retry dort).
+        //
+        // Bis hierher wartete der Rebalance-Pfad in diesem Fall auf einen ZUFÄLLIGEN
+        // Folge-Trigger (z.B. das nächste Drift-Rebalance), der die Position erneut
+        // anfasst und den Burn dabei nebenbei nachholt — das dauerte im Beleg-Fall
+        // (ZEC/USDC, forge-pub1, 30.08.2026) 2,5 Stunden und löste zwischenzeitlich die
+        // "Auszahlung noch nicht verbucht"-Meldung des Kapitalabgleichs aus, weil weder
+        // eine `close_position`-Zeile noch `positions.closed_at` gesetzt war.
+        //
+        // Jetzt gilt wie bei den vier Exit-Modulen: Kapital zuerst. Sofort buchen und die
+        // Position sofort als geschlossen markieren — das leere NFT bleibt on-chain liegen
+        // und wird vom täglichen Zombie-Cron abgeräumt (bindet nur ~0,002 SOL Rent). Das
+        // Rebalancing läuft direkt im selben Zyklus weiter, statt auf den nächsten zu warten.
+        if (err.partialExit) {
+            const { amountA: partialA, amountB: partialB, decreaseTxHash } = err.partialExit;
+            closeAmountA = partialA;
+            closeAmountB = partialB;
+            closeTxHash  = decreaseTxHash;
 
-        // Reconcile nach fehlgeschlagenem Close: Der vorangehende decreaseLiquidity kann
-        // bereits erfolgreich gewesen sein (Tokens sind ins Wallet geflossen), während der
-        // NFT-Burn scheiterte. Dann steht die Position on-chain mit REDUZIERTER Liquidität,
-        // die DB/der Snapshot zeigen aber noch den alten vollen Wert → Doppel-Count
-        // (Position-Altwert + freigesetzte Wallet-Tokens gleichzeitig). Genau das hat am
-        // 2026-06-28 den 6.999-Spike + Phantom-PnL ausgelöst, weil der stündliche Cleanup
-        // die freigesetzten Tokens später als Neukapital wieder einzahlte.
-        // Fix: sofort frischen On-Chain-Snapshot schreiben, damit die reduzierte Liquidität
-        // (und positions.liquidity) der Wahrheit entspricht. Fehler hier dürfen den Bot-Tick
-        // nicht abbrechen.
-        try {
-            const reconState = await adapter.getPositionState(pool, position.nft_mint, {
-                tickLowerIndex: position.tick_lower,
-                tickUpperIndex: position.tick_upper,
+            const closePrice = getPoolStats(db, pool.id, 1)[0]?.price ?? null;
+            const closeUsdValue = closePrice != null
+                ? _calcUsdValue(pool, db, closePrice, closeAmountA, closeAmountB)
+                : null;
+
+            closeFee = await getTxFee(closeTxHash).catch(() => null);
+            insertTransaction(db, {
+                poolId: pool.id, type: 'close_position',
+                amountA: closeAmountA, amountB: closeAmountB, usdValue: closeUsdValue,
+                txHash: closeTxHash, txFeeSol: closeFee, note: 'rebalance (NFT offen)',
             });
-            writePositionSnapshotFromState(db, pool, position, reconState, reconState.currentPrice);
-            await refreshAfterAction(db, { log: m => console.log(`[bot:${pool.id}] ${m}`) });
-            console.log(`[bot:${pool.id}] Reconcile nach Close-Fehler: On-Chain-Liquidität ${reconState.liquidity} übernommen`);
-        } catch (reconErr) {
-            console.warn(`[bot:${pool.id}] Reconcile nach Close-Fehler fehlgeschlagen (ignoriert): ${reconErr.message}`);
-        }
+            closePosition(db, position.id, closeTxHash);
+            const partialMsg = typeof err.message === 'string' ? err.message.split('\n')[0] : String(err);
+            console.warn(
+                `[bot:${pool.id}] 🔒 Position-Close: NFT-Burn gescheitert (${partialMsg}), `
+                + `Kapital ist trotzdem im Wallet (TX=${closeTxHash}) — sofort gebucht, Rebalance läuft weiter.`
+            );
 
-        // Cleanup sperren: decreaseLiquidity kann bereits Tokens ins Wallet freigesetzt haben.
-        // Solange das Rebalancing nicht sauber abgeschlossen ist, darf der Cleanup diese
-        // Tokens NICHT als Neukapital einzahlen (sonst Phantom-Kapital). Wird beim nächsten
-        // erfolgreichen Close gelöscht; Auto-Verfall nach 90 Min.
-        setRebalancePendingFlag(pool.id);
-        return;
+            _closePositionFailCount.delete(pool.id); // Kapital gesichert und gebucht → kein Fehlerfall
+            clearRebalancePendingFlag(pool.id);
+
+            try {
+                await refreshAfterAction(db, { log: msg => console.log(`[bot:${pool.id}] ${msg}`) });
+            } catch (refreshErr) {
+                console.warn(`[bot:${pool.id}] Portfolio-Refresh nach Close fehlgeschlagen (ignoriert): ${refreshErr.message}`);
+            }
+            // Kein return — weiter zu Schritt 3 (neue Position eröffnen), das Kapital
+            // steht bereits im Wallet.
+        } else {
+            // Transiente Orca-Fehler: lösen sich im nächsten Zyklus selbst, kein Telegram-Alarm nötig.
+            // 0x177f = LiquidityUnderflow (stale RPC-Daten)
+            // 0x1782 = LiquidityTooHigh   (Preis-Tick-Grenze, selbstlösend)
+            // [object Object]: Orca common-sdk wraps Plain-Object TX-Errors via new Error(obj.toString())
+            //                  → immer transient (Slippage/Blockhash), selbstlösend.
+            const msg = typeof err.message === 'string' ? err.message : '';
+            const isTransient =
+                err.name === 'TransactionExpiredBlockheightExceededError' ||
+                msg.includes('Blockhash not found') ||
+                msg.includes('custom program error: 0x177f') ||
+                msg.includes('custom program error: 0x1782') ||
+                msg === '[object Object]';
+            if (isTransient) {
+                console.warn(`[bot:${pool.id}] closePosition transient (wird im nächsten Zyklus wiederholt): ${msg.split('\n')[0] || '(Details nicht lesbar)'}`);
+            } else {
+                const fails = (_closePositionFailCount.get(pool.id) ?? 0) + 1;
+                _closePositionFailCount.set(pool.id, fails);
+                if (fails >= 2) {
+                    console.error(`[bot:${pool.id}] closePosition Fehler (${fails}× in Folge): ${msg || String(err)}`);
+                    await notify.error(pool.displayPair ?? pool.pair, err);
+                } else {
+                    console.warn(`[bot:${pool.id}] closePosition Fehler (1/2 – warte auf Bestätigung im nächsten Zyklus): ${msg.split('\n')[0] || String(err)}`);
+                }
+            }
+
+            // Reconcile nach fehlgeschlagenem Close: Der vorangehende decreaseLiquidity kann
+            // bereits erfolgreich gewesen sein (Tokens sind ins Wallet geflossen), während der
+            // NFT-Burn scheiterte. Dann steht die Position on-chain mit REDUZIERTER Liquidität,
+            // die DB/der Snapshot zeigen aber noch den alten vollen Wert → Doppel-Count
+            // (Position-Altwert + freigesetzte Wallet-Tokens gleichzeitig). Genau das hat am
+            // 2026-06-28 den 6.999-Spike + Phantom-PnL ausgelöst, weil der stündliche Cleanup
+            // die freigesetzten Tokens später als Neukapital wieder einzahlte.
+            // Fix: sofort frischen On-Chain-Snapshot schreiben, damit die reduzierte Liquidität
+            // (und positions.liquidity) der Wahrheit entspricht. Fehler hier dürfen den Bot-Tick
+            // nicht abbrechen.
+            try {
+                const reconState = await adapter.getPositionState(pool, position.nft_mint, {
+                    tickLowerIndex: position.tick_lower,
+                    tickUpperIndex: position.tick_upper,
+                });
+                writePositionSnapshotFromState(db, pool, position, reconState, reconState.currentPrice);
+                await refreshAfterAction(db, { log: m => console.log(`[bot:${pool.id}] ${m}`) });
+                console.log(`[bot:${pool.id}] Reconcile nach Close-Fehler: On-Chain-Liquidität ${reconState.liquidity} übernommen`);
+            } catch (reconErr) {
+                console.warn(`[bot:${pool.id}] Reconcile nach Close-Fehler fehlgeschlagen (ignoriert): ${reconErr.message}`);
+            }
+
+            // Cleanup sperren: decreaseLiquidity kann bereits Tokens ins Wallet freigesetzt haben.
+            // Solange das Rebalancing nicht sauber abgeschlossen ist, darf der Cleanup diese
+            // Tokens NICHT als Neukapital einzahlen (sonst Phantom-Kapital). Wird beim nächsten
+            // erfolgreichen Close gelöscht; Auto-Verfall nach 90 Min.
+            setRebalancePendingFlag(pool.id);
+            return;
+        }
     }
 
     // 3. Neuen Preis abrufen + neue Range berechnen
@@ -2952,6 +3278,10 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         feesClaimedB:  claimedB,
         lpValueBefore: preValue,
         lpValueAfter:  totalDeployed,
+        // LIQ#000558: exakter Rest, der beim Reconcile nicht mehr reinvestiert wurde
+        // (derselbe Wert, der oben ggf. den Underdeployment-Hinweis auslöst) — bislang
+        // nur transient geloggt, jetzt dauerhaft pro Rebalance festgehalten.
+        leftoverUsdc:  Math.max(0, newCapital - totalDeployed),
     });
 
     console.log(`[bot:${pool.id}] Rebalancing abgeschlossen → neue Range ${newRange.priceLower.toFixed(2)} – ${newRange.priceUpper.toFixed(2)} (Grund: ${reason})`);
@@ -3198,6 +3528,92 @@ const _reinvestFailCount     = new Map();
 // im Dashboard (Lehre aus dem SPCX-Vorfall 2026-06-23, manuell gefixt).
 const _openPositionFailCount = new Map();
 const MAX_OPEN_POSITION_FAILS = 3;
+
+// LIQ#0355: Die frühen Abbruch-Guards in _openNewPosition (zu wenig Wallet-Kapital,
+// gescheiterter Pre-Swap, Tiny-Position-Guard) gaben bisher nur `return null` zurück,
+// ohne _openPositionFailCount zu berühren — der Auto-Disable oben griff dadurch nie,
+// wenn ausschließlich diese Guards abbrachen (z.B. ZEC/USDC auf pub1, 29./30.08.2026:
+// Wallet-Kapital blieb dauerhaft unter der 30-%-Schwelle, Bot retryte alle 5 Minuten
+// ohne Ende). Gemeinsame Zähl-/Disable-Logik für alle Abbruchpfade, nicht nur echte
+// TX-Fehler im catch weiter unten.
+function _recordOpenPositionAbort(pool, reason) {
+    const fails = (_openPositionFailCount.get(pool.id) ?? 0) + 1;
+    _openPositionFailCount.set(pool.id, fails);
+    if (fails >= MAX_OPEN_POSITION_FAILS) {
+        _openPositionFailCount.delete(pool.id);
+        setPoolActive(pool.id, false);
+        notify.openPositionGaveUp(pool, new Error(reason), 'beim Öffnen', fails)
+            .catch(err => console.error(`[bot:${pool.id}] notify.openPositionGaveUp fehlgeschlagen: ${err.message}`));
+        console.error(`[bot:${pool.id}] openPosition ${fails}× abgebrochen (${reason}) – Pool automatisch deaktiviert.`);
+        // LIQ#0355: Ein deaktivierter Pool ohne offene Position gilt cleanup.js als
+        // "kein aktiv akkumulierender Pool" mehr (siehe loadAccumulatingPoolMints()) und
+        // würde sein Token-Restguthaben erst beim nächsten stündlichen Cleanup-Lauf
+        // wieder zu USDC einsammeln. Hier sofort nachziehen, statt bis zu einer Stunde
+        // zu warten — das Kapital, das gerade beim Öffnen scheiterte, bleibt so nicht
+        // isoliert liegen, sondern steht dem Wallet (und damit anderen Pools) direkt
+        // wieder zur Verfügung. Ein Fehlschlag hier ist kein Drama: der reguläre
+        // Cleanup-Lauf holt es notfalls nach.
+        _flushStrandedTokensToUsdc(pool)
+            .catch(err => console.warn(`[bot:${pool.id}] Flush nach Deaktivierung fehlgeschlagen (${err.message}) – nächster Cleanup-Lauf holt es nach.`));
+    }
+}
+
+async function _flushStrandedTokensToUsdc(pool) {
+    const keypair    = getKeypair();
+    const connection = getConnection();
+    const [symA, symB] = pool.pair.split('/');
+    const sides = [
+        { mint: pool.tokenA, decimals: pool.decimalsA, symbol: symA },
+        { mint: pool.tokenB, decimals: pool.decimalsB, symbol: pool.usdcIsTokenA ? symA : symB },
+    ];
+    for (const side of sides) {
+        // USDC ist bereits das Ziel, SOL bleibt als TX-Fee-Reserve unangetastet — beides
+        // ist kein "gestrandetes" Kapital in diesem Sinne.
+        if (side.mint === USDC_MINT || side.mint === SOL_MINT) continue;
+
+        let balance;
+        try {
+            balance = await getTokenBalanceFresh(keypair.publicKey, side.mint, side.decimals);
+        } catch (err) {
+            console.warn(`[bot:${pool.id}] Flush: ${side.symbol}-Balance nicht lesbar (${err.message}) – übersprungen.`);
+            continue;
+        }
+        if (balance <= 0) continue;
+
+        const price    = getTokenUsdPrice(side.mint, db) || 0;
+        const usdValue = balance * price;
+        if (usdValue < 1.0) continue; // zu klein, TX-Gebühr würde den Swap auffressen
+
+        try {
+            const { amountOut, txSignature } = await swapTokens({
+                inputMint:      side.mint,
+                outputMint:     USDC_MINT,
+                inputDecimals:  side.decimals,
+                outputDecimals: 6,
+                amount:         balance * 0.99,
+                wallet:         keypair,
+                connection,
+            });
+            console.log(`[bot:${pool.id}] Flush: ${balance.toFixed(6)} ${side.symbol} → ${amountOut.toFixed(2)} USDC (Pool deaktiviert) TX=${txSignature}`);
+            insertTransaction(db, {
+                poolId:    pool.id,
+                type:      'swap',
+                amountA:   balance,
+                amountB:   amountOut,
+                usdValue:  amountOut,
+                // usd_value_in/out (LIQ#0376 Teil 2): derselbe `price`-Read, der oben schon
+                // den 1-USD-Filter bestimmt hat (Eingang), USDC (Ausgang) exakt.
+                usdValueIn:  usdValue,
+                usdValueOut: amountOut,
+                txHash:    txSignature,
+                txFeeSol:  await getTxFee(txSignature),
+                note:      'auto-disable flush',
+            });
+        } catch (err) {
+            console.warn(`[bot:${pool.id}] Flush: ${side.symbol} → USDC fehlgeschlagen (${err.message}) – nächster Cleanup-Lauf holt es nach.`);
+        }
+    }
+}
 // closePosition (Rebalancing): gleiche Logik – 1. Fehler → warn, ab 2. → error.
 const _closePositionFailCount = new Map();
 // collectFees: gleiche Logik – transiente TX-Fehler werden nicht gezählt.
@@ -3329,15 +3745,12 @@ async function _takeSnapshot(pool, position, state, adapter) {
         // 1b. Trailing-Stop: Reset-Request aus UI verarbeiten, dann HWM nachziehen.
         //     Reset zuerst (sonst würde updateHwm einen Reset auf einen niedrigeren
         //     Wert nicht zulassen, da HWM monoton steigt).
+        //     Stop-Wert = LP-Wert + offene Fees (latestStopValueUsd, seit 2026-08-30).
         try {
-            const snapRow = db.prepare(
-                `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ?
-                 ORDER BY recorded_at DESC LIMIT 1`
-            ).get(pool.id);
-            const lpUsd = snapRow?.lp_value_usd ?? 0;
-            if (lpUsd > 0) {
-                const resetApplied = processHwmResetIfRequested(db, pool, position, lpUsd);
-                if (!resetApplied) updateHwm(db, pool, position, lpUsd);
+            const stopValue = latestStopValueUsd(db, pool.id)?.valueUsd ?? 0;
+            if (stopValue > 0) {
+                const resetApplied = processHwmResetIfRequested(db, pool, position, stopValue);
+                if (!resetApplied) updateHwm(db, pool, position, stopValue);
             }
         } catch (err) {
             console.warn(`[bot:${pool.id}] HWM-Update fehlgeschlagen (nicht kritisch): ${err.message}`);
@@ -3394,7 +3807,7 @@ function _getQuotePrice(pool, db) {
 async function _balanceWalletForPair(pool, currentPrice, targetUsdc) {
     const SOL_MINT       = 'So11111111111111111111111111111111111111112';
     const SOL_RESERVE    = 0.15;
-    const IMBALANCE_THRESHOLD = 0.5;  // unter 50% des Ziel-Anteils → swappen
+    const IMBALANCE_THRESHOLD = 0.5;  // unter 50% des deploybaren Anteils → swappen
     const keypair        = getKeypair();
     const pub            = keypair.publicKey;
     // 🔒 LIQ#0316: wird nur über _openNewPosition/_doRebalance erreicht, die den
@@ -3439,46 +3852,46 @@ async function _balanceWalletForPair(pool, currentPrice, targetUsdc) {
         };
     }
 
-    const halfTarget   = targetUsdc / 2;
-    const targetAToken = halfTarget / usdPerA;
-    const targetBToken = halfTarget / usdPerB;
-
     const [symA, symB] = pool.pair.split('/');
-    const ratioA = targetAToken > 0 ? tokenABal / targetAToken : 1;
-    const ratioB = targetBToken > 0 ? tokenBBal / targetBToken : 1;
+    // Bemessungsgrundlage ist das deploybare Kapital, nicht das volle Ziel (LIQ#0393) —
+    // Begründung und Vorfall stehen bei pairBalanceSwapPlan in lib/deposit-lib.js.
+    const plan = pairBalanceSwapPlan({
+        tokenABal, tokenBBal, usdPerA, usdPerB, targetUsdc,
+        decimalsA: pool.decimalsA, decimalsB: pool.decimalsB,
+        tokenAIsSol: pool.tokenA === SOL_MINT,
+        tokenBIsSol: pool.tokenB === SOL_MINT,
+        solReserve:  SOL_RESERVE,
+        imbalanceThreshold: IMBALANCE_THRESHOLD,
+    });
+    const ratioPct = `A=${(plan.ratioA*100).toFixed(0)}% B=${(plan.ratioB*100).toFixed(0)}%`;
 
-    if (ratioA >= IMBALANCE_THRESHOLD && ratioB >= IMBALANCE_THRESHOLD) {
-        return { success: true, tokenABal, tokenBBal };  // schon balanced
+    if (plan.action === 'balanced') {
+        return { success: true, tokenABal, tokenBBal };
     }
 
-    // Welche Seite hat Überschuss? Tausch in die deficit-Seite.
-    let inMint, outMint, inDec, outDec, inAmount;
-    if (ratioA > ratioB) {
-        // tokenA-Überschuss → tokenA → tokenB
-        const surplusA = Math.max(0, tokenABal - targetAToken);
-        const capA = pool.tokenA === SOL_MINT
-            ? Math.max(0, tokenABal - SOL_RESERVE)
-            : tokenABal * 0.99;
-        inAmount = Math.min(surplusA * 0.99, capA);  // 99% des Überschusses (Slippage-Puffer)
-        inMint = pool.tokenA;   outMint = pool.tokenB;
-        inDec  = pool.decimalsA; outDec = pool.decimalsB;
-    } else {
-        const surplusB = Math.max(0, tokenBBal - targetBToken);
-        const capB = pool.tokenB === SOL_MINT
-            ? Math.max(0, tokenBBal - SOL_RESERVE)
-            : tokenBBal * 0.99;
-        inAmount = Math.min(surplusB * 0.99, capB);
-        inMint = pool.tokenB;   outMint = pool.tokenA;
-        inDec  = pool.decimalsB; outDec = pool.decimalsA;
+    // Nach der LIQ#0393-Korrektur praktisch nur noch bei einem insgesamt staubgroßen
+    // Wallet erreichbar: die Ratios sind am deploybaren Kapital verankert, eine Seite
+    // unter der Schwelle bedingt daher eine andere deutlich über 100 % — echten Überschuss.
+    if (plan.action === 'dust') {
+        return {
+            success: false, tokenABal, tokenBBal,
+            reason: `Auszugleichender Betrag ${plan.inAmount.toFixed(9)} ` +
+                    `${plan.inSide === 'A' ? symA : symB} unter der Dust-Schwelle ` +
+                    `(Ratios ${ratioPct} vom deploybaren Kapital ${plan.deployableUsd.toFixed(2)} USDC).`,
+        };
     }
 
-    if (inAmount < 1 / Math.pow(10, inDec) * 100) {
-        return { success: false, tokenABal, tokenBBal, reason: 'Swap-Betrag zu klein' };
-    }
+    const aIsIn = plan.inSide === 'A';
+    const inMint  = aIsIn ? pool.tokenA    : pool.tokenB;
+    const outMint = aIsIn ? pool.tokenB    : pool.tokenA;
+    const inDec   = aIsIn ? pool.decimalsA : pool.decimalsB;
+    const outDec  = aIsIn ? pool.decimalsB : pool.decimalsA;
+    const inAmount = plan.inAmount;
 
     console.log(`[bot:${pool.id}] Balance-Wallet: tausche ${inAmount.toFixed(6)} ` +
-        `(${inMint === pool.tokenA ? symA : symB} → ${inMint === pool.tokenA ? symB : symA}) ` +
-        `— Ziel-USD: ${targetUsdc.toFixed(2)}, Ratios A=${(ratioA*100).toFixed(0)}% B=${(ratioB*100).toFixed(0)}%`);
+        `(${aIsIn ? symA : symB} → ${aIsIn ? symB : symA}) ` +
+        `— deploybar: ${plan.deployableUsd.toFixed(2)} USDC (Ziel ${targetUsdc.toFixed(2)}), ` +
+        `Ratios ${ratioPct}`);
 
     try {
         await swapTokens({

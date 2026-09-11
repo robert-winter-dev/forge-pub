@@ -75,28 +75,19 @@ SKIPPED="${SKIPPED:-0}"
 if [[ "${EXIT_OK}" -eq 0 ]]; then
   # burn-zombie-nfts.js prüft SOL VOR dem ersten Burn (assertSufficientSol) und bricht
   # dann sauber ab (Exit 1, kein Crash) — jede gefundene Zombie-Position steht dann als
-  # [burn-pending] im Output. Nur in diesem Fall die spezifische Pool-Liste + SOL-Hinweis
-  # senden; jeder andere Script-Crash (kein [burn-pending] vorhanden) bleibt bei der
-  # generischen Meldung, weil die Ursache dann unbekannt ist.
-  PENDING_POOLS="$(grep '^\[burn-pending\]' "${OUT_FILE}" | sed -n 's/.*pool=\(.*\) mint=.*/\1/p' | sort -u || true)"
-
-  if [[ -n "${PENDING_POOLS}" ]]; then
-    LIST=""
-    while IFS= read -r POOL; do
-      [[ -z "${POOL}" ]] && continue
-      LIST="${LIST}* Pool: ${POOL}
+  # [burn-pending] im Output. Nur in diesem Fall die spezifische Pool-Tabelle senden;
+  # jeder andere Script-Crash (kein [burn-pending] vorhanden) bleibt bei der generischen
+  # Meldung, weil die Ursache dann unbekannt ist.
+  ROWS=""
+  while IFS= read -r LINE; do
+    [[ -z "${LINE}" ]] && continue
+    POOL="$(sed -n 's/.*pool=\(.*\) mint=.*/\1/p' <<<"${LINE}")"
+    [[ -z "${POOL}" ]] && continue
+    ROWS="${ROWS}| ${POOL} | ❌ | zu wenig SOL, wiederhole es morgen |
 "
-    done <<<"${PENDING_POOLS}"
-    MSG="Folgende Fees eines geschlossenen Pools konnten NICHT abgeholt werden:
+  done < <(grep '^\[burn-pending\]' "${OUT_FILE}" | sort -u)
 
-${LIST}
-Bitte überprüfe dein SOL Guthaben!"
-    echo "  ✗ ${MSG}"
-    curl -s -X POST "${NEXUS_URL}/notify" \
-      -H 'Content-Type: application/json' \
-      -d "$(printf '{"botId":"liquidity","level":"warn","category":"zombie-check","message":"🚨 %s"}' "${MSG//$'\n'/\\n}")" \
-      >/dev/null 2>&1 || true
-  else
+  if [[ -z "${ROWS}" ]]; then
     MSG="Zombie-NFT-Cleanup fehlgeschlagen (Script-Exit != 0) — siehe Cron-Log zombie-check"
     echo "  ✗ ${MSG}"
     curl -s -X POST "${NEXUS_URL}/notify" \
@@ -105,41 +96,54 @@ Bitte überprüfe dein SOL Guthaben!"
       >/dev/null 2>&1 || true
   fi
 
-elif [[ "${COUNT}" -gt 0 && "${FAILED}" -gt 0 ]]; then
-  SKIP_SUFFIX=""
-  if [[ "${SKIPPED}" -gt 0 ]]; then
-    SKIP_SUFFIX=" + ${SKIPPED} mit Liquidität übersprungen"
-  fi
-  MSG="${BURNED}/${COUNT} Zombie-NFT(s) geburnt — ${FAILED} Fehler${SKIP_SUFFIX}. Siehe Cron-Log zombie-check"
-  echo "  ⚠ ${MSG}"
-  curl -s -X POST "${NEXUS_URL}/notify" \
-    -H 'Content-Type: application/json' \
-    -d "{\"botId\":\"liquidity\",\"level\":\"warn\",\"category\":\"zombie-check\",\"message\":\"⚠️ ${MSG}\"}" \
-    >/dev/null 2>&1 || true
-
 elif [[ "${COUNT}" -gt 0 ]]; then
-  echo "  ✓ ${BURNED}/${COUNT} Zombie-NFT(s) erfolgreich geburnt und Rent zurückgeholt"
-
-  # Eine aggregierte Telegram-Notify statt einer pro Burn (bis 2026-08-28), damit
-  # mehrere in einem Lauf geburnte Pools in EINER Liste erscheinen statt als
-  # mehrere Einzelnachrichten. Level 'info' statt 'warn' (bis 2026-08-24 fälschlich
-  # 'warn', siehe LIQ#0327): reiner Erfolgsfall, nichts zu tun.
-  LIST=""
+  # Vereinheitlichtes Format (seit 2026-08-29, Festlegung): erfolgreiche
+  # ([burn-result]) und fehlgeschlagene ([burn-fail]) Einzel-Burns in EINER Tabelle
+  # statt getrennter Text-Varianten für "alles ok" / "teilweise Fehler" — bis dahin
+  # sah dieselbe Nachricht je nach Ausgang komplett verschieden aus (Master zeigte nur
+  # die Aggregatzahl "2/4 geburnt — 2 Fehler", pub1 die Pool-Liste der Erfolge).
+  ROWS=""
+  TOTAL_RENT="0"
   while IFS= read -r LINE; do
     [[ -z "${LINE}" ]] && continue
     POOL="$(sed -n 's/.*pool=\(.*\) mint=.*/\1/p' <<<"${LINE}")"
     RENT="$(sed -n 's/.*rentSol=\(.*\)$/\1/p' <<<"${LINE}")"
-    LIST="${LIST}* Pool: ${POOL}: ${RENT} SOL Rent zurückgeholt
+    [[ -z "${POOL}" ]] && continue
+    ROWS="${ROWS}| ${POOL} | ✅ | ${RENT} SOL |
 "
+    TOTAL_RENT="$(awk -v a="${TOTAL_RENT}" -v b="${RENT}" 'BEGIN{printf "%.5f", a+b}')"
   done < <(grep '^\[burn-result\]' "${OUT_FILE}")
 
-  if [[ -n "${LIST}" ]]; then
-    MSG="Folgende Fees eines geschlossenen Pools wurden abgeholt:
+  while IFS= read -r LINE; do
+    [[ -z "${LINE}" ]] && continue
+    POOL="$(sed -n 's/.*pool=\(.*\) mint=.*/\1/p' <<<"${LINE}")"
+    REASON="$(sed -n 's/.*reason=\(.*\)$/\1/p' <<<"${LINE}")"
+    [[ -z "${POOL}" ]] && continue
+    ROWS="${ROWS}| ${POOL} | ❌ | ${REASON:-Fehler} |
+"
+  done < <(grep '^\[burn-fail\]' "${OUT_FILE}")
 
-${LIST}"
+  if [[ -n "${ROWS}" ]]; then
+    LEVEL="info"
+    ICON="🔥"
+    if [[ "${FAILED}" -gt 0 ]]; then
+      LEVEL="warn"
+      ICON="⚠️"
+    fi
+    MSG="Info: Fees geschlossener Pools
+
+Folgende Fees eines oder mehrerer geschlossener Pools wurde versucht abzuholen:
+
+\`\`\`
+| Pool | Status | Ergebnis |
+|------|:------:|---------:|
+${ROWS}\`\`\`
+
+Im heutigen Nachtlauf wurden ${TOTAL_RENT} SOL bereits geschlossener Pools abgeholt."
+    echo "  ${MSG}"
     curl -s -X POST "${NEXUS_URL}/notify" \
       -H 'Content-Type: application/json' \
-      -d "$(printf '{"botId":"liquidity","level":"info","category":"zombie-check","message":"🔥 %s"}' "${MSG//$'\n'/\\n}")" \
+      -d "$(printf '{"botId":"liquidity","level":"%s","category":"zombie-check","message":"%s %s"}' "${LEVEL}" "${ICON}" "${MSG//$'\n'/\\n}")" \
       >/dev/null 2>&1 || true
   fi
 

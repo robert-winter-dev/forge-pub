@@ -43,7 +43,7 @@ import {
     WhirlpoolIx,
     collectFeesQuote,
     decreaseLiquidityQuoteByLiquidityWithParams,
-    NO_TOKEN_EXTENSION_CONTEXT,
+    TokenExtensionUtil,
     IGNORE_CACHE,
 } from '@orca-so/whirlpools-sdk';
 import { Percentage, TransactionBuilder } from '@orca-so/common-sdk';
@@ -98,6 +98,22 @@ function displayPairForMint(mintStr) {
     const row = poolByMintStmt.get(mintStr);
     if (!row) return 'unbekannter Pool';
     return displayPairMap.get(row.pool_id) ?? row.pair;
+}
+
+// Kurzform eines Burn-Fehlers für die Ergebnis-Spalte der Zombie-Check-Notification
+// (run-zombie-check.sh). Die rohe RPC-Fehlermeldung dort ("TX abgelaufen") ließ den
+// Leser ratlos zurück (Betreiber-Feedback 2026-08-29) — kein Hinweis, ob etwas zu tun
+// ist. Die Zombie-Position bleibt bei jedem Fehler unangetastet im Wallet und taucht
+// beim nächsten 00:01-Lauf erneut als Zombie auf, wird also automatisch wiederholt —
+// das gehört deshalb IMMER mit in den Text, nicht nur bei den bekannten Mustern unten.
+function shortenBurnError(message) {
+    const msg = String(message ?? '');
+    // Solana: Blockhash der TX war abgelaufen, bevor sie bestätigt wurde – ein
+    // Netzwerk-/Timing-Problem, keines mit dem Pool oder dem Guthaben.
+    if (/block height exceeded|has expired/i.test(msg)) return 'Netzwerk-Timeout, wiederhole es morgen';
+    if (/insufficient|not enough|too low/i.test(msg))   return 'zu wenig SOL, wiederhole es morgen';
+    const short = msg.replace(/\s+/g, ' ').trim().slice(0, 40);
+    return short ? `${short}, wiederhole es morgen` : 'Fehler, wiederhole es morgen';
 }
 
 // Aktive NFT-Mints aus der DB (closed_at IS NULL)
@@ -289,6 +305,11 @@ for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, 
                 ? Percentage.fromFraction(1, 100)
                 : DUST_SLIPPAGE;
 
+            // Echter Extension-Kontext statt NO_TOKEN_EXTENSION_CONTEXT (LIQ#0276) — sonst
+            // unterschätzt die Quote bei Token-2022-Transfer-Fee-Mints die Vault-Fee.
+            const tokenExtCtx = await TokenExtensionUtil.buildTokenExtensionContextForPool(
+                ctx.fetcher, poolData.tokenMintA, poolData.tokenMintB, IGNORE_CACHE,
+            );
             const quote = decreaseLiquidityQuoteByLiquidityWithParams({
                 liquidity:         posData.liquidity,
                 sqrtPrice:         poolData.sqrtPrice,
@@ -296,7 +317,7 @@ for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, 
                 tickLowerIndex:    posData.tickLowerIndex,
                 tickUpperIndex:    posData.tickUpperIndex,
                 slippageTolerance: slippage,
-                tokenExtensionCtx: NO_TOKEN_EXTENSION_CONTEXT,
+                tokenExtensionCtx: tokenExtCtx,
             });
 
             const decTx = await position.decreaseLiquidity(quote);
@@ -339,6 +360,9 @@ for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, 
         burned++;
     } catch (err) {
         console.error(`  ❌ Fehler bei ${mintStr}: ${err.message}`);
+        // Kurzform für die Pool-Tabelle im Wrapper (run-zombie-check.sh) — ohne diese
+        // Zeile kennt der Wrapper bei Einzel-Fehlern nur die Aggregatzahl, keinen Pool.
+        console.log(`[burn-fail] pool=${pair} mint=${mintStr} reason=${shortenBurnError(err.message)}`);
     }
 }
 

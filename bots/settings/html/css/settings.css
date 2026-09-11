@@ -679,6 +679,7 @@ body {
 .modal-feedback       { font-size: 0.8rem; min-height: 1.2em; margin-top: 0.5rem; }
 .modal-feedback.error { color: var(--danger); }
 .modal-feedback.ok    { color: var(--success); }
+.tx-link               { color: inherit; text-decoration: underline; }
 
 .ap-suggestion       { font-size: 0.8rem; color: var(--text-muted); font-style: italic; }
 .ap-suggestion-hint  { font-size: 0.75rem; opacity: 0.7; }
@@ -921,6 +922,12 @@ body {
 }
 .pool-type-filter option { background: var(--bg-2); color: var(--text); }
 
+/* Strategie-Zeile (LIQ#0379, Punkt 2): linksbündig statt rechtsbündig, breiter als die
+   übrigen pool-type-filter-Selects — hier kommen später weitere Einträge hinzu. */
+.strategy-select {
+    min-width: 200px;
+}
+
 @keyframes card-pool-switch-flash {
     0%   { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }
     55%  { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }
@@ -1040,6 +1047,25 @@ body {
 .input-unit-row { display: flex; align-items: center; gap: 0.5rem; }
 .input-short    { width: 110px; }
 .input-unit     { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+
+/* ── Trailing Stop: übernommene Advisor-Werte (LIQ#0351) ──────────────
+   Steht „Drawdown Auto" auf an und liegt eine Empfehlung vor, überschreibt der Bot den
+   eingetragenen Wert. Das Feld bleibt lesbar — der Nutzer soll seine eigene Einstellung
+   weiter sehen —, wird aber gedämpft, und der tatsächlich wirkende Wert steht daneben.
+   Farbe allein trägt die Aussage nicht: Der Pfeil „→ 4,75 %" ist auch ohne Farbunterschied
+   eindeutig. */
+.ts-advised-input.is-advised {
+    opacity: 0.45;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+}
+.ts-advised-value {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.ts-advised-value strong { color: var(--text); font-weight: 600; }
+.ts-advice-basis { font-size: 0.78rem; white-space: nowrap; }
 
 /* Toggle-Hint */
 .toggle-hint { font-size: 0.78rem; color: var(--text-muted); margin-left: 0.4rem; }

@@ -1002,7 +1002,7 @@ body {
 }
 .active-pools-header {
     display: grid;
-    grid-template-columns: 1fr 36px 52px 1fr 1fr;
+    grid-template-columns: 1fr 36px 52px 1fr 1fr 20px;
     gap: 0 12px;
     padding: 8px 14px;
     font-size: 0.7rem;
@@ -1013,7 +1013,7 @@ body {
 }
 .active-pools-row {
     display: grid;
-    grid-template-columns: 1fr 36px 52px 1fr 1fr;
+    grid-template-columns: 1fr 36px 52px 1fr 1fr 20px;
     gap: 0 12px;
     align-items: center;
     padding: 10px 14px;
@@ -1038,13 +1038,25 @@ body {
     transition: color 0.15s;
 }
 .range-icon-btn:hover { color: var(--text-primary); }
-/* Kennziffern: Hochformat Smartphone → "Anteil" ausblenden */
+/* Pool-Edit-Spalte (Stift → Settings): so schmal wie möglich, kein Header-Text (LIQ#000533) */
+.pool-edit-col { width: 20px; }
+.pool-edit-link {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    color: var(--text-muted);
+    text-decoration: none;
+    line-height: 1;
+    transition: color 0.15s;
+}
+.pool-edit-link:hover { color: var(--text-primary); }
+/* Kennziffern: Hochformat Smartphone → "Anteil" und Edit-Spalte ausblenden */
 @media (orientation: portrait) and (max-width: 767px) {
     .active-pools-header, .active-pools-row {
         grid-template-columns: 1fr 36px 52px 1fr;
     }
-    .active-pools-header > :last-child,
-    .active-pools-row > :last-child { display: none; }
+    .active-pools-header > :nth-last-child(-n+2),
+    .active-pools-row > :nth-last-child(-n+2) { display: none; }
 }
 
 /* ── Pools-Row: stapelt früher als Charts-Row ───────────────────── */

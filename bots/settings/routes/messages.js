@@ -220,7 +220,7 @@ function backfillLegacyExitPnl(liquidityDb, pair, notifTimestampMs) {
  * (core/premium/server.js humanizePremiumMessage()): eigene Frontend-Darstellung
  * statt Fließtext, hier für die Exit-Kennzahlen inkl. PnL.
  */
-function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
+export function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
     if (msgKey !== 'notify.liq.rm_executed') return null;
     let p = msgParams;
     if (typeof p === 'string') {
@@ -242,58 +242,90 @@ function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
         if (pnlUsdcNum == null) pnlUsdcNum = backfillLegacyExitPnl(liquidityDb, p.pair, timestamp);
         const pnlUsdc = pnlUsdcNum != null ? `${pnlUsdcNum >= 0 ? '+' : ''}${pnlUsdcNum.toFixed(2)}` : null;
 
-        // Prozent relativ zum Pool-Wert bei Schließung – dieselbe Bezugsgröße wie
-        // die PnL-%-Anzeige im Dashboard (html/liquidity/js/app.js: pnl / myValue).
+        // 🔒 Bezugsgröße des PnL-Prozentwerts ist das eingezahlte Kapital
+        // (positions.capital_usdc) — exakt der Nenner, mit dem lib/pnl.js auch den
+        // Zähler bildet. Vorher war es der Poolwert bei Schließung; zusammen mit der
+        // damaligen Zeile "Guthaben Start" (= positions.entry_usd, die über
+        // Kapitalflüsse hochskalierte Trailing-Stop-Referenz) standen in derselben
+        // Tabelle drei verschiedene Nullpunkte. Ergebnis am 30.08.2026, STONK/SOL:
+        // "Start 409,04 → nach Exit 411,05" bei ausgewiesenem PnL −0,23 USDC — die
+        // Meldung widersprach sich selbst (LIQ#0353). Altmeldungen ohne
+        // capitalUsdcRaw fallen auf den alten Nenner zurück, damit ihr Prozentwert
+        // zu ihrer eigenen Zahl passt.
+        const investNum  = p.capitalUsdcRaw ?? null;
         const lpValueNum = p.lpValue != null ? parseFloat(p.lpValue) : null;
-        const pnlPct = (pnlUsdcNum != null && lpValueNum != null && lpValueNum !== 0)
-            ? `${pnlUsdcNum >= 0 ? '+' : ''}${(pnlUsdcNum / lpValueNum * 100).toFixed(2)}%`
+        const pctBase    = investNum ?? lpValueNum;
+        const pnlPct = (pnlUsdcNum != null && pctBase != null && pctBase !== 0)
+            ? `${pnlUsdcNum >= 0 ? '+' : ''}${(pnlUsdcNum / pctBase * 100).toFixed(2)}%`
             : null;
 
-        // "Max %"/"Ende %" – beide relativ zum Einstieg (entryUsdRaw), nicht zum
-        // Poolwert bei Schließung (das ist pnlPct, andere Bezugsgröße, siehe oben).
-        // Rohzahlen kommen seit 2026-08-24 zusätzlich zu den fertig formatierten
-        // Strings aus exitMetricsParams() – Ende-% gab es als fertige Zeile vorher
-        // nicht, deshalb hier aus den Rohwerten berechnet statt übernommen.
-        const entryUsdNum = p.entryUsdRaw ?? null;
-        const hwmUsdNum   = p.hwmUsdRaw ?? null;
-        const swappedNum  = p.swappedLine?.p?.usdc != null ? parseFloat(p.swappedLine.p.usdc) : null;
-        // "Ende" ist der tatsächlich realisierte Gegenwert – nach Swap, falls einer
-        // stattfand, sonst der letzte gemessene Poolwert (kein Swap konfiguriert/nötig).
-        // Bewusst NICHT der Poolwert vor dem Exit (lpValueNum): der Abschnitt erzählt
-        // Start → Max → Kosten → Ende, und "Ende" soll das sein, was am Ende wirklich
-        // in der Wallet ankam (Vorgabe 2026-08-24).
-        const endValueNum = swappedNum ?? lpValueNum;
-        // Nur für "Max %" – rein informativ (wie weit lag der Peak über dem Start),
-        // keine PnL-Zahl. "Ende %" dagegen ist unten bewusst identisch mit pnlPct
-        // (siehe dort): zwei verschiedene Formeln für "praktisch dieselbe Zahl" hätten
-        // bei mehreren Ein-/Auszahlungen während der Laufzeit auseinanderlaufen können
-        // (lib/pnl.js verankert am letzten externen Deposit, nicht zwingend am
-        // Öffnungszeitpunkt) — 🔒 PnL kommt in FORGE ausschließlich aus lib/pnl.js,
-        // kein zweites Berechnungsverfahren dafür (siehe CLAUDE.md, oberste Regel).
-        const pctVs = (valueNum) => (entryUsdNum != null && entryUsdNum !== 0 && valueNum != null)
-            ? `${valueNum >= entryUsdNum ? '+' : ''}${((valueNum - entryUsdNum) / entryUsdNum * 100).toFixed(2)}%`
+        // "Ausstieg Betrag" ist der tatsächlich realisierte Gegenwert – nach Swap,
+        // falls einer stattfand, sonst der letzte gemessene Poolwert (kein Swap
+        // konfiguriert/nötig). Bewusst der Betrag, der in der Wallet ankam: zusammen
+        // mit "Invest Betrag" oben ergibt er genau den PnL.
+        const swappedNum = p.exitAmountRaw
+            ?? (p.swappedLine?.p?.usdc != null ? parseFloat(p.swappedLine.p.usdc) : null);
+        const exitAmountNum = swappedNum ?? lpValueNum;
+
+        const fix2 = (v) => (v != null && Number.isFinite(v) ? v.toFixed(2) : null);
+        // 🔒 Ein Geldbetrag von 0 ist in dieser Meldung immer eine FEHLENDE Messung, nie
+        // ein Messergebnis: die Aufrufer setzen `hwmUsd: position?.hwm_usd ?? 0`, und ein
+        // Einstieg über 0 USDC oder ein Ausstieg mit 0 USDC Erlös existiert nicht.
+        //
+        // Die Prüfung MUSS hier stehen und nicht nur in notify.js: msg_params sind
+        // gespeichert. Meldung 7804 trug bereits `hwmUsdRaw: 0` und zeigte deshalb weiter
+        // „Guthaben Betrag 0,00 USDC", nachdem der Schreibpfad längst korrigiert war —
+        // ein Fix im Schreibpfad allein repariert keine einzige bestehende Meldung.
+        //
+        // Ausdrücklich NICHT für die Kostenzeilen: Ein- und Ausstiegskosten dürfen 0 oder
+        // negativ sein (negativ = es kam mehr an als gemessen), das sind echte Werte.
+        const amount2 = (v) => (v != null && Number.isFinite(v) && v > 0 ? v.toFixed(2) : null);
+
+        const hwmUsdc2 = amount2(p.hwmUsdRaw ?? null);
+        // Bezugsgröße wie bei pnlPct oben: das eingezahlte Kapital (investNum), nicht
+        // der Poolwert bei Schließung — derselbe Nenner in derselben Tabelle.
+        const hwmRaw = p.hwmUsdRaw ?? null;
+        const hwmPct = (hwmUsdc2 != null && hwmRaw != null && investNum != null && investNum !== 0)
+            ? `${hwmRaw >= investNum ? '+' : ''}${((hwmRaw - investNum) / investNum * 100).toFixed(2)}%`
+            : null;
+        // Absoluter Abstand zum eingezahlten Kapital, eigene Zeile neben dem Prozentwert
+        // (Vorgabe 2026-09-01) — dieselbe Bezugsgröße wie hwmPct, nur unskaliert.
+        const hwmDeltaUsdc = (hwmUsdc2 != null && hwmRaw != null && investNum != null)
+            ? fix2(hwmRaw - investNum)
             : null;
 
         return {
-            pair:        p.pair ?? null,
+            pair:      p.pair ?? null,
             scenario,
-            // entryValue/hwmValue kommen bereits fertig formatiert aus exitMetricsParams()
-            // (bots/liquidity/lib/notify.js) — keine zweite Formatierungslogik hier, anders
-            // als bei den übrigen Feldern unten (die stammen noch aus der Fließtext-Ära).
-            entryValue:  entryUsdNum != null ? entryUsdNum.toFixed(2) : null,
-            hwmValue:    hwmUsdNum   != null ? hwmUsdNum.toFixed(2)   : null,
-            hwmPct:      pctVs(hwmUsdNum),
-            endValue:    endValueNum != null ? endValueNum.toFixed(2) : null,
-            // Bewusst derselbe Wert wie pnlPct, nicht pctVs(endValueNum): die Details-
-            // Tabelle soll erklären, WIE der oben gezeigte PnL zustande kommt – beide
-            // Zahlen müssen deckungsgleich sein (Vorgabe 2026-08-24).
-            exitPct:     pnlPct,
-            exitCost:    p.swappedLine?.p?.cost ?? null,
-            openedAtMs:  p.openedAtMs ?? null,
-            exitAtMs:    timestamp ?? null,
             pnlUsdc,
             pnlPct,
+            // ── Einstieg ──────────────────────────────────────────────────────
+            openedAtMs:    p.openedAtMs ?? null,
+            investUsdc:    amount2(investNum),
+            // NULL bei jedem Einstieg, dessen Bruttoeinsatz nicht feststeht (Altbestand
+            // und Pfade mit Budget-Deckel, siehe recordEntryCost() in deposit-lib.js) —
+            // die Zeile entfällt dann, statt eine 0 zu behaupten.
+            entryCostUsdc: amount2(p.entryCostRaw ?? null),
+            // ── Maximum ───────────────────────────────────────────────────────
+            // Zeitpunkt nur zusammen mit dem Betrag, auf den er sich bezieht.
+            hwmAtMs:       hwmUsdc2 != null ? (p.hwmAtMs ?? null) : null,
+            hwmUsdc:       hwmUsdc2,
+            hwmPct,
+            hwmDeltaUsdc,
+            // ── Ausstieg ──────────────────────────────────────────────────────
+            exitStartedAtMs: p.exitStartedAtMs ?? null,
+            exitAmountUsdc:  amount2(exitAmountNum),
+            exitCostUsdc:    fix2(p.exitCostRaw ?? (p.swappedLine?.p?.cost != null ? parseFloat(p.swappedLine.p.cost) : null)),
+            // Abschluss der Meldung = Ende der Laufzeit (für die Zusammenfassung oben).
+            exitAtMs:      timestamp ?? null,
             actionText,
+            // ── Nachvollziehbarkeit (Solscan-Links) ──────────────────────────────
+            openTx:        p.openTxRaw ?? null,
+            closeTx:       p.closeTxRaw ?? null,
+            nftMint:       p.nftMintRaw ?? null,
+            reinvestCount: p.reinvestCountRaw ?? null,
+            reinvestUsdc:  fix2(p.reinvestUsdcRaw ?? null),
+            bestPoolUsdc:  fix2(p.bestPoolUsdcRaw ?? null),
         };
     } catch {
         return null;

@@ -572,7 +572,22 @@ table.mc-table .mc-num {
     letter-spacing: 0.03em;
     margin: 0.9rem 0 0.3rem;
 }
-.mc-risk-result { margin: 0.2rem 0 0.6rem; font-size: 0.95rem; }
+/* Kopf des Exit-Blocks: eine <h1> mit dem Pool, darunter die Zusammenfassung als
+   Liste (Vorgabe 2026-08-30). Bewusst nur wenig größer als .mc-risk-heading — die
+   Detailspalte ist schmal, ein Browser-Default-h1 sprengt sie. */
+.mc-risk-h1 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+    margin: 0 0 0.5rem;
+}
+.mc-risk-summary {
+    margin: 0 0 1.1rem;
+    padding-left: 1.1rem;
+    font-size: 0.95rem;
+    line-height: 1.6;
+}
+.mc-risk-summary li { margin: 0; }
 /* Eine Details-Tabelle statt zwei nebeneinander (Vorgabe 2026-08-24, zurückgenommen —
    zwei Spalten sahen nicht gut aus). ~80% der verfügbaren Breite, gedeckelt auf eine
    klassische Notebook-Breite abzüglich der Nachrichtenliste links — auf einem großen
@@ -580,16 +595,58 @@ table.mc-table .mc-num {
    table.mc-table ist sonst auf width:max-content + horizontales Scrollen ausgelegt
    (Basis-Regel oben) — hier soll sie stattdessen die 80%-Breite exakt ausfüllen. */
 .mc-risk-details { width: 80%; max-width: 640px; margin-bottom: 1rem; }
-.mc-risk-details table.mc-table { display: table; width: 100%; margin: 0; }
+/* table-layout:fixed + je 50 %: ohne das bemisst der Browser die Spalten nach ihrem
+   Inhalt, und die drei Tabellen (Einstieg/Maximum/Ausstieg) bekamen bei gleicher
+   Gesamtbreite unterschiedliche Spaltenbreiten — die Zahlenspalte sprang von Tabelle
+   zu Tabelle (Vorgabe 2026-08-30). Fixed heißt: die erste Zeile legt die Breiten fest,
+   der Inhalt richtet sich danach. */
+.mc-risk-details table.mc-table { display: table; width: 100%; margin: 0; table-layout: fixed; }
+.mc-risk-details table.mc-table:not(.mc-table-report) td { width: 50%; }
 /* Zwei Tabellen-Abschnitte direkt hintereinander (z.B. Tagesbericht: geschlossene +
    offene Trades) brauchen sichtbaren Abstand — ohne diese Regel klebt die zweite
    Überschrift am vorherigen Block, weil .mc-risk-heading:first-child ihren eigenen
    margin-top zurücksetzt (Vorgabe 2026-08-25). */
 .mc-risk-block + .mc-risk-block { margin-top: 1.2rem; }
+/* Tagesbericht-Tabellen (dailyReportHtml() in js/message.js, 5 Spalten) teilen sich
+   .mc-risk-details mit der 2-Spalten-Risk-Exit-Tabelle oben (Einstieg/Maximum/
+   Ausstieg) — deren pauschale 50%-Aufteilung presste hier alle 5 Spalten gleich
+   schmal zusammen, "Trailing Stop 2,00 %" & Co. liefen aus der Zelle (gemeldet
+   31.08.2026). Eigene, an den Inhalt angepasste Breiten statt der 50%-Regel; beide
+   Tabellen bleiben über denselben Wrapper (width:100% von .mc-risk-details, siehe
+   oben) exakt gleich breit. */
+/* Exakt gleiche Breite für alle 5 Spalten (Vorgabe 31.08.2026, zurückgenommen: die
+   inhaltsgewichtete Verteilung wirkte "willkürlich"/chaotisch statt aufgeräumt). */
+.mc-risk-details table.mc-table.mc-table-report th,
+.mc-risk-details table.mc-table.mc-table-report td { width: 20%; }
+/* Zombie-Fee-Tabelle (zombieFeesHtml() in js/message.js, 3 Spalten: Pool/Status/
+   Ergebnis) fiel bisher unter die 50%-Regel oben, die für die 2-spaltige Risk-Exit-
+   Tabelle gedacht ist — bei langen Ergebnis-Texten wie "Netzwerk-Timeout, wiederhole
+   es morgen" lief die Zelle über die Tabelle hinaus (gemeldet 05.09.2026). Eigene,
+   an den Inhalt angepasste Breiten plus Umbruch statt der ererbten nowrap-Vorgabe. */
+.mc-risk-details table.mc-table.mc-table-zombie-fees th,
+.mc-risk-details table.mc-table.mc-table-zombie-fees td { width: auto; }
+.mc-risk-details table.mc-table.mc-table-zombie-fees td:first-child,
+.mc-risk-details table.mc-table.mc-table-zombie-fees th:first-child { width: 20%; }
+.mc-risk-details table.mc-table.mc-table-zombie-fees td:nth-child(2),
+.mc-risk-details table.mc-table.mc-table-zombie-fees th:nth-child(2) { width: 15%; }
+.mc-risk-details table.mc-table.mc-table-zombie-fees td.mc-zombie-result,
+.mc-risk-details table.mc-table.mc-table-zombie-fees th:last-child {
+    width: 65%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
 /* Handlungssatz braucht mehr Luft zur Tabelle darüber als der Standardabstand von
    .mc-detail-text (Feedback 2026-08-24) — sonst wirkt er wie eine weitere
    Tabellenzeile statt wie ein eigener, abschließender Satz. */
 .mc-risk-action { margin-top: 1.1rem; }
+/* Fußnote zu den Kosten-Zeilen (Einstiegskosten*/Ausstiegskosten*, Vorgabe
+   2026-08-30): gleicher Abstand nach oben wie .mc-risk-action, aber kleiner und
+   gedämpft — eine Erläuterung, kein weiterer Fließtextsatz. */
+.mc-risk-footnote { margin-top: 1.1rem; font-size: 0.82rem; color: var(--text-muted); }
+.mc-risk-footnote + .mc-risk-action { margin-top: 0.4rem; }
+/* Zombie-Check: sichtbare Leerzeile zwischen Einleitungssatz und Tabelle (Vorgabe
+   2026-08-29) — .mc-detail-text hat sonst keinen eigenen Absatzabstand nach unten. */
+.mc-zombie-intro { margin: 0.2rem 0 1.1rem; }
 /* PnL-Zeile: das Vorzeichen im Text (+/−) trägt die Bedeutung, die Farbe ist
    nur Verstärkung (siehe feedback_color_blindness). */
 .msg-pnl-positive { color: var(--success); font-weight: 600; }

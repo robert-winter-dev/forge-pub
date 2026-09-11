@@ -130,6 +130,7 @@ export function buildPoolEntry(offer, now = Date.now()) {
         usdcIsTokenA: offer.poolShape?.usdcIsTokenA ?? false,
         volatilePair: offer.poolShape?.volatilePair ?? false,
         quotePricePoolId: offer.poolShape?.quotePricePoolId ?? null,
+        quoteTokenMint: offer.poolShape?.quoteTokenMint ?? null,
         aprAlertEnabled: offer.poolShape?.aprAlertEnabled ?? false,
         proactiveTrigger: offer.suggested?.proactiveTrigger ?? 0.75,
         rangeOverride: {

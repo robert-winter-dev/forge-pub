@@ -89,6 +89,36 @@ export function clmmLpReturnPath(path, rangePct) {
     };
 }
 
+// Rohe On-Chain-Liquidity (L) einer hypothetischen Position aus eingesetztem USDC-Kapital
+// (LIQ#0361, Fee-/Preis-Rechner). Nötig, um myL gegen pool_stats.liquidity_in_range (rohes,
+// dezimalskaliertes On-Chain-L) zu teilen — beide Größen müssen in derselben Einheit stehen.
+// Voraussetzung: Token B ist der USD-Quote (z.B. USDC) — gilt NICHT für volatilePair-Pools
+// (z.B. cbBTC/WBTC), dort ist die Funktion nicht anwendbar (Aufrufer muss das ausschließen).
+//
+// Herleitung: Im human-unit-Raum (reale Token-Mengen, realer Preis P0) gilt für eine
+// CLMM-Position mit Range [P0·pa, P0·pb] (pa=1−r, pb=1+r):
+//   x_human = L_human·(1/√P0 − 1/√(P0·pb)) = L_human/√P0 · (1 − 1/√pb)
+//   y_human = L_human·(√P0 − √(P0·pa))     = L_human·√P0 · (1 − √pa)
+// Wert in USDC (x in Token A zu P0, y in Token B = USDC 1:1):
+//   capitalUsdc = x_human·P0 + y_human = L_human·√P0·[(1−1/√pb) + (1−√pa)] = L_human·√P0·denom
+//   ⇒ L_human = capitalUsdc / (√P0 · denom)
+// Rohes On-Chain-L skaliert mit den Dezimalstellen beider Token (Uniswap-V3/Orca-Konvention,
+// da sqrtPrice_raw = √P0 · 10^((decimalsB−decimalsA)/2) und x_raw = x_human · 10^decimalsA):
+//   L_raw = L_human · 10^((decimalsA+decimalsB)/2)
+// Der Skalenfaktor ist preisunabhängig (Herleitung geprüft für LIQ#0361).
+export function clmmLiquidityFromCapital(P0, capitalUsdc, rangePct, decimalsA, decimalsB) {
+    if (!P0 || P0 <= 0 || !(capitalUsdc > 0) || !(rangePct > 0)) return 0;
+    const r  = rangePct / 100;
+    const pa = 1 - r;
+    const pb = 1 + r;
+    if (pa <= 0) return 0;
+    const denom = (1 - 1 / Math.sqrt(pb)) + (1 - Math.sqrt(pa));
+    if (denom <= 0) return 0;
+
+    const lHuman = capitalUsdc / (Math.sqrt(P0) * denom);
+    return lHuman * Math.pow(10, (decimalsA + decimalsB) / 2);
+}
+
 // IL vs. HODL: nur für die IL-Anzeige in der Position-Detailansicht.
 // NICHT für NP-Berechnung verwenden (misst Opportunity Cost, nicht Kapitalrendite).
 export function clmmIlPct(P0, Pt, rangePct) {

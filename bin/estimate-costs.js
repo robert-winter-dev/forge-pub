@@ -57,6 +57,7 @@ const __dirname  = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..');
 import { PATHS } from '../config/paths.js';
 import { t } from '../lib/i18n.js';
+import { costFeePct, effectiveFeePct, isAdaptiveSurcharge } from '../lib/effective-fee.js';
 const require    = createRequire(import.meta.url);
 
 // better-sqlite3 aus dem Liquidity-Projekt laden (liegt dort in node_modules)
@@ -84,7 +85,9 @@ const PRESWAP_POOLS      = new Set(['ZEC/USDC']);
 /** Volatile-Pair-Pools (beide Tokens volatil, kein USDC im Pool) – brauchen ZWEI Pre-Swaps */
 const VOLATILE_PAIR_POOLS = new Set(['HYPE/SOL', 'ORCA/SOL']);
 
-/** Aktionen die SOL aus dem Wallet entnehmen (deposit/open benötigen SOL als TokenA) */
+/** Aktionen bei denen SOL/HYPE/ORCA-Pools einen Vor-Swap Richtung TokenA (SOL) auslösen können
+ *  und die SOL-Reserve-Prüfung deshalb relevant ist (die SOL kommt aus dem Swap, nicht aus der
+ *  Wallet-Reserve — geprüft wird hier nur, ob die Reserve die TX-Gebühren trägt, s. LIQ#0364) */
 const SOL_CONSUMING_ACTIONS = new Set(['deposit', 'open', 'rebalance', 'close-reopen']);
 
 /** Fallback-Preise wenn DB nicht verfügbar */
@@ -277,7 +280,8 @@ async function costHops(hops, amount, db) {
     const details   = [];
 
     for (const hop of hops) {
-        let tvl       = await fetchLiveTvl(hop.address);
+        const live    = await fetchLivePool(hop.address);
+        let tvl       = live.tvl;
         let tvlSource = 'live';
         if (tvl == null) {
             tvl       = getCachedTvl(db, hop.poolId);
@@ -286,12 +290,18 @@ async function costHops(hops, amount, db) {
         if (tvlSource === 'cached' && confidence === 'live') confidence = 'cached';
         if (tvlSource === 'none') confidence = 'none';
 
-        const fee  = Math.round(remaining * (hop.feeTier / 100) * 10_000) / 10_000;
+        // Effektiver Fee-Satz statt Konstante — bei Adaptive-Fee-Pools liegt der
+        // reale Satz über dem konfigurierten Tier (LIQ#0394).
+        const feeInfo = costFeePct(hop.feeTier, live.data, getCachedFeeStats(db, hop.poolId));
+        const feePct  = feeInfo.pct ?? hop.feeTier;
+
+        const fee  = Math.round(remaining * (feePct / 100) * 10_000) / 10_000;
         const slip = tvl ? estimateSlippage(remaining, tvl, hop.correlated) : null;
 
         protocolFee += fee;
         slippageUsd += slip?.usd ?? 0;
-        details.push({ label: hop.poolId, feeTier: hop.feeTier, fee, slip, tvl, tvlSource, amount: remaining });
+        details.push({ label: hop.poolId, feeTier: feePct, baseFeeTier: hop.feeTier,
+                       feeSource: feeInfo.source, fee, slip, tvl, tvlSource, amount: remaining });
 
         remaining = Math.round((remaining - fee) * 10_000) / 10_000;
     }
@@ -522,6 +532,55 @@ function getCachedTvl(db, poolId) {
     `).get(poolId)?.tvl_usd ?? null;
 }
 
+/**
+ * Fees und Volumen der letzten 24 h aus dem jüngsten `pool_stats`-Eintrag —
+ * Grundlage des effektiven Fee-Satzes (siehe `lib/effective-fee.js`).
+ * Der Bot schreibt beide Werte pro Zyklus mit; hier kostet das keinen API-Call.
+ */
+function getCachedFeeStats(db, poolId) {
+    if (!db) return {};
+    const row = db.prepare(`
+        SELECT fees_24h_usd, volume_24h_usd FROM pool_stats
+        WHERE pool_id = ? AND fees_24h_usd IS NOT NULL
+        ORDER BY recorded_at DESC LIMIT 1
+    `).get(poolId);
+    return { fees24hUsd: row?.fees_24h_usd ?? null, volume24hUsd: row?.volume_24h_usd ?? null };
+}
+
+/**
+ * Effektiver Fee-Satz eines Pools in % aus der DB — ohne API-Call, für synchrone
+ * Rechenwege (Routen-Hops in `calcCosts`).
+ *
+ * ⚠️ Nie ohne diese Funktion mit `feeTier` rechnen: bei Adaptive-Fee-Pools ist der
+ * konfigurierte Wert nur die Untergrenze (LIQ#0394).
+ */
+/**
+ * Beschriftung eines Fee-Satzes für die Ausgabe — nur der Satz selbst, damit die
+ * Tabellenbreite hält. Dass es ein Adaptive-Fee-Aufschlag ist, sagt der Hinweis
+ * darunter (`adaptiveFeeNote`).
+ */
+function feeLabel(pct, basePct) {
+    return `${Number.isFinite(pct) ? +pct.toFixed(4) : basePct}%`;
+}
+
+/**
+ * Hinweiszeile, wenn der effektive Satz den konfigurierten Tier übersteigt —
+ * sonst `null`. Ohne diesen Hinweis wüsste niemand, warum die Schätzung von der
+ * `pools.json` abweicht (LIQ#0394).
+ */
+function adaptiveFeeNote(pct, basePct, label = null) {
+    if (!isAdaptiveSurcharge(pct, basePct)) return null;
+    return t('cli.est.note_adaptive_fee', {
+        pool: label ? ` (${label})` : '',
+        eff:  +pct.toFixed(4),
+        base: basePct,
+    });
+}
+
+function cachedFeePct(db, poolId, staticPct) {
+    return effectiveFeePct(staticPct, getCachedFeeStats(db, poolId)).pct ?? staticPct ?? 0;
+}
+
 function getOpenPosition(db, poolId) {
     if (!db) return null;
     return db.prepare(`
@@ -623,19 +682,30 @@ async function getWalletSolBalance() {
     }
 }
 
-// ─── Live-TVL von Orca API ────────────────────────────────────────────────────
+// ─── Live-Pooldaten von Orca API ──────────────────────────────────────────────
 
-async function fetchLiveTvl(poolAddress) {
+/**
+ * Ein Abruf, zwei Werte: TVL **und** der aktuelle Fee-Satz inklusive
+ * Adaptive-Fee-Aufschlag (`data.feeRate` + `data.adaptiveFee.currentRate`).
+ *
+ * Warum hier live und nicht der 24h-Schnitt: der Aufschlag klingt über
+ * `decayPeriod` (~10 Min) ab. Im Moment einer Aktion zählt der Momentanwert, den
+ * ein 24h-Durchschnitt genau dann wegglättet, wenn er am größten ist
+ * (LIQ#0394 — Begründung ausführlich in `lib/effective-fee.js`).
+ *
+ * Kein zusätzlicher API-Call: derselbe Endpunkt lieferte vorher schon die TVL.
+ */
+async function fetchLivePool(poolAddress) {
     try {
         const url = `https://api.orca.so/v2/solana/pools/${poolAddress}`;
         const res = await fetch(url, { signal: AbortSignal.timeout(6_000) });
-        if (!res.ok) return null;
+        if (!res.ok) return { tvl: null, data: null };
         const json = await res.json();
         const pool = json?.data ?? json;
         const tvl  = parseFloat(pool?.tvl ?? pool?.tvlUsdc ?? 0);
-        return tvl > 0 ? tvl : null;
+        return { tvl: tvl > 0 ? tvl : null, data: pool ?? null };
     } catch {
-        return null;
+        return { tvl: null, data: null };
     }
 }
 
@@ -665,7 +735,14 @@ function estimateSlippage(swapAmount, tvl, correlated) {
 
 // ─── Kostenberechnung pro Aktion ─────────────────────────────────────────────
 
-function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap = null }) {
+/**
+ * @param {number} [feePct]  Effektiver Fee-Satz des Pools in % (inkl. Adaptive-Fee-Aufschlag).
+ *                           Fällt auf `pool.feeTier` zurück, wenn nicht ermittelbar — nie
+ *                           direkt mit `pool.feeTier` rechnen (LIQ#0394).
+ */
+function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap = null, feePct = null, feeInfo = null, db = null }) {
+    const effFeePct = Number.isFinite(feePct) ? feePct : (pool.feeTier ?? 0);
+    const feeNote   = adaptiveFeeNote(effFeePct, pool.feeTier);
     // Wenn --amount-a angegeben: Ratio berechnen und effectiveCapital daraus ableiten
     let ratioInfo = null;
     if (amountA != null && action === 'deposit' && currentPrice != null && position?.price_lower != null) {
@@ -692,9 +769,9 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
             // Out-of-Range: Position hält 100% eines Tokens → 50% muss geswappt werden
             if (effectiveCapital) {
                 swapAmount  = effectiveCapital * 0.5;
-                protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
+                protocolFee = Math.round(swapAmount * (effFeePct / 100) * 10_000) / 10_000;
                 slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
-                notes.push(t('cli.est.note_rebalance_swap', { usd: swapAmount.toFixed(2), feeTier: pool.feeTier }));
+                notes.push(t('cli.est.note_rebalance_swap', { usd: swapAmount.toFixed(2), feeTier: +effFeePct.toFixed(4) }));
             } else {
                 unknown.push(t('cli.est.unknown_capital_swap'));
             }
@@ -704,7 +781,7 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
         case 'open':
             if (effectiveCapital) {
                 swapAmount  = effectiveCapital * 0.5;
-                protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
+                protocolFee = Math.round(swapAmount * (effFeePct / 100) * 10_000) / 10_000;
                 slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
                 notes.push(t('cli.est.note_open_swap', { usd: swapAmount.toFixed(2) }));
             } else {
@@ -721,10 +798,14 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                 txFeeUsd = Math.round(txCount * SOL_PER_TX * solPrice * 10_000) / 10_000;
                 if (effectiveCapital) {
                     const halfAmount = effectiveCapital * 0.5;
+                    // Fee je Hop: gecachter 24h-Ist-Satz aus pool_stats. calcCosts ist
+                    // synchron, ein Live-Abruf je Hop ginge hier nicht — der Schnitt liegt
+                    // aber immer noch über der Konstante (LIQ#0394).
+                    const hopFee = (h) => halfAmount * (cachedFeePct(db, h.poolId, h.feeTier) / 100);
                     const routeA = SWAP_ROUTES[routeKey('USDC', pool.tokenA)];
-                    const feeA   = routeA ? routeA.hops.reduce((s, h) => s + halfAmount * (h.feeTier / 100), 0) : halfAmount * (pool.feeTier / 100);
+                    const feeA   = routeA ? routeA.hops.reduce((s, h) => s + hopFee(h), 0) : halfAmount * (effFeePct / 100);
                     const routeB = SWAP_ROUTES[routeKey('USDC', pool.tokenB)];
-                    const feeB   = routeB ? routeB.hops.reduce((s, h) => s + halfAmount * (h.feeTier / 100), 0) : halfAmount * (pool.feeTier / 100);
+                    const feeB   = routeB ? routeB.hops.reduce((s, h) => s + hopFee(h), 0) : halfAmount * (effFeePct / 100);
 
                     swapAmount  = effectiveCapital;
                     protocolFee = Math.round((feeA + feeB) * 10_000) / 10_000;
@@ -745,9 +826,9 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
                 txFeeUsd = Math.round(txCount * SOL_PER_TX * solPrice * 10_000) / 10_000;
                 if (effectiveCapital) {
                     swapAmount  = effectiveCapital * 0.5;
-                    protocolFee = Math.round(swapAmount * (pool.feeTier / 100) * 10_000) / 10_000;
+                    protocolFee = Math.round(swapAmount * (effFeePct / 100) * 10_000) / 10_000;
                     slippage    = estimateSlippage(swapAmount, tvl, pool.correlated);
-                    notes.push(t('cli.est.note_preswap_half', { usd: swapAmount.toFixed(2), token: swapTarget, feeTier: pool.feeTier }));
+                    notes.push(t('cli.est.note_preswap_half', { usd: swapAmount.toFixed(2), token: swapTarget, feeTier: +effFeePct.toFixed(4) }));
                 } else {
                     unknown.push(t('cli.est.unknown_capital_swap'));
                 }
@@ -809,6 +890,10 @@ function calcCosts({ action, pool, poolName, capital, amount, amountA, currentPr
             break;
     }
 
+    // Der Adaptive-Fee-Hinweis nur dort, wo er die Rechnung erklärt — bei einer
+    // Aktion ohne Swap (close ohne --swap-to-usdc) wäre er reines Rauschen.
+    if (feeNote && protocolFee > 0) notes.unshift(feeNote);
+
     const total = Math.round((txFeeUsd + protocolFee + (slippage?.usd ?? 0)) * 10_000) / 10_000;
 
     return { txFeeUsd, txCount, swapAmount, protocolFee, slippage, total, notes, unknown, ratioInfo,
@@ -841,8 +926,9 @@ async function calcSwapCosts({ fromToken, toToken, amount, solPrice, db }) {
     let overallConfidence = 'live';
 
     for (const hop of route.hops) {
-        // TVL für diesen Hop laden
-        let tvl       = await fetchLiveTvl(hop.address);
+        // TVL + Live-Fee-Satz für diesen Hop laden (ein Abruf, siehe fetchLivePool)
+        const live    = await fetchLivePool(hop.address);
+        let tvl       = live.tvl;
         let tvlSource = 'live';
         if (tvl == null) {
             tvl       = getCachedTvl(db, hop.poolId);
@@ -851,15 +937,19 @@ async function calcSwapCosts({ fromToken, toToken, amount, solPrice, db }) {
         if (tvlSource === 'cached' && overallConfidence === 'live') overallConfidence = 'cached';
         if (tvlSource === 'none')  overallConfidence = 'none';
 
-        const fee      = Math.round(remainingAmount * (hop.feeTier / 100) * 10_000) / 10_000;
+        const feeInfo  = costFeePct(hop.feeTier, live.data, getCachedFeeStats(db, hop.poolId));
+        const feePct   = feeInfo.pct ?? hop.feeTier;
+        const fee      = Math.round(remainingAmount * (feePct / 100) * 10_000) / 10_000;
         const slip     = tvl ? estimateSlippage(remainingAmount, tvl, hop.correlated) : null;
 
         totalProtocolFee += fee;
         totalSlippageUsd += slip?.usd ?? 0;
 
         hopDetails.push({
-            label:     hop.poolId,
-            feeTier:   hop.feeTier,
+            label:       hop.poolId,
+            feeTier:     feePct,
+            baseFeeTier: hop.feeTier,
+            feeSource:   feeInfo.source,
             fee,
             slip,
             tvl,
@@ -982,7 +1072,7 @@ function printWithdrawAndSwapReport({ pool, poolName, amount, result, solPrice, 
             console.log(`│ ${routeStr.padEnd(W - 2)} │`);
             for (const hop of swap.swapResult.hopDetails) {
                 const tvlStr = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : t('cli.est.tvl_na');
-                console.log(row(`  ${t('cli.est.protocol_fee')} (${hop.feeTier}%, ${tvlStr})`, `$${hop.fee.toFixed(4)} USDC`));
+                console.log(row(`  ${t('cli.est.protocol_fee')} (${feeLabel(hop.feeTier, hop.baseFeeTier)}, ${tvlStr})`, `$${hop.fee.toFixed(4)} USDC`));
                 if (hop.slip) {
                     console.log(row(`  Slippage (est. ${hop.slip.pct.toFixed(4)}%)`, `$${hop.slip.usd.toFixed(4)} USDC`));
                 }
@@ -1012,7 +1102,7 @@ function printWithdrawAndSwapReport({ pool, poolName, amount, result, solPrice, 
 
 // ─── Ausgabe ─────────────────────────────────────────────────────────────────
 
-function printReport({ poolName, pool, action, capital, amount, amountA, currentPrice, costs, solPrice, btcPrice, tvl, tvlSource, walletSol, dataAge = null }) {
+function printReport({ poolName, pool, action, capital, amount, amountA, currentPrice, costs, solPrice, btcPrice, tvl, tvlSource, walletSol, dataAge = null, feePct = null, feeInfo = null }) {
     const W   = 60;
     const SEP = '─'.repeat(W);
     const row = (label, value) => {
@@ -1073,7 +1163,7 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
         // neben einem Betrag, der sich daraus nicht ergibt, liest sich wie ein Rechenfehler.
         const swapLabel = costs.exitSwapLegs
             ? `Swap     ($${costs.swapAmount.toFixed(2)}, beide Seiten → USDC)`
-            : `Swap     ($${costs.swapAmount.toFixed(2)} × ${pool.feeTier}% Fee)`;
+            : `Swap     ($${costs.swapAmount.toFixed(2)} × ${feeLabel(feePct ?? pool.feeTier, pool.feeTier)} Fee)`;
         console.log(row(swapLabel, `$${costs.protocolFee.toFixed(4)} USDC`));
         if (costs.slippage) {
             console.log(row(
@@ -1094,24 +1184,27 @@ function printReport({ poolName, pool, action, capital, amount, amountA, current
     console.log(`└${SEP}┘`);
 
     // ── SOL-Reserve-Prüfung ────────────────────────────────────────────────────
+    // Die SOL für die Position selbst kommt bei deposit/open/rebalance/close-reopen
+    // aus einem Vor-Swap (USDC → SOL, s. Zeile 741 / calcCosts), sie wird NICHT aus
+    // der vorhandenen Wallet-Reserve entnommen. Aus der Reserve bezahlt werden nur
+    // die TX-Gebühren dieser Aktion (LIQ#0364 — vorher wurde der Vor-Swap-Betrag
+    // fälschlich zusätzlich von der Wallet-SOL abgezogen).
     if (SOL_POOLS.has(poolName) && SOL_CONSUMING_ACTIONS.has(action)) {
-        const effectiveAmount = amount ?? capital ?? 0;
-        // Schätzung: ~50% des Deposit-Betrags wird als SOL benötigt
-        const solNeeded  = effectiveAmount * 0.5 / solPrice;
+        const solNeeded  = costs.txFeeUsd / solPrice;
         const solAfter   = walletSol != null ? walletSol - solNeeded : null;
         const solDisplay = walletSol != null ? walletSol.toFixed(4) : t('cli.est.unknown_word');
 
         console.log();
         console.log(`  ${t('cli.est.sol_reserve_check', { min: MIN_SOL_RESERVE })}`);
         console.log(`    ${t('cli.est.wallet_current', { sol: solDisplay })}`);
-        console.log(`    ${t('cli.est.estimated_needed', { sol: solNeeded.toFixed(4) })}`);
+        console.log(`    ${t('cli.est.estimated_needed', { sol: solNeeded.toFixed(6) })}`);
 
         if (walletSol != null) {
             console.log(`    ${t('cli.est.after_action', { sol: solAfter.toFixed(4) })}`);
             if (solAfter < MIN_SOL_RESERVE) {
-                const maxSafeUsdc = Math.floor((walletSol - MIN_SOL_RESERVE) * solPrice * 2);
+                const topupSol = Math.round((MIN_SOL_RESERVE - solAfter) * 10_000) / 10_000;
                 console.log(`    🚨 ${t('cli.est.reserve_warning', { sol: solAfter.toFixed(4) })}`);
-                console.log(`    💡 ${t('cli.est.max_safe_amount', { usd: maxSafeUsdc })}`);
+                console.log(`    💡 ${t('cli.est.reserve_topup_hint', { sol: topupSol })}`);
             } else {
                 console.log(`    ✅ ${t('cli.est.reserve_ok', { sol: solAfter.toFixed(4), min: MIN_SOL_RESERVE })}`);
             }
@@ -1160,7 +1253,7 @@ function printSwapReport(result, solPrice) {
             const hopLabel = result.hopDetails.length > 1 ? ` Hop ${i + 1}` : '';
             const tvlStr   = hop.tvl ? `TVL $${(hop.tvl / 1000).toFixed(0)}K` : t('cli.est.tvl_na');
             console.log(row(
-                `${t('cli.est.protocol_fee')}${hopLabel} (${hop.feeTier}%, ${tvlStr})`,
+                `${t('cli.est.protocol_fee')}${hopLabel} (${feeLabel(hop.feeTier, hop.baseFeeTier)}, ${tvlStr})`,
                 `$${hop.fee.toFixed(4)} USDC`
             ));
             if (hop.slip) {
@@ -1459,29 +1552,35 @@ for (const [poolName, pool] of poolEntries) {
     const capital      = position?.capital_usdc ?? null;
     const currentPrice = getLatestPrice(db, pool.id);
 
-    // TVL: live → gecacht → null
-    let tvl       = await fetchLiveTvl(pool.address);
+    // TVL + Fee-Satz: live → gecacht → null (ein Abruf, siehe fetchLivePool)
+    const live    = await fetchLivePool(pool.address);
+    let tvl       = live.tvl;
     let tvlSource = 'live';
     if (tvl == null) {
         tvl       = getCachedTvl(db, pool.id);
         tvlSource = tvl != null ? 'cached' : 'none';
     }
 
+    // Effektiver Fee-Satz inkl. Adaptive-Fee-Aufschlag (LIQ#0394)
+    const feeInfo = costFeePct(pool.feeTier ?? null, live.data, getCachedFeeStats(db, pool.id));
+    const feePct  = feeInfo.pct ?? pool.feeTier ?? 0;
+
     // Swap-Beine eines Voll-Exits vorab (async) berechnen — calcCosts selbst ist synchron.
     const exitSwap = (action === 'close' && args['swap-to-usdc'])
         ? await calcExitSwapLegs(pool, amount ?? capital, db)
         : null;
 
-    const costs = calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap });
+    const costs = calcCosts({ action, pool, poolName, capital, amount, amountA, currentPrice, position, solPrice, tvl, exitSwap, feePct, feeInfo, db });
 
     if (jsonMode) {
         jsonResults.push({
             poolName, action, capital, amount, amountA, currentPrice,
             solPrice, btcPrice, tvl, tvlSource, walletSol,
+            feePct, baseFeePct: pool.feeTier ?? null, feeSource: feeInfo.source,
             costs,
         });
     } else {
-        printReport({ poolName, pool, action, capital, amount, amountA, currentPrice, costs, solPrice, btcPrice, tvl, tvlSource, walletSol });
+        printReport({ poolName, pool, action, capital, amount, amountA, currentPrice, costs, solPrice, btcPrice, tvl, tvlSource, walletSol, feePct, feeInfo });
     }
 }
 
