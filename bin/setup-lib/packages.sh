@@ -108,6 +108,24 @@ do_user() {
 # ═════════════════════════════════════════════════════════════════════════════
 # TLS
 # ═════════════════════════════════════════════════════════════════════════════
+detect_lan_ip() {
+    ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || hostname -I | awk '{print $1}'
+}
+
+# Schreibt die LAN-IP nach config/health-config.js (LOCAL_SERVER.ip). Ohne
+# diesen Schritt bleibt dort der Placeholder '0.0.0.0' stehen, den der Fork-
+# Export bewusst einträgt (sanitize-text.js) — Dashboard-Links in Nachrichten
+# (z.B. "Auffälliger Token gefunden") zeigen dann auf eine falsche Adresse
+# (LIQ#000565). $APP_DIR/config/** wird bei JEDEM Update komplett neu aus dem
+# Artefakt ausgerollt (do_deploy: rm -rf + Extract) — dieser Schritt muss
+# deshalb sowohl bei do_install als auch bei JEDEM do_update laufen
+# (CORE#000568), nicht nur einmalig.
+sync_health_config_ip() {
+    local ip="$1" file="$APP_DIR/config/health-config.js"
+    [[ -f "$file" ]] || return 0
+    sed -i -E "s/(ip:[[:space:]]*')[^']*(')/\1$ip\2/" "$file"
+}
+
 do_ssl() {
     step "$(t SSL_STEP)"
     command -v mkcert &>/dev/null || die "$(t SSL_MKCERT_MISSING "$0")"
@@ -116,11 +134,11 @@ do_ssl() {
 
     local ip="$OPT_LAN_IP"
     if [[ -z "$ip" ]]; then
-        local erkannt
-        erkannt=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || hostname -I | awk '{print $1}')
+        local erkannt; erkannt="$(detect_lan_ip)"
         ask ip "$(t SSL_LAN_IP_PROMPT "$erkannt")" "$erkannt"
     fi
     [[ -n "$ip" ]] || die "$(t SSL_LAN_IP_MISSING)"
+    sync_health_config_ip "$ip"
 
     say "$(t SSL_CA_TRUST "$CAROOT")"
     mkcert -install >/dev/null 2>&1 || c_warn "$(t SSL_MKCERT_INSTALL_WARN)"

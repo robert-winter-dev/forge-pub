@@ -46,6 +46,7 @@ import {
 import { FORGE_ROOT } from '../../../config/paths.js';
 import { loadPremiumKeypair, walletExists } from '../../../lib/premium-wallet.js';
 import { classify, fetchTokenSignals, buildKnownTokens, verdictReason, DEFAULT_VALUE_THRESHOLD } from '../../../lib/scam-classify.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 
 const NEXUS = 'http://127.0.0.1:3100';
 
@@ -150,7 +151,7 @@ if (!walletExists()) {
 }
 
 const keypair = loadPremiumKeypair();
-const conn    = new Connection(`${NEXUS}/rpc`, 'confirmed');
+const conn    = new Connection(`${NEXUS}/rpc`, { commitment: 'confirmed', httpHeaders: rpcCallerHeaders() });
 const owner   = keypair.publicKey;
 
 console.log(`[close-scam-premium] Wallet: ${owner.toBase58()}`);

@@ -34,6 +34,7 @@ import {
 import { t } from '../../../lib/i18n.js';
 import { classify, buildKnownTokens } from '../../../lib/scam-classify.js';
 import { visibleLabel } from '../../../lib/token-symbol.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -530,6 +531,9 @@ const NEXUS_RPC_FRESH       = 'http://127.0.0.1:3100/rpc/fresh';
 const RPC_CONN_OPTS = {
     commitment: 'confirmed',
     wsEndpoint: readEnvField(LIQUIDITYBOT_ENV, 'HELIUS_WS_URL') || undefined,
+    // CORE#000846: Verursacher-Kennung für rpc_stats. Gilt über den Import in
+    // pools-actions.js auch dort.
+    httpHeaders: rpcCallerHeaders(),
 };
 
 const SPL_PROGRAM_ID   = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
@@ -1128,10 +1132,12 @@ router.get('/:flavor/scam', (req, res) => {
     if (!SCAM_FLAVORS[flavor]) return res.status(404).json({ error: 'unknown_flavor' });
 
     try {
-        const { tokens, recorded_at } = readScamTokens(flavor);
+        const { tokens: all, recorded_at } = readScamTokens(flavor);
+        // VERIFIED (von Jupiter verifizierter Token in Staubmenge) ist kein Befund und
+        // bleibt aus dem Reiter, den Zählern und dem Wallet-Icon heraus.
         res.json({
             available: !!scamScriptPath(flavor),
-            tokens,
+            tokens:    all.filter(tk => tk.tier !== 'VERIFIED'),
             recorded_at,
         });
     } catch (err) {

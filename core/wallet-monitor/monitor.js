@@ -30,6 +30,7 @@ import { renderNotification } from '../../lib/notify-render.js';
 import { getLang } from '../../lib/i18n.js';
 import { fetchTokenSignals, classify, buildKnownTokens } from '../../lib/scam-classify.js';
 import { LOCAL_SERVER } from '../../config/health-config.js';
+import { rpcCallerHeaders } from '../../lib/rpc-caller.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..', '..');
@@ -323,7 +324,7 @@ async function fetchReceiveTx(account) {
 // diesen veralteten Stand zurück — der verbrannte Token bliebe fälschlich in
 // unknown_tokens stehen, die Auffällig-Badge zeigt weiter (1). Analog zu
 // getConnectionFresh() in bots/liquidity/lib/wallet.js.
-const connection = new Connection(config.rpcUrl.replace(/\/rpc$/, '/rpc/fresh'), 'confirmed');
+const connection = new Connection(config.rpcUrl.replace(/\/rpc$/, '/rpc/fresh'), { commitment: 'confirmed', httpHeaders: rpcCallerHeaders() });
 
 async function fetchWalletSnapshot(walletAddress) {
     const pubkey = new PublicKey(walletAddress);

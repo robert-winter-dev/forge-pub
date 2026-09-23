@@ -14,37 +14,15 @@ import {
 import { establishPositionBaseline, settleCapitalFlow, getQuotePriceUsd } from './refresh-state.js';
 import { isRebalancePending } from './cleanup-lock.js';
 import { config, setPoolActive } from './config.js';
-import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
+import { ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
          ensureTrailingStopDefaults } from './settings-auto.js';
 import { calculateRange } from './range.js';
-import { applyStrategyOffsetToComputedRange } from './strategy-range-offset.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import Decimal from 'decimal.js';
 import BN     from 'bn.js';
-import Database from 'better-sqlite3';
 import * as notify from './notify.js';
 import { t }       from '../../../lib/i18n.js';
 import { foreignExitBlock } from './exit-reservation.js';
-import { PATHS } from '../../../config/paths.js';
-
-const SETTINGS_DB = PATHS.settingsDb;
-
-/**
- * Liest die aktive Strategie (LIQ#0369/#0377) aus `strategy_state` in settings.db.
- * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
- * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
- * Gleiches Muster wie `_loadActiveStrategyId()` in bin/bot.js und bin/cleanup.js.
- */
-function _loadActiveStrategyId() {
-    try {
-        const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
-        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
-        sdb.close();
-        return row?.strategy_id ?? null;
-    } catch {
-        return null;
-    }
-}
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -55,7 +33,7 @@ const WSOL_MINT            = 'So11111111111111111111111111111111111111112';
 const CBTC_MINT            = 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij';
 const SOL_TX_FEE_BUFFER    = 0.005;
 const MIN_USDC_AMOUNT      = 1.0;
-const PRESWAP_SLIPPAGE_BPS = 150; // höherer Slippage für Cleanup-Swaps (cbBTC/EURC illiquid)
+export const PRESWAP_SLIPPAGE_BPS = 150; // höherer Slippage für Cleanup-Swaps (cbBTC/EURC illiquid)
 
 // ─── Gemeinsame Hilfsfunktionen ───────────────────────────────────────────────
 
@@ -392,6 +370,16 @@ export function planResidualSweep({ bal, usd, budgetUsdc, aPerB }) {
     return { needAUsd, needBUsd, weightA, swap: { fromA, valueUsd, amountIn } };
 }
 
+/** Summe zweier Liquiditäts-Strings (u128 als Dezimalstring); bei Unlesbarem der jüngere Wert. */
+export function sumLiquidityAdded(a, b) {
+    try {
+        if (a == null || b == null) return b ?? a;
+        return (BigInt(String(a)) + BigInt(String(b))).toString();
+    } catch {
+        return b;
+    }
+}
+
 /**
  * Zahlt den nach einem Deposit im Wallet verbliebenen Rest in dieselbe Position nach.
  * Wirft nie — die Haupteinzahlung ist beim Aufruf bereits erfolgt; scheitert der Sweep,
@@ -419,6 +407,10 @@ export async function sweepResidualIntoPosition(pool, nftMint, opts) {
                 tokenEstA: combined.tokenEstA + res.tokenEstA,
                 tokenEstB: combined.tokenEstB + res.tokenEstB,
                 usdc:      combined.usdc + res.usdc,
+                // Über ALLE Runden summieren (LIQ#000841): settleCapitalFlow() skaliert die
+                // Trailing-Stop-Referenz mit der zugefügten Liquidität. Nur die der letzten
+                // Runde zu liefern, ließ die Referenz bei mehrrundigem Sweep zu niedrig.
+                liquidityAdded: sumLiquidityAdded(combined.liquidityAdded, res.liquidityAdded),
               }
             : res;
         if (Number.isFinite(budgetLeft)) budgetLeft = Math.max(0, budgetLeft - res.usdc);
@@ -939,13 +931,7 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     const effectiveRange = pool.rangeOverride
         ? { ...config.range, ...pool.rangeOverride }
         : config.range;
-    const rawRange = calculateRange(pool, currentPrice, effectiveRange, db);
-    // LIQ#0377: autoritativer Open-Pfad für frische volatilePair-Positionen (Erstbefüllung
-    // via Cleanup) — hier muss der Strategie-Versatz wirken, unabhängig davon, ob der
-    // Aufrufer bin/cleanup.js, bin/deposit.js oder bot.js (Reopen) ist.
-    const range = applyStrategyOffsetToComputedRange(
-        _loadActiveStrategyId(), pool, currentPrice, db, rawRange,
-    ) ?? rawRange;
+    const range = calculateRange(pool, currentPrice, effectiveRange, db);
     console.log(`[deposit-lib:open] ${pool.pair}: Range ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)}`);
 
     // ─── 3. Wallet-Bestände lesen ─────────────────────────────────────────────
@@ -1085,7 +1071,6 @@ async function openVolatilePairPosition(pool, keypair, db, adapter, { note = 'cl
     if (setPoolActive(pool.id, true)) {
         console.log(`[deposit-lib:open] Pool ${pool.pair} auf active=true gesetzt`);
     }
-    ensureScoreLimitEnabled(pool.id);
     ensureTrailingStopDefaults(pool.id, pool.poolType);
     {
         const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;

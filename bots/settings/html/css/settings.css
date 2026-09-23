@@ -922,12 +922,6 @@ body {
 }
 .pool-type-filter option { background: var(--bg-2); color: var(--text); }
 
-/* Strategie-Zeile (LIQ#0379, Punkt 2): linksbündig statt rechtsbündig, breiter als die
-   übrigen pool-type-filter-Selects — hier kommen später weitere Einträge hinzu. */
-.strategy-select {
-    min-width: 200px;
-}
-
 @keyframes card-pool-switch-flash {
     0%   { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }
     55%  { box-shadow: 0 0 0 3px rgba(99,102,241,0.75); }

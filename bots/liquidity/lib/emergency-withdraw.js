@@ -29,6 +29,7 @@ import { createUtils, resolveToken, getQuote, TOKEN_MINTS }
 import { PATHS } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
 import { settle } from './settle-promise.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BOT_DIR   = path.join(__dirname, '..');
@@ -102,7 +103,7 @@ async function checkConnectivity() {
     try {
         const { config }     = await import('./config.js');
         const { Connection } = web3;
-        await new Connection(config.rpcUrl, 'confirmed').getSlot();
+        await new Connection(config.rpcUrl, { commitment: 'confirmed', httpHeaders: rpcCallerHeaders() }).getSlot();
         rpcOk = true;
     } catch (err) { log(`RPC-Fehler: ${err.message}`); }
 

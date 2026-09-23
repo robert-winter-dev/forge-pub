@@ -2,7 +2,6 @@
  * FORGE Liquidity – Exit-Finalizer
  *
  * Gemeinsame Swap- und Transfer-Logik für alle Exit-Mechanismen:
- *   • Score Limit      (lib/score-limit.js)
  *   • Trailing Stop    (lib/trailing-stop.js)
  *
  * Hintergrund: Exit-Module hatten zuvor jeweils eigene `stepSwap`/`stepTransfer`-
@@ -26,7 +25,7 @@ import { Transaction, SystemProgram, PublicKey, TransactionInstruction } from '@
 import { swapTokens, quoteTokens } from './swap.js';
 import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT, getTxFee } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
-import { insertTransaction, insertCapitalFlow, setCloseProceeds } from './db.js';
+import { insertTransaction, insertCapitalFlow, setCloseProceeds, setTransactionTxFee } from './db.js';
 import { logChainTx } from './chain-tx-log.js';
 // Nur für die Entnahmeprüfung unten. notify.js importiert exit-finalizer.js nicht — kein Zyklus.
 import * as notify from './notify.js';
@@ -35,7 +34,8 @@ import { settle } from './settle-promise.js';
 import { config } from './config.js';
 import { poolSides, sellSideOf } from './pool-tokens.js';
 import { pnlForPeriod } from '../../../lib/pnl.js';
-import { resolvePnlAnchorMs, chainStartOpenedAt } from './pnl-anchor.js';
+import { resolvePnlExtremaAnchorMs, chainStartOpenedAt } from './pnl-anchor.js';
+import { getTokenUsdPrice } from './deposit-lib.js';
 
 const WSOL_MINT      = 'So11111111111111111111111111111111111111112';
 const USDC_DECIMALS  = 6;
@@ -69,6 +69,13 @@ const EXIT_CAP_TOLERANCE_PCT      = 0.5;
 // checkExitAmountsAgainstLastMeasurement().
 const EXIT_AMOUNT_TOLERANCE         = 0.003;
 const EXIT_AMOUNT_CHECK_MAX_AGE_MS  = 15 * 60 * 1000;
+
+// Quote-Retry im Dust-Prüfpfad von adaptiveSwapToUsdc() – ein Timeout/429/5xx bei der
+// Quote-Anfrage darf den Betrag nicht als Dust verwerfen (LIQ#000897). Läuft über den
+// lokalen Nexus-Proxy (127.0.0.1:3100), kein direkter Jupiter-Call – kurze Pausen sind
+// hier unkritisch fürs API-Limit.
+const QUOTE_RETRY_ATTEMPTS = 3;
+const QUOTE_RETRY_DELAY_MS = 1_500;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -218,7 +225,47 @@ async function probeSlippage(token, totalAmount, logPrefix) {
  * per Jupiter-Quote und teilt den Swap in Chunks auf, falls die Schwelle
  * EXIT_SWAP_MAX_SLIPPAGE_PCT überschritten wird.
  */
-async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label, logPrefix, slippageBps) {
+// Exportiert für bin/test-exit-swap-quote.js (LIQ#000897) – `deps` erlaubt dem Test,
+// quoteTokens/swapTokens/getTxFee ohne Netzwerk zu stubben. Produktionscode ruft immer ohne
+// `deps` auf und bekommt damit die echten Funktionen aus ./swap.js bzw. ./wallet.js.
+//
+// `db`/`poolId` (LIQ#000896, optional): erlauben das Schreiben einer `swap`-Zeile je
+// ausgeführtem Teil-Swap, analog zum Deposit-Pfad (bin/deposit.js). Ohne `db` (Test,
+// Aufrufer ohne DB-Zugriff) entfällt die Buchung, der Swap läuft unverändert weiter —
+// der Exit darf nie an der Buchung scheitern (siehe Annahmen in LIQ#000896).
+export async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label, logPrefix, slippageBps, deps = {}, db = null, poolId = null) {
+    const { quote: quoteFn = quoteTokens, swap: swapFn = swapTokens, txFee: txFeeFn = getTxFee } = deps;
+
+    // Synchron und ohne RPC: Die Zeile steht sofort (auch wenn ein CLI-Aufrufer danach
+    // gleich endet), der nächste Teil-Swap wartet auf nichts. Die TX-Gebühr kommt im
+    // Hintergrund nach (setTransactionTxFee) — eine RPC-Abfrage zwischen zwei Teil-Swaps
+    // hätte den Verkauf gerade im Crash (Stückelung = hohe Slippage) verzögern können.
+    function _recordSwap(amountIn, amountOut, txSignature, note) {
+        if (!db) return;
+        try {
+            const price   = getTokenUsdPrice(token.mint, db);
+            insertTransaction(db, {
+                poolId,
+                type:        'swap',
+                amountA:     amountIn,
+                amountB:     amountOut,
+                usdValue:    amountOut,
+                // usd_value_in/out (LIQ#0896): Ausgang exakt (USDC), Eingang über einen
+                // einmaligen Preis-Read (getTokenUsdPrice) für das verkaufte Token.
+                usdValueIn:  price > 0 ? amountIn * price : null,
+                usdValueOut: amountOut,
+                txHash:      txSignature,
+                txFeeSol:    null,
+                note,
+            });
+        } catch (err) {
+            console.warn(`${logPrefix} Swap-Zeile konnte nicht geschrieben werden (Exit läuft weiter): ${err.message}`);
+            return;
+        }
+        Promise.resolve().then(() => txFeeFn(txSignature))
+            .then(fee => setTransactionTxFee(db, { txHash: txSignature, type: 'swap', txFeeSol: fee }))
+            .catch(err => console.warn(`${logPrefix} TX-Gebühr der Swap-Zeile nicht nachgetragen: ${err.message}`));
+    }
     const fullRaw = Math.round(totalAmount * 10 ** token.decimals);
     if (fullRaw < MIN_SWAP_RAW_ABSOLUTE) {
         console.log(`${logPrefix} Swap ${label}: Betrag zu gering (${fullRaw} Raw-Units) – übersprungen`);
@@ -228,21 +275,57 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
         // Raw-Einheiten allein sagen nichts über den USD-Wert aus (Decimals/Preis
         // variieren pro Token) – per Quote den tatsächlichen Gegenwert prüfen,
         // statt pauschal als Dust zu verwerfen.
-        try {
-            const quote    = await quoteTokens({
-                inputMint: token.mint, outputMint: USDC_MINT,
-                inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
-                amount: totalAmount,
-            });
+        let quote = null;
+        let quoteErr = null;
+        for (let attempt = 1; attempt <= QUOTE_RETRY_ATTEMPTS; attempt++) {
+            try {
+                quote = await quoteFn({
+                    inputMint: token.mint, outputMint: USDC_MINT,
+                    inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
+                    amount: totalAmount,
+                });
+                break;
+            } catch (err) {
+                quoteErr = err;
+                if (attempt < QUOTE_RETRY_ATTEMPTS) {
+                    console.warn(`${logPrefix} Swap ${label}: Quote-Versuch ${attempt}/${QUOTE_RETRY_ATTEMPTS} fehlgeschlagen (${err.message}) – Retry in ${QUOTE_RETRY_DELAY_MS}ms`);
+                    await sleep(QUOTE_RETRY_DELAY_MS);
+                }
+            }
+        }
+
+        if (quote) {
             const usdValue = quote.outAmountRaw / 10 ** USDC_DECIMALS;
             if (usdValue < MIN_SWAP_USDC) {
                 console.log(`${logPrefix} Swap ${label}: ~${usdValue.toFixed(4)} USDC (${fullRaw} Raw-Units) – Dust, übersprungen`);
                 return { amountOut: 0 };
             }
             console.log(`${logPrefix} Swap ${label}: ${fullRaw} Raw-Units, aber ~${usdValue.toFixed(2)} USDC wert – Swap wird trotzdem ausgeführt`);
-        } catch (err) {
-            console.warn(`${logPrefix} Swap ${label}: Quote fehlgeschlagen (${err.message}) – als Dust behandelt, übersprungen`);
-            return { amountOut: 0 };
+        } else {
+            // Quote bleibt nach mehreren Versuchen unerreichbar – der USD-Wert ist unbekannt,
+            // der Betrag liegt aber über MIN_SWAP_RAW_ABSOLUTE und ist damit kein gesicherter
+            // Staub. Swap direkt versuchen statt stillschweigend zu verwerfen (LIQ#000897) –
+            // swapTokens holt sich sein eigenes Quote und retried transiente Fehler selbst.
+            console.warn(`${logPrefix} Swap ${label}: Quote nach ${QUOTE_RETRY_ATTEMPTS} Versuchen weiter fehlgeschlagen (${quoteErr.message}) – Swap wird direkt versucht`);
+            try {
+                const { amountOut, txSignature } = await swapFn({
+                    inputMint: token.mint, outputMint: USDC_MINT,
+                    inputDecimals: token.decimals, outputDecimals: USDC_DECIMALS,
+                    amount: totalAmount, wallet: keypair, connection, apiKey: null, slippageBps,
+                });
+                console.log(`${logPrefix} Swap ✓: ${amountOut.toFixed(2)} USDC erhalten  TX: ${txSignature}`);
+                _recordSwap(totalAmount, amountOut, txSignature, `exit swap ${label}→USDC`);
+                return { amountOut };
+            } catch (swapErr) {
+                // Auch der direkte Swap scheitert (z.B. echter Staub, den Jupiter ablehnt) –
+                // Annahme laut Ticket: warnen (kein Telegram) und den Exit trotzdem
+                // abschließen, statt die State-Machine dauerhaft zu blockieren.
+                await notify.warn(`exit-swap:${label}`, new Error(
+                    `${label}: ${fullRaw} Raw-Units (~${totalAmount} Token) nach Quote- und Swap-Fehlschlag ungeswappt im Wallet – ${swapErr.message}`
+                ));
+                console.warn(`${logPrefix} Swap ${label}: auch direkter Swap fehlgeschlagen (${swapErr.message}) – Exit wird trotzdem abgeschlossen`);
+                return { amountOut: 0 };
+            }
         }
     }
 
@@ -279,6 +362,7 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
         });
 
         console.log(`${logPrefix} Swap ✓: ${amountOut.toFixed(2)} USDC erhalten  TX: ${txSignature}`);
+        _recordSwap(chunks[i], amountOut, txSignature, `exit swap ${chunkLabel}→USDC`);
         totalOut += amountOut;
     }
 
@@ -289,16 +373,18 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
 }
 
 /**
- * PnL der soeben geschlossenen Position seit der letzten externen Einzahlung (oder seit
- * Beginn der Rebalancing-Kette, falls keine) – anders als das Tooltip "PnL seit
- * Einzahlung" in bin/export.js geht der Anker hier über `chainStartOpenedAt()` durch
- * alle Rebalancings dieser Kette zurück, nicht nur bis `position.opened_at` (=
- * Zeitpunkt des letzten Rebalancings). Sonst verliert die Exit-Nachricht das Ergebnis
- * der Kette vor dem letzten Rebalancing und widerspricht dem Tagesbericht, der dieselbe
- * Kette schon seit 30./31.08.2026 korrekt zusammenhängend misst (Befund 01.09.2026,
- * USELESS/SOL: Nachricht −5,31 USDC vs. Tagesbericht +2,44 USDC für denselben Exit).
- * Ausschließlich über lib/pnl.js (CLAUDE.md-Pflicht) – hier steht keine eigene
- * PnL-Mathematik.
+ * PnL der soeben geschlossenen Position seit Pool-Eröffnung — Beginn der Rebalancing-
+ * Kette (`chainStartOpenedAt()`) bzw. späterer manueller "Höchststand zurücksetzen"-
+ * Klick, derselbe Anker wie Anteil-Spalte und PnL-Details-Reiter im Dashboard
+ * (`resolvePnlExtremaAnchorMs()`, LIQ#000612).
+ *
+ * Bis 13.09.2026 gewann hier die letzte externe Einzahlung (`resolvePnlAnchorMs()`):
+ * Nach einem Nachschuss meldete die Exit-Nachricht dann nur noch das Ergebnis seit dem
+ * Nachschuss, das Dashboard aber das seit Eröffnung — zwei Zahlen für denselben Pool.
+ * Die Kette statt `position.opened_at` (= letztes Rebalancing) war schon vorher richtig
+ * (Befund 01.09.2026, USELESS/SOL: Nachricht −5,31 USDC vs. Tagesbericht +2,44 USDC
+ * für denselben Exit). Ausschließlich über lib/pnl.js (CLAUDE.md-Pflicht) – hier steht
+ * keine eigene PnL-Mathematik.
  *
  * @param {object} db
  * @param {object} pool      braucht pool.id
@@ -307,11 +393,7 @@ async function adaptiveSwapToUsdc(token, totalAmount, keypair, connection, label
  */
 export function computeExitPnl(db, pool, position) {
     const chainStartMs = chainStartOpenedAt(db, position.id, position.opened_at);
-    const lastDeposit = db.prepare(`
-        SELECT MAX(created_at) AS t FROM capital_flows
-         WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
-    `).get(pool.id, chainStartMs);
-    const fromMs = resolvePnlAnchorMs(lastDeposit?.t, position.pnl_anchor_reset_at, chainStartMs);
+    const fromMs = resolvePnlExtremaAnchorMs(chainStartMs, position.pnl_anchor_reset_at);
     return pnlForPeriod(db, { flavor: config.botId, scope: pool.id, fromMs });
 }
 
@@ -730,6 +812,9 @@ function capToPosition(usableAmount, fromPosition) {
  *                                          auch ohne sendTo. Für Teil-Entnahmen (manueller
  *                                          Withdraw), bei denen der restliche Wallet-Bestand
  *                                          unangetastet bleiben muss.
+ *   @param {Database} [opts.db]            (LIQ#000896) Erlaubt das Schreiben einer
+ *                                          `swap`-Zeile je ausgeführtem Teil-Swap. Ohne db
+ *                                          entfällt die Buchung (siehe adaptiveSwapToUsdc).
  * @returns {Promise<number>}  Summe USDC nach Swap
  */
 export async function executeSwapStep(pool, opts) {
@@ -740,6 +825,7 @@ export async function executeSwapStep(pool, opts) {
         onSwapped,
         slippageBps = DEFAULT_SLIPPAGE_BPS,
         forceCoins = false,
+        db = null,
     } = opts;
 
     const keypair    = getKeypair();
@@ -771,6 +857,7 @@ export async function executeSwapStep(pool, opts) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenA, decimals: pool.decimalsA },
                     swapA, keypair, connection, sides.a.symbol, logPrefix, slippageBps,
+                    {}, db, pool.id,
                 );
                 swappedUsdc += r.amountOut;
             }
@@ -781,6 +868,7 @@ export async function executeSwapStep(pool, opts) {
                 const r = await adaptiveSwapToUsdc(
                     { mint: pool.tokenB, decimals: pool.decimalsB },
                     swapB, keypair, connection, sides.b.symbol, logPrefix, slippageBps,
+                    {}, db, pool.id,
                 );
                 swappedUsdc += r.amountOut;
             }
@@ -817,6 +905,7 @@ export async function executeSwapStep(pool, opts) {
             const r = await adaptiveSwapToUsdc(
                 { mint: sell.mint, decimals: sell.decimals },
                 swapAmount, keypair, connection, sell.symbol, logPrefix, slippageBps,
+                {}, db, pool.id,
             );
             swappedUsdc = r.amountOut + usdcCoins;
         } else {

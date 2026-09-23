@@ -20,6 +20,7 @@
 import { config } from './config.js';
 import { getConnection } from './wallet.js';
 import { RateLimiter } from './rate-limiter.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -288,7 +289,7 @@ export class JupiterLendProtocol {
      */
     async getPosition(walletAddress) {
         const { Connection, PublicKey } = await import('@solana/web3.js');
-        const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+        const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
 
         // 1) jlUSDC-Token-Info + Exchange Rate aus API holen
         const usdc = await this._getUsdcToken();            // enthält convertToAssets + address (= jlUSDC Mint)
@@ -336,7 +337,7 @@ export class JupiterLendProtocol {
         const { PublicKey, Connection, Transaction }   = await import('@solana/web3.js');
 
         const walletPubkey = new PublicKey(walletAddress);
-        const connection   = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+        const connection   = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
         const amountBN     = new BN(Math.round(amount * 1e6));
 
         await this.limiter.wait();
@@ -366,7 +367,7 @@ export class JupiterLendProtocol {
         const { PublicKey, Connection, Transaction }   = await import('@solana/web3.js');
 
         const walletPubkey = new PublicKey(walletAddress);
-        const connection   = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+        const connection   = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
 
         let ixs;
         if (amount === 'all') {
@@ -439,7 +440,7 @@ export class DriftProtocol {
         const { DriftClient } = await import('@drift-labs/sdk');
         const { Connection, PublicKey } = await import('@solana/web3.js');
 
-        const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+        const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
 
         return new DriftClient({
             connection,
@@ -527,7 +528,7 @@ export class DriftProtocol {
             await client.subscribe();
 
             // Prüfen ob Drift-Account on-chain existiert (bevor wir versuchen zu laden)
-            const connection    = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+            const connection    = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
             const userAccountPk = await getUserAccountPublicKey(
                 client.program.programId, walletPubkey, 0,
             );
@@ -590,7 +591,7 @@ export class DriftProtocol {
             await client.subscribe();
 
             // Prüfen ob Drift-UserAccount bereits existiert
-            const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined });
+            const connection = new Connection(config.rpcUrl, { commitment: 'confirmed', wsEndpoint: process.env.HELIUS_WS_URL || undefined, httpHeaders: rpcCallerHeaders() });
             const userAccountPk = await getUserAccountPublicKey(
                 client.program.programId, walletPubkey, 0,
             );

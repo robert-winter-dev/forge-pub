@@ -21,8 +21,7 @@
 // 'none' ist ein regulärer Zustand, kein Fehler: der freie Fork ohne Premium hat
 // keinen Score. Er MUSS sichtbar bleiben (Entscheidung 2026-07-25: „Zustand immer
 // sichtbar") — deshalb liefert der Provider `source` mit, das bis ins Dashboard
-// durchgereicht und dort als Platzhalter angezeigt wird. Ein Notausstieg, der auf
-// dem Score beruht, feuert in diesem Zustand nicht (fail-safe, siehe score-limit.js).
+// durchgereicht und dort als Platzhalter angezeigt wird.
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { readFileSync, existsSync } from 'fs';
@@ -121,7 +120,9 @@ export async function loadOpportunityScores(ctx) {
  * @param {object} ctx – { pools, poolsOverview, volHistRaw, poolTypeMap, openPosByPool,
  *                         lastNonZeroCapitalByPool, oppStatsByPool, volatilePairMap }
  * @param {object} opportunityScores – Ergebnis von loadOpportunityScores()
- * @returns {Promise<{source:string, stale:boolean, investScores:Map<string,object>}>}
+ * @returns {Promise<{source:string, stale:boolean, investScores:Map<string,object>,
+ *          applyRankingAdjustments:Function|null}>}  Letzteres nur im Master (Formel ist
+ *          Score-IP); im Fork null — dort kommen die Werte fertig angepasst an.
  */
 export async function loadInvestScores(ctx, opportunityScores) {
     const be = await getBackend();
@@ -131,6 +132,7 @@ export async function loadInvestScores(ctx, opportunityScores) {
             source: 'compute',
             stale: false,
             investScores: be.compute.computeInvestScores({ ...ctx, opportunityScores }),
+            applyRankingAdjustments: be.compute.applyRankingAdjustments,
         };
     }
 

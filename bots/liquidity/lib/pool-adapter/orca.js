@@ -55,6 +55,7 @@ import BN                    from 'bn.js';
 import { getConnection, getConnectionFresh, getKeypair, assertSufficientSol, assertSufficientSolForExit, getTxFee, getSolBalance, getSolBalanceFresh, getTokenBalance, getTokenBalanceFresh } from '../wallet.js';
 import { rpcLimiter, geckoLimiter } from '../rate-limiter.js';
 import { settle } from '../settle-promise.js';
+import { readPricesBulk } from '../pool-price-bulk.js';
 import { emitChainTxLeg } from '../chain-tx-log.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
@@ -388,9 +389,18 @@ export class OrcaAdapter {
     // 30 req/10s) und können deshalb häufiger abgefragt werden als die Volume-Candles,
     // die am knappen, undokumentierten Gecko-Limit hängen (Nexus: 1 req/20s zentral für
     // alle Pools). Aufrufer steuert die beiden Kadenzen getrennt (siehe bot.js).
-    async getPoolStats(pool, { includeVolumeCandles = true } = {}) {
+    // onChainPrices (LIQ#000854): Map<poolAddress, {price, tickCurrentIndex}> aus
+    // getPricesOnChainBulk(). Ist sie gesetzt, kommt der Preis ausschließlich daraus; fehlt der
+    // Pool darin, schlägt der Aufruf fehl wie ein gescheiterter Einzelread (kein Ersatzwert,
+    // kein stiller Einzel-Fallback, der bei einem RPC-Ausfall 54× die teure Abfrage liefe).
+    async getPoolStats(pool, { includeVolumeCandles = true, onChainPrices = null } = {}) {
+        const priceLeg = onChainPrices
+            ? (onChainPrices.has(pool.address)
+                ? Promise.resolve(onChainPrices.get(pool.address))
+                : Promise.reject(new Error(`Kein gebündelter Preis für ${pool.address}`)))
+            : this._getPriceOnChain(pool);
         const [onChain, orcaStats, volumeCandles] = await Promise.all([
-            settle(this._getPriceOnChain(pool)),
+            settle(priceLeg),
             settle(this._getOrcaV2Stats(pool.address)),
             includeVolumeCandles ? settle(this._getVolumeCandles(pool.address)) : Promise.resolve(null),
         ]);
@@ -483,12 +493,8 @@ export class OrcaAdapter {
         return (await this._getPriceOnChain(pool)).price;
     }
 
-    /** Liest den aktuellen Preis direkt von der Chain (sqrtPrice → Preis). */
-    async _getPriceOnChain(pool) {
-        await rpcLimiter.wait();
-        const whirlpool = await this._getClient().getPool(new PublicKey(pool.address), IGNORE_CACHE);
-        const data      = whirlpool.getData();
-
+    /** Preis + aktueller Tick aus Whirlpool-Kontodaten — von Einzel- und Sammelweg gemeinsam genutzt. */
+    _priceFromData(data, pool) {
         const price = PriceMath.sqrtPriceX64ToPrice(
             data.sqrtPrice,
             pool.decimalsA,
@@ -496,6 +502,34 @@ export class OrcaAdapter {
         ).toNumber();
 
         return { price, tickCurrentIndex: data.tickCurrentIndex };
+    }
+
+    /** Liest den aktuellen Preis direkt von der Chain (sqrtPrice → Preis). */
+    async _getPriceOnChain(pool) {
+        await rpcLimiter.wait();
+        const whirlpool = await this._getClient().getPool(new PublicKey(pool.address), IGNORE_CACHE);
+        return this._priceFromData(whirlpool.getData(), pool);
+    }
+
+    /**
+     * Preise vieler Pools über gebündelte getMultipleAccounts-Aufrufe (max. 100 Konten je
+     * Aufruf, ein Credit je Aufruf) statt je Pool ein SDK-getPool() (~4,8 Credits, LIQ#000854).
+     * Dekodiert wird mit dem SDK-Parser (ParsableWhirlpool), Preisformel wie _getPriceOnChain().
+     * Pools mit fehlendem/nicht dekodierbarem Konto fehlen in der Map.
+     *
+     * @param {Object[]} pools
+     * @returns {Promise<Map<string, {price: number, tickCurrentIndex: number}>>}
+     */
+    async getPricesOnChainBulk(pools) {
+        if (pools.length === 0) return new Map();
+        this._getClient();  // ctx sicherstellen
+        return readPricesBulk(pools, {
+            fetchAccounts: addrs => this._ctx.connection.getMultipleAccountsInfo(addrs.map(a => new PublicKey(a))),
+            decode:        (addr, info) => ParsableWhirlpool.parse(new PublicKey(addr), info),
+            toPrice:       (data, pool) => this._priceFromData(data, pool),
+            wait:          () => rpcLimiter.wait(),
+            warn:          msg => console.warn(msg),
+        });
     }
 
     // ─── getPositionState ─────────────────────────────────────────────────────

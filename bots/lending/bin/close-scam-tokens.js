@@ -484,7 +484,7 @@ console.log('─'.repeat(110));
 for (const t of classified) {
     const symbol   = t.meta?.symbol ?? t.meta?.name ?? '?';
     const nameFlag = t.dupSymbol ? `⚠ ${t.dupSymbol}` : (t.susReason ? '⚠ Jupiter' : '–');
-    const action   = t.tier === 'SKIP'             ? 'unberührt' :
+    const action   = (t.tier === 'SKIP' || t.tier === 'VERIFIED') ? 'unberührt' :
                      t.tier === 'REVIEW'           ? '⚠ MANUELL PRÜFEN (kein Auto-Burn)' :
                      t.tier === 'BURN'             ? 'BURN' :
                      SKIP_WARN                     ? 'übersprungen' : 'WARN→burn';

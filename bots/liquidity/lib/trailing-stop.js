@@ -47,7 +47,9 @@
  * Die Scharfschaltung kennt seit 2026-08-30 zwei Wege (ODER-verknüpft, siehe
  * evaluateSecondStageArming): den gemessenen (HWM ≥ Einstieg × (1 + Stufe 1)) und den
  * angezeigten (PnL-Höchststand seit Anker ≥ Einstieg × Stufe 1, via pnlPeakForPeriod aus
- * lib/pnl.js — exakt die Zahl, die der „Hoch"-Tooltip im Dashboard zeigt). Grund: Messwelt
+ * lib/pnl.js, Auswahl `by:'usd'` — bis LIQ#000572 exakt die Zahl des Dashboards; seitdem
+ * wählt die Anzeige den Höchststand nach Rendite, dieser Pfad bewusst weiter nach USD,
+ * damit die Scharfschaltschwelle unverändert bleibt). Grund: Messwelt
  * und Anzeige trennen systematisch ~0,2–0,3 pp (Einstands-Anker-Differenz); peakt ein Pool
  * genau dazwischen, sah der Nutzer „+2 % überschritten", der Stop schaltete aber nie scharf
  * (PUMP/SOL 2026-08-30: Anzeige +2,15 %, Messwelt +1,91 %, Exit wäre bei ±0 statt +1,5 %
@@ -340,7 +342,11 @@ function _displayPeakPnlUsd(db, poolId, position) {
               WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?`
         ).get(poolId, position.opened_at ?? 0);
         const fromMs = resolvePnlAnchorMs(dep?.t, position.pnl_anchor_reset_at, position.opened_at);
-        const peak   = pnlPeakForPeriod(db, { flavor: config.botId, scope: poolId, fromMs });
+        // by:'usd' — hier wird der Höchststand gegen eine USD-Schwelle (Einstiegswert ×
+        // Stufe 1) gestellt, nicht angezeigt. Die Anzeige wählt seit LIQ#000572 nach
+        // Rendite aus; das hier auf pct umzustellen würde die Scharfschaltschwelle
+        // verschieben — eine Finanzentscheidung, die nicht Teil dieses Tickets ist.
+        const peak   = pnlPeakForPeriod(db, { flavor: config.botId, scope: poolId, fromMs, by: 'usd' });
         return Number.isFinite(peak?.pnlUsd) ? peak.pnlUsd : null;
     } catch (err) {
         if (!_peakPnlWarnLogged.has(poolId)) {
@@ -721,6 +727,7 @@ async function stepSwap(pool, db, execId, cfg, tsCoinsA, tsCoinsB) {
         sendTo:      cfg.sendTo,
         logPrefix:   `[trailing-stop:${pool.id}]`,
         slippageBps: config.rm.swapSlippageBps,
+        db,
         onSwapped:   (swappedUsdc) => {
             updateTsExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
             recordExitProceeds(db, { poolId: pool.id, swappedUsdc, note: 'trailing-stop-exit' });

@@ -76,6 +76,109 @@ function fmtPct(v, dec = 2) {
     return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u202f%';
 }
 
+// Vorsprung/Std.-bzw./Tag für die „Delta/H"-„Delta/D"-Spalte in Operative Metriken
+// (LIQ#000890) — Vorzeichen immer sichtbar wie bei fmtPct, plus "USDC"-Suffix wie bei den
+// Nachbar-Spalten Fees/Anteil (sonst unklar, ob die Zahl USDC oder % meint).
+//
+// null hat zwei verschiedene Ursachen (lib/pnl.js): entweder ist die Laufzeit seit
+// Pool-Eröffnung/Reset noch unter 1h/24h (Wert kommt von selbst, sobald genug Zeit
+// vergangen ist), oder es fehlt eine Kurslücke für hodlUsd (löst sich nicht von selbst).
+// Nur im ersten Fall — erkennbar daran, dass hodlUsd vorliegt — zeigen wir statt des
+// Strichs eine Sanduhr mit Tooltip (LIQ#000912); sonst bliebe die Sanduhr dauerhaft
+// stehen und würde fälschlich "kommt gleich" suggerieren. `remainingText` (Nachbesserung
+// LIQ#000912) kommt vorgerechnet von _edgeRemainingText() und steht im Tooltip-Titel,
+// damit sofort klar ist, wie lange es noch dauert statt nur dass es dauert.
+function fmtEdgePerHour(v, dec = 2, hodlUsd = undefined, remainingText = null) {
+    if (v == null) {
+        if (hodlUsd != null) {
+            const title = remainingText ?? tr('liq.edge_pending_title', 'Wird noch ermittelt');
+            return `<span class="has-tooltip text-muted" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(tr('liq.edge_pending', 'Der Pool läuft noch nicht lange genug für einen verlässlichen Durchschnitt.'))}" data-tooltip-type="text" style="cursor:default">⏳</span>`;
+        }
+        return '—';
+    }
+    const sign = v >= 0 ? '+' : '';
+    return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + ' USDC';
+}
+
+// Restzeit bis Delta/H bzw. Delta/D genug Laufzeit hat (LIQ#000912, Nachbesserung) —
+// dieselbe Schwelle wie lib/pnl.js (edgeHours >= 1 bzw. >= 24), hier nur nachgerechnet
+// für die Anzeige im Tooltip-Titel der Sanduhr. Anker ist pos.pnlDetailsAnchorAt
+// (Pool-Eröffnung bzw. manueller Höchststand-Reset, siehe resolvePnlExtremaAnchorMs()
+// in export.js) — derselbe fromMs, den lib/pnl.js für shareEdgePerHourUsd/-DayUsd nutzt.
+// `nowMs` kommt vom Dashboard-Timestamp statt der Client-Uhr, wie bei renderPosValueOpenAge.
+function _edgeRemainingText(pos, nowMs) {
+    const anchor = pos?.pnlDetailsAnchorAt;
+    if (!(anchor > 0)) return null;
+    const thresholdMs = (_edgeUnit === 'd' ? 24 : 1) * 3_600_000;
+    const remainMs = thresholdMs - (nowMs - anchor);
+    if (remainMs <= 0) return null;
+    const totalMin = Math.ceil(remainMs / 60_000);
+    if (totalMin < 60) return tr('liq.edge_pending_min', 'Noch ca. {n} Min.', { n: totalMin });
+    const hours = Math.floor(totalMin / 60);
+    const mins  = totalMin % 60;
+    return mins > 0
+        ? tr('liq.edge_pending_hm', 'Noch ca. {h} Std. {m} Min.', { h: hours, m: mins })
+        : tr('liq.edge_pending_h', 'Noch ca. {h} Std.', { h: hours });
+}
+
+// Formel-Tooltip für den Delta/H-Delta/D-Spaltenkopf (LIQ#000890): Fließtext blieb trotz
+// Kürzung unverständlich, es sollte statt dessen die Formel selbst zu sehen sein — rechtsbündig,
+// Minuszeichen untereinander, Summenzeile mit "=". Ein <table> statt \n-Text: initTooltips()
+// erkennt Inhalte mit "<table" und fügt sie roh ein (siehe dort), nur so lässt sich die
+// Spalte mit Vorzeichen pixelgenau ausrichten, ein proportionaler Font tut das mit
+// Leerzeichen nicht. Reihenfolge/Vorzeichen wie im Fließtext vorher: Fee-Einnahmen (Basis,
+// kein Vorzeichen), minus Impermanent Loss, minus Rebalance-Kosten — Summe ist
+// shareEdgePerHourUsd/-DayUsd. `unit` ('h'|'d') bestimmt nur die letzte Zeile.
+// Kompakter Text für den Spaltenkopf-Select ("Delta/H"/"Delta/D") — muss in die schmale
+// Tabellenspalte passen, anders als Tooltip-Titel/Summenzeile (siehe _edgeUnitFullLabel):
+// deren Box hat ohnehin die Breite der übrigen Tooltips, Kürzen brachte dort nichts mehr.
+function _edgeUnitLabel(unit) {
+    return unit === 'd' ? tr('liq.edge_unit_d', 'Edge/D') : tr('liq.edge_unit_h', 'Edge/H');
+}
+
+// Ausgeschriebene Fassung für Tooltip-Titel und Summenzeile — dort ist Platz, „Delta/H“ las
+// sich dort unnötig kryptisch.
+function _edgeUnitFullLabel(unit) {
+    return unit === 'd' ? tr('liq.edge_unit_d_full', 'Edge pro Tag') : tr('liq.edge_unit_h_full', 'Edge pro Stunde');
+}
+
+function _edgeFormulaTooltipHtml(unit) {
+    const row = (sign, label, strong = false) => `<tr><td style="width:1em;text-align:right;padding-right:2px${strong ? ';border-top:1px solid var(--border)' : ''}">${sign}</td><td style="text-align:right;white-space:nowrap${strong ? ';font-weight:600;border-top:1px solid var(--border)' : ''}">${label}</td></tr>`;
+    return `<div style="margin-bottom:6px;white-space:normal">${escHtml(tr('liq.edge_explain', 'Edge (Trading-Begriff): Vorsprung des Pools gegenüber bloßem Halten der beiden Token, in USDC pro Stunde bzw. Tag. Positiv heißt: Der Pool schlägt das Halten.'))}</div>`
+        + '<table><tbody>'
+        + row('', tr('liq.pnl_fee_income', 'Fee-Einnahmen') + ' (USDC)')
+        + row('−', tr('liq.bd_il_only', 'Impermanent Loss') + ' (USDC)')
+        + row('−', tr('liq.edge_rebalance_cost', 'Rebalance-Kosten') + ' (USDC)')
+        + row('=', _edgeUnitFullLabel(unit) + ' (USDC)', true)
+        + '</tbody></table>';
+}
+
+// Spaltenkopf der Delta-Spalte als Select (LIQ#000890): kann zwischen Delta/H und
+// Delta/D umschalten, Auswahl bleibt über localStorage (LS_EDGE_UNIT) erhalten. Tooltip liegt
+// auf dem Wrapper-Span, nicht dem <select> selbst — Select-Hover ist browserübergreifend
+// unzuverlässig.
+function _edgeUnitSelectHtml() {
+    return `<span class="has-tooltip" data-tooltip-title="${_edgeUnitFullLabel(_edgeUnit)}" data-tooltip-content="${escHtml(_edgeFormulaTooltipHtml(_edgeUnit))}" data-tooltip-type="text" style="display:inline-flex"><select class="edge-unit-select" style="background:#0f172a;border:none;color:#94a3b8;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.06em;text-transform:uppercase;text-align:right">
+        <option value="h"${_edgeUnit==='h'?' selected':''}>${tr('liq.edge_unit_h', 'Edge/H')}</option>
+        <option value="d"${_edgeUnit==='d'?' selected':''}>${tr('liq.edge_unit_d', 'Edge/D')}</option>
+    </select></span>`;
+}
+
+// Spaltenkopf Range/Reb. als Select (LIQ#000890, Nachbesserung „Tabelle zu voll"): beide
+// Spalten waren schmal, zusammen mit den USDC-Werten kam es zu Zeilenumbrüchen — Zusammenlegung
+// analog zum Delta-Umschalter, Auswahl in localStorage (LS_RANGE_REB_MODE). Tooltip zeigt
+// dieselben Texte, die vorher an den einzelnen Spaltenköpfen hingen.
+function _rangeRebSelectHtml() {
+    const title   = _rangeRebMode === 'reb' ? 'Rebalances' : 'Range';
+    const content = _rangeRebMode === 'reb'
+        ? tr('liq.tip.rebalances', 'Anzahl der Rebalancings heute. Ein Rebalancing schließt die aktuelle Position und öffnet sie mit angepasster Kursrange neu.')
+        : tr('liq.tip.range_open', 'Öffnet die aktuelle Kursrange und Coin-Verteilung der Position.');
+    return `<span class="has-tooltip" data-tooltip-title="${title}" data-tooltip-content="${escHtml(content)}" data-tooltip-type="text" style="display:inline-flex"><select class="range-reb-select" style="background:#0f172a;border:none;color:#94a3b8;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.06em;text-transform:uppercase;text-align:right">
+        <option value="range"${_rangeRebMode==='range'?' selected':''}>Range</option>
+        <option value="reb"${_rangeRebMode==='reb'?' selected':''}>${tr('liq.reb', 'Reb.')}</option>
+    </select></span>`;
+}
+
 /**
  * Preisformatierung — delegiert an die gemeinsame Regel in js/format-price.js, damit
  * Dashboard und Bot-Meldungen nicht auseinanderlaufen (beide zeigten für cbBTC/SOL
@@ -289,19 +392,17 @@ function calcPortfolioPnl24h(data) {
 // ── Gemeinsamer Pool-Sortierschlüssel ─────────────────────────────────────────
 // Wird von renderPools, renderOpportunity und renderPositions verwendet,
 // damit alle drei Tabellen identische Reihenfolge zeigen.
-// Reihenfolge: 1. investScore.value (desc), 2. sortRank (asc, trägt Tier+rankPos),
-//              3. displayPair alphabetisch als absoluter Notfallfall.
-function poolSortKey(investScore, sortRank, displayPair) {
+// Reihenfolge: 1. displayPair alphabetisch, 2. poolId als Tiebreak (LIQ#000928).
+function poolSortKey(displayPair, poolId) {
     return {
-        score:    investScore?.value ?? -Infinity,
-        rank:     sortRank           ?? 9999,
-        pair:     displayPair        ?? '',
+        pair: displayPair ?? '',
+        id:   poolId       ?? '',
     };
 }
 function comparePoolSortKeys(a, b) {
-    if (b.score !== a.score) return b.score - a.score;
-    if (a.rank  !== b.rank)  return a.rank  - b.rank;
-    return a.pair.localeCompare(b.pair);
+    const c = a.pair.localeCompare(b.pair, undefined, { sensitivity: 'base' });
+    if (c !== 0) return c;
+    return a.id.localeCompare(b.id);
 }
 
 // ── Pool Metriken ─────────────────────────────────────────────────────────────
@@ -330,8 +431,8 @@ let _oppPoolFilter = localStorage.getItem(LS_OPP_POOL_FILTER) ?? 'all';
 const LS_OPP_TYPE_FILTER = 'liquiditybot_opp_type_filter';
 let _oppTypeFilter = localStorage.getItem(LS_OPP_TYPE_FILTER) ?? 'all';
 
-// Kurzlabels für poolType (config/pools.json), siehe auch _typeInfo im InvestScore-Modal
-// für die ausführlichen Erklärtexte je Typ.
+// Kurzlabels für poolType (config/pools.json), siehe auch das gleichnamige Objekt in
+// bots/settings/html/js/bot-liquidity.js.
 const POOL_TYPE_LABELS = {
     rebalance_free: 'Rebalance-frei',
     volatil_1:      tr('liq.vol_low', 'Gering volatil'),
@@ -342,9 +443,6 @@ const POOL_TYPE_LABELS = {
 
 const LS_OPP_SEARCH = 'liquiditybot_opp_search';
 let _oppSearchQuery = localStorage.getItem(LS_OPP_SEARCH) ?? '';
-
-const LS_OPP_PNL_MODE = 'liquiditybot_opp_pnl_mode';
-let _oppPnlMode = (localStorage.getItem(LS_OPP_PNL_MODE) === 'sim') ? 'sim' : 'hist';
 
 // Pool Metriken: Wahl der APR-Spalte (24h / 1h) — persistent in localStorage
 const LS_POOLS_APR_TF = 'liquiditybot_pools_apr_tf';
@@ -362,8 +460,17 @@ let _poolsSearchQuery = localStorage.getItem(LS_POOLS_SEARCH) ?? '';
 const LS_ACTIVE_SEARCH = 'liquiditybot_active_search';
 let _activeSearchQuery = localStorage.getItem(LS_ACTIVE_SEARCH) ?? '';
 
+// Operative Metriken: Einheit der Delta-Spalte (Stunde/Tag) — persistent in localStorage
+const LS_EDGE_UNIT = 'liquiditybot_edge_unit';
+let _edgeUnit = localStorage.getItem(LS_EDGE_UNIT) === 'd' ? 'd' : 'h';
+
+// Operative Metriken: Range- und Reb.-Spalte zusammengelegt (zu viele Spalten, unschöne
+// Zeilenumbrüche bei größeren Zahlen) — Auswahl per Select, persistent in localStorage.
+const LS_RANGE_REB_MODE = 'liquiditybot_range_reb_mode';
+let _rangeRebMode = localStorage.getItem(LS_RANGE_REB_MODE) === 'reb' ? 'reb' : 'range';
+
 // Pool Metriken: Sortierspalte (APR/VOL/TVL) + Richtung — persistent in localStorage
-// (null = Standard nach InvestScore)
+// (null = Standard alphabetisch, LIQ#000928)
 const LS_POOLS_SORT_COL = 'liquiditybot_pools_sort_col';
 const LS_POOLS_SORT_DIR = 'liquiditybot_pools_sort_dir';
 const _POOLS_SORT_COLS  = new Set(['apr', 'vol', 'tvl']);
@@ -371,10 +478,10 @@ let _poolsSortCol = _POOLS_SORT_COLS.has(localStorage.getItem(LS_POOLS_SORT_COL)
     ? localStorage.getItem(LS_POOLS_SORT_COL) : null;
 let _poolsSortDir = (localStorage.getItem(LS_POOLS_SORT_DIR) === 'asc') ? 'asc' : 'desc';
 
-// Opportunity-Tabelle: aktive Sortierspalte + Richtung (null = Standard nach Score)
+// Opportunity-Tabelle: aktive Sortierspalte + Richtung (null = Standard alphabetisch, LIQ#000928)
 const LS_OPP_SORT_COL = 'liquiditybot_opp_sort_col';
 const LS_OPP_SORT_DIR = 'liquiditybot_opp_sort_dir';
-const _OPP_SORT_COLS  = new Set(['score','pnl','priceSlope','aprSlope','tvlSlope']);
+const _OPP_SORT_COLS  = new Set(['delta','priceSlope','aprSlope','tvlSlope']);
 let _oppSortCol = _OPP_SORT_COLS.has(localStorage.getItem(LS_OPP_SORT_COL))
     ? localStorage.getItem(LS_OPP_SORT_COL) : null;
 let _oppSortDir = (localStorage.getItem(LS_OPP_SORT_DIR) === 'asc') ? 'asc' : 'desc';
@@ -390,11 +497,11 @@ const OPP_TF_OPTIONS = [
 ];
 const OPP_TF_VALID = new Set(OPP_TF_OPTIONS.map(o => o.id));
 const _lsOppDisplayTf = localStorage.getItem(LS_OPP_DISPLAY_TIMEFRAME);
-let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '24h';
+let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '6h';
 
 // ── Premium-Deckung (2026-07-29) ──────────────────────────────────────────────
 // Eine Stelle für "hat diese Installation gerade Zugriff", von renderNotifs()
-// (Krone/Tooltip) UND renderOpportunityScores() (Tabelle ein/aus) genutzt — sonst
+// (Krone/Tooltip) UND renderOpportunityTable() (Tabelle ein/aus) genutzt — sonst
 // könnten Krone und Tabelle auseinanderlaufen (Krone sagt "aktiv", Tabelle ist
 // schon leer, oder umgekehrt).
 //
@@ -417,7 +524,7 @@ let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '24h';
 // premiumCoveredUntilMs bleibt für die Countdown-Anzeige bei abgeschalteter
 // Auto-Zahlung in Gebrauch (siehe showCountdown weiter unten).
 /**
- * Darf die Premium-Ansicht (Opportunity-Tabelle, Score-Spalten, Charts) gezeigt werden?
+ * Darf die Premium-Ansicht (Opportunity-Tabelle, Edge/Slope-Spalten, Charts) gezeigt werden?
  *
  * Maßgeblich ist die **Frische der gelieferten Daten**, NICHT die Grenze der zuletzt
  * bezahlten Stunde (Änderung 2026-07-30).
@@ -441,9 +548,21 @@ let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '24h';
  * Zahlungsgrenze.
  */
 function hasPremiumAccess(data) {
-    if (data?.scoreSource === 'compute') return true;
-    if (data?.scoreSource === 'delivered') return !data?.scoreStale;
+    const feed = premiumFeedState(data);
+    if (feed.source === 'compute') return true;
+    if (feed.source === 'delivered') return !feed.stale;
     return false;
+}
+
+/**
+ * Zustand des Premium-Datenstroms: seit CORE#000931 liefert Premium die Edge-Prognose
+ * statt des Scores, maßgeblich ist deshalb `edgeSource`/`edgeStale` aus data.json.
+ * Fallback auf `scoreSource`/`scoreStale` nur für eine data.json, die noch vom alten
+ * Export stammt (kurzes Fenster nach einem Update, bevor der nächste Export lief).
+ */
+function premiumFeedState(data) {
+    if (data?.edgeSource) return { source: data.edgeSource, stale: !!data.edgeStale };
+    return { source: data?.scoreSource, stale: !!data?.scoreStale };
 }
 
 /** "(noch aktiviert bis 19:00 Uhr)" – Text neben der Krone im Header. */
@@ -451,136 +570,6 @@ function formatPremiumCountdown(coveredUntilMs) {
     const tz = window.FORGE_TZ || 'Europe/Berlin';
     const timeStr = new Intl.DateTimeFormat(NUM_LOCALE, { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(coveredUntilMs));
     return `(noch aktiviert bis ${timeStr} Uhr)`;
-}
-
-/**
- * Pool ist aktuell "Bester Pool": Hammer-Icon hinter dem Poolnamen.
- *
- * Ersetzt seit 2026-08-24 die drei einzelnen Zustands-Icons (Trend-Gate, Cooldown,
- * Invest-Blocked) — deren Kombination verwirrte mehr, als sie half: ein Pool konnte z.B.
- * das Trend-Gate-Icon zeigen, obwohl er den letzten Cleanup-Lauf schon vor dem Kippen des
- * Trends gewonnen hatte (Befund 2026-08-24, SOL/USDC & ZEC/USDC). Jetzt bekommt nur der
- * Pool ein Icon, den der nächste stündliche Cleanup-Lauf im Modus „Bester Pool" mit dem
- * aktuellen Datenstand wählen würde — Datenquelle `pool.cleanupWinner` aus bin/export.js,
- * berechnet mit denselben Toren, die bin/cleanup.js `runCleanupByRanking()` nutzt.
- *
- * Bedeutung steht im Tooltip, nie allein im Symbol.
- */
-const _trendTfLabel = tf => ({
-    '1h': tr('liq.trend_tf_1h', '1 Stunde'),
-    '4h': tr('liq.trend_tf_4h', '4 Stunden'),
-    '1d': tr('liq.trend_tf_1d', '1 Tag'),
-}[tf] ?? tf);
-
-function _cleanupWinnerIcon(pool) {
-    const w = pool?.cleanupWinner;
-    if (!w) return '';
-
-    const tfLabel = _trendTfLabel;
-
-    const lines = [tr('liq.cw_score', 'Opportunity Score {score} ≥ Minimum {min}')
-        .replace('{score}', w.score).replace('{min}', w.minScore)];
-    const req = pool.trendGate?.required ?? [];
-    if (req.length) {
-        lines.push(tr('liq.cw_trend', 'Aufwärtstrend auf {timeframes}').replace('{timeframes}', req.map(tfLabel).join(', ')));
-    }
-    lines.push(tr('liq.cw_no_cooldown', 'Kein Risk-Management-Cooldown aktiv'));
-    lines.push(tr('liq.cw_no_block', 'Nicht durch TVL-Schutz/Score-Limit gesperrt'));
-
-    // Cleanup läuft stündlich zu :05 (bin/cleanup.js Cron) — dieselbe Formel wie
-    // _cleanupTitleSuffix() im Settings-Modal (bot-liquidity.js), damit beide Anzeigen
-    // nie auseinanderlaufen.
-    const cdMin = (65 - new Date().getMinutes()) % 60;
-    const title = cdMin === 0
-        ? tr('liq.cw_title_now', 'Cleanup > Bester Pool läuft gerade')
-        : tr('liq.cw_title', 'Nächster Cleanup > Bester Pool in {min} min').replace('{min}', cdMin);
-    const text  = tr('liq.cw_intro', 'Würde „Cleanup > Bester Pool" jetzt laufen, würde er hier investieren:') + '\n\n'
-        + lines.map(l => `✓ ${l}`).join('\n');
-    return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">🔨</span>`;
-}
-
-/**
- * Pool hat den Score für „Bester Pool" erreicht, wird aber von genau einem Tor
- * zurückgehalten (Trend-Gate, Risk-Management-Cooldown, TVL-Schutz/Score-Limit/
- * Max-Investment): Schlaf-Icon hinter dem Poolnamen — „temporär nicht berücksichtigt",
- * kein Fehler. Datenquelle `pool.cleanupBlocked` aus bin/export.js — dieselbe
- * Prüfreihenfolge, die dort auch den Gewinner ermittelt, damit Icon und
- * tatsächlicher Ausschlussgrund nie auseinanderlaufen.
- *
- * Ersetzt seit 2026-08-31 (LIQ#0351-Folge) drei mögliche Einzel-Icons durch eines:
- * beim ersten Anlauf (drei Zustands-Icons nebeneinander) hatte sich am 2026-08-24
- * gezeigt, dass zu viele gleichzeitige Symbole mehr verwirren als erklären (siehe
- * Kommentar bei _cleanupWinnerIcon) — deshalb blieb danach nur noch das Hammer-Icon
- * für den Gewinner übrig. Diese Variante behält die Reduktion auf zwei Symbole bei:
- * der Hammer für „das hier wäre der Gewinner" und das Schlaf-Icon für „das hier
- * hätte es sonst geschafft" — welches der drei Tore genau greift, steht
- * ausschließlich im Tooltip. Ein erster Anlauf mit einem grauen Info-Kreis-Icon
- * war zum Verwechseln ähnlich mit dem Info-Button links vom Poolnamen (derselbe
- * Kreis-i) — das Schlaf-Icon (zuvor schon für den reinen Cooldown-Fall im Einsatz)
- * ist davon eindeutig unterscheidbar.
- *
- * Bedeutung steht im Tooltip, nie allein im Symbol.
- */
-function _cleanupBlockedIcon(pool) {
-    const rule = pool?.cleanupBlocked;
-    if (!rule) return '';
-
-    const title = tr('liq.blocked_title', 'Nicht bei „Bester Pool" berücksichtigt');
-
-    // Ein Grund pro Listenzeile — bewusst kurz (ein Halbsatz), damit ein zweiter
-    // Grund sich später einfach als weiterer Bullet ergänzen lässt, ohne den
-    // Tooltip neu zu strukturieren. Aktuell liefert bin/export.js immer genau
-    // einen Grund (den ersten greifenden Tor), das Array ist trotzdem der Rahmen
-    // dafür, falls das später mehrere gleichzeitig werden.
-    const bullets = [];
-
-    if (rule === 'cooldown') {
-        const now = Date.now();
-        const active = (pool.investCooldowns ?? [])
-            .filter(c => Number(c?.untilMs) > now)
-            .sort((a, b) => b.untilMs - a.untilMs);
-        const srcLabel = key => ({
-            trailingStop:  tr('liq.cooldown_src_trailing_stop', 'Trailing Stop'),
-            tvlProtection: tr('liq.cooldown_src_tvl',           'TVL-Schutz'),
-            scoreLimit:    tr('liq.cooldown_src_score_limit',   'Score-Limit'),
-        }[key] ?? key);
-        const fmtRemaining = ms => {
-            const totalMin = Math.max(1, Math.ceil(ms / 60_000));
-            const h = Math.floor(totalMin / 60);
-            const m = totalMin % 60;
-            const hStr = tr('liq.unit_hours_short', 'Std.');
-            const mStr = tr('liq.unit_minutes_short', 'Min.');
-            if (h && m) return `${h} ${hStr} ${m} ${mStr}`;
-            if (h)      return `${h} ${hStr}`;
-            return `${m} ${mStr}`;
-        };
-        for (const c of active) {
-            bullets.push(tr('liq.blocked_cooldown', '{source}-Cooldown, noch {time}')
-                .replace('{source}', srcLabel(c.key)).replace('{time}', fmtRemaining(c.untilMs - now)));
-        }
-    } else if (rule === 'trend_gate') {
-        const failing = pool.trendGate?.failing ?? [];
-        bullets.push(tr('liq.blocked_trend', 'Der {timeframes}-Trend ist aktuell negativ')
-            .replace('{timeframes}', failing.map(_trendTfLabel).join(', ')));
-    } else {
-        // tvl / tvl_unknown / score_limit / max_investment — Detail aus derselben Quelle,
-        // aus der bin/cleanup.js schon vor dem Invest sperrt (lib/invest-eligibility.js).
-        const d = pool.investBlocked ?? {};
-        const fmtUsd = v => Number(v).toLocaleString(NUM_LOCALE, { maximumFractionDigits: 0 });
-        const byRule = {
-            tvl:            () => tr('liq.blocked_tvl', 'TVL unter Schutz-Schwelle ({tvl} < {threshold} USDC)')
-                .replace('{tvl}', fmtUsd(d.tvl)).replace('{threshold}', fmtUsd(d.threshold)),
-            tvl_unknown:    () => tr('liq.blocked_tvl_unknown', 'Kein aktueller TVL-Messwert'),
-            score_limit:    () => tr('liq.blocked_score_limit', 'Exit-Score unter Score-Limit ({exitScore} < {minScore})')
-                .replace('{exitScore}', d.exitScore).replace('{minScore}', d.minScore),
-            max_investment: () => tr('liq.blocked_max_investment', 'Max Investment erreicht ({cap} USDC)')
-                .replace('{cap}', fmtUsd(d.capUsdc)),
-        };
-        bullets.push(byRule[rule]?.() ?? tr('liq.blocked_generic', 'Durch eine Risk-Management-Regel gesperrt'));
-    }
-
-    const text = bullets.map(b => `• ${b}`).join('\n');
-    return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">\u{1F4A4}</span>`;
 }
 
 /**
@@ -622,7 +611,7 @@ function _trailingStopIcon(pos, data) {
         : tr('liq.ts_liquidate_at', 'Schutz tritt ein ab: {usd} USDC')
             .replace('{usd}', ts.liquidateAtUsd != null ? fmtUsdc(ts.liquidateAtUsd) : '–');
 
-    // Listen-Konvention wie _cleanupBlockedIcon: "• " je Zeile, initTooltips() wandelt
+    // Listen-Konvention: "• " je Zeile, initTooltips() wandelt
     // \n unabhängig davon in <br> um (keine <li>/<ul>, das ist im Tooltip-System nicht
     // vorgesehen — data-tooltip-type bleibt "text").
     const drawdownLine = tr('liq.ts_drawdown', 'Aktueller Drawdown: {cur} / {active} %')
@@ -632,28 +621,38 @@ function _trailingStopIcon(pos, data) {
     return ` <span class="has-tooltip" data-tooltip-title="${escHtml(title)}" data-tooltip-content="${escHtml(text)}" data-tooltip-type="text" role="img" aria-label="${escHtml(title)}" style="cursor:default">🔨</span>`;
 }
 
-function renderOpportunityScores(data) {
-    const container = $('opportunityScoreContainer');
-    const emptyMsg  = $('opportunityScoreEmpty');
-    const tfBtns    = $('opportunityScoreTimeframeBtns');
+const _EDIT_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M9.5 1.5L12.5 4.5L4.5 12.5H1.5V9.5L9.5 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+</svg>`;
+
+/**
+ * Stift-Spalte (Klasse "pool-edit-col") zu den Settings dieses Pools — gemeinsam für
+ * „Operative Metriken" (renderActivePositions) und „Opportunity" (renderOpportunityTable,
+ * LIQ#000915). Nur bei LAN-Zugriff sichtbar, weil die Settings selbst das voraussetzen.
+ */
+function _poolEditCell(poolId) {
+    if (!isLanAccess()) return '<span class="pool-edit-col"></span>';
+    const href = `https://${escHtml(window.location.hostname)}:3200/#liquidity/${encodeURIComponent(poolId ?? '')}`;
+    return `<span class="pool-edit-col"><a class="pool-edit-link has-tooltip" href="${href}" data-tooltip-title="${tr('liq.tip.pool_settings', 'Pool-Einstellungen')}" data-tooltip-content="${tr('liq.tip.pool_settings_desc', 'Öffnet die Settings für diesen Pool.')}" data-tooltip-type="text">${_EDIT_ICON_SVG}</a></span>`;
+}
+
+function renderOpportunityTable(data) {
+    const container = $('opportunityContainer');
+    const emptyMsg  = $('opportunityEmpty');
+    const tfBtns    = $('opportunityTimeframeBtns');
     if (!container) return;
 
-    // Event-Delegation für Pool-Chart-Modal, InvestScore-Modal und Metric-Charts (einmalig binden)
+    // Event-Delegation für Pool-Chart-Modal und Metric-Charts (einmalig binden)
     if (!container.dataset.chartClickBound) {
         container.dataset.chartClickBound = '1';
         container.addEventListener('click', async e => {
-            // Premium-Link (Score-/Slope-Zellen ohne Premium-Datenzugang) navigiert normal
-            // zu den Settings – darf NICHT das Metric-Chart-/Score-Modal der umschließenden
+            // Premium-Link (Slope-Zellen ohne Premium-Datenzugang) navigiert normal
+            // zu den Settings – darf NICHT das Metric-Chart-Modal der umschließenden
             // Zelle öffnen (das hätte ohnehin keine Daten zu zeigen).
             if (e.target.closest('a.premium-link')) return;
-            const scoreEl = e.target.closest('.invest-score-clickable[data-pool-id]');
-            if (scoreEl) {
-                if (_lastData) openInvestScoreModal(scoreEl.dataset.poolId, _lastData);
-                return;
-            }
             const metricEl = e.target.closest('.opp-metric-clickable[data-pool-id]');
             if (metricEl) {
-                if (_lastData) openMetricChartModal(metricEl.dataset.poolId, metricEl.dataset.metric, _lastData, metricEl.dataset.metricTf);
+                if (_lastData) openMetricChartModal(metricEl.dataset.poolId, metricEl.dataset.metric, _lastData);
                 return;
             }
             const infoEl = e.target.closest('.opp-info-btn[data-pool-id]');
@@ -682,12 +681,12 @@ function renderOpportunityScores(data) {
             btn.textContent   = o.label;
             btn.addEventListener('click', () => {
                 // Buttons steuern nur die Anzeige-Spalten in diesem Bereich —
-                // die Sortierung aller Tabellen bleibt bei _oppSortTf (Settings > Strategie).
+                // die Sortierung aller Tabellen bleibt unverändert.
                 _oppDisplayTf = o.id;
                 localStorage.setItem(LS_OPP_DISPLAY_TIMEFRAME, _oppDisplayTf);
                 tfBtns.querySelectorAll('.chart-range-btn').forEach(b =>
                     b.classList.toggle('active', b.dataset.range === _oppDisplayTf));
-                if (_lastData) renderOpportunityScores(_lastData);
+                if (_lastData) renderOpportunityTable(_lastData);
             });
             tfBtns.appendChild(btn);
         }
@@ -740,8 +739,9 @@ function renderOpportunityScores(data) {
         // Meldung im Message Center, hier fällt der Fall bewusst durch auf denselben
         // leeren Hinweis wie "nie Premium gehabt" (kein zweiter, irreführender Text
         // der einen baldigen automatischen Wiederanlauf verspricht).
-        const unreachable = data?.scoreSource === 'delivered' && data?.scoreStale && data?.premiumOutagePaused;
-        const waitingForFirstDelivery = !unreachable && data?.scoreSource === 'none'
+        const feed = premiumFeedState(data);
+        const unreachable = feed.source === 'delivered' && feed.stale && data?.premiumOutagePaused;
+        const waitingForFirstDelivery = !unreachable && feed.source === 'none'
             && (data?.premiumAutoPayEnabled || data?.premiumCoveredUntilMs != null);
         // Überschrift richtet sich nach demselben Dreiwege-Unterschied wie der
         // Zusatzhinweis: "inaktiv" ist nur bei "nie Premium gehabt" korrekt — bei
@@ -788,14 +788,14 @@ function renderOpportunityScores(data) {
         searchInput.addEventListener('input', () => {
             _oppSearchQuery = searchInput.value;
             localStorage.setItem(LS_OPP_SEARCH, _oppSearchQuery);
-            if (_lastData) renderOpportunityScores(_lastData);
+            if (_lastData) renderOpportunityTable(_lastData);
         });
         searchInput.addEventListener('keydown', e => {
             if (e.key === 'Escape') {
                 searchInput.value = '';
                 _oppSearchQuery = '';
                 localStorage.setItem(LS_OPP_SEARCH, '');
-                if (_lastData) renderOpportunityScores(_lastData);
+                if (_lastData) renderOpportunityTable(_lastData);
             }
         });
     }
@@ -814,7 +814,7 @@ function renderOpportunityScores(data) {
             localStorage.setItem(LS_OPP_TYPE_FILTER, _oppTypeFilter);
             _oppSortCol = null; _oppSortDir = 'desc';
             localStorage.setItem(LS_OPP_SORT_COL, ''); localStorage.setItem(LS_OPP_SORT_DIR, 'desc');
-            if (_lastData) renderOpportunityScores(_lastData);
+            if (_lastData) renderOpportunityTable(_lastData);
         });
     }
     if (typeFilterInput && typeFilterInput.value !== _oppTypeFilter) typeFilterInput.value = _oppTypeFilter;
@@ -835,7 +835,7 @@ function renderOpportunityScores(data) {
         container.appendChild(table);
     }
 
-    // Pool-Reihen: generische Spaltensortierung, Fallback auf InvestScore
+    // Pool-Reihen: generische Spaltensortierung, Fallback alphabetisch (LIQ#000928)
     // Preis-Trend: bei volatilePair-Pools (z.B. PUMP/SOL) ist pool_stats.price die
     // Token/Token-Ratio, kein USD-Preis — usdTrendSlopePct (USD-Korb-Trend) zeigt dort
     // stattdessen die reale Richtung. Gleiche Weiche wie invest-score-compute.js.
@@ -848,20 +848,11 @@ function renderOpportunityScores(data) {
             const dir = _oppSortDir === 'asc' ? 1 : -1;
             // Numerische Spalten: null-Werte ans Ende
             const getVal = (item) => {
-                if (_oppSortCol === 'score')      return item.pool.investScore?.value ?? null;
-                if (_oppSortCol === 'pnl') {
-                    if (_oppPnlMode === 'sim') {
-                        const _npRaw = item.pool.npWindows?.[_oppDisplayTf] ?? null;
-                        if (_npRaw == null) return null;
-                        const _npCap = item.pool.capitalUSDC > 0 ? item.pool.capitalUSDC : null;
-                        return _npCap != null ? _npRaw * _npCap / 1000 : _npRaw;
-                    }
-                    const _sRaw = item.pool.pnlWindows?.[_oppDisplayTf] ?? null;
-                    const _sCap = item.pool.capitalUSDC > 0 ? item.pool.capitalUSDC : null;
-                    if (_sRaw != null) return _sCap != null ? _sRaw / _sCap * 1000 : _sRaw;
+                if (_oppSortCol === 'delta') {
                     const _npRaw = item.pool.npWindows?.[_oppDisplayTf] ?? null;
                     if (_npRaw == null) return null;
-                    return _sCap != null ? _npRaw * _sCap / 1000 : _npRaw;
+                    const _npCap = item.pool.capitalUSDC > 0 ? item.pool.capitalUSDC : null;
+                    return _npCap != null ? _npRaw * _npCap / 1000 : _npRaw;
                 }
                 if (_oppSortCol === 'priceSlope') return item.trendPct;
                 if (_oppSortCol === 'aprSlope')   return item.s?.yieldSlopePct ?? null;
@@ -875,8 +866,8 @@ function renderOpportunityScores(data) {
             return dir * (aVal - bVal);
         }
         return comparePoolSortKeys(
-            poolSortKey(a.pool.investScore, a.pool.sortRank, a.pool.displayLabel ?? a.pool.displayPair ?? a.pool.pair),
-            poolSortKey(b.pool.investScore, b.pool.sortRank, b.pool.displayLabel ?? b.pool.displayPair ?? b.pool.pair),
+            poolSortKey(a.pool.displayLabel ?? a.pool.displayPair ?? a.pool.pair, a.pool.id),
+            poolSortKey(b.pool.displayLabel ?? b.pool.displayPair ?? b.pool.pair, b.pool.id),
         );
     });
 
@@ -896,7 +887,20 @@ function renderOpportunityScores(data) {
         const etaTimeStr = etaDate.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
         return `Messpunkte sind verfügbar:\n${etaDateStr} ab ca. ${etaTimeStr} Uhr`;
     };
+    // LIQ#000847: Im 1-h-Fenster sind vorhandene, aber zu wenige Stützpunkte der Normalfall
+    // kapitalfreier Pools (Stats-Takt 60 Min, lib/stats-budget.js). Das ist kein Datenloch:
+    // eigene Zelle mit Grund, unterscheidbar von "no data" (0 Stützpunkte).
+    const _slowCadenceSpan = (poolId, tf) => {
+        const entry = scores[poolId]?.[tf];
+        if (tf !== '1h' || entry?.reason !== 'insufficient_data' || !(entry.sampleCount > 0)) return null;
+        const tip = tr('liq.slow_cadence_tip',
+            'Im 1-h-Fenster liegen {have} von mindestens {need} Messpunkten vor. Pools ohne Kapital werden im längeren Takt fortgeschrieben (spart Helius-Aufrufe), deshalb reicht eine Stunde nicht für eine Steigung. Das ist kein Fehler. Wähle 6 h oder länger, dort sind alle Pools vollständig.',
+            { have: entry.sampleCount, need: OPP_MIN_SAMPLES });
+        return `<span class="has-tooltip text-muted" data-tooltip-title="${escHtml(tr('liq.slow_cadence_title', 'Takt zu langsam'))}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">${escHtml(tr('liq.slow_cadence', 'Takt zu langsam'))}</span>`;
+    };
     const _noDataSpan = (poolId, tf) => {
+        const slow = _slowCadenceSpan(poolId, tf);
+        if (slow) return slow;
         const tip = _dataEtaTooltip(poolId, tf);
         return tip
             ? `<span class="has-tooltip text-muted" data-tooltip-title="${tr('liq.no_data_yet', 'Noch keine Daten')}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">no data</span>`
@@ -937,16 +941,12 @@ function renderOpportunityScores(data) {
         <option value="inactive"${_oppPoolFilter==='inactive'?' selected':''}>${tr('liq.inactive_pools', 'Inaktive Pools')}</option>
     </select>`;
 
-    // PnL-Modus Select (hist = historischer PnL aktiver Pools, sim = Modell-Prognose aller Pools)
-    // Tooltip liegt auf dem Wrapper-Span (Select-Hover ist browserübergreifend unzuverlässig).
-    const _pnlSelTitle   = _oppPnlMode === 'sim' ? tr('liq.simulation_future', 'Simulation – Zukunft') : tr('liq.hist_pnl_norm', 'Historischer PnL – norm. 1.000 USDC');
-    const _pnlSelContent = _oppPnlMode === 'sim'
-        ? tr('liq.np_forecast', 'Modell-Prognose des Netto-Ertrags für alle Pools im gewählten Zeitfenster. Berechnet aus aktuellem Fee-APR, Volatilität und geschätztem Impermanent Loss nach Range-Advisor-Modell. Basis: 1.000 USDC. Bezieht sich auf die Zukunft — kein realer Messwert, kursiv dargestellt.')
-        : 'Tatsächlich realisierter PnL im gewählten Zeitfenster (Kurswert + Fees − Kapitalflüsse, cashflow-bereinigt), normiert auf 1.000 USDC Poolkapital. Alle Pools sind so direkt vergleichbar.\n\nAktive Pools: realer PnL, auf 1.000 USDC normiert.\nInaktive Pools: Schätzwert aus Modell (kursiv) — für eine Zukunftsprognose den Modus "PnL sim" wählen.';
-    const pnlModeSel = `<span class="has-tooltip" data-tooltip-title="${_pnlSelTitle}" data-tooltip-content="${escHtml(_pnlSelContent)}" data-tooltip-type="text" style="display:inline-flex"><select id="oppPnlModeSelect" style="background:#0f172a;border:none;color:#94a3b8;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.05em;text-transform:uppercase">
-        <option value="hist"${_oppPnlMode==='hist'?' selected':''}>${tr('liq.pnl_hist', 'PnL hist.')}</option>
-        <option value="sim"${_oppPnlMode==='sim'?' selected':''}>${tr('liq.pnl_sim', 'PnL sim')}</option>
-    </select></span>`;
+    // Delta-Spaltenkopf (LIQ#000913, Nachbesserung): "PnL hist." komplett entfernt — der
+    // reale historische PnL steht bereits per Klick in "Operative Metriken", eine zweite
+    // Anzeige hier war für inaktive Pools ohnehin nur eine Dopplung von "Delta" (identischer
+    // NP-Fallback-Wert, siehe Ticket-Diskussion).
+    const _deltaTip = tr('liq.edge_explain_forecast', 'Edge (Trading-Begriff): prognostizierter Vorsprung des Pools gegenüber bloßem Halten der beiden Token. Positiv heißt: Der Pool schlägt das Halten voraussichtlich.') + '\n\n' + tr('liq.np_forecast', 'Modell-Prognose des Netto-Ertrags für alle Pools im gewählten Zeitfenster. Berechnet aus aktuellem Fee-APR, Volatilität und geschätztem Impermanent Loss nach Range-Advisor-Modell. Basis: 1.000 USDC.');
+    const deltaHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.simulation_future', 'Simulation – Zukunft')}" data-tooltip-content="${escHtml(_deltaTip)}" data-tooltip-type="text" style="cursor:default">${tr('liq.delta', 'Edge')}</span>`;
 
     // Chart-Icon spiegelt den Preis-Trend des aktuell gewählten Zeitfensters (_oppDisplayTf)
     // wider (trendPct aus rows-Mapping oben — bei volatilePair-Pools usdTrendSlopePct statt
@@ -967,14 +967,6 @@ function renderOpportunityScores(data) {
         <line x1="6" y1="5.3" x2="6" y2="8.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
         <circle cx="6" cy="3.4" r="0.8" fill="currentColor"/>
     </svg>`;
-
-    // InvestScore-Hilfsfunktionen
-    const isScoreCls = v => v == null ? 'text-muted' : v >= 60 ? 'value-good' : v < 35 ? 'value-danger' : '';
-    const fmtInvestScore = pool => {
-        const is = pool.investScore;
-        if (!is || is.value == null) return _noDataSpan(pool.id, '24h');
-        return `<span class="${isScoreCls(is.value)}">${Math.round(is.value)}</span>`;
-    };
 
     // Token-Info-Icon: Kategorien beider Tokens als Teaser, Details im Klick-Modal.
     // "Layer-1-Coin" (i.d.R. SOL) und "Stablecoin" (USDC/EURC/USDG) sind Boilerplate, da
@@ -1007,86 +999,50 @@ function renderOpportunityScores(data) {
         <div class="opp-score-header">
             <span style="display:flex;align-items:center;gap:3px">${poolFilterSel}</span>
             <span class="has-tooltip" data-tooltip-title="Chart" data-tooltip-content="${tr('liq.tip.chart_open', 'Öffnet den Kurs- und Fee-Chart des Pools.')}" data-tooltip-type="text" style="cursor:default">Chart</span>
-            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('score',tr('liq.sort_score', 'Nach Score sortieren'))}<span class="has-tooltip" data-tooltip-title="Opportunity Score" data-tooltip-content="${tr('liq.tip.opp_score', 'Bewertet die aktuelle Investitionsqualität eines Pools (0–100). Hauptfaktor ist der PnL (verdient die Position gerade Geld), dazu Fee-APR, Preis-Trend und APR-Entwicklung. Die Gewichtung hängt vom Pool-Typ ab (z. B. zählt bei stabilen/RWA-Pools der PnL stärker, bei sehr volatilen die Fee-APR).\\n\\n≥ 60 – Gute Bedingungen, Position lohnt sich.\\n35–59 – Neutrale Lage, abwarten.\\n&lt; 35 – Ungünstige Bedingungen, kein Invest.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.score', 'Score')}</span></span>
-            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('pnl',tr('liq.sort_pnl', 'Nach PnL sortieren'))}${pnlModeSel}</span>
+            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('delta',tr('liq.sort_delta', 'Nach Edge sortieren'))}${deltaHead}</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('priceSlope',tr('liq.sort_price_slope', 'Nach Preis-Slope sortieren'))}Preis-Slope</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('aprSlope',tr('liq.sort_apr_slope', 'Nach APR-Slope sortieren'))}APR-Slope</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('tvlSlope',tr('liq.sort_tvl_slope', 'Nach TVL-Slope sortieren'))}TVL-Slope</span>
+            <span class="pool-edit-col"></span>
         </div>
         <div class="opp-score-body">
         ${rows.map(({pool, s, trendPct}) => {
             const rowCls  = pool.active ? '' : ' inactive';
             const pair    = escHtml(pool.displayLabel ?? pool.displayPair ?? pool.pair ?? '—');
-            const winnerIcon = _cleanupWinnerIcon(pool);
-            const blockedIcon = _cleanupBlockedIcon(pool);
-            const isGated   = pool.investScore?.hopiumVeto === true;
-            const isNewPool = (pool.investScore?.dataDays ?? 1) === 0;
-            const badge   = isGated
-                ? ` <span class="has-tooltip" data-tooltip-title="${tr('liq.higher_risk', 'Höheres Risiko!')}" data-tooltip-content="${tr('liq.tip.signal_6h', '6h-Signal: Kurs fällt stärker als −0,5 %/h und der Fee-APR sinkt gleichzeitig. Score auf max. 40 gedeckelt.')}" data-tooltip-type="text" style="cursor:default">🚫</span>`
-                : '';
-            const newPoolBadge = isNewPool
-                ? ` <span class="has-tooltip" data-tooltip-title="${tr('liq.few_data', 'Wenig Daten')}" data-tooltip-content="${tr('liq.pool_young', 'Pool erst seit weniger als 24h beobachtet – Zeitfenster-Werte sind noch identisch.')}" data-tooltip-type="text" style="color:#f59e0b;font-size:0.75em;cursor:default">&#60;24h</span>`
-                : '';
-            const pnlVal   = pool.pnlWindows?.[_oppDisplayTf] ?? null;
             const capital  = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
             const pid     = escHtml(pool.id);
             const mc      = `opp-metric-clickable`;
-            const _tfMs   = { '1h': 1, '6h': 6, '12h': 12, '24h': 24, '7d': 168 };
-            let pnlCell;
             // NP auf kurzen Fenstern für volatile Pools unzuverlässig (Richtungstreffer < 50%).
             const _npUnreliable = Array.isArray(pool.npUnreliableWindows)
                 && pool.npUnreliableWindows.includes(_oppDisplayTf);
             const _unreliableNote = tr('liq.unreliable_note', ' ⚠ Für volatile Pools auf kurzen Zeitfenstern (6h/12h) unzuverlässig')
                 + ' — Richtungstreffer unter 50 %. Nur als grobe Tendenz lesen.';
-            if (_oppPnlMode === 'sim') {
+
+            // Delta-Spalte (LIQ#000913, vormals "PnL sim"): Modell-Schätzung, immer sichtbar.
+            let deltaCell;
+            {
                 const npRaw    = pool.npWindows?.[_oppDisplayTf] ?? null;
                 const npScaled = npRaw != null ? (capital != null ? npRaw * capital / 1000 : npRaw) : null;
                 const simBasis = capital != null
                     ? `Basis: ${capital.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC (aktuelles Poolkapital).`
                     : `Basis: 1.000 USDC (kein aktives Kapital).`;
-                const simTip = `Simulierter Netto-Ertrag aus Fee-APR und geschätztem Impermanent Loss nach Range-Advisor-Modell. ${simBasis} Kein realer Messwert.${_npUnreliable ? _unreliableNote : ''}`;
+                const simTip = `Simulierter Netto-Ertrag aus Fee-APR und geschätztem Impermanent Loss nach Range-Advisor-Modell. ${simBasis}${_npUnreliable ? _unreliableNote : ''}`;
                 const simTitle = `Simulierter Ertrag ${tfLabel}${_npUnreliable ? tr('liq.unreliable_short', ' (unzuverlässig)') : ''}`;
                 const _simIcon = `<span style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;${_npUnreliable ? '' : 'visibility:hidden'}">⚠</span>`;
-                pnlCell = npScaled != null
+                deltaCell = npScaled != null
                     ? `<span>${_simIcon}<span class="has-tooltip" data-tooltip-title="${simTitle}" data-tooltip-content="${escHtml(simTip)}" data-tooltip-type="text" style="cursor:default">${fmtNp(npScaled)}</span></span>`
                     : _noDataSpan(pool.id, _oppDisplayTf);
-            } else {
-                // hist-Modus: echter PnL für aktive Pools, npWindows-Schätzung für inaktive.
-                if (pnlVal != null) {
-                    const pnlNorm = capital != null ? pnlVal / capital * 1000 : pnlVal;
-                    const _capStr = capital != null ? capital.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' USDC' : 'unbekannt';
-                    const _pnlTip = `Realer PnL ${tfLabel}, normiert auf 1.000 USDC Poolkapital (aktuelles Kapital: ${_capStr}). Klicken für PnL-Verlauf.`;
-                    pnlCell = `<span><span style="display:inline-block;min-width:1.2em;text-align:center;visibility:hidden">⚠</span><span class="${mc} has-tooltip" data-tooltip-title="${tr('liq.real_pnl_norm', 'Realer PnL (norm. 1.000 USDC)')}" data-tooltip-content="${escHtml(_pnlTip)}" data-tooltip-type="text" data-pool-id="${pid}" data-metric="pnl" data-metric-tf="${escHtml(_oppDisplayTf)}" style="cursor:pointer">${fmtPnl(pnlNorm)}</span></span>`;
-                } else {
-                    // Kein realer PnL (Pool inaktiv oder zu jung) → NP-Schätzung als Fallback.
-                    const npRaw    = pool.npWindows?.[_oppDisplayTf] ?? null;
-                    const npScaled = npRaw != null ? (capital != null ? npRaw * capital / 1000 : npRaw) : null;
-                    let npTip;
-                    if (pool.active) {
-                        const availMs  = pool.positionOpenedAt
-                            ? pool.positionOpenedAt + (_tfMs[_oppDisplayTf] ?? 24) * 3_600_000 : null;
-                        const availStr = availMs
-                            ? new Date(availMs).toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' }) : null;
-                        npTip = `Schätzwert auf Basis historischer Pool-Daten — realer PnL noch nicht verfügbar (Pool zu jung für dieses Zeitfenster${availStr ? `, voraussichtlich ab ${availStr} Uhr` : ''}). Kursiv dargestellt.`;
-                    } else {
-                        npTip = `Auf historischen Pool-Daten (Fee-APR, Volatilität, Preisverlauf) basierender Schätzwert. Basis: 1.000 USDC. Kein realer PnL-Messwert — kursiv dargestellt.`;
-                    }
-                    const npTitle = `Schätzung (hist. Daten)${_npUnreliable ? tr('liq.unreliable_dash', ' – unzuverlässig') : ''}`;
-                    const _npIcon = `<span style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;${_npUnreliable ? '' : 'visibility:hidden'}">⚠</span>`;
-                    pnlCell = npScaled != null
-                        ? `<span>${_npIcon}<span class="has-tooltip" data-tooltip-title="${npTitle}" data-tooltip-content="${escHtml(npTip + (_npUnreliable ? _unreliableNote : ''))}" data-tooltip-type="text" style="cursor:default">${fmtNp(npScaled)}</span></span>`
-                        : _noDataSpan(pool.id, _oppDisplayTf);
-                }
             }
+
             return `
         <div class="opp-score-row${rowCls}">
-            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}${winnerIcon}${blockedIcon}${badge}${newPoolBadge}</span></span>
+            <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}</span></span>
             <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg(_chartIconArrow(trendPct))}</button>
-            <span><span class="invest-score-clickable" data-pool-id="${pid}" style="cursor:pointer;white-space:nowrap"${(pool.investScore?.value == null) ? '' : ' title="' + tr('liq.opp_details_show', 'Opportunity Score – Details anzeigen') + '"'}>${fmtInvestScore(pool)}</span></span>
-            ${pnlCell}
+            ${deltaCell}
             <span class="opp-col-detail ${mc} ${slopeCls(trendPct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${trendPct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(trendPct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="' + tr('liq.slope_apr_show', 'APR-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.tvlSlopePct)}"  data-pool-id="${pid}" data-metric="tvlSlope"   style="cursor:pointer"${s?.tvlSlopePct == null ? '' : ' title="' + tr('liq.slope_tvl_show', 'TVL-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.tvlSlopePct, '%/h', pool.id, _oppDisplayTf, 'TVL-Slope')}</span>
+            ${_poolEditCell(pid)}
         </div>`;
         }).join('')}
         </div>`;
@@ -1114,7 +1070,7 @@ function renderOpportunityScores(data) {
             }
             localStorage.setItem(LS_OPP_SORT_COL, _oppSortCol ?? '');
             localStorage.setItem(LS_OPP_SORT_DIR, _oppSortDir);
-            if (_lastData) renderOpportunityScores(_lastData);
+            if (_lastData) renderOpportunityTable(_lastData);
         });
     });
 
@@ -1123,13 +1079,7 @@ function renderOpportunityScores(data) {
         localStorage.setItem(LS_OPP_POOL_FILTER, _oppPoolFilter);
         _oppSortCol = null; _oppSortDir = 'desc';
         localStorage.setItem(LS_OPP_SORT_COL, ''); localStorage.setItem(LS_OPP_SORT_DIR, 'desc');
-        if (_lastData) renderOpportunityScores(_lastData);
-    });
-
-    table.querySelector('#oppPnlModeSelect')?.addEventListener('change', e => {
-        _oppPnlMode = e.target.value;
-        localStorage.setItem(LS_OPP_PNL_MODE, _oppPnlMode);
-        if (_lastData) renderOpportunityScores(_lastData);
+        if (_lastData) renderOpportunityTable(_lastData);
     });
 }
 
@@ -1151,7 +1101,7 @@ function renderPools(data) {
         container.dataset.chartClickBound = '1';
     }
 
-    // Sortierung: per Spaltenwahl (APR/VOL/TVL) oder Standard nach InvestScore
+    // Sortierung: per Spaltenwahl (APR/VOL/TVL) oder Standard alphabetisch (LIQ#000928)
     const useApr1hSort = _poolsAprTf === '1h';
     const allPools = [...(data?.pools ?? [])].sort((a, b) => {
         if (_poolsSortCol) {
@@ -1172,8 +1122,8 @@ function renderPools(data) {
             return dir * (aVal - bVal);
         }
         return comparePoolSortKeys(
-            poolSortKey(a.investScore, a.sortRank, a.displayLabel ?? a.displayPair ?? a.pair),
-            poolSortKey(b.investScore, b.sortRank, b.displayLabel ?? b.displayPair ?? b.pair),
+            poolSortKey(a.displayLabel ?? a.displayPair ?? a.pair, a.id),
+            poolSortKey(b.displayLabel ?? b.displayPair ?? b.pair, b.id),
         );
     });
     // Pool-Filter + Suche anwenden
@@ -1370,13 +1320,11 @@ function renderActivePositions(data) {
     if (activeSearchInputEl) activeSearchInputEl.style.display = '';
     removeBotInactivePanel(container);
 
-    // Sortierung nach InvestScore des zugehörigen Pools
-    const _poolsById = Object.fromEntries((data?.pools ?? []).map(p => [p.id, p]));
+    // Alphabetische Default-Sortierung (LIQ#000928)
     const positions = [...(data?.positions ?? [])].filter(p => p.active).sort((a, b) => {
-        const pa = _poolsById[a.poolId], pb = _poolsById[b.poolId];
         return comparePoolSortKeys(
-            poolSortKey(pa?.investScore, pa?.sortRank, a.displayLabel ?? a.displayPair ?? a.pair),
-            poolSortKey(pb?.investScore, pb?.sortRank, b.displayLabel ?? b.displayPair ?? b.pair),
+            poolSortKey(a.displayLabel ?? a.displayPair ?? a.pair, a.poolId),
+            poolSortKey(b.displayLabel ?? b.displayPair ?? b.pair, b.poolId),
         );
     });
 
@@ -1407,9 +1355,9 @@ function renderActivePositions(data) {
         table.innerHTML = `
             <div class="active-pools-header">
                 <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
-                <span>Range</span>
-                <span class="col-r">${tr('liq.reb', 'Reb.')}</span>
+                <span>${_rangeRebSelectHtml()}</span>
                 <span class="col-r">${tr('liq.fees', 'Fees')}</span>
+                <span class="col-r">${_edgeUnitSelectHtml()}</span>
                 <span class="col-r">${tr('liq.share', 'Anteil')}</span>
             </div>
             <div class="pools-overview-empty-row">${positions.length === 0 ? tr('liq.no_active_positions_plain', 'Keine aktiven Positionen') : tr('liq.no_matches', 'Keine Treffer')}</div>`;
@@ -1437,17 +1385,12 @@ function renderActivePositions(data) {
         <circle cx="7" cy="5" r="2" fill="currentColor"/>
     </svg>`;
 
-    const _editIconSvg = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <path d="M9.5 1.5L12.5 4.5L4.5 12.5H1.5V9.5L9.5 1.5Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
-    </svg>`;
-    const _lan = isLanAccess();
-
     table.innerHTML = `
         <div class="active-pools-header">
             <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
-            <span class="has-tooltip" data-tooltip-title="Range" data-tooltip-content="${tr('liq.tip.range_open', 'Öffnet die aktuelle Kursrange und Coin-Verteilung der Position.')}" data-tooltip-type="text" style="cursor:default">Range</span>
-            <span class="col-r has-tooltip" data-tooltip-title="Rebalances" data-tooltip-content="${tr('liq.tip.rebalances', 'Anzahl der Rebalancings heute. Ein Rebalancing schließt die aktuelle Position und öffnet sie mit angepasster Kursrange neu.')}" data-tooltip-type="text" style="cursor:default">${tr('liq.reb', 'Reb.')}</span>
+            <span>${_rangeRebSelectHtml()}</span>
             <span class="col-r">${tr('liq.fees', 'Fees')}</span>
+            <span class="col-r">${_edgeUnitSelectHtml()}</span>
             <span class="col-r">${tr('liq.share', 'Anteil')}</span>
             <span class="pool-edit-col"></span>
         </div>
@@ -1465,23 +1408,39 @@ function renderActivePositions(data) {
             const _feeTodayDate = new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: window.FORGE_TZ || 'Europe/Berlin' }).format(new Date());
             const _feeTtTitle   = `${pair}: Fees ${_feeTodayDate}`;
             const _feeTtContent = `${_claimCnt} Claims (${fmtUsdc(_claimUsd)} USDC)`;
-            const _pnlDep       = pos.sinceDepositPnlUsd;
-            const _pnlDepPct    = _pnlDep != null && pos.myValue != null && pos.myValue !== 0 ? (_pnlDep / pos.myValue) * 100 : null;
+            // Färbung nach PnL seit Pool-Eröffnung (Kettenstart bzw. manueller Reset) —
+            // derselbe Anker wie der PnL-Details-Reiter und die Exit-Nachricht
+            // (LIQ#000612). Vorher seit letzter Einzahlung: direkt nach einem Nachschuss
+            // stand die Spalte grün, während der Pool seit Eröffnung im Minus war.
+            // Seit 21.09.2026 derselbe Wert wie die Unterzeile "Wert heute" im Anteil-Modal
+            // (Mein Anteil − Eingezahlt, pnlBreakdown.sharePnlUsd), auf Cent gerundet wie dort.
+            // sinceOpenPnlUsd enthält die aufs Wallet ausgezahlten Fees und färbte grün, wo
+            // der Anteil im Minus lag. Fallback nur, wenn keine Überleitung vorliegt.
+            const _pnlDep       = pos.pnlBreakdown?.sharePnlUsd ?? pos.sinceOpenPnlUsd;
             // Vereinfachte Farbregel (LIQ#000532): kein neutrales Toleranzband mehr —
             // jeder positive PnL grün, jeder negative rot.
-            if (_pnlDep != null) partValCls = _pnlDep > 0 ? 'value-good' : _pnlDep < 0 ? 'value-danger' : '';
-            const _pnlTipContent = _pnlDep != null
-                ? `${_pnlDep >= 0 ? '+' : '−'}${fmtUsdc(Math.abs(_pnlDep))} USDC${_pnlDepPct != null ? ' / ' + fmtPct(_pnlDepPct) : ''}`
-                : tr('liq.tip.share_pnl.no_data', 'Keine Daten');
+            if (_pnlDep != null) { const _c = Math.round(Number(_pnlDep) * 100); partValCls = _c > 0 ? 'value-good' : _c < 0 ? 'value-danger' : ''; }
             const _tsIcon = _trailingStopIcon(pos, data);
+            // Delta-Spalte (LIQ#000890): Vorsprung/Std. bzw. /Tag gegenüber Halten aus
+            // lib/pnl.js (pnlBreakdown.shareEdgePerHourUsd/-DayUsd), keine eigene Rechnung
+            // hier (PnL-Regel). Einheit folgt dem Select im Spaltenkopf (_edgeUnit).
+            const _edgeH    = _edgeUnit === 'd' ? pos.pnlBreakdown?.shareEdgePerDayUsd : pos.pnlBreakdown?.shareEdgePerHourUsd;
+            const _edgeHCls = _edgeH != null ? (_edgeH > 0 ? 'value-good' : _edgeH < 0 ? 'value-danger' : '') : '';
+            // Range/Reb.-Spalte zusammengelegt (LIQ#000890): nur eine der beiden Zellen wird
+            // gerendert, je nach _rangeRebMode. Beide Elemente behalten ihre bestehenden Klassen
+            // (range-icon-btn/rebalance-clickable) unverändert — die Klick-Handler in
+            // $('activePoolsContainer').addEventListener('click', ...) bleiben unangetastet.
+            const _rangeRebCell = _rangeRebMode === 'reb'
+                ? `<span class="col-r">${rbHtml}</span>`
+                : `<button class="range-icon-btn" data-pool-id="${escHtml(pos.poolId ?? '')}">${_rangeIconSvg}</button>`;
             return `
         <div class="active-pools-row">
             <span>${pair}${_tsIcon}</span>
-            <button class="range-icon-btn" data-pool-id="${escHtml(pos.poolId ?? '')}">${_rangeIconSvg}</button>
-            <span class="col-r">${rbHtml}</span>
+            ${_rangeRebCell}
             <span class="col-r"><span class="fees-clickable has-tooltip" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${escHtml(_feeTtTitle)}" data-tooltip-content="${escHtml(_feeTtContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pos.feesPendingUsd != null ? fmtUsdc(pos.feesPendingUsd) + ' USDC' : '—'}</span></span>
-            <span class="col-r"><span class="composition-clickable has-tooltip${partValCls ? ' ' + partValCls : ''}" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${tr('liq.tip.share_pnl.title', 'PnL')}" data-tooltip-content="${escHtml(_pnlTipContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${partVal}</span></span>
-            <span class="pool-edit-col">${_lan ? `<a class="pool-edit-link has-tooltip" href="https://${escHtml(window.location.hostname)}:3200/#liquidity/${encodeURIComponent(pos.poolId ?? '')}" data-tooltip-title="${tr('liq.tip.pool_settings', 'Pool-Einstellungen')}" data-tooltip-content="${tr('liq.tip.pool_settings_desc', 'Öffnet die Settings für diesen Pool.')}" data-tooltip-type="text">${_editIconSvg}</a>` : ''}</span>
+            <span class="col-r${_edgeHCls ? ' ' + _edgeHCls : ''}">${_edgeH != null ? `<span class="edge-clickable" data-pool-id="${escHtml(pos.poolId ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${fmtEdgePerHour(_edgeH)}</span>` : fmtEdgePerHour(_edgeH, 2, pos.pnlBreakdown?.hodlUsd, _edgeRemainingText(pos, Date.parse(data?.timestamp) || Date.now()))}</span>
+            <span class="col-r"><span class="composition-clickable${partValCls ? ' ' + partValCls : ''}" data-pool-id="${escHtml(pos.poolId ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${partVal}</span></span>
+            ${_poolEditCell(pos.poolId)}
         </div>`;
         }).join('')}
         ${pendingPools.map(pool => {
@@ -1505,6 +1464,23 @@ function renderActivePositions(data) {
 }
 
 function _bindActiveSearch() {
+    // Delta-Einheit-Select: liegt IM Tabellen-innerHTML und wird bei jedem Render neu
+    // erzeugt (anders als das Suchfeld unten, das außerhalb der Tabelle im statischen
+    // Markup steht) — deshalb vor dem dataset.bound-Wächter, sonst bindet dieser Teil
+    // nur beim allerersten Aufruf und verliert den Listener bei jedem weiteren Render.
+    document.querySelector('.edge-unit-select')?.addEventListener('change', e => {
+        _edgeUnit = e.target.value === 'd' ? 'd' : 'h';
+        localStorage.setItem(LS_EDGE_UNIT, _edgeUnit);
+        if (_lastData) renderActivePositions(_lastData);
+    });
+
+    // Range/Reb.-Select: gleiches Muster wie oben (bei jedem Render neu im DOM).
+    document.querySelector('.range-reb-select')?.addEventListener('change', e => {
+        _rangeRebMode = e.target.value === 'reb' ? 'reb' : 'range';
+        localStorage.setItem(LS_RANGE_REB_MODE, _rangeRebMode);
+        if (_lastData) renderActivePositions(_lastData);
+    });
+
     const input = document.getElementById('activePoolsSearchInput');
     if (!input || input.dataset.bound) return;
     input.dataset.bound = '1';
@@ -1738,7 +1714,7 @@ function openPayedFeesModal(period, data) {
                     : period === 'yesterday' ? fmtDE(yesterdayStart.getTime())
                     :                          `01.–${td}.${tm}.${ty}`;
     const labels = { today: 'Heute', yesterday: 'Gestern', month: 'Monat' };
-    title.textContent = `TX-Fees – ${labels[period] ?? period}: ${dateLabel}`;
+    title.textContent = `Kosten – ${labels[period] ?? period}: ${dateLabel}`;
 
     const txs = (data?.transactions ?? []).filter(t =>
         t.txFeeSol != null && t.createdAt >= fromMs && (toMs === null || t.createdAt < toMs)
@@ -2036,7 +2012,7 @@ function renderNotifs(data) {
         // und meldete "Der Premium Service ist deaktiviert", während er in
         // Wirklichkeit läuft und stündlich weiterläuft. Für Zahler ändert die
         // Bedingung nichts: dort war coveredUntil ohnehin nur bei 'paid' gesetzt.
-        const showCountdown = active && data?.scoreSource === 'delivered'
+        const showCountdown = active && premiumFeedState(data).source === 'delivered'
             && !data?.premiumAutoPayEnabled && coveredUntil != null
             && data?.premiumCoverageSource === 'paid';
 
@@ -2049,8 +2025,8 @@ function renderNotifs(data) {
             // — ein Freigabe-Teilnehmer sieht denselben Zustand wie ein Zahler.
             premiumIcon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
             premiumIcon.dataset.tooltipContent = active
-                ? 'Premium-Datendienst aktiv – Opportunity Score und Score-Limit-Exit laufen mit gelieferten Daten.'
-                : tr('liq.score_inactive', 'Score-Bewertung nicht aktiv – Opportunity Score und Score-Limit-Exit werden über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
+                ? tr('sliq.premium_active_tip', 'Premium-Datendienst aktiv – die Edge-Prognose läuft mit gelieferten Daten.')
+                : tr('liq.score_inactive', 'Premium nicht aktiv – die Edge-Prognose der Opportunity-Tabelle wird über den Premium-Datendienst geliefert. Trailing Stop und TVL-Schutz arbeiten unabhängig davon weiter.');
         }
 
         if (premiumCountdownText) {
@@ -2126,12 +2102,13 @@ const LS_RANGE = {
     posValueA:   'liquiditybot_chart_posValueA',
     posValueB:   'liquiditybot_chart_posValueB',
     posValuePnl: 'liquiditybot_chart_posValuePnl',
+    posValueShowShare:    'liquiditybot_chart_posValue_showShare',
+    posValueShowInvested: 'liquiditybot_chart_posValue_showInvested',
     myAprIL:     'liquiditybot_chart_myAprIL',
     myAprNP:     'liquiditybot_chart_myAprNP',
     rangeChart:  'liquiditybot_chart_range',
     tvl:         'liquiditybot_chart_tvl',
     volModal:    'liquiditybot_chart_volModal',
-    oppScore:    'liquiditybot_chart_oppScore',
     metricChart: 'liquiditybot_chart_metricChart',
 };
 
@@ -2884,7 +2861,10 @@ function initCompositionModal() {
 let _posValueRange    = localStorage.getItem(LS_RANGE.posValue)    ?? '1W';
 let _posValueRangePnl = localStorage.getItem(LS_RANGE.posValuePnl) ?? '1W';
 let _posValuePool     = null;
-let _posValueTab      = 'value';  // aktiver Tab: 'value' | 'details'
+let _posValueTab      = 'details';  // aktiver Tab: 'details' | 'value' (Details zuerst, LIQ#000867)
+// Linien "Mein Anteil" / "Eingezahlt" einzeln ein-/ausblendbar (LIQ#000873), Default beide an.
+let _posValueShowShare    = localStorage.getItem(LS_RANGE.posValueShowShare)    !== '0';
+let _posValueShowInvested = localStorage.getItem(LS_RANGE.posValueShowInvested) !== '0';
 
 /**
  * Zeichnet den LP-Wert-Chart (Tab 1).
@@ -2894,9 +2874,22 @@ function renderPosValueChart(data, poolId) {
     const emptyMsg = $('posValueChartEmptyMsg');
     if (!svg) return;
 
-    const history = poolId
-        ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId)
-        : [];
+    // Wertlinie = "Mein Anteil" im Zeitverlauf aus lib/pnl.js (LIQ#000867): Position + Wallet-
+    // Rest über die ganze Kette, ohne ausgezahlte und offene Fees (wie "Wert heute").
+    // position_snapshots allein (posValueHistory) beginnt nach jedem Neu-Öffnen neu und
+    // springt bei Nachzahlungen; nur Rückfall, solange data-history.json das Feld nicht hat.
+    const history = !poolId ? [] : (data?.poolValueHistory
+        ? data.poolValueHistory.filter(r => r.poolId === poolId)
+        : (data?.posValueHistory ?? []).filter(r => r.poolId === poolId));
+    // data-history.json wird nur alle 5 Minuten geschrieben, data.json jede Minute: Endpunkt ist
+    // deshalb immer der aktuelle Wert der Spalte "Anteil" (pos.myValue), damit Chart, "Wert
+    // heute" und Pool-Tabelle dieselbe Zahl zeigen.
+    const livePos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active);
+    const liveAt  = livePos?.pnlBreakdown?.shareValueAtMs;
+    if (data?.poolValueHistory && livePos?.myValue != null && liveAt != null) {
+        while (history.length && history[history.length - 1].t >= liveAt) history.pop();
+        history.push({ t: liveAt, poolId, value: livePos.myValue });
+    }
     const filtered = filterByRange(history, _posValueRange, r => r.t);
 
     if (filtered.length < 2) {
@@ -2908,7 +2901,7 @@ function renderPosValueChart(data, poolId) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 200;
+    const H   = 316;   // LIQ#000867: bestimmt die Höhe beider Reiter (Details ohne Scrollbalken)
     const pad = { top: 20, right: 20, bottom: 30, left: 72 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
@@ -2916,7 +2909,19 @@ function renderPosValueChart(data, poolId) {
     const ts   = filtered.map(r => r.t);
     const vals = filtered.map(r => r.value);
     const minT = Math.min(...ts), maxT = Math.max(...ts);
-    let   minV = Math.min(...vals), maxV = Math.max(...vals);
+
+    // Zweite Linie: kumulierte Einzahlungen als Stufen (LIQ#000867), fertig aus lib/pnl.js.
+    // Stand am linken Rand = letzte Stufe davor; Stufen erst ab Messbeginn.
+    const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active);
+    const inv = pos?.pnlBreakdown?.investedSeries ?? [];
+    const steps = [];
+    for (const e of inv) {
+        if (e.t <= minT) { steps.length = 0; steps.push({ t: minT, usd: e.usd }); }
+        else if (e.t <= maxT) steps.push(e);
+    }
+    const invVals = steps.map(e => e.usd);
+
+    let   minV = Math.min(...vals, ...invVals), maxV = Math.max(...vals, ...invVals);
     const span = maxV - minV;
     if (span < 1) { minV = Math.max(0, minV - 1); maxV += 1; }
     else          { minV = Math.max(0, minV - span * 0.05); maxV += span * 0.05; }
@@ -2953,12 +2958,50 @@ function renderPosValueChart(data, poolId) {
     const areaClose = ` L ${xOf(ts[ts.length - 1]).toFixed(1)} ${yOf(minV).toFixed(1)} L ${xOf(ts[0]).toFixed(1)} ${yOf(minV).toFixed(1)} Z`;
 
     html += `<g clip-path="url(#posValClip)">`;
-    html += `<path d="${area + areaClose}" fill="url(#posValGrad)"/>`;
-    html += `<path d="${line}" fill="none" stroke="var(--primary)" stroke-width="1.5"/>`;
+    if (_posValueShowShare) {
+        html += `<path d="${area + areaClose}" fill="url(#posValGrad)"/>`;
+        html += `<path d="${line}" fill="none" stroke="var(--primary)" stroke-width="1.5"/>`;
+    }
+    if (_posValueShowInvested && steps.length) {
+        let d = `M ${xOf(steps[0].t).toFixed(1)} ${yOf(steps[0].usd).toFixed(1)}`;
+        for (let i = 1; i < steps.length; i++) {
+            d += ` H ${xOf(steps[i].t).toFixed(1)} V ${yOf(steps[i].usd).toFixed(1)}`;
+        }
+        d += ` H ${xOf(maxT).toFixed(1)}`;
+        html += `<path d="${d}" fill="none" stroke="var(--text-secondary)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
+    }
     html += `</g>`;
+    // Legende: Linienart statt nur Farbe (Farbschwäche). Abstand der Linien ≈ Gewinn/Verlust.
+    // Jede Zeile einzeln anklickbar (LIQ#000873): blendet die zugehörige Linie ein/aus,
+    // Default beide an. Ausgeblendet = gedimmt (CSS .off) statt nur über Farbe erkennbar.
+    {
+        const lx = pad.left + 8, ly = pad.top - 10;
+        html += `<g class="chart-legend" font-size="10">
+            <g class="chart-legend-item${_posValueShowShare ? '' : ' off'}" data-legend="share">
+                <rect x="${lx - 4}" y="${ly - 8}" width="100" height="14" fill="transparent"/>
+                <line x1="${lx}" x2="${lx + 18}" y1="${ly}" y2="${ly}" stroke="var(--primary)" stroke-width="1.5"/>
+                <text class="chart-label" x="${lx + 22}" y="${ly + 3}">${escHtml(tr('liq.chart_pool_value', 'Mein Anteil'))}</text>
+            </g>
+            <g class="chart-legend-item${_posValueShowInvested ? '' : ' off'}" data-legend="invested">
+                <rect x="${lx + 106}" y="${ly - 8}" width="100" height="14" fill="transparent"/>
+                <line x1="${lx + 110}" x2="${lx + 128}" y1="${ly}" y2="${ly}" stroke="var(--text-secondary)" stroke-width="1.5" stroke-dasharray="5 4"/>
+                <text class="chart-label" x="${lx + 132}" y="${ly + 3}">${escHtml(tr('liq.chart_invested', 'Eingezahlt'))}</text>
+            </g>
+        </g>`;
+    }
 
     svg.innerHTML = html;
     svg.setAttribute('height', H);
+
+    for (const g of svg.querySelectorAll('.chart-legend-item')) {
+        g.addEventListener('click', () => {
+            if (g.dataset.legend === 'share') _posValueShowShare    = !_posValueShowShare;
+            else                              _posValueShowInvested = !_posValueShowInvested;
+            localStorage.setItem(LS_RANGE.posValueShowShare,    _posValueShowShare    ? '1' : '0');
+            localStorage.setItem(LS_RANGE.posValueShowInvested, _posValueShowInvested ? '1' : '0');
+            renderPosValueChart(data, poolId);
+        });
+    }
 
     // Hover-Fadenkreuz mit Achsen-Labels
     attachHoverOverlay(svg, {
@@ -3370,7 +3413,7 @@ function renderNPChart(data, poolId) {
 }
 
 /**
- * Wechselt den aktiven Tab im Positionswert-Modal (Wert USDC / PnL-Details).
+ * Wechselt den aktiven Tab im Positionswert-Modal (Details / Pool-Entwicklung).
  * @param {'value'|'details'} tab
  */
 function _switchPosValueTab(tab) {
@@ -3388,7 +3431,10 @@ function _switchPosValueTab(tab) {
 
     if (!_lastData || !_posValuePool) return;
     if (tab === 'value')        renderPosValueChart(_lastData, _posValuePool);
-    else if (tab === 'details') renderPosValueDetails(_lastData, _posValuePool);
+    else if (tab === 'details') {
+        renderPosValueDetails(_lastData, _posValuePool);
+        renderPosValueBreakdown(_lastData, _posValuePool);
+    }
 }
 
 function openPosValueModal(poolId, data) {
@@ -3396,14 +3442,19 @@ function openPosValueModal(poolId, data) {
     const modal = $('posValueModal');
     if (!modal) return;
 
+    // Nur das Paar (LIQ#000867): Das Guthaben steht im Reiter "Details" unter "Wert heute".
     $('posValueModalTitle').textContent = tr('liq.my_share_prefix', 'Mein Anteil: ') + displayPairOf(data, poolId);
 
-    _switchPosValueTab('value');
+    // Details ist der erste Reiter (LIQ#000867) und rendert beim Wechsel selbst. Der Chart
+    // wird unten trotzdem sofort gezeichnet: Sein Reiter bestimmt die Höhe des Stapels, der
+    // Details-Reiter scrollt innerhalb dieser Höhe (components.css).
+    _switchPosValueTab('details');
+    renderPosValueOpenAge(data, poolId);
 
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
 
-    const posHistory = data?.posValueHistory ?? [];
+    const posHistory = data?.poolValueHistory ?? data?.posValueHistory ?? [];
     updateChartRangeBtns('posValueRangeBtns', posHistory, r => r.t,
         () => _posValueRange,
         v  => { _posValueRange = v; localStorage.setItem(LS_RANGE.posValue, v); },
@@ -3413,7 +3464,33 @@ function openPosValueModal(poolId, data) {
 }
 
 /**
- * Baut den Tab "PnL-Details" (Einzahlung / Maximum / Aktuell) im Positionswert-Modal.
+ * "Eröffnet vor X Tagen und Y Stunden" neben den Reitern des Positionswert-Modals.
+ * Maßgeblich ist der Beginn der Rebalance-Kette (chainOpenedAt), nicht die zuletzt
+ * geöffnete Position — sonst stünde hier nur die Zeit seit dem letzten Rebalance.
+ */
+function renderPosValueOpenAge(data, poolId) {
+    const el = $('posValueOpenAge');
+    if (!el) return;
+    const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active)
+             ?? (data?.positions ?? []).find(p => p.poolId === poolId);
+    const openedAt = pos?.chainOpenedAt ?? pos?.openedAt;
+    if (!(openedAt > 0)) { el.textContent = ''; return; }
+
+    const totalH = Math.max(0, Math.floor(((Date.parse(data?.timestamp) || Date.now()) - openedAt) / 3_600_000));
+    const days = Math.floor(totalH / 24);
+    const hours = totalH % 24;
+    const dayTxt  = n => n === 1 ? tr('liq.age_day_one', '{n} Tag', { n })     : tr('liq.age_day_many', '{n} Tagen', { n });
+    const hourTxt = n => n === 1 ? tr('liq.age_hour_one', '{n} Stunde', { n }) : tr('liq.age_hour_many', '{n} Stunden', { n });
+
+    const parts = [];
+    if (days > 0) parts.push(dayTxt(days));
+    if (hours > 0 || days === 0) parts.push(hourTxt(hours));
+    el.textContent = tr('liq.pos_open_age', 'Eröffnet vor {age}.',
+        { age: parts.join(' ' + tr('liq.age_and', 'und') + ' ') });
+}
+
+/**
+ * Baut den Tab "PnL-Details" (Maximum / Minimum / Aktuell) im Positionswert-Modal.
  * Alle Zahlen kommen fertig aus export.js/lib/pnl.js — hier nur Formatierung, keine
  * eigene PnL-Berechnung (Ablösung des früheren Anteil-Tooltips, siehe _switchPosValueTab).
  */
@@ -3436,77 +3513,228 @@ function renderPosValueDetails(data, poolId) {
         return `${date}, ${time} Uhr`;
     };
 
-    const pnlLine = (usd, valueUsd) => {
-        if (usd == null) return '<span class="text-muted">—</span>';
-        const pct  = valueUsd != null && valueUsd !== 0 ? (usd / valueUsd) * 100 : null;
-        const cls  = usd > 0 ? 'value-good' : usd < 0 ? 'value-danger' : '';
-        const sign = usd >= 0 ? '+' : '';
-        return `<span class="${cls}">PnL ${sign}${fmtUsdc(usd)} USDC${pct != null ? ` / ${fmtPct(pct)}` : ''}</span>`;
+    // Seit LIQ#000776 steht oben (wo zuvor der Positionswert in USDC stand) der
+    // PnL-Prozentsatz: Genau der wird von "Maximum" gemeint (höchster PnL%, nicht
+    // höchster je erreichter Positionswert) — nach Nacheinzahlungen kann der aktuelle
+    // Positionswert den hier gezeigten "Maximum"-Wert übersteigen, was als Fehler
+    // gemeldet wurde, obwohl beide Werte korrekt waren. Der %-Wert macht die Aussage
+    // sofort eindeutig.
+    const pctLine = (pct) => {
+        if (pct == null) return '—';
+        const cls = pct > 0 ? 'value-good' : pct < 0 ? 'value-danger' : '';
+        return `<span class="${cls}">${fmtPct(pct)}</span>`;
     };
 
-    // Mehr als eine Kapitalbewegung seit dem Anker (z.B. Cleanup-Nachschuss nach der
-    // letzten externen Einzahlung) → Label + Datum spiegeln das wider. Der Betrag
-    // (depositValueUsd) ist in beiden Fällen bereits korrekt, siehe export.js.
-    const _depMulti = (pos.depositCount ?? 0) > 1;
-    const _depLabel = _depMulti ? tr('liq.pnl_deposit_total', 'Einzahlung (gesamt)') : tr('liq.pnl_deposit', 'Einzahlung');
-    const _depDate  = _depMulti ? (pos.depositLatestAt ?? pos.sinceDepositAt) : pos.sinceDepositAt;
+    // Betrag in Klammern und klein (LIQ#000776/Folgeänderung) — der Prozentsatz
+    // ist der eigentliche Aussagewert (siehe pctLine), der USDC-Betrag nur Kontext.
+    const pnlLine = (usd) => {
+        if (usd == null) return '<span class="text-muted">—</span>';
+        const cls  = usd > 0 ? 'value-good' : usd < 0 ? 'value-danger' : '';
+        const sign = usd >= 0 ? '+' : '';
+        return `<span class="${cls}">(${sign}${fmtUsdc(usd)} USDC)</span>`;
+    };
 
+    // Der Reiter zeigt ausschließlich den PnL-Verlauf (LIQ#000572): Einzahlungsbetrag
+    // und im Wallet verbliebener Rebalance-Rest sind Kapital-Infos und stehen hier
+    // nicht mehr. Seit LIQ#000577 drei Spalten — Höchststand, Tiefstand, heute — alle
+    // aus derselben Kurve und mit derselben Kapitalbasis, also direkt vergleichbar.
+    //
+    // Alle drei messen ab demselben Anker: Pool-Eröffnung (Kettenstart) bzw. manueller
+    // Reset — NICHT ab der letzten Einzahlung (LIQ#000612: nach einem Nachschuss stand
+    // sonst in allen drei Spalten der aktuelle Wert). Auch "Aktuell" nimmt deshalb
+    // sinceOpenPnlUsd/-Pct und nicht sinceDepositPnlUsd — ein Mischanker im selben Grid
+    // ließe "Aktuell" über dem "Maximum" stehen. Alles fertig aus export.js/lib/pnl.js.
+    // Karten messen "Mein Anteil" (Festlegung 21.09.2026): Anteil − Eingezahlt, derselbe
+    // Begriff wie der PnL unter "Wert heute", fertig aus lib/pnl.js (sharePeak/shareTrough).
+    const peak   = pos.pnlBreakdown?.sharePeak ?? null;
+    const trough = pos.pnlBreakdown?.shareTrough ?? null;
     const cols = [
         {
-            label: _depLabel,
-            date:  fmtDateTime(_depDate),
-            value: pos.depositValueUsd != null ? `${fmtUsdc(pos.depositValueUsd)} USDC` : '—',
-            pnl:   null,
+            label: tr('liq.pnl_best', 'Bester Stand'),
+            tip:   tr('liq.tip.pnl_best', 'Der höchste Stand von Mein Anteil seit dem Messbeginn: Wert minus Eingezahlt, als Rendite auf das damals Eingezahlte. Darüber steht, wann er erreicht wurde.'),
+            date:  fmtDateTime(peak?.atMs),
+            value: pctLine(peak?.pnlPct),
+            pnl:   pnlLine(peak?.pnlUsd),
         },
         {
-            label: tr('liq.pnl_maximum', 'Maximum'),
-            date:  fmtDateTime(pos.peakPnlAt),
-            value: pos.peakValueUsd != null ? `${fmtUsdc(pos.peakValueUsd)} USDC` : '—',
-            pnl:   pnlLine(pos.peakPnlUsd, pos.myValue),
-        },
-        {
-            label: tr('liq.pnl_current', 'Aktuell'),
-            date:  fmtDateTime(data?.timestamp ?? Date.now()),
-            value: pos.myValue != null ? `${fmtUsdc(pos.myValue)} USDC` : '—',
-            pnl:   pnlLine(pos.sinceDepositPnlUsd, pos.myValue),
+            label: tr('liq.pnl_worst', 'Schlechtester Stand'),
+            tip:   tr('liq.tip.pnl_worst', 'Der tiefste Stand seit dem Messbeginn, auf derselben Basis wie der beste Stand. Muss kein Minus sein: War der Pool nie im Minus, ist es der niedrigste Gewinn.'),
+            date:  fmtDateTime(trough?.atMs),
+            value: pctLine(trough?.pnlPct),
+            pnl:   pnlLine(trough?.pnlUsd),
         },
     ];
-
-    // Nicht reinvestierter Rebalance-Rest (LIQ#000558): eigene Zeile unter dem 3er-Grid,
-    // nicht als 4. Spalte — sonst brechen die Boxen bei schmaleren Modal-Breiten um.
-    // Bewusst kein Verlust-Framing (keine rote Farbe, kein "fehlt") — das Kapital liegt
-    // weiterhin im Wallet. Nur sichtbar, wenn seit dem Anker tatsächlich ein Rest anfiel.
-    let leftoverHtml = '';
-    if (pos.walletLeftoverUsd > 0) {
-        const n = pos.walletLeftoverRebalances ?? 0;
-        const sinceLabel = n === 1
-            ? tr('liq.pnl_leftover_since_one', 'seit {n} Rebalance', { n })
-            : tr('liq.pnl_leftover_since_many', 'seit {n} Rebalances', { n });
-        // 🧪 TEMPORÄR, siehe LIQ#000559 — Marker + eigener Tooltip für den Näherungs-Fallback
-        // in export.js. Entfällt zusammen mit walletLeftoverEstimated.
-        const estimatedBadge = pos.walletLeftoverEstimated
-            ? ` <span class="has-tooltip" data-tooltip-title="${escHtml(tr('liq.pnl_leftover_estimated', 'grob geschätzt'))}" data-tooltip-content="${escHtml(tr('liq.pnl_leftover_estimated_tooltip', 'Für Rebalances vor dieser Funktion wurde der Rest nicht exakt erfasst. Grob genähert aus Positionswert vor/nach dem Rebalance — verzerrt durch TX-Kosten, Slippage und Preisbewegung. Wird mit dem nächsten Rebalance durch den exakten Wert ersetzt.'))}" data-tooltip-type="text" style="cursor:default;color:var(--warning,#f59e0b)">⚠ ${escHtml(tr('liq.pnl_leftover_estimated', 'grob geschätzt'))}</span>`
-            : '';
-        leftoverHtml = `
-        <div class="pos-value-leftover">
-            <div class="pos-value-leftover-label">
-                ${escHtml(tr('liq.pnl_leftover', 'Im Wallet verblieben'))}
-                <span class="has-tooltip" data-tooltip-title="${escHtml(tr('liq.pnl_leftover', 'Im Wallet verblieben'))}" data-tooltip-content="${escHtml(tr('liq.pnl_leftover_tooltip', 'Nicht bei jedem Rebalance vollständig reinvestierter Betrag. Liegt im Wallet, ist Teil deines Kapitals, kein Verlust.'))}" data-tooltip-type="text" style="cursor:default">ⓘ</span>${estimatedBadge}
-            </div>
-            <div class="pos-value-leftover-row">
-                <span class="pos-value-leftover-since">${escHtml(sinceLabel)}</span>
-                <span class="pos-value-leftover-value">${fmtUsdc(pos.walletLeftoverUsd)} USDC<span class="pos-value-leftover-hint">${escHtml(tr('liq.pnl_leftover_note', 'gehört zu deinem Kapital'))}</span></span>
-            </div>
-        </div>`;
-    }
+    // "Jetzt" entfällt seit LIQ#000867: Der aktuelle PnL steht unter "Wert heute" in der
+    // Überleitung darunter. Zwei flachere Karten: links Überschrift/Zeitpunkt, rechts Wert.
 
     container.innerHTML = cols.map(c => `
         <div class="pos-value-details-col">
-            <div class="pos-value-details-label">${escHtml(c.label)}</div>
-            <div class="pos-value-details-date">${escHtml(c.date)}</div>
-            <div class="pos-value-details-value">${c.value}</div>
-            ${c.pnl != null ? `<div class="pos-value-details-pnl">${c.pnl}</div>` : ''}
-        </div>`).join('') + leftoverHtml;
+            <div class="pos-value-details-head">
+                ${_posValueCardLabel(c.label, c.tip)}
+                <div class="pos-value-details-date">${escHtml(c.date)}</div>
+            </div>
+            <div class="pos-value-details-figs">
+                <div class="pos-value-details-value">${c.value}</div>
+                ${c.pnl != null ? `<div class="pos-value-details-pnl">${c.pnl}</div>` : ''}
+            </div>
+        </div>`).join('');
+}
+
+/** Überschrift einer Karte mit Erklär-Tooltip (LIQ#000794). */
+function _posValueCardLabel(label, tip) {
+    return `<div class="pos-value-details-label has-tooltip"
+                 data-tooltip-title="${escHtml(label)}"
+                 data-tooltip-content="${escHtml(tip)}"
+                 data-tooltip-type="text">${escHtml(label)}<i class="pos-value-details-info" aria-hidden="true">i</i></div>`;
+}
+
+/**
+ * Baut die Überleitung im Reiter "Details" (LIQ#000867): Eingezahlt → + Gebühren →
+ * + Kursentwicklung → − IL und Rebalancing → = Wert heute. Je Zeile drei Spalten: Überschrift,
+ * Erläuterung (Mitte, wo anfangs ein Wasserfall-Balken stand), Betrag. Löst die Karten
+ * Ein-/Auszahlungen, Reinvestierte Fees und Rebalances ab (LIQ#000794). Alle Zahlen fertig
+ * aus lib/pnl.js (pnlBreakdownForPeriod) über export.js, hier keine Rechnung. Farbe nur in
+ * der letzten Zeile (Gewinn/Verlust), die Zwischenzeilen tragen nur Vorzeichen (bewusste Festlegung).
+ */
+function renderPosValueBreakdown(data, poolId) {
+    const container = $('posValueBreakdown');
+    if (!container) return;
+
+    const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active)
+             ?? (data?.positions ?? []).find(p => p.poolId === poolId);
+    const b = pos?.pnlBreakdown;
+    if (!b) {
+        container.innerHTML = `<p class="chart-empty">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</p>`;
+        return;
+    }
+
+    const usd = v => `${fmtUsdc(Math.abs(v))} USDC`;
+    const signed = v => {
+        const c = Math.round(Number(v) * 100);
+        if (c === 0) return `±${fmtUsdc(0)} USDC`;
+        return c > 0 ? `+${usd(v)}` : `−${usd(v)}`;
+    };
+    const cls = v => { const c = Math.round(Number(v) * 100); return c > 0 ? 'value-good' : c < 0 ? 'value-danger' : ''; };
+    const plural = (n, one, many) => n === 1 ? one : many;
+
+    // Unterzeilen
+    const investedParts = [];
+    if (b.startValueUsd > 0) investedParts.push(tr('liq.bd_start_value', 'Wert beim Messbeginn {v}', { v: fmtUsdc(b.startValueUsd) }));
+    if (b.openingUsd > 0)    investedParts.push(tr('liq.bd_opening', 'Eröffnung {v}', { v: fmtUsdc(b.openingUsd) }));
+    if (b.depositCount > 0)  investedParts.push(plural(b.depositCount,
+        tr('liq.bd_deposits_one', '{n} Einzahlung {v}', { n: b.depositCount, v: fmtUsdc(b.depositsUsd) }),
+        tr('liq.bd_deposits_many', '{n} Einzahlungen {v}', { n: b.depositCount, v: fmtUsdc(b.depositsUsd) })));
+    let investedSub = investedParts.join(' + ');
+    if (b.withdrawalCount > 0) investedSub += ' − ' + plural(b.withdrawalCount,
+        tr('liq.bd_withdrawals_one', '{n} Auszahlung {v}', { n: b.withdrawalCount, v: fmtUsdc(b.withdrawalsUsd) }),
+        tr('liq.bd_withdrawals_many', '{n} Auszahlungen {v}', { n: b.withdrawalCount, v: fmtUsdc(b.withdrawalsUsd) }));
+
+    // "Mein Anteil" (Festlegung 21.09.2026): nur Fees, die in den Anteil geflossen sind —
+    // reinvestierte Claims und Claims direkt vor einem Rebalance (gehen in die neue Position).
+    // Aufs Wallet ausgezahlte und noch offene Fees stehen nicht in der Summe.
+    const reinvSub = plural(b.feesInShareCount,
+        tr('liq.bd_claims_one', '{n} Claim', { n: b.feesInShareCount }),
+        tr('liq.bd_claims_many', '{n} Claims', { n: b.feesInShareCount }));
+
+    const marketOk  = b.marketUsd != null;
+    const marketSub = marketOk
+        ? (b.tokens ?? []).filter(t => t.symbol && t.symbol !== 'USDC').map(t => `${t.symbol} ${fmtPct(t.changePct)}`).join(' · ')
+        : tr('liq.bd_market_missing', 'Für mindestens einen Token fehlt ein USD-Kurs, die Kursentwicklung steckt deshalb in der Zeile darunter.');
+
+    const rebSub = b.rebalanceCount > 0
+        ? plural(b.rebalanceCount,
+            tr('liq.bd_rebalances_one', '{n} Rebalance, Betrag geschätzt', { n: b.rebalanceCount }),
+            tr('liq.bd_rebalances_many', '{n} Rebalances, Betrag geschätzt', { n: b.rebalanceCount }))
+        : tr('liq.bd_rebalances_none', 'keine Rebalances');
+
+    // Unterzeile "Wert heute": PnL von "Mein Anteil" = Wert heute − Eingezahlt, fertig aus
+    // lib/pnl.js. Nicht der Gesamt-PnL: Der enthält die aufs Wallet ausgezahlten Fees, die hier
+    // bewusst keine Zeile haben (Festlegung 21.09.2026), die Rechnung ginge sonst nicht auf.
+    const sharePnl = b.sharePnlUsd;
+    const pnlUsdTxt = sharePnl == null ? '—'
+        : (Math.round(sharePnl * 100) > 0 ? '+' : Math.round(sharePnl * 100) < 0 ? '−' : '±')
+          + fmtUsdc(Math.abs(sharePnl));
+    const valueSub = tr('liq.bd_value_pnl', 'PnL {pct} / {usd} USDC', { pct: fmtPct(b.sharePnlPct), usd: pnlUsdTxt });
+
+    // Vorsprung gegenüber bloßem Halten (LIQ#000872): shareEdgeUsd/-Pct = Wert heute −
+    // (Eingezahlt + Kursentwicklung), fertig aus lib/pnl.js. Steht NICHT als eigener Text in
+    // der Zeile (Festlegung 22.09.2026, 2. Anlauf: zu lang, brach um) — stattdessen ein
+    // Info-Icon direkt hinter der PnL-Zeile, Wert + Erklärung nur im Tooltip. Kein Symbol
+    // sichtbar ohne Hover; auf Touch-Geräten (kein Hover) bleibt das bewusst so hingenommen.
+    const edgeUsd = b.shareEdgeUsd;
+    const edgeUsdTxt = edgeUsd == null ? null
+        : (Math.round(edgeUsd * 100) > 0 ? '+' : Math.round(edgeUsd * 100) < 0 ? '−' : '±') + fmtUsdc(Math.abs(edgeUsd));
+    const edgeTitle = escHtml(tr('liq.bd_edge_title', 'Halten statt Liquidity Pool'));
+    const edgeTipTxt = edgeUsd == null
+        ? tr('liq.bd_edge_missing', 'nicht verfügbar')
+        : tr('liq.bd_value_pnl', 'PnL {pct} / {usd} USDC', { pct: fmtPct(b.shareEdgePct), usd: edgeUsdTxt });
+    const edgeIconHtml = `<i class="pos-value-details-info has-tooltip" aria-hidden="true"
+        data-tooltip-title="${edgeTitle}" data-tooltip-content="${escHtml(edgeTipTxt)}"
+        data-tooltip-type="text">i</i>`;
+
+    // Zeilen: kind 'total' = Stand (Betrag ohne Vorzeichen), 'step' = Veränderung (mit Vorzeichen).
+    const rows = [
+        { kind: 'total', amount: b.investedUsd,
+          label: tr('liq.bd_invested', 'Eingezahlt'),
+          tip:   tr('liq.tip.bd_invested', 'Dein eigenes Kapital seit dem Messbeginn: Eröffnungswert plus alle späteren Einzahlungen, abzüglich Auszahlungen. Reinvestierte Fees und Nachzahlungen nach Rebalances sind keine Einzahlung, das ist Geld, das schon im Pool war.'),
+          sub:   investedSub },
+        { kind: 'step', amount: b.feesInShareUsd,
+          label: tr('liq.bd_fees_reinvested_label', 'Fee-Claims reinvestiert'),
+          tip:   tr('liq.tip.bd_fees_reinvested', 'Fees, die der Bot abgeholt und wieder in den Pool gelegt hat, auch die direkt vor einem Rebalance.'),
+          sub:   reinvSub },
+        { kind: 'step', amount: marketOk ? b.marketUsd : null,
+          label: tr('liq.bd_market', 'Kursentwicklung der Token'),
+          tip:   tr('liq.tip.bd_market', 'Was dein Geld gebracht hätte, wenn du beide Token nur gehalten hättest: jede Einzahlung zu ihrem Zeitpunkt je zur Hälfte in beide Token getauscht und heute bewertet, minus Eingezahlt. Darunter die Kursänderung beider Token seit dem Messbeginn.'),
+          sub:   marketSub },
+        { kind: 'step', amount: b.ilShareUsd,
+          label: tr('liq.bd_il_only', 'Impermanent Loss'),
+          tip:   tr('liq.tip.bd_il_only', 'Was der Pool gegenüber reinem Halten verliert: Er verkauft beim Steigen und kauft beim Fallen. Ohne die Kosten der Rebalances (eigene Zeile).'),
+          sub:   tr('liq.bd_il_sub', 'Verlust gegenüber Halten') },
+        { kind: 'step', amount: b.rebalanceShareUsd,
+          label: tr('liq.bd_rebalancing', 'Rebalancing'),
+          tip:   tr('liq.tip.bd_rebalancing', 'Was bei den Rebalances nicht wieder in die Position ging: Swap-Fees, Slippage, Kursbewegung zwischen Schließen und Neueröffnen und der Rest, der im Wallet liegt. Geschätzt, deshalb ungefähr.'),
+          sub:   rebSub },
+        // Betrag = exakt das Feld der Spalte "Anteil" (pos.myValue), nicht nachgerechnet.
+        { kind: 'total', amount: pos.myValue ?? b.shareValueUsd, strong: true, tone: cls(sharePnl ?? 0),
+          label: tr('liq.bd_value', 'Wert heute'),
+          tip:   tr('liq.tip.bd_value', 'Dein Anteil heute, wie in der Spalte Anteil.'),
+          sub:   valueSub, subHtml: (() => {
+              // Icon bleibt am letzten Wort der PnL-Zeile (kein Umbruch dazwischen), gleiches
+              // Muster wie labelHtml() für die Zeilen-Überschriften.
+              const words = valueSub.split(' ');
+              const last  = words.pop();
+              return `${escHtml(words.join(' '))} <span class="pv-wf-nowrap">${escHtml(last)}${edgeIconHtml}</span>`;
+          })() },
+    ];
+
+    // Überschrift darf umbrechen, das Info-Zeichen bleibt aber am letzten Wort.
+    const labelHtml = (label) => {
+        const i = label.lastIndexOf(' ');
+        const head = i > 0 ? escHtml(label.slice(0, i + 1)) : '';
+        return `${head}<span class="pv-wf-nowrap">${escHtml(label.slice(i + 1))}<i class="pos-value-details-info" aria-hidden="true">i</i></span>`;
+    };
+
+    const rowHtml = (r) => {
+        const amountHtml = r.amount == null
+            ? `<span class="text-muted">${escHtml(tr('liq.bd_not_available', 'nicht verfügbar'))}</span>`
+            : r.kind === 'total'
+                ? `<span class="${r.tone ?? ''}">${escHtml(usd(r.amount))}</span>`
+                : escHtml(signed(r.amount));   // Zwischenzeilen ohne Farbe, nur Vorzeichen
+        return `
+        <div class="pv-wf-row${r.strong ? ' pv-wf-row--strong' : ''}">
+            <div class="pv-wf-label has-tooltip" data-tooltip-title="${escHtml(r.label)}"
+                 data-tooltip-content="${escHtml(r.tip)}" data-tooltip-type="text">${labelHtml(r.label)}</div>
+            <div class="pv-wf-sub${r.tone ? ` ${r.tone}` : ''}">${r.subHtml ?? escHtml(r.sub)}</div>
+            <div class="pv-wf-amount">${amountHtml}</div>
+        </div>`;
+    };
+
+    // Nur die Zwischenzeilen scrollen, "Wert heute" steht immer unten (LIQ#000867). Beide
+    // Bereiche reservieren dieselbe Scrollbalken-Spur, damit die Spalten fluchten.
+    const last = rows.length - 1;
+    container.innerHTML = `
+        <div class="pv-wf-scroll">${rows.slice(0, last).map(rowHtml).join('')}</div>
+        <div class="pv-wf-foot">${rowHtml(rows[last])}</div>`;
 }
 
 function closePosValueModal() {
@@ -4463,17 +4691,17 @@ function _renderClaimHistTab(tab) {
     const yesterdayStart = new Date(todayStart); yesterdayStart.setDate(yesterdayStart.getDate() - 1);
     const monthStart     = new Date(todayStart); monthStart.setDate(1);
 
-    // Nur die Claims der AKTUELLEN Position dieses Pools. Ein Pool kann am selben Tag mehrfach
-    // geschlossen und wiedereröffnet worden sein — die Claims der Vorgänger-Positionen gehören
-    // nicht in dieses Modal (sie stehen in den Tagesaggregaten und im Profit-Chart).
-    // Grenze: positionId (seit 2026-08-22 im Export), Fallback: Eröffnungszeitpunkt.
+    // Alle Claims seit der ersten Einzahlung in diesen Pool (LIQ#000605) — ein Rebalance
+    // schließt zwar die aktuelle Position technisch und eröffnet eine neue, ist aber kein
+    // Ausstieg, solange die Kapitalkette lückenlos ist (siehe chainOpenedAt im Export, analog
+    // chainStartOpenedAt() in pnl-anchor.js). Erst ein echter Full-Exit ohne Reopen bricht die
+    // Kette — dann beginnt die Zählung mit der nächsten Einzahlung wieder bei 0.
     const curPos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active)
                 ?? (data?.positions ?? []).find(p => p.poolId === poolId);
     const allEntries       = (data?.claimHistory ?? []).filter(e => {
         if (e.poolId !== poolId) return false;
         if (!curPos) return true;
-        if (e.positionId != null && curPos.positionId != null) return e.positionId === curPos.positionId;
-        return !(curPos.openedAt > 0) || e.claimedAt >= curPos.openedAt;
+        return !(curPos.chainOpenedAt > 0) || e.claimedAt >= curPos.chainOpenedAt;
     });
     const todayEntries     = allEntries.filter(e => e.claimedAt >= todayStart.getTime());
     const yesterdayEntries = allEntries.filter(e =>
@@ -4546,14 +4774,9 @@ function _renderClaimHistTab(tab) {
     const total      = entries.reduce((s, e) => s + (e.usdValue ?? 0), 0);
     const contentHtml = _buildClaimTable(cols, rows, total, entries.length);
 
-    // Geltungsbereich sichtbar machen: Position, nicht Pool-Historie.
-    const scopeHtml = curPos?.openedAt > 0
-        ? `<div class="tx-modal-scope" style="font-size:0.85em;opacity:0.75;margin:-0.25rem 0 0.5rem">${tr('liq.claims_scope_position', 'Nur Claims der aktuellen Position, eröffnet')} ${new Intl.DateTimeFormat(NUM_LOCALE, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: _tz }).format(new Date(curPos.openedAt))}</div>`
-        : '';
-
     listEl.innerHTML = `
         <div class="modal-tabs" style="margin:-0.25rem 0 0.75rem">${tabsHtml}</div>
-        ${scopeHtml}${contentHtml}`;
+        ${contentHtml}`;
 
     listEl.querySelectorAll('[data-claim-tab]').forEach(btn =>
         btn.addEventListener('click', () => _renderClaimHistTab(btn.dataset.claimTab))
@@ -4794,6 +5017,13 @@ function initPoolTxModal() {
             if (poolId && _lastData) openPoolClaimHistoryModal(poolId, _lastData);
             return;
         }
+        // Delta-Wert (LIQ#000891): Verlauf im Metric-Chart-Modal, Einheit wie im Spaltenkopf.
+        const edgeLink = e.target.closest('.edge-clickable');
+        if (edgeLink) {
+            const poolId = edgeLink.dataset.poolId;
+            if (poolId && _lastData) openMetricChartModal(poolId, _edgeUnit === 'd' ? 'deltaD' : 'deltaH', _lastData);
+            return;
+        }
         const rebalLink = e.target.closest('.rebalance-clickable');
         if (rebalLink) {
             // Mobile-Portrait: Modal ist zu breit für den Bildschirm → nicht öffnen.
@@ -4827,7 +5057,7 @@ async function refresh() {
     _safeRender(() => renderMetrics(d),          'renderMetrics');
     _safeRender(() => renderPools(d),            'renderPools');
     _safeRender(() => renderActivePositions(d),  'renderActivePositions');
-    _safeRender(() => renderOpportunityScores(d),'renderOpportunityScores');
+    _safeRender(() => renderOpportunityTable(d),'renderOpportunityTable');
     _safeRender(() => renderStatistics(d),       'renderStatistics');
     _safeRender(() => renderTransactions(d),     'renderTransactions');
     _safeRender(() => renderNotifs(d),           'renderNotifs');
@@ -4855,163 +5085,26 @@ async function refresh() {
     renderFeeChart(d);
 }
 
-// ── InvestScore Modal ────────────────────────────────────────────────────────
-
-// ── Opportunity Score Chart ───────────────────────────────────────────────────
-
-let _oppScoreRange = localStorage.getItem(LS_RANGE.oppScore) ?? '1d';
-
-function _drawScoreChart(svgEl, points, range) {
-    const W  = svgEl.getBoundingClientRect().width || 300;
-    const H  = 180;
-    const PL = 28, PR = 16, PT = 10, PB = 22;
-    const cW = W - PL - PR;
-    const cH = H - PT - PB;
-
-    svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svgEl.setAttribute('height', H);
-
-    const yPx  = v => PT + cH - (v / 100) * cH;
-    const RANGE_MS = { '1d': 86_400_000, '1w': 7 * 86_400_000, '1m': 30 * 86_400_000 };
-    const tMax  = Date.now();
-    const tMin  = tMax - (RANGE_MS[range] ?? 86_400_000);
-    const tSpan = tMax - tMin;
-    const xPx   = t => PL + ((t - tMin) / tSpan) * cW;
-
-    // Zone bands (background)
-    const bands = [
-        { lo:  0, hi:  35, fill: 'rgba(239,68,68,0.12)'  },
-        { lo: 35, hi:  60, fill: 'rgba(234,179,8,0.09)'  },
-        { lo: 60, hi: 100, fill: 'rgba(34,197,94,0.12)'  },
-    ];
-
-    let svg = '';
-    for (const b of bands) {
-        const by = yPx(b.hi), bh = yPx(b.lo) - by;
-        svg += `<rect x="${PL}" y="${by.toFixed(1)}" width="${cW}" height="${bh.toFixed(1)}" fill="${b.fill}"/>`;
-    }
-
-    // Reference lines + right-side labels
-    const refs = [
-        { y: 35, stroke: 'rgba(239,68,68,0.55)',  label: '35' },
-        { y: 60, stroke: 'rgba(34,197,94,0.55)',   label: '60' },
-    ];
-    for (const r of refs) {
-        const ry = yPx(r.y).toFixed(1);
-        svg += `<line x1="${PL}" y1="${ry}" x2="${PL + cW}" y2="${ry}" stroke="${r.stroke}" stroke-width="1" stroke-dasharray="4,3"/>`;
-        svg += `<text x="${(PL + cW + 3).toFixed(1)}" y="${(parseFloat(ry) + 3.5).toFixed(1)}" font-size="9" fill="${r.stroke}">${r.label}</text>`;
-    }
-
-    // Y-axis labels (left): 0 and 100 only (35/60 shown on right)
-    for (const v of [0, 100]) {
-        svg += `<text x="${(PL - 3).toFixed(1)}" y="${(yPx(v) + 3.5).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="end">${v}</text>`;
-    }
-
-    // X-axis labels
-    const tickCount = range === '1w' ? 6 : 5;
-    for (let i = 0; i <= tickCount; i++) {
-        const t = tMin + (i / tickCount) * tSpan;
-        const d = new Date(t);
-        const label = range === '1d'
-            ? `${String(d.getHours()).padStart(2, '0')}h`
-            : `${d.getDate()}.${d.getMonth() + 1}.`;
-        const x = (PL + (i / tickCount) * cW).toFixed(1);
-        svg += `<text x="${x}" y="${(H - 4).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="middle">${label}</text>`;
-    }
-
-    // Data line
-    const linePoints = points.map(p => `${xPx(p.ts).toFixed(1)},${yPx(p.v).toFixed(1)}`).join(' ');
-    if (points.length >= 2) {
-        svg += `<polyline points="${linePoints}" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-    }
-    // Dots for sparse data
-    if (points.length <= 14) {
-        for (const p of points) {
-            svg += `<circle cx="${xPx(p.ts).toFixed(1)}" cy="${yPx(p.v).toFixed(1)}" r="3" fill="#60a5fa"/>`;
-        }
-    }
-
-    svgEl.innerHTML = svg;
-}
-
-function openInvestScoreModal(poolId, data) {
-    const modal = $('investScoreModal');
-    if (!modal) return;
-
-    const pool = (data?.pools ?? []).find(p => p.id === poolId);
-    if (!pool) return;
-
-    const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
-    const titleEl = $('investScoreModalTitle');
-    if (titleEl) titleEl.textContent = `Opportunity Score – ${pair}`;
-
-    // ── Chart-Panel + Range-Buttons ──────────────────────────────────────────
-    const chartEl    = $('oppScoreChartPanel');
-    const rangeBtns  = $('oppScoreRangeBtns');
-
-    const renderChart = () => {
-        const svgEl = chartEl?.querySelector('svg.opp-score-chart');
-        if (!svgEl) return;
-        const pts = (pool.scoreHistory ?? {})[_oppScoreRange] ?? [];
-        if (!pts.length) {
-            svgEl.setAttribute('viewBox', '0 0 300 180');
-            svgEl.setAttribute('height', '180');
-            svgEl.innerHTML = `<text x="150" y="90" dominant-baseline="middle" text-anchor="middle" fill="#64748b" font-size="12">${tr('liq.no_data_yet', 'Noch keine Daten')}</text>`;
-            return;
-        }
-        _drawScoreChart(svgEl, pts, _oppScoreRange);
-    };
-
-    if (rangeBtns) {
-        rangeBtns.innerHTML = ['1d', '1w', '1m'].map(r =>
-            `<button class="chart-range-btn${_oppScoreRange === r ? ' active' : ''}" data-range="${r}">${r.toUpperCase()}</button>`
-        ).join('');
-        rangeBtns.querySelectorAll('.chart-range-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                _oppScoreRange = btn.dataset.range;
-                localStorage.setItem(LS_RANGE.oppScore, _oppScoreRange);
-                rangeBtns.querySelectorAll('.chart-range-btn').forEach(b =>
-                    b.classList.toggle('active', b.dataset.range === _oppScoreRange));
-                renderChart();
-            });
-        });
-    }
-
-    if (chartEl) {
-        chartEl.innerHTML = `<svg class="opp-score-chart" width="100%" style="display:block;overflow:visible"></svg>`;
-        requestAnimationFrame(renderChart);
-    }
-
-    modal.classList.remove('hidden');
-    document.body.classList.add('modal-open');
-}
-
-function initInvestScoreModal() {
-    const modal = $('investScoreModal');
-    if (!modal) return;
-    const close = () => { modal.classList.add('hidden'); document.body.classList.remove('modal-open'); };
-    $('investScoreModalClose')?.addEventListener('click', close);
-    modal.addEventListener('click', e => { if (e.target === modal) close(); });
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
-    });
-}
-
 // ── Metric Chart Modal (PnL / Slopes) ────────────────────────────────────────
 
 let _metricChartRange = localStorage.getItem(LS_RANGE.metricChart) ?? '1d';
 
+// axis = Beschriftung der Y-Achse (Einheit der Werte), X-Achse beschriftet _drawMetricChart selbst.
 const _METRIC_META = {
-    pnl:        { label: 'PnL',         unit: ' USDC', zeroline: true  },
-    priceSlope: { label: 'Preis-Slope', unit: ' %/h',  zeroline: true  },
-    aprSlope:   { label: 'APR-Slope',   unit: ' pp/h', zeroline: true  },
-    tvlSlope:   { label: 'TVL-Slope',   unit: ' %/h',  zeroline: true  },
+    priceSlope: { label: 'Preis-Slope', unit: ' %/h',  axis: '%/h',  zeroline: true  },
+    aprSlope:   { label: 'APR-Slope',   unit: ' pp/h', axis: 'pp/h', zeroline: true  },
+    tvlSlope:   { label: 'TVL-Slope',   unit: ' %/h',  axis: '%/h',  zeroline: true  },
+    // Delta-Spalte (LIQ#000891): Rate seit Eröffnung, ändert sich binnen 6–12 h kaum —
+    // export.js liefert sie nur für 1D/1W/1M. Label per Getter, tr() erst zur Anzeige.
+    deltaH:     { get label() { return _edgeUnitFullLabel('h'); }, unit: ' USDC', get axis() { return tr('liq.axis_usdc_per_hour', 'USDC pro Stunde'); }, zeroline: true, ranges: ['1d', '1w', '1m'] },
+    deltaD:     { get label() { return _edgeUnitFullLabel('d'); }, unit: ' USDC', get axis() { return tr('liq.axis_usdc_per_day', 'USDC pro Tag'); },    zeroline: true, ranges: ['1d', '1w', '1m'] },
 };
 
 function _drawMetricChart(svgEl, points, meta) {
     const W  = svgEl.getBoundingClientRect().width || 560;
-    const H  = 200;
-    const PL = 52, PR = 12, PT = 12, PB = 24;
+    const H  = 220;
+    // PL/PB mit Platz für die Achsentitel (Y gedreht links, X unter den Zeitmarken).
+    const PL = 66, PR = 12, PT = 12, PB = 40;
     const cW = W - PL - PR;
     const cH = H - PT - PB;
 
@@ -5043,21 +5136,24 @@ function _drawMetricChart(svgEl, points, meta) {
 
     let svg = '';
 
-    // Y-axis grid lines + labels (4 ticks)
+    // Y-axis grid lines + labels (4 ticks). Tick-Beschriftungen, die mit der „0" der Nulllinie
+    // kollidieren würden (< 10 px Abstand), entfallen — die Nulllinie hat ihre eigene.
+    const zyNum = meta.zeroline ? yPx(0) : null;
     const yTicks = 4;
     for (let i = 0; i <= yTicks; i++) {
         const v  = yMin + (i / yTicks) * yRange;
         const py = yPx(v).toFixed(1);
         svg += `<line x1="${PL}" y1="${py}" x2="${PL+cW}" y2="${py}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`;
+        if (zyNum != null && Math.abs(parseFloat(py) - zyNum) < 10) continue;
         const lbl = Math.abs(v) < 0.001 ? '0' : v >= 10 || v <= -10 ? v.toFixed(1) : v.toFixed(2);
         svg += `<text x="${(PL-4).toFixed(1)}" y="${(parseFloat(py)+3.5).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="end">${lbl}</text>`;
     }
 
-    // Zero line
-    if (meta.zeroline) {
-        const zy = yPx(0).toFixed(1);
-        svg += `<line x1="${PL}" y1="${zy}" x2="${PL+cW}" y2="${zy}" stroke="rgba(148,163,184,0.4)" stroke-width="1" stroke-dasharray="4,3"/>`;
-    }
+    // Achsentitel: Y = Einheit (gedreht), X = Uhrzeit bzw. Datum je nach Zeitspanne.
+    const yTitle = meta.axis ?? String(meta.unit ?? '').trim();
+    if (yTitle) svg += `<text transform="translate(12,${(PT + cH / 2).toFixed(1)}) rotate(-90)" font-size="10" fill="#94a3b8" text-anchor="middle">${escHtml(yTitle)}</text>`;
+    const xTitle = (tMax - tMin) <= 86_400_000 ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    svg += `<text x="${(PL + cW / 2).toFixed(1)}" y="${(H - 2).toFixed(1)}" font-size="10" fill="#94a3b8" text-anchor="middle">${xTitle}</text>`;
 
     // X-axis labels
     const tickCount = 5;
@@ -5067,18 +5163,28 @@ function _drawMetricChart(svgEl, points, meta) {
         const label = (tMax - tMin) <= 86_400_000
             ? `${String(d.getHours()).padStart(2,'0')}h`
             : `${d.getDate()}.${d.getMonth()+1}.`;
-        svg += `<text x="${(PL + (i/tickCount)*cW).toFixed(1)}" y="${(H-4).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="middle">${label}</text>`;
+        svg += `<text x="${(PL + (i/tickCount)*cW).toFixed(1)}" y="${(PT + cH + 14).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="middle">${label}</text>`;
     }
 
-    // Area fill (positive above zero, negative below)
-    if (points.length >= 2 && meta.zeroline) {
-        const zy = yPx(0);
+    // Fläche einheitlich von der Linie nach UNTEN bis zum Achsenboden (Festlegung
+    // 22.09.2026, LIQ#000891) — früher zur Nulllinie hin, lag die Kurve unter 0, wurde der
+    // ganze Bereich darüber ausgemalt.
+    if (points.length >= 2) {
+        const by = (PT + cH).toFixed(1);
         const areaSegs = points.map((p, i) => {
             const px = xPx(p.ts).toFixed(1), py = yPx(p.v).toFixed(1);
-            return i === 0 ? `M${px},${zy.toFixed(1)} L${px},${py}` : `L${px},${py}`;
+            return i === 0 ? `M${px},${by} L${px},${py}` : `L${px},${py}`;
         });
-        areaSegs.push(`L${xPx(points[points.length-1].ts).toFixed(1)},${zy.toFixed(1)} Z`);
+        areaSegs.push(`L${xPx(points[points.length-1].ts).toFixed(1)},${by} Z`);
         svg += `<path d="${areaSegs.join(' ')}" fill="rgba(96,165,250,0.12)" stroke="none"/>`;
+    }
+
+    // Nulllinie: durchgezogen und mit eigener „0"-Beschriftung, damit auf einen Blick
+    // erkennbar ist, ob die Kurve darüber oder darunter liegt (nicht nur über Farbe/Fläche).
+    if (zyNum != null) {
+        const zy = zyNum.toFixed(1);
+        svg += `<line x1="${PL}" y1="${zy}" x2="${PL+cW}" y2="${zy}" stroke="rgba(226,232,240,0.55)" stroke-width="1.2"/>`;
+        svg += `<text x="${(PL-4).toFixed(1)}" y="${(zyNum+3.5).toFixed(1)}" font-size="9" font-weight="600" fill="#e2e8f0" text-anchor="end">0</text>`;
     }
 
     // Data line
@@ -5095,11 +5201,7 @@ function _drawMetricChart(svgEl, points, meta) {
     svgEl.innerHTML = svg;
 }
 
-// Mappt Opportunity-Tabellen-Timeframe auf den passenden metricHistory-Range.
-// Stellt sicher, dass der letzte Chart-Punkt dem angeklickten Tabellenwert entspricht.
-const _OPP_TF_TO_CHART_RANGE = { '6h': '6h', '12h': '12h', '24h': '1d', '7d': '1w' };
-
-function openMetricChartModal(poolId, metric, data, oppTf) {
+function openMetricChartModal(poolId, metric, data) {
     const modal  = $('metricChartModal');
     const titleEl = $('metricChartModalTitle');
     const bodyEl  = $('metricChartBody');
@@ -5109,35 +5211,33 @@ function openMetricChartModal(poolId, metric, data, oppTf) {
     const pool = (data?.pools ?? []).find(p => p.id === poolId);
     if (!pool) return;
 
-    // Beim Klick auf PnL-Zelle: Range passend zum Tabellen-Zeitfenster setzen.
-    if (metric === 'pnl' && oppTf && _OPP_TF_TO_CHART_RANGE[oppTf]) {
-        _metricChartRange = _OPP_TF_TO_CHART_RANGE[oppTf];
-        localStorage.setItem(LS_RANGE.metricChart, _metricChartRange);
-    }
-
     const meta = _METRIC_META[metric] ?? { label: metric, unit: '', zeroline: true };
+    const ranges = meta.ranges ?? ['6h', '12h', '1d', '1w', '1m'];
+    // Gespeicherte Auswahl nur übernehmen, wenn die Metrik das Fenster kennt (Delta: kein 6H/12H);
+    // sonst lokal auf das erste Fenster, ohne die gespeicherte Auswahl der übrigen Charts zu ändern.
+    let range = ranges.includes(_metricChartRange) ? _metricChartRange : ranges[0];
     const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
     if (titleEl) titleEl.textContent = `${pair} – ${meta.label}`;
 
     const renderChart = () => {
         const svgEl = bodyEl.querySelector('svg.metric-chart-svg');
         if (!svgEl) return;
-        const pts = pool.metricHistory?.[_metricChartRange]?.[metric] ?? [];
+        const pts = pool.metricHistory?.[range]?.[metric] ?? [];
         _drawMetricChart(svgEl, pts, meta);
     };
 
     bodyEl.innerHTML = `<svg class="metric-chart-svg" width="100%" style="display:block;overflow:visible"></svg>`;
 
     if (rangEl) {
-        rangEl.innerHTML = ['6h', '12h', '1d', '1w', '1m'].map(r =>
-            `<button class="chart-range-btn${_metricChartRange === r ? ' active' : ''}" data-range="${r}">${r.toUpperCase()}</button>`
+        rangEl.innerHTML = ranges.map(r =>
+            `<button class="chart-range-btn${range === r ? ' active' : ''}" data-range="${r}">${r.toUpperCase()}</button>`
         ).join('');
         rangEl.querySelectorAll('.chart-range-btn').forEach(btn => {
             btn.addEventListener('click', () => {
-                _metricChartRange = btn.dataset.range;
+                range = _metricChartRange = btn.dataset.range;
                 localStorage.setItem(LS_RANGE.metricChart, _metricChartRange);
                 rangEl.querySelectorAll('.chart-range-btn').forEach(b =>
-                    b.classList.toggle('active', b.dataset.range === _metricChartRange));
+                    b.classList.toggle('active', b.dataset.range === range));
                 renderChart();
             });
         });
@@ -5228,7 +5328,6 @@ initCompositionModal();
 initPosValueModal();
 initRangeModal();
 initWalletDetailModal(() => _lastData);
-initInvestScoreModal();
 initMetricChartModal();
 initPayedFeesModal();
 initClaimedFeesModal();

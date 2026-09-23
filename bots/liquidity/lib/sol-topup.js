@@ -24,6 +24,7 @@ import {
     SOL_EXIT_FLOOR,
     getSolBalanceFresh,
     getTokenBalanceFresh,
+    getAllTokenBalancesFresh,
     getTxFee,
 } from './wallet.js';
 import { getTokenUsdPrice } from './deposit-lib.js';
@@ -96,6 +97,13 @@ export async function ensureWalletSol(db, keypair, connection, { minSol, targetS
         getSolBalance: () => getSolBalanceFresh(keypair.publicKey),
         getTokenBalance: (mint, decimals) =>
             getTokenBalanceFresh(keypair.publicKey, new PublicKey(mint), decimals),
+        // 🔒 Sammelabfrage statt einer Abfrage je Kandidat (LIQ#000843). Die
+        // Kandidatenliste oben bleibt die einzige Quelle dafür, WELCHE Token getauscht
+        // werden dürfen — die Map liefert nur deren Bestände. Ein fremder Mint, der hier
+        // mitkommt (Scam/Dust/Airdrop), wird nie Swap-Kandidat: die Schleife in
+        // ensureSolBalance() iteriert `candidates`, nicht die Map. Damit bleibt der
+        // Spam-Schutz aus dem Modulkopf unberührt.
+        getTokenBalances: () => getAllTokenBalancesFresh(keypair.publicKey),
         getSolPrice: () => loadSolPrice(db),
         getTokenPrice,
         slippageBufferPct: TOPUP_SLIPPAGE_BPS / 10000,
@@ -153,8 +161,8 @@ export const EXIT_SOL_COMFORT = config.solReserve;
 
 /**
  * Ziel-Puffer OBERHALB der Reserve, den jedes Auffüllen anstrebt — an einer
- * Stelle definiert und von allen vier Topup-Aufrufern importiert (hier,
- * bin/cleanup.js, lib/score-limit.js, bin/bot.js), statt vier leicht
+ * Stelle definiert und von allen Topup-Aufrufern importiert (hier,
+ * bin/cleanup.js, bin/bot.js), statt vier leicht
  * unterschiedliche Kopien zu pflegen (Zustand vor 2026-07-29: 0,05/0,10/0,15 je
  * nach Stelle — genau die Art Streuung, die zu Inkonsistenzen führt).
  *

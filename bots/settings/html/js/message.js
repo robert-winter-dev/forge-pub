@@ -1031,7 +1031,7 @@ function riskExitHtml(r) {
         : null;
     const historySection = section(tr('msg.risk_exit_history_head', 'Reinvest'), [
         r.reinvestUsdc != null && [tr('msg.risk_exit_claim_reinvest', 'Fees Auto Compounding'), usdc(r.reinvestUsdc)],
-        r.bestPoolUsdc != null && [tr('msg.risk_exit_best_pool', 'Cleanup > Bester Pool'), usdc(r.bestPoolUsdc)],
+        r.bestPoolUsdc != null && [tr('msg.risk_exit_cleanup', 'Cleanup-Invest'), usdc(r.bestPoolUsdc)],
         reinvestSum != null && [tr('msg.risk_exit_reinvest_sum', 'Summe'), usdc(reinvestSum)],
         (r.nftMint != null && r.reinvestCount != null) && [
             tr('msg.risk_exit_reinvests', 'Positionen'),
@@ -1661,7 +1661,7 @@ async function renderSettingsPanel() {
             <label class="msg-setting-row">
                 <span>
                     <span class="msg-setting-label">${tr('msg.risk_messages', 'Risk-Management')}</span>
-                    <span class="msg-setting-hint">${tr('msg.risk_messages_hint', 'Zähler oben (Reiter + Brief-Icon) bei Meldungen aus einem Risk-Management-Ereignis (z.B. Risk-Management – Trailing Stop, TVL-Schutz, Score-Limit). Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Bots trotzdem sichtbar.')}</span>
+                    <span class="msg-setting-hint">${tr('msg.risk_messages_hint', 'Zähler oben (Reiter + Brief-Icon) bei Meldungen aus einem Risk-Management-Ereignis (z.B. Risk-Management – Trailing Stop, TVL-Schutz). Ausgeschaltet: keine Zähler/Hinweise, die Nachrichten bleiben in der Rubrik Bots trotzdem sichtbar.')}</span>
                 </span>
                 <input type="checkbox" id="setNotifyRisk">
             </label>

@@ -666,6 +666,10 @@ body {
 .chart-label-y { text-anchor: end; }
 .chart-label-x { text-anchor: middle; }
 
+/* Legendeneinträge einzeln ein-/ausblendbar (LIQ#000873) */
+.chart-legend-item        { cursor: pointer; }
+.chart-legend-item.off    { opacity: 0.35; }
+
 /* ── Utility ──────────────────────────────────────────────────────────────── */
 
 .hidden { display: none !important; }
@@ -863,12 +867,12 @@ body {
     /* Scroll-Verhalten wird in renderPools() dynamisch gesetzt */
 }
 
-/* ── Opportunity-Score Tabelle (LMB#0116, Phase 2) ───────────────── */
+/* ── Opportunity-Tabelle (LMB#0116, Phase 2) ───────────────── */
 
 .opp-score-header,
 .opp-score-row {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    grid-template-columns: repeat(6, 1fr) 20px;
     gap: 0 10px;
     align-items: center;
     padding: 8px 12px;
@@ -950,16 +954,15 @@ body {
 }
 .token-info-link:hover { color: #818cf8; }
 
-/* Portrait-Modus: Pool (1), Chart (2), PnL (4) — Score + Slopes ausgeblendet */
+/* Portrait-Modus: Pool (1), Chart (2), Delta (3) — Slopes + Stift ausgeblendet
+   (LIQ#000930: Score-Spalte entfernt, Delta rückt auf Spalte 3 nach) */
 @media (max-width: 640px) {
     .opp-score-header,
     .opp-score-row {
         grid-template-columns: repeat(3, 1fr);
     }
-    .opp-score-header > :nth-child(3),
-    .opp-score-row    > :nth-child(3),
-    .opp-score-header > :nth-child(n+5),
-    .opp-score-row    > :nth-child(n+5) {
+    .opp-score-header > :nth-child(n+4),
+    .opp-score-row    > :nth-child(n+4) {
         display: none !important;
     }
 }
@@ -1002,7 +1005,7 @@ body {
 }
 .active-pools-header {
     display: grid;
-    grid-template-columns: 1fr 36px 52px 1fr 1fr 20px;
+    grid-template-columns: 1fr 44px 1fr minmax(0, 0.8fr) 1fr 20px;
     gap: 0 12px;
     padding: 8px 14px;
     font-size: 0.7rem;
@@ -1013,7 +1016,7 @@ body {
 }
 .active-pools-row {
     display: grid;
-    grid-template-columns: 1fr 36px 52px 1fr 1fr 20px;
+    grid-template-columns: 1fr 44px 1fr minmax(0, 0.8fr) 1fr 20px;
     gap: 0 12px;
     align-items: center;
     padding: 10px 14px;
@@ -1053,10 +1056,11 @@ body {
 /* Kennziffern: Hochformat Smartphone → "Anteil" und Edit-Spalte ausblenden */
 @media (orientation: portrait) and (max-width: 767px) {
     .active-pools-header, .active-pools-row {
-        grid-template-columns: 1fr 36px 52px 1fr;
+        grid-template-columns: 1fr 44px 1fr;
     }
-    .active-pools-header > :nth-last-child(-n+2),
-    .active-pools-row > :nth-last-child(-n+2) { display: none; }
+    /* Δ (LIQ#000890), Anteil und Edit-Spalte ausblenden — nur Kernwerte auf schmalem Screen */
+    .active-pools-header > :nth-last-child(-n+3),
+    .active-pools-row > :nth-last-child(-n+3) { display: none; }
 }
 
 /* ── Pools-Row: stapelt früher als Charts-Row ───────────────────── */

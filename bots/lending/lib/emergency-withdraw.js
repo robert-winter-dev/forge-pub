@@ -22,6 +22,7 @@
 import path              from 'path';
 import { fileURLToPath } from 'url';
 import * as web3         from '@solana/web3.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 
 import { createUtils, resolveToken, getQuote, TOKEN_MINTS }
     from '../../../lib/emergency-utils.js';
@@ -95,7 +96,7 @@ async function checkConnectivity() {
     try {
         const { config }     = await import('./config.js');
         const { Connection } = web3;
-        await new Connection(config.rpcUrl, 'confirmed').getSlot();
+        await new Connection(config.rpcUrl, { commitment: 'confirmed', httpHeaders: rpcCallerHeaders() }).getSlot();
         rpcOk = true;
     } catch (err) { log(`RPC-Fehler: ${err.message}`); }
 

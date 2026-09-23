@@ -22,7 +22,7 @@
  * (`lib/cleanup-lock.js`) für die strukturell gleiche Lage im Rebalancing-Pfad.
  * Für Exits ist ein zweites Flag der falsche Weg — aus drei Gründen:
  *
- *   1. **Keine zweite Wahrheit.** Der Zustand steht bereits in der DB: jede der sechs
+ *   1. **Keine zweite Wahrheit.** Der Zustand steht bereits in der DB: jede der fünf
  *      Exit-State-Machines legt ihre Zeile mit `step='preparing'` an, *bevor* das erste
  *      Token die Position verlässt, und setzt `step='complete'` erst nach Swap und
  *      Transfer. Eine Flag-Datei daneben könnte davon abdriften.
@@ -57,7 +57,6 @@ import { config } from './config.js';
 import {
     getIncompleteTsExecutions,
     getIncompleteTvlExecutions,
-    getIncompleteScoreLimitExecutions,
     getIncompleteRetireExecutions,
     getIncompleteSlExecutions,
     getIncompleteTpExecutions,
@@ -67,7 +66,7 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 
 /**
- * Die sechs Exit-State-Machines. `sl_executions`/`tp_executions` werden derzeit von
+ * Die fünf Exit-State-Machines. `sl_executions`/`tp_executions` werden derzeit von
  * keinem Modul mehr geschrieben (Altbestand je eine Zeile, beide 'complete') — sie
  * bleiben trotzdem in der Liste: die Abfrage kostet nichts und ein reaktiviertes
  * Modul wäre sofort mitgeschützt, ohne dass jemand daran denken muss.
@@ -75,7 +74,6 @@ const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const EXIT_SOURCES = [
     { label: 'Trailing Stop', get: getIncompleteTsExecutions },
     { label: 'TVL-Schutz',    get: getIncompleteTvlExecutions },
-    { label: 'Score-Limit',   get: getIncompleteScoreLimitExecutions },
     { label: 'Retirement',    get: getIncompleteRetireExecutions },
     { label: 'Stop-Loss',     get: getIncompleteSlExecutions },
     { label: 'Take-Profit',   get: getIncompleteTpExecutions },

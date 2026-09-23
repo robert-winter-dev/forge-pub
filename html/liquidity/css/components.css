@@ -92,11 +92,72 @@ body.modal-open {
 .modal-tab-panel { display: none; }
 .modal-tab-panel.active { display: block; }
 
+/* Positionswert-Modal: alle Reiter gleich hoch. Die Panels liegen übereinander in
+   derselben Grid-Zelle (nur der aktive ist sichtbar), die Zelle nimmt die Höhe des
+   höchsten Panels an — das Modal springt beim Wechseln nicht mehr, ohne dass eine
+   Höhe von Hand nachgezogen werden muss (früher min-height, LIQ#000803, wurde von den
+   zwei Kartenreihen des Details-Reiters überholt). */
+#posValueModal .modal-tab-stack { display: grid; position: relative; }
+/* Chart 316 px + Zeitraum-Knöpfe: Mindesthöhe auch ohne Chart-Daten, sonst schrumpft
+   der Details-Reiter mit (LIQ#000867). */
+#posValuePanelLp { min-height: 347px; }
+/* Die Höhe gibt der Reiter "Pool-Entwicklung" vor; "Details" liegt darüber und scrollt
+   senkrecht, statt den Dialog höher zu machen (LIQ#000867). Absolut positioniert zählt er
+   nicht zur Grid-Höhe. */
+#posValueModal .modal-tab-stack > #posValuePanelDetails {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+/* Kennzahlen und Überschrift oben fest, "Wert heute" unten fest, nur die Zeilen
+   dazwischen scrollen (LIQ#000867). */
+#posValuePanelDetails > #posValueBreakdown {
+    flex: 1 1 auto;
+    min-height: 0;
+    padding-bottom: 0;
+}
+.pv-wf-scroll,
+.pv-wf-foot {
+    /* Beide reservieren dieselbe Scrollbalken-Spur, sonst wären die Balkenspuren unten
+       breiter als oben und der Wasserfall fluchtete nicht mehr. */
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-secondary) transparent;
+    padding-right: 0.5rem;
+}
+.pv-wf-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }   /* Balken nur bei Überlauf */
+.pv-wf-foot   { flex: 0 0 auto; overflow-y: hidden; }
+/* Scrollbalken bei Überlauf sichtbar, auch bei Overlay-Scrollbars (macOS, Chrome). */
+.pv-wf-scroll::-webkit-scrollbar,
+.pv-wf-foot::-webkit-scrollbar { width: 8px; }
+.pv-wf-scroll::-webkit-scrollbar-track { background: rgba(148, 163, 184, 0.12); border-radius: 4px; }
+.pv-wf-scroll::-webkit-scrollbar-thumb { background: var(--text-secondary); border-radius: 4px; }
+#posValueModal .modal-tab-stack > .modal-tab-panel {
+    display: block;
+    grid-area: 1 / 1;
+    visibility: hidden;
+}
+#posValueModal .modal-tab-stack > .modal-tab-panel.active { visibility: visible; }
+
+/* Hinweis rechts neben den Reitern ("Eröffnet vor …"), auf Höhe der Reiter. */
+.modal-tabs-note {
+    margin-left: auto;
+    align-self: center;
+    padding: 0 0.25rem 0.35rem 1rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+.modal-tabs-note:empty { display: none; }
+
+
 /* ── PnL-Details (Positionswert-Modal, Tab "PnL-Details") ───────────────── */
 
 .pos-value-details {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));   /* Bester · Schlechtester Stand, LIQ#000867 */
     gap: 1rem;
     padding: 0.25rem 0 0.5rem;
 }
@@ -106,88 +167,136 @@ body.modal-open {
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.75rem;
+    /* Flach statt hoch (LIQ#000867): links Überschrift und Zeitpunkt, rechts der Wert.
+       Kein Umbruch, damit beide Karten gleich aussehen; auf dem Handy untereinander. */
     display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.25rem 0.75rem;
+    padding: 0.55rem 0.75rem;
 }
+.pos-value-details-head .pos-value-details-label { white-space: nowrap; }
+.pos-value-details-head { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
+.pos-value-details-figs { display: flex; flex-direction: column; align-items: flex-end; flex: 0 0 auto; }
 
+/* Überschrift hell, Textzeilen darunter sekundärfarbig (LIQ#000794) — bis dahin trugen
+   beide dieselbe Farbe, der Unterschied kam allein aus Fettung und Versalien. */
 .pos-value-details-label {
     font-size: 0.78rem;
     font-weight: 700;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.02em;
 }
 
-.pos-value-details-date {
+/* Zeilen unter der Überschrift einer Spalte — bewusst sekundärfarbig, damit sie sich
+   von der Überschrift absetzen (gilt für beide Reihen gleich, LIQ#000794). */
+.pos-value-details-date,
+.pos-value-details-line {
     font-size: 0.78rem;
     color: var(--text-secondary);
+}
+
+/* Erklär-Zeichen hinter der Überschrift. Bewusst ein sichtbares Zeichen und nicht nur
+   der Hilfe-Cursor: Ein Tooltip, den man nicht sieht, wird nicht gesucht. */
+.pos-value-details-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.05em;
+    height: 1.05em;
+    margin-left: 0.4em;
+    border: 1px solid var(--text-secondary);
+    border-radius: 50%;
+    color: var(--text-secondary);
+    font-size: 0.72em;
+    font-style: normal;
+    font-weight: 600;
+    line-height: 1;
+    vertical-align: middle;
 }
 
 .pos-value-details-value {
-    font-size: 0.95rem;
+    font-size: 1.25rem;
+    line-height: 1.2;
     font-weight: 700;
     color: var(--text-primary);
 }
 
+/* USDC-Betrag ist nur noch Kontext zum Prozentwert (der eigentlichen Aussage) —
+   klein und in Klammern, damit er nicht mit dem Prozentwert verwechselt wird.
+   Kein eigener margin-top: der flex-gap von .pos-value-details-col sorgt schon für
+   Abstand, ein zusätzlicher Top-Rand erzeugte eine sichtbare Leerzeile (LIQ#000794). */
 .pos-value-details-pnl {
-    font-size: 0.82rem;
+    font-size: 0.72rem;
     font-weight: 600;
+    color: var(--text-secondary);
 }
 
-/* Vierte Zeile unter dem 3er-Grid statt einer 4. Spalte (LIQ#000558) — vermeidet
-   den Zeilenumbruch, den eine 4-Spalten-Variante bei schmaleren Modal-Breiten hätte. */
-.pos-value-leftover {
-    grid-column: 1 / -1;
-    margin-top: 0.75rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 0.6rem 0.85rem;
+
+/* ── Überleitung Eingezahlt → Wert heute (Reiter "Details", LIQ#000867) ───────
+   Drei Spalten je Zeile: Überschrift, Erläuterung, Betrag. Farbe nur in der letzten Zeile,
+   die trägt zusätzlich das Vorzeichen im PnL-Text. */
+.pv-wf {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
+    padding: 0.5rem 0 0.25rem;
 }
-
-.pos-value-leftover-label {
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: 0.02em;
-    display: flex;
+.pv-wf-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 8.5rem;
+    grid-template-areas: "label sub amount";
     align-items: center;
-    gap: 6px;
+    gap: 0.75rem;
+    padding: 0.55rem 0;
+    border-top: 1px solid var(--border);
 }
-
-.pos-value-leftover-row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 1rem;
-    flex-wrap: wrap;
-}
-
-.pos-value-leftover-since {
-    font-size: 0.78rem;
-    color: var(--text-secondary);
-}
-
-.pos-value-leftover-value {
-    font-size: 0.95rem;
-    font-weight: 700;
+.pv-wf-row--strong { border-top: 2px solid var(--text-secondary); }
+.pv-wf-label {
+    grid-area: label;
+    font-size: 0.82rem;
+    font-weight: 600;
     color: var(--text-primary);
 }
-
-.pos-value-leftover-hint {
-    font-size: 0.78rem;
-    font-weight: 600;
+.pv-wf-row--strong .pv-wf-label { font-weight: 700; }
+.pv-wf-nowrap { white-space: nowrap; }   /* Info-Zeichen nicht allein in die nächste Zeile */
+.pv-wf-sub {
+    grid-area: sub;
+    font-size: 0.75rem;
     color: var(--text-secondary);
-    margin-left: 0.4em;
+    overflow-wrap: anywhere;
 }
+.pv-wf-amount {
+    grid-area: amount;
+    font-size: 0.85rem;
+    font-weight: 600;
+    white-space: nowrap;
+    text-align: right;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+.pv-wf-row--strong .pv-wf-amount { font-size: 1.05rem; font-weight: 700; }
 
 @media (max-width: 560px) {
-    .pos-value-details { grid-template-columns: 1fr; }
+    /* Zeilen sind hier zweizeilig: Reiter höher, damit alle Zeilen ohne Scrollen passen. */
+    #posValuePanelLp { min-height: 440px; }
+    /* "Eröffnet vor …" darf umbrechen, sonst ragt es rechts aus dem Modal. */
+    .modal-tabs-note { white-space: normal; min-width: 0; text-align: right; padding-left: 0.5rem; }
+    /* Kennzahlen bleiben nebeneinander (kompakt), nur kleiner. */
+    .pos-value-details { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.4rem; }
+    .pos-value-details-col { padding: 0.5rem; }
+    .pos-value-details-col { flex-direction: column; align-items: flex-start; }
+    .pos-value-details-head .pos-value-details-label { white-space: normal; }
+    .pos-value-details-figs { align-items: flex-start; }
+    .pos-value-details-label { font-size: 0.68rem; text-transform: none; hyphens: auto; }
+    .pos-value-details-value { font-size: 1.05rem; }
+    /* Handy: Überschrift und Betrag in einer Zeile, Erläuterung darunter. */
+    .pv-wf-row {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "label amount" "sub sub";
+        gap: 0.15rem 0.75rem;
+    }
 }
 
 .tx-modal-list {
@@ -1052,15 +1161,13 @@ body.modal-open {
 
 /* ── Opportunity-Tabelle: klickbare Zellen ───────────────────────────────── */
 
-.invest-score-clickable,
 .opp-metric-clickable {
     text-decoration: underline dotted rgba(255,255,255,0.35);
     text-underline-offset: 3px;
 }
-.invest-score-clickable:hover,
 .opp-metric-clickable:hover { color: var(--primary); }
 
-/* ── Premium-Link (Score-/Slope-Zellen ohne Premium-Datenzugang) ──────────
+/* ── Premium-Link (Slope-Zellen ohne Premium-Datenzugang) ──────────
    Sitzt innerhalb einer cursor:default-Zelle (Opportunity-Tabelle) – braucht
    deshalb einen eigenen Cursor, um als klickbar erkennbar zu sein. Führt zu
    Settings: Liquidity, nicht zum Metric-Chart der umschließenden Zelle. */

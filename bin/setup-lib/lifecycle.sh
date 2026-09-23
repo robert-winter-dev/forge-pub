@@ -139,6 +139,10 @@ do_update() {
         # installierte node_modules laufen (Fund 2026-08-09, pool-offers-sync).
         deploy_lock_acquire
         do_deploy
+        # config/health-config.js kommt frisch aus dem Artefakt (Placeholder-IP
+        # aus dem Fork-Export) — LAN-IP direkt danach wieder eintragen, sonst
+        # verliert LIQ#000565 seine Wirkung bei jedem Update (CORE#000568).
+        sync_health_config_ip "$(detect_lan_ip)"
         do_trust_anchor
         do_npm
         deploy_lock_release
@@ -157,6 +161,7 @@ do_update() {
         sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR/bots/liquidity' && node bin/export.js" >/dev/null 2>&1 || true
         sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR/bots/lending'   && node bin/export.js" >/dev/null 2>&1 || true
         run_migrations
+        vacuum_bloated_dbs
         do_services
         do_cron
         do_logrotate
@@ -356,6 +361,24 @@ do_repair() {
 #    bewegen können, laufen nie automatisch — sie werden hier nur gemeldet und warten
 #    auf eine bewusste Entscheidung (node bin/migrate.js --apply --financial).
 #    Ein Update darf niemals ungefragt Kapital bewegen.
+# Einmal-VACUUM (CORE#000837): DELETE gibt in SQLite keinen Platz ans Dateisystem zurück, eine
+# durch Retention geleerte DB behält ihre Größe. Läuft nach dem Dienststopp und den Migrationen,
+# VOR dem Neustart (VACUUM sperrt exklusiv). Schwelle und Platzprüfung stecken in bin/db-vacuum.js
+# (config/db-retention.json → vacuum). Best-effort: ein Fehler hier darf das Update nie abbrechen,
+# die DB bleibt dann unverändert und das Backup von oben liegt vor.
+vacuum_bloated_dbs() {
+    [[ -f "$APP_DIR/bin/db-vacuum.js" ]] || return 0
+    say "  $(t LIFECYCLE_VACUUM_STEP)"
+    local out rc=0
+    out=$(sudo -u "$INSTALL_USER" bash -c "cd '$APP_DIR' && node bin/db-vacuum.js --apply" 2>&1) || rc=$?
+    sed 's/^/  /' <<< "$out"
+    if [[ "$rc" -eq 2 ]]; then
+        c_warn "$(t LIFECYCLE_VACUUM_INTEGRITY_FAILED)"
+    elif [[ "$rc" -ne 0 ]]; then
+        c_warn "$(t LIFECYCLE_VACUUM_FAILED "$rc")"
+    fi
+}
+
 run_migrations() {
     [[ -f "$APP_DIR/bin/migrate.js" ]] || return 0
 

@@ -18,6 +18,7 @@ import {
     PublicKey,
     LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 import { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from '@solana/spl-token';
 import { readFileSync }     from 'fs';
 import bs58                 from 'bs58';
@@ -87,6 +88,7 @@ export function getConnection() {
         _connection = new Connection(config.rpcUrl, {
             commitment:  COMMITMENT,
             wsEndpoint:  process.env.HELIUS_WS_URL || undefined,
+            httpHeaders: rpcCallerHeaders(),
         });
     }
     return _connection;
@@ -99,7 +101,7 @@ export function getConnection() {
 export function getConnectionFresh() {
     if (!_connectionFresh) {
         const freshUrl = config.rpcUrl.replace(/\/rpc$/, '/rpc/fresh');
-        _connectionFresh = new Connection(freshUrl, { commitment: COMMITMENT });
+        _connectionFresh = new Connection(freshUrl, { commitment: COMMITMENT, httpHeaders: rpcCallerHeaders() });
     }
     return _connectionFresh;
 }
@@ -148,15 +150,14 @@ export async function getTokenBalance(walletPubkey, mintPubkey, decimals) {
 }
 
 /**
- * Alle SPL-Token-Balances der Wallet in einem einzigen RPC-Call.
- * Ersetzt N × getTokenBalance()-Aufrufe in Loops (z.B. cleanup.js).
+ * Sammelt alle Token-Bestände der Wallet über die gegebene Verbindung.
+ * Zwei RPC-Calls (SPL + Token-2022), unabhängig von der Anzahl der Mints.
  *
- * @param {PublicKey|string} walletPubkey
- * @returns {Promise<Map<string, number>>}  mint (string) → uiAmount
+ * Beide Token-Programme sind nötig: Token-2022-Mints kommen real in den Pools vor
+ * (siehe lib/pool-import-check.js). Eine Abfrage nur über TOKEN_PROGRAM_ID würde
+ * deren Bestände lautlos als 0 melden.
  */
-export async function getAllTokenBalances(walletPubkey) {
-    const wallet = typeof walletPubkey === 'string' ? new PublicKey(walletPubkey) : walletPubkey;
-    const conn = getConnection();
+async function collectTokenBalances(conn, wallet) {
     const [spl, t22] = await Promise.all([
         settle(conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_PROGRAM_ID })),
         settle(conn.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_2022_PROGRAM_ID })),
@@ -168,6 +169,18 @@ export async function getAllTokenBalances(walletPubkey) {
         if (uiAmount > 0) map.set(info.mint, uiAmount);
     }
     return map;
+}
+
+/**
+ * Alle SPL-Token-Balances der Wallet in einem einzigen RPC-Call.
+ * Ersetzt N × getTokenBalance()-Aufrufe in Loops (z.B. cleanup.js).
+ *
+ * @param {PublicKey|string} walletPubkey
+ * @returns {Promise<Map<string, number>>}  mint (string) → uiAmount
+ */
+export async function getAllTokenBalances(walletPubkey) {
+    const wallet = typeof walletPubkey === 'string' ? new PublicKey(walletPubkey) : walletPubkey;
+    return collectTokenBalances(getConnection(), wallet);
 }
 
 /**
@@ -193,6 +206,24 @@ export async function getSolBalanceFresh(pubkey) {
 
 export async function getUsdcBalanceFresh(pubkey) {
     return getTokenBalanceFresh(pubkey, USDC_MINT, 6);
+}
+
+/**
+ * Alle Token-Bestände am Cache vorbei — zwei RPC-Calls statt einer je Mint.
+ *
+ * 🔒 Für Schleifen über viele Kandidaten-Token gedacht (SOL-Topup, LIQ#000843). Der
+ * Topup fragte bis dahin jeden Kandidaten einzeln über getTokenBalanceFresh() ab: auf
+ * forge-pub1 54 Aufrufe je Versuch, und weil ein Topup bei leerem Wallet in JEDEM
+ * Bot-Zyklus erneut scheitert, rund 3.650 vermeidbare Helius-Aufrufe pro Tag (18 % des
+ * Tagesverbrauchs, gemessen 20.09.2026). Die Frische bleibt gleich — es wird nichts
+ * seltener abgefragt, nur nicht mehr einzeln.
+ *
+ * @param {PublicKey|string} walletPubkey
+ * @returns {Promise<Map<string, number>>}  mint (string) → uiAmount, nur Bestände > 0
+ */
+export async function getAllTokenBalancesFresh(walletPubkey) {
+    const wallet = typeof walletPubkey === 'string' ? new PublicKey(walletPubkey) : walletPubkey;
+    return collectTokenBalances(getConnectionFresh(), wallet);
 }
 
 export async function getUsableSolBalanceFresh(pubkey) {

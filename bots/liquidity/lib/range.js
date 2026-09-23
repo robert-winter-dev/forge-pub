@@ -31,9 +31,7 @@ import Decimal from 'decimal.js';
  * @param {number}   currentPrice  Aktueller Preis Token A in USDC
  * @param {Object}   rangeConfig   config.range ({ mode, fixedPct, atrPeriod, atrMultiplier })
  * @param {Database} db            SQLite-Datenbankinstanz (für ATR-Modus)
- * @returns {{ tickLower, tickUpper, priceLower, priceUpper, rangePct }}
- *   `rangePct` ist die tatsächlich verwendete Halbbreite in % der Mitte — nach ATR-Clamp,
- *   modusunabhängig (LIQ#0377).
+ * @returns {{ tickLower, tickUpper, priceLower, priceUpper }}
  */
 export function calculateRange(pool, currentPrice, rangeConfig, db) {
     let halfWidth;
@@ -63,11 +61,6 @@ export function calculateRange(pool, currentPrice, rangeConfig, db) {
         // fixed-Modus: RANGE_FIXED_PCT % der aktuellen Mitte
         halfWidth = currentPrice * (rangeConfig.fixedPct / 100);
     }
-
-    // Halbbreite als Prozentsatz der Mitte — unabhängig vom Modus (fixed/atr), nach jedem
-    // Clamp bereits final. Einziger Abnehmer bisher: der Strategie-Versatz (LIQ#0377), der
-    // damit ohne eigene ATR-Rechnung an den Rohwert kommt, auf dem er verschiebt.
-    const rangePct = halfWidth / currentPrice * 100;
 
     const rawLower = currentPrice - halfWidth;
     const rawUpper = currentPrice + halfWidth;
@@ -100,7 +93,6 @@ export function calculateRange(pool, currentPrice, rangeConfig, db) {
         tickUpper:  clampedUpper,
         priceLower: actualPriceLower,
         priceUpper: actualPriceUpper,
-        rangePct,
     };
 }
 

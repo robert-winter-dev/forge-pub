@@ -15,6 +15,7 @@
  *   portfolio_history  – Portfolio-Gesamtwert-Verlauf
  *   transactions       – alle Ereignisse (deposit, withdraw, claim, reinvest, rebalance)
  *   notifications      – Dashboard-Alerts
+ *   reinvest_pending   – nicht reinvestierte Fee-Claim-Mengen je Pool (LIQ#000868, lib/reinvest-pending.js)
  *
  * Wichtig: NIEMALS direkte SQL-Manipulationen auf Bot-DBs außerhalb dieses Moduls.
  * Positions-Daten (Ticks, NFT-Mint) nur vom Bot schreiben — Chain ist Quelle der Wahrheit.
@@ -25,6 +26,7 @@ import path              from 'path';
 import { fileURLToPath } from 'url';
 import { PATHS }         from '../../../config/paths.js';
 import { logChainTx, setChainTxSink } from './chain-tx-log.js';
+import { REINVEST_PENDING_SCHEMA } from './reinvest-pending.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -139,6 +141,22 @@ function initSchema(db) {
             leftover_usdc         REAL,              -- freigesetztes Kapital, das NICHT reinvestiert wurde (liegt im Wallet)
             rebalanced_at         INTEGER NOT NULL   -- Unix-Timestamp (ms)
         );
+
+        -- Verschiebungs-Bilanz je Pool (LIQ#000841): Abgänge und Startwerte. Der Zugang steht
+        -- schon in rebalance_history.leftover_usdc; hier stehen nur die Buchungen, die ihn
+        -- verringern ('settle' = Nachzahlung in die Position), einmalig erhöhen ('seed' =
+        -- manueller Startwert) und die Tagesversuche ('attempt', usdc = 0).
+        CREATE TABLE IF NOT EXISTS rebalance_shift_ledger (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_id     TEXT    NOT NULL,
+            kind        TEXT    NOT NULL,            -- 'settle' | 'seed' | 'attempt'
+            usdc        REAL    NOT NULL DEFAULT 0,
+            tx_hash     TEXT,
+            note        TEXT,
+            created_at  INTEGER NOT NULL             -- Unix-Timestamp (ms)
+        );
+        CREATE INDEX IF NOT EXISTS idx_rebalance_shift_ledger_pool
+            ON rebalance_shift_ledger(pool_id, created_at);
 
         -- Portfolio-Gesamtwert-Verlauf (Snapshot alle N Minuten)
         CREATE TABLE IF NOT EXISTS portfolio_history (
@@ -740,6 +758,16 @@ function migrateSchema(db) {
         console.log('[db] Migration: rebalance_history.leftover_usdc hinzugefügt.');
     }
 
+    // Verschiebungs-Bilanz (LIQ#000841): Go-Live-Marker genau einmal je DB. Der Zugang aus
+    // rebalance_history zählt erst ab diesem Zeitpunkt (siehe lib/rebalance-shift.js).
+    if (!db.prepare(`SELECT 1 FROM rebalance_shift_ledger WHERE kind = 'start' LIMIT 1`).get()) {
+        db.prepare(`INSERT INTO rebalance_shift_ledger (pool_id, kind, usdc, note, created_at) VALUES ('*', 'start', 0, 'Go-Live LIQ#000841', ?)`).run(Date.now());
+        console.log('[db] Migration: rebalance_shift_ledger Go-Live-Marker gesetzt.');
+    }
+
+    // Ausstehender Fee-Reinvest je Pool (LIQ#000868, siehe lib/reinvest-pending.js).
+    db.exec(REINVEST_PENDING_SCHEMA);
+
     // positions.hwm_usd / hwm_at — Trailing-Stop High-Water-Mark (pro offene Position)
     // pools: dynamische Betriebsfelder (Single Source of Truth = DB, nicht mehr pools.json).
     // active existiert bereits; enabled + range_override_fixed_pct sind neu. NULL bedeutet
@@ -1313,8 +1341,6 @@ function migrateSchema(db) {
                 exit_score  INTEGER,
                 PRIMARY KEY (pool_id, recorded_at)
             );
-            CREATE INDEX idx_invest_score_hist
-                ON invest_score_history (pool_id, recorded_at DESC);
         `);
         console.log('[db] Migration: Tabelle invest_score_history angelegt.');
     } else {
@@ -1327,6 +1353,15 @@ function migrateSchema(db) {
         if (!cols.includes('exit_score')) {
             db.exec(`ALTER TABLE invest_score_history ADD COLUMN exit_score INTEGER`);
             console.log('[db] Migration: invest_score_history.exit_score ergänzt.');
+        }
+        // LIQ#000836: idx_invest_score_hist (pool_id, recorded_at DESC) war 1:1 der PK-Autoindex
+        // (pool_id, recorded_at) und kostete 133 MB. SQLite liest den PK-Index rückwärts.
+        const dupIdx = db.prepare(
+            `SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_invest_score_hist'`
+        ).get();
+        if (dupIdx) {
+            db.exec(`DROP INDEX idx_invest_score_hist`);
+            console.log('[db] Migration: redundanter Index idx_invest_score_hist entfernt.');
         }
     }
 
@@ -1544,11 +1579,10 @@ function migrateSchema(db) {
     }
 
     // dust_watch: verfolgt seit wann ein Pool-Token-Rest >= DUST_SWAP_MAX_USDC im
-    // Wallet liegt und auf den regulären Ranking-Invest wartet (Score >= CLEANUP_MIN_SCORE).
-    // Analyse 2026-07-24 zeigte Score-<65-Phasen von bis zu 72h – ohne Notbremse
-    // könnten größere Restbeträge entsprechend lange als volatiles Asset liegen
-    // bleiben. sweepDust() in bin/cleanup.js swappt nach CLEANUP_STUCK_HOURS
-    // zwangsweise zu USDC, unabhängig vom Score.
+    // Wallet liegt, ohne dass ein Cleanup-Invest (Modus 'pool:X') ihn aufgenommen hat.
+    // Ohne Notbremse könnten größere Restbeträge beliebig lange als volatiles Asset
+    // liegen bleiben. sweepDust() in bin/cleanup.js swappt nach CLEANUP_STUCK_HOURS
+    // zwangsweise zu USDC (seit LIQ#000929 in jedem Cleanup-Modus).
     if (!tables.includes('dust_watch')) {
         db.exec(`
             CREATE TABLE dust_watch (
@@ -2295,6 +2329,82 @@ export function getAdvisorLog(db, poolId, limit = 96) {
 }
 
 /**
+ * Retention für die unbegrenzt wachsenden Score-Historien (LIQ#000836).
+ * Löscht in Batches, damit der Bot-Writer nicht sekundenlang blockiert wird.
+ * invest_score_history: 35 Tage (Dashboard-Chart '1m' liest 31 Tage).
+ * @returns {{[table: string]: number}} gelöschte Zeilen je Tabelle
+ */
+export function pruneScoreHistories(db, { investDays = 35, oppDays = 30, poolScoreDays = 30 } = {}) {
+    const DAY = 24 * 60 * 60 * 1000;
+    const BATCH = 50_000;
+    const now = Date.now();
+    const jobs = [
+        ['invest_score_history', now - investDays    * DAY],
+        ['opportunity_scores',   now - oppDays       * DAY],
+        ['pool_score_history',   now - poolScoreDays * DAY],
+    ];
+    const deleted = {};
+    for (const [table, cutoff] of jobs) {
+        const stmt = db.prepare(
+            `DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE recorded_at < ? LIMIT ${BATCH})`
+        );
+        let total = 0, n;
+        do { n = stmt.run(cutoff).changes; total += n; } while (n === BATCH);
+        deleted[table] = total;
+    }
+    return deleted;
+}
+
+/**
+ * Verdichtet invest_score_history für Zeilen älter als afterDays auf ein Raster von
+ * bucketMs (Vorgabe 10 min): je (pool_id, Bucket) bleibt eine Zeile mit dem Bucket-Anfang als
+ * recorded_at und dem Mittelwert von score und exit_score (LIQ#000836).
+ * Idempotent: verdichtete Zeilen liegen auf einem Vielfachen von bucketMs und werden beim
+ * nächsten Lauf nicht mehr angefasst. Läuft in Tages-Chunks, je Chunk eine Transaktion.
+ * Lesefenster im Dashboard: 1d im 10-min-Raster, 1w stündlich, 1m täglich — alle mitteln
+ * ohnehin; nur ts-what-if/ts-sampling-check verlieren für Zeilen > afterDays die Minutenauflösung.
+ * @returns {number} Zeilen, die dadurch weggefallen sind
+ */
+export function downsampleScoreHistory(db, { afterDays = 7, bucketMs = 600_000 } = {}) {
+    const DAY = 86_400_000;                                 // Vielfaches von bucketMs → Chunks bucket-aligned
+    const cutoff = Math.floor((Date.now() - afterDays * DAY) / bucketMs) * bucketMs;
+    const first = db.prepare(`SELECT MIN(recorded_at) AS t FROM invest_score_history`).get()?.t;
+    if (first == null || first >= cutoff) return 0;
+    // Steady-State-Kurzschluss: liegt nichts Unverdichtetes mehr vor dem Cutoff, ist nichts zu tun.
+    const pending = db.prepare(
+        `SELECT 1 FROM invest_score_history WHERE recorded_at < ? AND recorded_at % ? != 0 LIMIT 1`
+    ).get(cutoff, bucketMs);
+    if (!pending) return 0;
+
+    const agg = db.prepare(`
+        SELECT pool_id, (recorded_at / ${bucketMs}) * ${bucketMs} AS b,
+               ROUND(AVG(score)) AS score, ROUND(AVG(exit_score)) AS exit_score
+        FROM invest_score_history
+        WHERE recorded_at >= ? AND recorded_at < ?
+        GROUP BY pool_id, recorded_at / ${bucketMs}
+        HAVING COUNT(*) > 1 OR MIN(recorded_at) % ${bucketMs} != 0`);
+    const del = db.prepare(
+        `DELETE FROM invest_score_history WHERE recorded_at >= ? AND recorded_at < ? AND recorded_at % ${bucketMs} != 0`);
+    const ins = db.prepare(
+        `INSERT OR REPLACE INTO invest_score_history (pool_id, recorded_at, score, exit_score) VALUES (?,?,?,?)`);
+    const count = db.prepare(
+        `SELECT COUNT(*) AS n FROM invest_score_history WHERE recorded_at >= ? AND recorded_at < ?`);
+
+    let removed = 0;
+    for (let from = Math.floor(first / DAY) * DAY; from < cutoff; from += DAY) {
+        const to = Math.min(from + DAY, cutoff);
+        db.transaction(() => {
+            const before = count.get(from, to).n;
+            const rows = agg.all(from, to);               // vollständig materialisiert, bevor geschrieben wird
+            del.run(from, to);
+            for (const r of rows) ins.run(r.pool_id, r.b, r.score, r.exit_score);
+            removed += before - count.get(from, to).n;
+        })();
+    }
+    return removed;
+}
+
+/**
  * Löscht Advisor-Log-Einträge älter als keepDays Tage.
  */
 export function pruneAdvisorLog(db, keepDays = 14) {
@@ -2396,6 +2506,18 @@ export function insertTransaction(db, tx) {
     // Kapital-Anker `cap` entlang der Snapshot-Zeitachse: säße ein nachgetragener Fluss auf
     // "jetzt" statt auf seinem blockTime, bliebe die gesamte Kurve dazwischen falsch.
     .run({ txFeeSol: null, usdValueIn: null, usdValueOut: null, createdAt: Date.now(), ...tx });
+}
+
+/**
+ * Trägt die TX-Gebühr einer schon geschriebenen transactions-Zeile nach (LIQ#000896).
+ * Für Pfade, die die Zeile sofort schreiben müssen und die Gebühr (RPC-Abfrage) nicht
+ * abwarten dürfen, z.B. die Exit-Swaps in lib/exit-finalizer.js. Ändert nur Zeilen ohne
+ * Gebühr, eine schon gesetzte bleibt unangetastet.
+ */
+export function setTransactionTxFee(db, { txHash, type, txFeeSol }) {
+    if (!txHash || !Number.isFinite(txFeeSol)) return;
+    db.prepare(`UPDATE transactions SET tx_fee_sol = ? WHERE tx_hash = ? AND type = ? AND tx_fee_sol IS NULL`)
+      .run(txFeeSol, txHash, type);
 }
 
 /**
@@ -3115,46 +3237,6 @@ export function getLastTvlLevelExecutionAt(db, poolId, level) {
     const row = db.prepare(
         `SELECT MAX(triggered_at) AS last FROM tvl_executions WHERE pool_id = ? AND level = ?`
     ).get(poolId, level);
-    return row?.last ?? 0;
-}
-
-// ─── Score-Limit State-Machine ────────────────────────────────────────────────
-
-export function createScoreLimitExecution(db, { poolId, triggerScore, configSnapshot, subScores = null }) {
-    const result = db.prepare(`
-        INSERT INTO score_limit_executions (
-            pool_id, triggered_at, trigger_score, config_snapshot,
-            apr_score, pnl_score_6h, pnl_score_12h, pnl_score_24h
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-        poolId, Date.now(), triggerScore ?? null, JSON.stringify(configSnapshot),
-        subScores?.aprScore ?? null, subScores?.pnl6hScore ?? null,
-        subScores?.pnl12hScore ?? null, subScores?.pnl24hScore ?? null,
-    );
-    return result.lastInsertRowid;
-}
-
-export function updateScoreLimitExecution(db, id, fields) {
-    const allowed = ['step', 'coins_a', 'coins_b', 'swapped_usdc', 'completed_at',
-                     'error_msg', 'close_error'];
-    const sets    = Object.keys(fields).filter(k => allowed.includes(k));
-    if (!sets.length) return;
-    const sql = `UPDATE score_limit_executions SET ${sets.map(k => `${k} = ?`).join(', ')} WHERE id = ?`;
-    db.prepare(sql).run(...sets.map(k => fields[k]), id);
-}
-
-export function getIncompleteScoreLimitExecutions(db) {
-    return db.prepare(
-        `SELECT * FROM score_limit_executions WHERE step != 'complete' ORDER BY triggered_at ASC`
-    ).all();
-}
-
-/** Zeitpunkt der letzten Score-Limit-Auslösung für einen Pool (für Cleanup-Cooldown). */
-export function getLastScoreLimitExecutionAt(db, poolId) {
-    const row = db.prepare(
-        `SELECT MAX(triggered_at) AS last FROM score_limit_executions WHERE pool_id = ?`
-    ).get(poolId);
     return row?.last ?? 0;
 }
 

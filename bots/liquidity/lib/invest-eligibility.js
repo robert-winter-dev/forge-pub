@@ -2,7 +2,7 @@
  * FORGE Liquidity – Invest-Guard: darf in diesen Pool überhaupt Kapital hinein?
  *
  * ═══ Warum es dieses Modul gibt ═══════════════════════════════════════════════
- * Die Risk-Management-Regeln (TVL-Schutz, Score-Limit) waren bis 2026-08-20
+ * Die Risk-Management-Regeln (TVL-Schutz) waren bis 2026-08-20
  * ausschließlich Austritts-Regeln: sie prüfen erst, wenn eine Position existiert
  * (resolveTrigger() steigt bei !getOpenPosition() aus). „Bester Pool" konnte
  * deshalb in einen Pool investieren, den dieselben Regeln Minuten später wieder
@@ -27,7 +27,7 @@ import Database from 'better-sqlite3';
 
 import { config } from './config.js';
 import { resolveTvlThresholds } from './tvl-thresholds.js';
-import { DEFAULT_TVL_PROTECTION, DEFAULT_SCORE_LIMIT } from './settings-auto.js';
+import { DEFAULT_TVL_PROTECTION } from './settings-auto.js';
 import { POOL_SETTINGS_DEFAULTS } from '../../../lib/pool-settings-defaults.js';
 import { getOpenPosition } from './db.js';
 import { PATHS } from '../../../config/paths.js';
@@ -37,7 +37,7 @@ const SETTINGS_DB = PATHS.settingsDb;
 /**
  * Liest die komplette Settings-Zeile eines Pools (eine Query statt je eine pro Regel).
  * Fehlt die Zeile, gelten die Defaults aus settings-auto.js — genau das, was
- * ensureTvlProtectionDefaults()/ensureScoreLimitEnabled() beim Aktivieren schreiben
+ * ensureTvlProtectionDefaults() beim Aktivieren schreiben
  * würden. Ein nie aktivierter Pool ist damit nicht ungeschützt.
  */
 function loadPoolSettings(poolId) {
@@ -92,15 +92,12 @@ function latestTvl(db, poolId) {
  * @param {object} pool        Pool aus config.pools.all
  * @param {object} db          Offene Liquidity-DB (lesend genutzt)
  * @param {object} [opts]
- * @param {number|null} [opts.exitScore] investScore.exitValue aus data.json — derselbe
- *        Wert, den shouldTriggerScoreLimit() auswertet (NICHT investScore.value, der
- *        trägt den Volumen-Malus und darf keinen Exit auslösen).
  * @param {object} [opts.settings] vorgeladene Settings-Zeile (spart die Query)
  * @returns {{ok: boolean, rule: string|null, reason: string|null, detail: object}}
- *          `rule`: 'tvl' | 'tvl_unknown' | 'score_limit' | 'max_investment' — maschinenlesbar für
+ *          `rule`: 'tvl' | 'tvl_unknown' | 'max_investment' — maschinenlesbar für
  *          Dashboard und Entscheidungs-Log; `reason` ist deutscher Klartext fürs Log.
  */
-export function checkInvestEligibility(pool, db, { exitScore = null, settings = null } = {}) {
+export function checkInvestEligibility(pool, db, { settings = null } = {}) {
     const ok = { ok: true, rule: null, reason: null, detail: {} };
     if (!pool) return ok;
 
@@ -130,19 +127,6 @@ export function checkInvestEligibility(pool, db, { exitScore = null, settings = 
             reason: `TVL ${Math.round(tvl).toLocaleString('de-DE')} USDC unter Schutz-Schwelle `
                   + `${Math.round(th.l1.threshold).toLocaleString('de-DE')} USDC`,
             detail: { tvl, threshold: th.l1.threshold, level: 1 },
-        };
-    }
-
-    // Score-Limit: ein Pool, den das Score-Limit sofort wieder verlassen würde, darf
-    // nicht Ziel eines Invests sein. Bewusst gegen exitValue geprüft — der Ranking-Score
-    // (investScore.value) misst gegen CLEANUP_MIN_SCORE eine andere Größe.
-    const slCfg = s?.scoreLimit ?? DEFAULT_SCORE_LIMIT;
-    const minScore = Number.isFinite(Number(slCfg?.minScore)) ? Number(slCfg.minScore) : 30;
-    if (slCfg?.enabled === true && exitScore != null && exitScore < minScore) {
-        return {
-            ok: false, rule: 'score_limit',
-            reason: `Exit-Score ${exitScore} unter Score-Limit ${minScore}`,
-            detail: { exitScore, minScore },
         };
     }
 

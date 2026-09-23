@@ -15,6 +15,7 @@
  */
 
 import { effectiveFeePct } from '../../../lib/effective-fee.js';
+import { FEE_MODEL_V2_ADVISOR, feeAprScanner } from './fee-model.js';
 
 const ORCA_V2_BASE = 'http://127.0.0.1:3100/orcav2';
 
@@ -71,42 +72,6 @@ export function getPoolTypeConfig(pool) {
         );
     }
     return cfg;
-}
-
-// ─── Stufenversatz (LIQ#0371) ────────────────────────────────────────────────
-
-/**
- * Verschiebt eine rohe Advisor-Empfehlung um `offsetSteps` Stufen auf der
- * CANDIDATE_RANGES-Leiter, begrenzt auf die für den Pool-Typ zulässigen Stufen
- * (getPoolTypeConfig — dieselben Grenzen, die analyzePool() schon zur
- * Kandidatenauswahl verwendet). Reine Funktion, keine DB, kein Netzwerk — das ist
- * der Mechanismus, mit dem eine Strategie ihre Risikohaltung ausdrückt (KB
- * Strategien/strategie-auswahl.md, „Wie eine Strategie die Range ausdrückt").
- *
- * `offsetSteps === 0` (oder `null`/`undefined`) ist echte Identität — `rawRangePct` wird
- * unverändert zurückgegeben, ohne auf die Leiter einzurasten. Nur bei einem Versatz
- * ungleich 0 wird zunächst die nächstliegende zulässige Stufe zu `rawRangePct` gesucht
- * und von dort verschoben.
- *
- * @param {Object} pool          Pool-Konfiguration aus pools.json (mit poolType)
- * @param {number} rawRangePct   Rohe Empfehlung, i.d.R. advice.recommendation.rangePct
- * @param {number} offsetSteps   Stufenversatz (ganzzahlig, positiv = breiter)
- * @returns {number}
- */
-export function applyRangeStepOffset(pool, rawRangePct, offsetSteps) {
-    if (!offsetSteps) return rawRangePct;
-
-    const classCfg = getPoolTypeConfig(pool);
-    const bounded  = CANDIDATE_RANGES.filter(r => r >= classCfg.min && r <= classCfg.max);
-    if (bounded.length === 0) return rawRangePct; // Konfig-Lücke — Advisor-Wert unangetastet
-
-    let nearestIdx = 0, bestDist = Infinity;
-    for (let i = 0; i < bounded.length; i++) {
-        const d = Math.abs(bounded[i] - rawRangePct);
-        if (d < bestDist) { bestDist = d; nearestIdx = i; }
-    }
-    const shiftedIdx = Math.min(bounded.length - 1, Math.max(0, nearestIdx + offsetSteps));
-    return bounded[shiftedIdx];
 }
 
 // ─── Mathematik-Helfer ───────────────────────────────────────────────────────
@@ -178,7 +143,7 @@ export function assessTrend(prices) {
  * @param {number[]} prices
  * @returns {{ hourlyPct: number|null, annualizedPct: number|null }}
  */
-function computeVolatility(prices) {
+export function computeVolatility(prices) {
     if (prices.length < 2) return { hourlyPct: null, annualizedPct: null };
     const logReturns = [];
     for (let i = 1; i < prices.length; i++) {
@@ -431,15 +396,23 @@ export function getModelDrift(db, poolId, sigmaHourlyPct, _currentRangePct) {
  *   - IL pro Rebalancing ≈ rangePct² / 800  (geometrische Näherung für kleine %)
  *   - Break-Even-Kapital: Näherung für kleine Positionen (C << TVL × r/liqSpreadPct)
  *
+ * Fee-Term (LIQ#000884): Liefert params.feeAprForRange (lib/fee-model.js feeAprScanner) für die
+ * Range eine Zahl, ist das die Brutto-APR — eigenes L gegen liquidity_in_range, In-Range-Anteil
+ * der letzten 24 h, × Orca-LP-Anteil (feeSource 'model'). Sonst die alte Näherung unten
+ * (TVL gleichmäßig über ±liqSpreadPct, × TIME_IN_RANGE_FACTOR, feeSource 'fallback'), die laut
+ * bin/range-advisor-fee-check.js um Faktor 0,5–0,8 zu tief liegt. Rebalance-Kosten und IL
+ * bleiben unverändert.
+ *
  * @param {number} rangePct   Range-Breite in % (±)
- * @param {{ vol24h: number, tvl: number, feeTierPct: number, sigmaHourlyPct: number, capitalUsdc: number, liqSpreadPct?: number, empiricalCostUsdc?: number, driftFactor?: number|null }} params
+ * @param {{ vol24h: number, tvl: number, feeTierPct: number, sigmaHourlyPct: number, capitalUsdc: number, liqSpreadPct?: number, empiricalCostUsdc?: number, driftFactor?: number|null, feeAprForRange?: (rangePct:number)=>number|null }} params
  * @returns {Object}
  */
 export function scoreRange(rangePct, params) {
     const { vol24h, tvl, feeTierPct, sigmaHourlyPct, capitalUsdc,
             liqSpreadPct = POOL_LIQ_SPREAD_PCT,
             empiricalCostUsdc = null,
-            driftFactor = null } = params;
+            driftFactor = null,
+            feeAprForRange = null } = params;
 
     // Modellierte Rebalancing-Kosten (estimate-costs) bevorzugen, sonst Fallback-Konstante.
     const swapCostUsdc   = (typeof empiricalCostUsdc === 'number' && empiricalCostUsdc > 0)
@@ -451,10 +424,12 @@ export function scoreRange(rangePct, params) {
     const poolLiqInRange = tvl * (rangePct / liqSpreadPct);
     const myShare        = capitalUsdc / (capitalUsdc + poolLiqInRange);
 
-    // Brutto-Fees
+    // Brutto-Fees: validiertes Modell (lib/fee-model.js), sonst die alte Näherung
+    const modelAprPct     = typeof feeAprForRange === 'function' ? feeAprForRange(rangePct) : null;
+    const feeSource       = Number.isFinite(modelAprPct) ? 'model' : 'fallback';
     const dailyFeesPool   = vol24h * (feeTierPct / 100);
     const dailyMyFees     = dailyFeesPool * myShare * TIME_IN_RANGE_FACTOR;
-    const grossAprPct     = (dailyMyFees * 365 / capitalUsdc) * 100;
+    const grossAprPct     = feeSource === 'model' ? modelAprPct : (dailyMyFees * 365 / capitalUsdc) * 100;
 
     // Rebalance-Frequenz (Random-Walk: T_OOR = (r/σ_h)²), korrigiert um gemessenen
     // Model-Drift falls vorhanden (driftFactor = actual/theoretical aus letzten 30 Tagen).
@@ -490,6 +465,7 @@ export function scoreRange(rangePct, params) {
         rangePct,
         myShare,
         grossAprPct:          +grossAprPct.toFixed(1),
+        feeSource,
         hoursUntilOor:        isFinite(hoursUntilOor) ? +hoursUntilOor.toFixed(1) : null,
         rawRebalsPerDay:      +rawRebalsPerDay.toFixed(3),
         rebalsPerDay:         +rebalsPerDay.toFixed(3),
@@ -513,6 +489,9 @@ export function scoreRange(rangePct, params) {
  * @param {Database} db                SQLite-Datenbankinstanz
  * @param {Object}   [opts]
  * @param {number}   [opts.capitalUsdc]  Override Kapital in USDC
+ * @param {boolean}  [opts.feeModelV2]   Fee-Term aus lib/fee-model.js (Vorgabe: Schalter FEE_MODEL_V2_ADVISOR)
+ * @param {Object}   [opts.marketData]   { tvlUsdc, vol24h, currentPrice, change24hPct, fees24h } statt
+ *                                       Orca-Abruf — nur für Vergleichsläufe (bin/fee-model-compare.js)
  * @returns {Promise<Object|null>}     Advisor-Ergebnis, oder null wenn Pool ausgeschlossen
  */
 export async function analyzePool(pool, db, opts = {}) {
@@ -531,7 +510,9 @@ export async function analyzePool(pool, db, opts = {}) {
     let tvl = 0, vol24h = 0, currentPrice = 0, change24hPct = 0;
     let fees24h = null;
     let orcaError = null;
-    try {
+    if (opts.marketData) {
+        ({ tvlUsdc: tvl, vol24h, currentPrice, change24hPct, fees24h = null } = opts.marketData);
+    } else try {
         const resp = await fetch(`${ORCA_V2_BASE}/solana/pools/${pool.address}`, {
             signal: AbortSignal.timeout(30_000),
         });
@@ -588,6 +569,10 @@ export async function analyzePool(pool, db, opts = {}) {
     const empiricalCostUsdc = empiricalRebalCost.isFallback ? null : empiricalRebalCost.avgCostUsdc;
     const scanParams = { vol24h, tvl, feeTierPct, sigmaHourlyPct, capitalUsdc,
                          empiricalCostUsdc, driftFactor: modelDrift?.driftFactor ?? null };
+    // Fee-Term aus dem validierten Modell (LIQ#000884); Fallback je Range in scoreRange().
+    if (opts.feeModelV2 ?? FEE_MODEL_V2_ADVISOR) {
+        scanParams.feeAprForRange = feeAprScanner(db, pool.id, { capitalUsdc });
+    }
 
     const candidates = CANDIDATE_RANGES
         .filter(r => r >= classCfg.min && r <= classCfg.max)
@@ -661,7 +646,7 @@ export async function analyzePool(pool, db, opts = {}) {
         },
 
         marketData: {
-            tvlUsdc: tvl, vol24h, currentPrice, change24hPct, orcaError,
+            tvlUsdc: tvl, vol24h, currentPrice, change24hPct, fees24h, orcaError,
             // Verwendeter Fee-Satz: 'stats24h' = gemessener Ist-Satz (Adaptive Fee
             // eingerechnet), 'static' = konfigurierter Tier aus pools.json.
             feeTierPct, baseFeeTierPct: pool.feeTier ?? null, feeSource: feeInfo.source,

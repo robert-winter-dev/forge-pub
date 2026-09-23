@@ -229,13 +229,13 @@ export function setPoolActive(poolId, active) {
     // Liquidierter Pool darf nicht weiter als fester Cleanup-Pin ("invest in") dienen.
     // Egal warum der Pool deaktiviert wird (Score-Limit, TVL-Schutz,
     // Trailing-Stop, manueller Withdraw): ist genau dieser Pool als
-    // CLEANUP_MODE=pool:<id> konfiguriert, zurück auf 'ranking' ("bester Pool")
-    // schalten – sonst reinvestiert der nächste Cleanup-Lauf blind und ohne
-    // Score-Prüfung wieder in den gerade liquidierten Pool.
+    // CLEANUP_MODE=pool:<id> konfiguriert, auf 'disabled' schalten – sonst reinvestiert
+    // der nächste Cleanup-Lauf blind wieder in den gerade liquidierten Pool.
+    // Bis LIQ#000929 ging es hier auf 'ranking' („Bester Pool"), den es nicht mehr gibt.
     if (active === false && getCleanupModeFromEnv() === `pool:${poolId}`) {
         try {
-            setCleanupModeInEnv('ranking');
-            console.log(`[config] ${poolId} liquidiert & war fester Cleanup-Pool → CLEANUP_MODE auf 'ranking' umgestellt`);
+            setCleanupModeInEnv('disabled');
+            console.log(`[config] ${poolId} liquidiert & war fester Cleanup-Pool → CLEANUP_MODE auf 'disabled' umgestellt`);
         } catch (err) {
             console.error(`[config] CLEANUP_MODE-Umstellung nach Liquidierung von ${poolId} fehlgeschlagen: ${err.message}`);
         }
@@ -533,7 +533,7 @@ export function resolvePoolArg(pools, arg) {
  * @returns {string|null}
  */
 export function getCleanupModeFromEnv() {
-    const envPath = path.join(__dirname, '..', '.env');
+    const envPath = envFile('liquidity');
     if (!existsSync(envPath)) return process.env.CLEANUP_MODE ?? null;
     const text = readFileSync(envPath, 'utf-8');
     const m    = text.match(/^CLEANUP_MODE\s*=\s*(.*)$/m);
@@ -550,7 +550,7 @@ export function getCleanupModeFromEnv() {
  * @returns {number} Cap in USDC, 0 = kein Limit
  */
 export function getCleanupMaxDepositFromEnv() {
-    const envPath = path.join(__dirname, '..', '.env');
+    const envPath = envFile('liquidity');
     let raw = process.env.CLEANUP_MAX_DEPOSIT;
     if (existsSync(envPath)) {
         const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_MAX_DEPOSIT\s*=\s*(.*)$/m);
@@ -571,7 +571,7 @@ export function getCleanupMaxDepositFromEnv() {
  * @returns {number} Floor in USDC, 0 = kein Minimum
  */
 export function getCleanupMinDepositFromEnv() {
-    const envPath = path.join(__dirname, '..', '.env');
+    const envPath = envFile('liquidity');
     let raw = process.env.CLEANUP_MIN_DEPOSIT;
     if (existsSync(envPath)) {
         const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_MIN_DEPOSIT\s*=\s*(.*)$/m);
@@ -593,7 +593,7 @@ export function getCleanupMinDepositFromEnv() {
  * @returns {string|null} Rohwert, Parsing über lib/trend-indicators.js parseTrendGate()
  */
 export function getCleanupTrendGateFromEnv() {
-    const envPath = path.join(__dirname, '..', '.env');
+    const envPath = envFile('liquidity');
     if (!existsSync(envPath)) return process.env.CLEANUP_TREND_GATE ?? null;
     const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_TREND_GATE\s*=\s*(.*)$/m);
     return m ? m[1].trim() : (process.env.CLEANUP_TREND_GATE ?? null);
@@ -605,7 +605,7 @@ export function getCleanupTrendGateFromEnv() {
  * Cleanup-Ziel (CLEANUP_MODE=pool:<id>) war – siehe setPoolActive.
  */
 export function setCleanupModeInEnv(newMode) {
-    const envPath = path.join(__dirname, '..', '.env');
+    const envPath = envFile('liquidity');
     if (!existsSync(envPath)) return;
     let text = readFileSync(envPath, 'utf-8');
     if (/^CLEANUP_MODE\s*=/m.test(text)) {
@@ -615,4 +615,23 @@ export function setCleanupModeInEnv(newMode) {
     }
     writeFileSync(envPath, text, 'utf-8');
     console.log(`[config] CLEANUP_MODE → ${newMode} (.env aktualisiert)`);
+}
+
+/**
+ * Entfernt Schlüssel vollständig aus der Liquidity-.env (Zeile samt Wert).
+ * Genutzt für einmalige Hinweis-Flags (CLEANUP_NOTICE_RANKING_REMOVED, LIQ#000929).
+ * @param {string[]} keys
+ * @returns {string[]} tatsächlich entfernte Schlüssel
+ */
+export function removeKeysFromEnv(keys) {
+    const envPath = envFile('liquidity');
+    if (!existsSync(envPath)) return [];
+    let text = readFileSync(envPath, 'utf-8');
+    const removed = [];
+    for (const key of keys) {
+        const re = new RegExp(`^${key}\\s*=.*(?:\\r?\\n|$)`, 'm');
+        if (re.test(text)) { text = text.replace(re, ''); removed.push(key); }
+    }
+    if (removed.length) writeFileSync(envPath, text, 'utf-8');
+    return removed;
 }

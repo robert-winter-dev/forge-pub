@@ -11,7 +11,7 @@
  * Einmalige Migration: bestehende address_book-Einträge (bot_id='liquidity') werden übernommen.
  *
  * Usage-Check: durchsucht pool_settings (alle Bots) nach autoPayout.address,
- * scoreLimit.sendTo und trailingStop.sendTo.
+ * und trailingStop.sendTo.
  */
 
 import { Router }        from 'express';
@@ -74,7 +74,6 @@ function findUsages(db, address) {
         try {
             const s     = JSON.parse(row.settings);
             const found = [];
-            if (s.scoreLimit?.sendTo    === address) found.push('Score Limit');
             if (s.trailingStop?.sendTo  === address) found.push('Trailing Stop');
             if (found.length > 0) {
                 usages.push({ botId: row.bot_id, poolId: row.pool_id, fields: found });

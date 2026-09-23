@@ -35,20 +35,25 @@ import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition
          getIncompleteTsExecutions, latestStopValueUsd } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
 import { calculateRange }  from '../lib/range.js';
-import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig, applyRangeStepOffset } from '../lib/range-advisor.js';
+import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
 import { getKeypair, getSolBalance, getSolBalanceFresh, getUsdcBalance, getUsdcBalanceFresh, assertSufficientSol, getUsableSolBalance, getTokenBalance, getTokenBalanceFresh, getUsableSolBalanceFresh, getConnection, getTxFee } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
 import * as notify         from '../lib/notify.js';
 import { isCleanupRunning, isManualLocked, acquireRebalanceLock, releaseRebalanceLock, checkAndClearForceRebalanceFlag, acquireBotOpLock, releaseBotOpLock, setRebalancePendingFlag, clearRebalancePendingFlag, waitForCleanupToFinish, acquireSlLock, releaseSlLock } from '../lib/cleanup-lock.js';
 import { ensureWalletSol, ensureInvestCapableSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
-import { shouldTriggerScoreLimit, checkScoreLimitWarning, executeScoreLimit, resumePendingScoreLimitExecutions } from '../lib/score-limit.js';
 import { executeSwapStep, executeTransferStep } from '../lib/exit-finalizer.js';
 import { shouldTriggerTs, executeTs, resumePendingTsExecutions, updateHwm, processHwmResetIfRequested, readMinimumValue, clearMinimumValue } from '../lib/trailing-stop.js';
 import { runFastStopRound } from '../lib/fast-stop-check.js';
 import { shouldTriggerTvlProtection, executeTvlProtection, resumePendingTvlExecutions } from '../lib/tvl-protection.js';
 import { processPoolRetirements, resumePendingRetireExecutions } from '../lib/pool-retirement.js';
-import { checkClmmRatio, CLMM_RATIO_MAX_PCT, getTokenUsdPrice, reopenTargetCapitalUsd, pairBalanceSwapPlan } from '../lib/deposit-lib.js';
+import { checkClmmRatio, CLMM_RATIO_MAX_PCT, getTokenUsdPrice, reopenTargetCapitalUsd, pairBalanceSwapPlan, sweepResidualIntoPosition, PRESWAP_SLIPPAGE_BPS } from '../lib/deposit-lib.js';
+import {
+    getShiftBalanceForPosition, insertShiftLedger, lastShiftAttemptMs, shiftTopUpDecision,
+    shiftNeedsAlert, checkAndClearShiftTopUpFlag, volatileRebalanceCapital, abortedRebalanceContext, SHIFT_STAGE1_MIN_USDC, SHIFT_TOPUP_MIN_USDC,
+} from '../lib/rebalance-shift.js';
 import { foreignExitBlock } from '../lib/exit-reservation.js';
+import { chainStartOpenedAt } from '../lib/pnl-anchor.js';
+import { getPendingReinvest, setPendingReinvest, clearPendingReinvest, pendingValidity, standaloneRetryDue, mergeWithPending, pendingAfterOutcome } from '../lib/reinvest-pending.js';
 import { assertTypeInvariants } from '../lib/invariants.js';
 import { syncDashboard }   from '../lib/sync.js';
 import {
@@ -75,7 +80,7 @@ import { refreshReferencePrices } from '../lib/reference-prices.js';
 import { settle } from '../lib/settle-promise.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
 import { reasonPayload } from '../../../lib/pool-reason.js';
-import { getStrategy, rangeStepOffsetForPool, rangeHintsForPool } from '../../../lib/strategies.js';
+import { inactiveStatsIntervalMs, DAILY_BUDGET_CREDITS } from '../lib/stats-budget.js';
 
 const __bot_dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -131,23 +136,6 @@ function _getFeeClaimSettings(poolId) {
 
 function isAutoCompoundEnabled(poolId) {
     return _getFeeClaimSettings(poolId)?.enabled !== false;
-}
-
-/**
- * Liest die aktive Strategie (LIQ#0369/#0371) aus `strategy_state` in settings.db.
- * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
- * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
- * Gleiches Muster wie `_loadActiveStrategyId()` in cleanup.js.
- */
-function _loadActiveStrategyId() {
-    try {
-        const sdb = new Database(SETTINGS_DB_PATH, { readonly: true, fileMustExist: true });
-        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
-        sdb.close();
-        return row?.strategy_id ?? null;
-    } catch {
-        return null;
-    }
 }
 
 /**
@@ -243,12 +231,22 @@ const lastExport        = { ts: 0 };
 const outOfRangeSince   = new Map();   // pool_id → timestamp (oder null)
 const wasOutOfRange     = new Map();   // pool_id → boolean (für backInRange-Alert)
 
-// Pool-Stats-Intervalle: Preis/TVL/APR (RPC + Orca v2) haben reichlich Rate-Limit-
-// Spielraum und laufen alle 10 Minuten — Grundlage für Opportunity-Score und
-// Chart-Trend-Icon, die bei volatilen Pools sonst dem aktuellen Stand hinterherhinken
-// (LIQ, 2026-08-23). Die Volume-Candles hängen am knappen, undokumentierten
-// GeckoTerminal-Limit (Nexus: 1 req/20s zentral für alle Pools) und bleiben deshalb
-// beim bisherigen stündlichen Rhythmus — siehe getPoolStats() in pool-adapter/orca.js.
+// Pool-Stats-Intervalle: Preis/TVL/APR (RPC + Orca v2) laufen für Pools MIT Kapital
+// alle 10 Minuten — Grundlage für Opportunity-Score und Chart-Trend-Icon, die bei
+// volatilen Pools sonst dem aktuellen Stand hinterherhinken (LIQ, 2026-08-23).
+// Die Volume-Candles hängen am knappen, undokumentierten GeckoTerminal-Limit
+// (Nexus: 1 req/20s zentral für alle Pools) und bleiben deshalb beim bisherigen
+// stündlichen Rhythmus — siehe getPoolStats() in pool-adapter/orca.js.
+//
+// ⚠️ Die frühere Annahme „reichlich Rate-Limit-Spielraum" war falsch: _getPriceOnChain()
+// kostet gemessen ~4,8 Helius-Credits pro Pool-Zyklus. Bei 57 Pools im 10-Minuten-Takt
+// sind das ~27.400 Credits/Tag allein für getAccountInfo — 80 % des Gesamtverbrauchs und
+// über dem 1-Mio-Monatslimit des Free Tier. Deshalb hat der reine Ranking-Datenlauf für
+// Pools OHNE Kapital kein festes Intervall, sondern einen Regler: lib/stats-budget.js
+// leitet es je Sweep aus der Anzahl inaktiver Pools und einem festen Tagesbudget ab
+// (LIQ#000807). Wächst der Katalog, wird der Sweep seltener, der Verbrauch bleibt gleich.
+// Trading-relevante Abfragen (Pools mit Kapital, STATS_INTERVAL_MS) werden nie gedrosselt.
+// Siehe [[helius-credit-budget]].
 const STATS_INTERVAL_MS  = 10 * 60 * 1000;
 const VOLUME_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -424,12 +422,50 @@ async function retryStartupCall(fn, label, attempts = 20, delayMs = 30_000) {
 // deshalb aus der mainLoop-Iteration herausgezogen und auch aus der Einzahlungs-
 // Warteschleife in startup() aufrufbar (Fund forge-pub2 2026-08-11: ohne offene
 // Position lief dieser Code nie, Pool Metriken zeigten dauerhaft "No data").
+let lastInactiveStatsIntervalMs = null;
+
 async function fetchInactivePoolStats(pools) {
+    // Einmal je Sweep aus der Pool-Anzahl, nicht je Pool — so passt sich das Intervall
+    // ohne Neustart an, wenn der Scanner Pools ergänzt (LIQ#000807).
+    const { intervalMs: inactiveStatsIntervalMsNow, clamped } = inactiveStatsIntervalMs(pools.length);
+    if (pools.length > 0 && inactiveStatsIntervalMsNow !== lastInactiveStatsIntervalMs) {
+        lastInactiveStatsIntervalMs = inactiveStatsIntervalMsNow;
+        const min = Math.round(inactiveStatsIntervalMsNow / 60_000);
+        if (clamped === 'max') {
+            console.warn(`[bot] Inaktiv-Stats: ${pools.length} Pools → Intervall auf Maximum ${min} Min begrenzt. `
+                + `ACHTUNG: Das Helius-Budget von ${DAILY_BUDGET_CREDITS.toLocaleString('de-DE')} Credits/Tag wird damit überschritten, `
+                + `der Pool-Katalog ist zu groß. Katalog begrenzen oder Budget anheben.`);
+        } else {
+            console.log(`[bot] Inaktiv-Stats: ${pools.length} Pools → Intervall ${min} Min (Budget ${DAILY_BUDGET_CREDITS.toLocaleString('de-DE')} Credits/Tag)`);
+        }
+    }
+
+    // Preise aller in diesem Sweep fälligen Pools gebündelt lesen (LIQ#000854): je 100 Pools
+    // ein getMultipleAccounts statt je Pool ein SDK-getPool() (~4,8 Credits). Die Map wird
+    // immer übergeben — fällt der Bündel-Read aus, fehlen die Pools darin und werden wie ein
+    // gescheiterter Einzelread übersprungen (kein Ersatzwert, kein teurer Einzel-Fallback).
+    const sweepStart = Date.now();
+    const duePools   = pools.filter(p => sweepStart - (lastStatsFetch.get(p.id) ?? 0) >= inactiveStatsIntervalMsNow);
+    const onChainPrices = new Map();
+    const byAdapter = new Map();
+    for (const p of duePools) {
+        const a = getAdapter(p);
+        if (typeof a.getPricesOnChainBulk !== 'function') continue;
+        (byAdapter.get(a.constructor) ?? byAdapter.set(a.constructor, { adapter: a, list: [] }).get(a.constructor)).list.push(p);
+    }
+    for (const { adapter, list } of byAdapter.values()) {
+        try {
+            for (const [addr, v] of await adapter.getPricesOnChainBulk(list)) onChainPrices.set(addr, v);
+        } catch (err) {
+            console.warn(`[bot] Bündel-Preisabfrage fehlgeschlagen: ${err.message}`);
+        }
+    }
+
     for (const pool of pools) {
         if (!running) break;
 
         // Dashboard-Export zwischendurch: Fällt für viele Pools gleichzeitig die
-        // STATS_INTERVAL_MS-Schwelle, läuft diese Schleife am Stück ungebremst
+        // Intervall-Schwelle, läuft diese Schleife am Stück ungebremst
         // durch (ein `await` pro Pool, keine Pause) und blockiert damit die
         // periodischen Export-Checks der Haupt-Loop (Zeile ~4210/4316) für die
         // gesamte Sweep-Dauer. Live beobachtet (LIQ#0517): 10+ Minuten ohne
@@ -443,11 +479,14 @@ async function fetchInactivePoolStats(pools) {
         }
 
         const now = Date.now();
-        if (now - (lastStatsFetch.get(pool.id) ?? 0) >= STATS_INTERVAL_MS) {
+        if (now - (lastStatsFetch.get(pool.id) ?? 0) >= inactiveStatsIntervalMsNow) {
             try {
                 const adapter = getAdapter(pool);
                 const includeVolumeCandles = now - (lastVolumeFetch.get(pool.id) ?? 0) >= VOLUME_INTERVAL_MS;
-                const stats   = await adapter.getPoolStats(pool, { includeVolumeCandles });
+                const stats   = await adapter.getPoolStats(pool, {
+                    includeVolumeCandles,
+                    ...(adapter.getPricesOnChainBulk ? { onChainPrices } : {}),
+                });
                 const geckoNull = stats.tvlUsd == null || stats.volume24hUsd == null || stats.apr24h == null;
                 const lastKnown = geckoNull
                     ? db.prepare(`SELECT tvl_usd, volume_24h_usd, apr_24h FROM pool_stats
@@ -588,14 +627,6 @@ async function startup() {
     } catch (err) {
         console.error(`[bot] Reconciliation fehlgeschlagen (nicht kritisch): ${err.message}`);
     }
-
-    // Unvollständige Score-Limit-Ausführungen aus letztem Crash fortsetzen
-    try {
-        await resumePendingScoreLimitExecutions(db);
-    } catch (err) {
-        console.error(`[bot] Score-Limit-Resume fehlgeschlagen (nicht kritisch): ${err.message}`);
-    }
-
 
     // Unvollständige Trailing-Stop-Ausführungen aus letztem Crash fortsetzen
     try {
@@ -849,6 +880,11 @@ async function processPool(pool, adapter, preloadedState = null) {
         }
     }
 
+    // ── 4c. Verschiebung nachzahlen (LIQ#000841, Stufe 2) ────────────────────────
+    // Täglicher Check: liegt seit Rebalances Kapital im Wallet, das nicht reinvestiert
+    // wurde, und ist die Position im normalen Bereich, wird die Bilanz nachgezahlt.
+    if (state.inRange) await _shiftTopUpIfDue(pool, position, state, adapter);
+
     // ── 5./6. Fee-Claim/Reinvest + Portfolio-Snapshot ─────────────────────────
     // Beide mutieren on-chain bzw. schreiben Snapshots. Sie laufen unter dem
     // Bot-Op-Lock, damit manuelle Aktionen (deposit/withdraw/close-and-reopen)
@@ -859,8 +895,10 @@ async function processPool(pool, adapter, preloadedState = null) {
     const sinceLastClaim = now - (lastFeeClaim.get(pool.id) ?? 0);
     const claimDue    = !isCleanupRunning() && sinceLastClaim >= config.feeClaimIntervalMs && state.inRange;
     const snapshotDue = now - (lastSnapshot.get(pool.id) ?? 0) >= config.portfolioSnapshotIntervalMs;
+    // Ausstehender Reinvest (LIQ#000868): billige DB-Prüfung je Tick, on-chain nur wenn fällig.
+    const pendingDue  = !isCleanupRunning() && state.inRange && standaloneRetryDue(getPendingReinvest(db, pool.id), now);
 
-    if (claimDue || snapshotDue) {
+    if (claimDue || snapshotDue || pendingDue) {
         if (await _yieldToManualAction(pool.id, 'Claim/Reinvest/Snapshot')) {
             acquireBotOpLock({ pool: pool.id, op: 'claim-snapshot' });
             try {
@@ -887,6 +925,15 @@ async function processPool(pool, adapter, preloadedState = null) {
                     }
                 }
 
+                // ── 5b. Ausstehenden Reinvest nachholen (LIQ#000868) ──
+                // Nur ohne Claim in diesem Tick: ein Claim hat die Vormerkung schon mitgenommen.
+                if (pendingDue && !claimed) {
+                    if (await _retryPendingReinvest(pool, position, state, adapter)) {
+                        claimed = true;               // gleiche Folgeschritte wie nach einem Claim
+                        lastSnapshot.set(pool.id, 0);
+                    }
+                }
+
                 // ── 6. Portfolio-Snapshot ──
                 if (now - (lastSnapshot.get(pool.id) ?? 0) >= config.portfolioSnapshotIntervalMs) {
                     await _takeSnapshot(pool, position, state, adapter);
@@ -906,6 +953,128 @@ async function processPool(pool, adapter, preloadedState = null) {
             }
         }
     }
+}
+
+// ─── Verschiebung nachzahlen (LIQ#000841) ─────────────────────────────────────
+
+/**
+ * Bucht eine Nachzahlung (Stufe 1 nach Rebalance oder Stufe 2 täglich) in die Position.
+ * Eine kombinierte `deposit`-Zeile mit dem Hash der letzten Sweep-Runde (wie
+ * deposit-lib.js; capital-reconcile.js kennt dieses Muster). is_external = 0: keine
+ * Einzahlung, verschiebt den PnL-Anker nicht.
+ */
+async function _bookShiftDeposit(pool, posId, baseCapitalUsdc, sweep, note) {
+    updatePositionCapital(db, posId, baseCapitalUsdc + sweep.usdc);
+    updatePositionHodl(db, posId, sweep.tokenEstA, sweep.tokenEstB);
+    insertTransaction(db, {
+        poolId:   pool.id,
+        type:     'deposit',
+        amountA:  sweep.tokenEstA,
+        amountB:  sweep.tokenEstB,
+        usdValue: sweep.usdc,
+        txHash:   sweep.txHash,
+        txFeeSol: await getTxFee(sweep.txHash),
+        note,
+    });
+    insertCapitalFlow(db, {
+        poolId:     pool.id,
+        usdcAmount: sweep.usdc,
+        txHash:     sweep.txHash,
+        note,
+        isExternal: 0,   // eigenes Kapital aus dem Wallet, kein externer Zufluss
+    });
+}
+
+/**
+ * Stufe 2: zahlt die Verschiebungs-Bilanz in die offene, in Range liegende Position nach.
+ * Läuft je Tick nur als billige DB-Prüfung; on-chain nur, wenn `shiftTopUpDecision` grünes
+ * Licht gibt (Bilanz >= 10 USDC, Position nicht am Rand, letzter Versuch > 24 h her).
+ * Manueller Auslöser: data/force-shift-topup-<pool>.flag (siehe rebalance-shift.js).
+ * Wirft nie.
+ */
+async function _shiftTopUpIfDue(pool, position, state, adapter) {
+    try {
+        const flag  = checkAndClearShiftTopUpFlag(pool.id);
+        const force = flag != null;
+        if (force && flag.seedUsdc > 0) {
+            insertShiftLedger(db, { poolId: pool.id, kind: 'seed', usdc: flag.seedUsdc, note: 'Startwert manuell (LIQ#000841)' });
+            console.log(`[bot:${pool.id}] Verschiebung: Startwert ${flag.seedUsdc.toFixed(2)} USDC gebucht`);
+        }
+        const balance = getShiftBalanceForPosition(db, position);
+        if (!force && balance < SHIFT_TOPUP_MIN_USDC) return;   // Regelfall: nichts zu tun
+
+        const lastAttempt = lastShiftAttemptMs(db, pool.id);
+        const decision = shiftTopUpDecision({
+            balanceUsd: balance, inRange: state.inRange, price: state.currentPrice,
+            priceLower: state.priceLower, priceUpper: state.priceUpper,
+            msSinceLastAttempt:   lastAttempt ? Date.now() - lastAttempt : Infinity,
+            msSinceLastRebalance: getMinutesSinceLastRebalance(db, pool.id) * 60_000,
+            force,
+        });
+        if (!decision.due) {
+            if (force) console.log(`[bot:${pool.id}] Verschiebung: keine Nachzahlung — ${decision.reason}`);
+            return;
+        }
+        if (isCleanupRunning() || isManualLocked()) {
+            console.log(`[bot:${pool.id}] Verschiebung: Cleanup/manuelle Aktion läuft — Nachzahlung im nächsten Tick`);
+            return;
+        }
+
+        // Versuch VOR der Ausführung buchen: auch ein gescheiterter Lauf zählt für heute.
+        insertShiftLedger(db, { poolId: pool.id, kind: 'attempt', note: decision.reason });
+        acquireBotOpLock({ pool: pool.id, op: 'shift-topup' });
+        try {
+            await _runShiftTopUp(pool, position, state, adapter, balance, decision.reason);
+        } finally {
+            releaseBotOpLock();
+        }
+    } catch (err) {
+        console.error(`[bot:${pool.id}] Verschiebung: Nachzahlung fehlgeschlagen (ignoriert): ${err.message}`);
+    }
+}
+
+async function _runShiftTopUp(pool, position, state, adapter, balanceUsd, why) {
+    console.log(`[bot:${pool.id}] Verschiebung: Nachzahlung bis ${balanceUsd.toFixed(2)} USDC (${why})`);
+    const lpBefore = db.prepare(
+        `SELECT lp_value_usd FROM position_snapshots WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT 1`
+    ).get(pool.id)?.lp_value_usd ?? 0;
+
+    const sweep = await sweepResidualIntoPosition(pool, position.nft_mint, {
+        keypair: getKeypair(), db, adapter, currentPrice: state.currentPrice,
+        priceLower: state.priceLower, priceUpper: state.priceUpper,
+        budgetLeftUsdc: balanceUsd,
+        ...(pool.volatilePair ? { quotePrice: _getQuotePrice(pool, db) } : {}),
+        swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+        logPrefix: '[bot:shift]',
+    });
+    if (!sweep || !(sweep.usdc > 0)) {
+        console.log(`[bot:${pool.id}] Verschiebung: nichts nachgezahlt (Wallet zu klein, Position nicht in Range oder Sweep gescheitert)`);
+        return 0;
+    }
+
+    await _bookShiftDeposit(pool, position.id, position.capital_usdc ?? 0, sweep, 'Verschiebung-Nachzahlung');
+    insertShiftLedger(db, { poolId: pool.id, kind: 'settle', usdc: sweep.usdc, txHash: sweep.txHash, note: 'Verschiebung-Nachzahlung' });
+
+    // Trailing-Stop-Referenz mit dem gemessenen Liquiditätsfaktor nachziehen, sonst sähe
+    // der nächste Tick die Nachzahlung als unerklärten Kapitalfluss.
+    const posRow = getOpenPosition(db, pool.id);
+    if (posRow) {
+        settleCapitalFlow(db, pool, posRow, {
+            liquidityBefore: state.liquidity, legs: [sweep],
+            fallback: { lpBefore, deltaA: sweep.tokenEstA, deltaB: sweep.tokenEstB, price: state.currentPrice },
+            logPrefix: '[bot:shift]',
+        });
+    }
+    console.log(`[bot:${pool.id}] Verschiebung: +${sweep.usdc.toFixed(2)} USDC nachgezahlt (Bilanz vorher ${balanceUsd.toFixed(2)}, Rest ${Math.max(0, balanceUsd - sweep.usdc).toFixed(2)}) TX=${sweep.txHash}`);
+
+    try {
+        await refreshAfterAction(db, { log: m => console.log(`[bot:${pool.id}] ${m}`) });
+        lastSnapshot.set(pool.id, 0);
+        lastExport.ts = Date.now();
+    } catch (err) {
+        console.warn(`[bot:${pool.id}] Refresh nach Nachzahlung fehlgeschlagen (ignoriert): ${err.message}`);
+    }
+    return sweep.usdc;
 }
 
 // ─── Pre-Swap vor Position öffnen ─────────────────────────────────────────────
@@ -944,7 +1113,10 @@ function _isPreservationReopen(poolId) {
         `SELECT 1 FROM transactions
           WHERE pool_id = ? AND type = 'close_position'
             AND created_at > ? LIMIT 1`
-    ).get(poolId, Date.now() - 30 * 60_000);
+    ).get(poolId, Date.now() - 30 * 60_000)
+        // Nachgeholter Open eines abgebrochenen Rebalances (LIQ#000866): auch nach mehr als
+        // 30 min kein frischer Zufluss, sondern die zweite Hälfte desselben Rebalances.
+        || abortedRebalanceContext(db, poolId) != null;
 }
 
 async function _preSwapIfNeeded(pool, currentPrice, targetCapital = null, baseA = 0, baseB = 0) {
@@ -1508,13 +1680,12 @@ async function _getAdvisedRange(pool, currentPrice, capitalUsdc) {
     try {
         const advice = await analyzePool(pool, db, { capitalUsdc });
         if (!advice) return null;
-        const rawRec = advice.recommendation.rangePct;
-        const rec  = _applyStrategyRangeOffset(pool, rawRec);
+        const rec  = advice.recommendation.rangePct;
         const net  = advice.rationale.optimalScore.netAprPct;
         const conf = advice.recommendation.confidence;
         const trend = advice.rationale.trend.direction;
         console.log(
-            `[advisor:${pool.id}] ±${rawRec}%${rec !== rawRec ? ` → Strategie ±${rec}%` : ''} | N-APR: ${net}% | Trend: ${trend} | Konfidenz: ${conf}`
+            `[advisor:${pool.id}] ±${rec}% | N-APR: ${net}% | Trend: ${trend} | Konfidenz: ${conf}`
         );
         return calculateRange(pool, currentPrice, { mode: 'fixed', fixedPct: rec }, db);
     } catch (err) {
@@ -1538,50 +1709,6 @@ function _nearestCandidateIndex(pct) {
 }
 
 /**
- * Wendet den Stufenversatz der aktiven Strategie (LIQ#0371) auf eine rohe
- * Advisor-Empfehlung an. Ohne aktive Strategie oder außerhalb ihres Geltungsbereichs:
- * Identität, byte-genau (Entscheidung „Standard" in lib/strategies.js). Die eigentliche
- * Ladder-Mathematik liegt in range-advisor.js (`applyRangeStepOffset`) — rein, ohne DB,
- * und deshalb eigenständig testbar (bin/test-strategy-range-offset.js).
- *
- * 🔒 Aufgerufen an JEDER Stelle, an der `advice.recommendation.rangePct` gelesen wird
- * (_getAdvisedRange, _advisorRebalanceCheck, _dailyAdvisorScan, _advisorRangeHintScan) —
- * dieselbe reine Funktion auf denselben Rohwert angewendet liefert deterministisch
- * dieselbe Zahl, ohne dass sich die vier Aufrufer Zustand teilen müssen. Das ist die
- * Antwort auf LIQ#0371 Punkt (a): die Hysterese sieht dieselbe Zahl wie der tatsächlich
- * angewendete Wert, weil beide durch denselben Filter laufen.
- *
- * @param {Object} pool
- * @param {number} rawRangePct  advice.recommendation.rangePct (roh, ohne Versatz)
- * @returns {number}
- */
-function _applyStrategyRangeOffset(pool, rawRangePct) {
-    const strategyId = _loadActiveStrategyId();
-    if (strategyId == null) return rawRangePct; // "Standard" — keine Wirkung
-    const strategy = getStrategy(strategyId);
-    const offset = rangeStepOffsetForPool(strategy, pool);
-    return applyRangeStepOffset(pool, rawRangePct, offset);
-}
-
-/**
- * Erlaubt die aktive Strategie für diesen Pool überhaupt einen Range-Hinweis bzw. eine
- * automatische Range-Änderung durch den Advisor (LIQ#0461)? Ohne aktive Strategie oder
- * außerhalb ihres Geltungsbereichs: `true` — byte-genau das heutige Verhalten.
- *
- * Aufgerufen an beiden Stellen, die eine solche Empfehlung in eine Aktion (Hinweis oder
- * Schreiben) umsetzen können: `_advisorRebalanceCheck()` und `_advisorRangeHintScan()`.
- *
- * @param {Object} pool
- * @returns {boolean}
- */
-function _rangeHintsEnabledForPool(pool) {
-    const strategyId = _loadActiveStrategyId();
-    if (strategyId == null) return true; // "Standard" — keine Wirkung
-    const strategy = getStrategy(strategyId);
-    return rangeHintsForPool(strategy, pool);
-}
-
-/**
  * Konsultiert den Advisor beim Rebalancing und entscheidet per Hysterese, ob die
  * konfigurierte Range geändert wird. Schreibt das Ergebnis in advisor_decisions.
  *
@@ -1595,10 +1722,6 @@ function _rangeHintsEnabledForPool(pool) {
 async function _advisorRebalanceCheck(pool, capitalUsdc) {
     const currentPct = pool.rangeOverride?.fixedPct ?? null;
     if (currentPct == null) return null; // ohne rangeOverride keine Advisor-Steuerung
-    if (!_rangeHintsEnabledForPool(pool)) {
-        console.log(`[advisor:${pool.id}] Rebalance-Check: Strategie deklariert rangeHints:false — kein automatisches Nachschärfen (LIQ#0461)`);
-        return null;
-    }
 
     let advice;
     try {
@@ -1609,7 +1732,7 @@ async function _advisorRebalanceCheck(pool, capitalUsdc) {
     }
     if (!advice) return null;
 
-    const recPct      = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
+    const recPct      = advice.recommendation.rangePct;
     const confidence  = advice.recommendation.confidence;
     const netRec      = advice.rationale.optimalScore?.netAprPct ?? null;
     const netCur      = advice.rationale.currentScore?.netAprPct ?? null;
@@ -1816,7 +1939,7 @@ async function _dailyAdvisorScan(activePools) {
         }
         if (!advice) continue;
 
-        const recPct     = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
+        const recPct     = advice.recommendation.rangePct;
         const confidence = advice.recommendation.confidence;
         if (confidence === 'low') continue;
 
@@ -1935,7 +2058,6 @@ async function _advisorRangeHintScan(activePools) {
 
     for (const pool of activePools) {
         if (pool.rangeOverride?.locked === true) { _rangeHintState.delete(pool.id); continue; }
-        if (!_rangeHintsEnabledForPool(pool)) { _rangeHintState.delete(pool.id); continue; } // LIQ#0461
 
         // Aktuelle Range bestimmen: Override-fixedPct, sonst reale Position-Ticks.
         let currentPct = pool.rangeOverride?.fixedPct ?? null;
@@ -1959,7 +2081,7 @@ async function _advisorRangeHintScan(activePools) {
         }
         if (!advice) continue;
 
-        const recPct     = _applyStrategyRangeOffset(pool, advice.recommendation.rangePct);
+        const recPct     = advice.recommendation.rangePct;
         const confidence = advice.recommendation.confidence;
         if (confidence === 'low') { _rangeHintState.delete(pool.id); continue; }
 
@@ -2279,7 +2401,7 @@ async function _openNewPosition(pool, adapter) {
     // Vorposition und ohne konfiguriertes capitalUSDC hat schlicht kein Ziel. Spiegelt den
     // Reaktivierungs-Guard in cleanup.js (Fix 2026-08-25, KB `Liquidity Bot/cleanup-invest.md`).
     const configuredCapitalTarget = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
-    const checkTargetUsdc = lastPosForCheck?.capital_usdc ?? configuredCapitalTarget;
+    let checkTargetUsdc = lastPosForCheck?.capital_usdc ?? configuredCapitalTarget;
     const [preCheckABal, preCheckBBal] = await Promise.all([
         settle(pool.tokenA === SOL_MINT
             ? getUsableSolBalanceFresh(getKeypair().publicKey)
@@ -2287,6 +2409,31 @@ async function _openNewPosition(pool, adapter) {
         settle(getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB)),
     ]);
     const walletUsdValue  = _calcUsdValue(pool, db, currentPrice, preCheckABal, preCheckBBal);
+
+    // 🔒 LIQ#000866: War der Open eines Rebalances abgebrochen (z.B. Open-TX abgelaufen), ist
+    // dieser Open dessen zweite Hälfte. Ziel ist dann wie in _doRebalance das freigesetzte
+    // Kapital (Close-Mengen + im Wallet verbliebene Vor-Rebalance-Fees, gedeckelt auf den
+    // Wallet-Wert) statt capital_usdc der alten Position, und nach dem Open laufen Reconcile,
+    // Residual-Sweep und die Rest-Buchung (_finishRebalanceOpen). Sonst fehlt der Rest in der
+    // Verschiebungs-Bilanz und in lib/pnl.js (USELESS/SOL 18.09.2026: ~74 USDC ungebucht).
+    const abortedReb = abortedRebalanceContext(db, pool.id);
+    let abortedFreedUsd = null;
+    if (abortedReb) {
+        const keep = _rebalanceFeeSplit(pool.id, abortedReb.claimedA, abortedReb.claimedB);
+        const freedKnownUsd = _calcUsdValue(
+            pool, db, currentPrice,
+            abortedReb.closeAmountA + keep.keepA,
+            abortedReb.closeAmountB + keep.keepB,
+        );
+        abortedFreedUsd = volatileRebalanceCapital({
+            freedKnownUsd, walletUsd: walletUsdValue, oldCapitalUsd: abortedReb.oldPosition.capital_usdc,
+        });
+        checkTargetUsdc = abortedFreedUsd;
+        console.log(
+            `[bot:${pool.id}] Nachgeholter Rebalance-Open (Vorgänger Pos. ${abortedReb.oldPosition.id}): ` +
+            `freigesetzt ${freedKnownUsd.toFixed(2)} USDC, Ziel ${abortedFreedUsd.toFixed(2)} USDC (Wallet ${walletUsdValue.toFixed(2)})`
+        );
+    }
     // Schwelle: relative 30-%-Schranke UND – falls konfiguriert – der absolute
     // CLEANUP_MIN_DEPOSIT-Floor (frisch aus .env, da ForgeSettings ihn zur Laufzeit ändert).
     // Der Floor verhindert, dass ein zu kleines/korruptes capital_usdc der Vorposition die
@@ -2312,13 +2459,15 @@ async function _openNewPosition(pool, adapter) {
     }
 
     // Token-Mix vor dem Öffnen ausgleichen (Fix 3: Pre-Swap bei Imbalance)
-    await _preSwapIfNeeded(pool, currentPrice);
+    await _preSwapIfNeeded(pool, currentPrice, abortedFreedUsd);
 
     // Kapital 50/50 aufteilen (nach USDC-Äquivalent)
     // Zielkapital aus letzter DB-Position; Fallback auf Wallet-Balance (z.B. erster Start).
     // Fresh-Reads: Balances nach eventuell vorherigem Pre-Swap von Chain lesen.
     const MIN_REOPEN_CAPITAL = 5.0; // USDC – Kleinstpositionen aus DB blockieren keine neuen Deposits
     const lastPos  = lastPosForCheck;
+    // Bezugsgröße der neuen Position: beim nachgeholten Rebalance-Open das Freigesetzte.
+    const reopenCapitalUsd = abortedFreedUsd ?? lastPos?.capital_usdc ?? null;
 
     const effectiveRange = pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range;
     // checkTargetUsdc wurde oben bereits ohne Phantom-Fallback ermittelt (null statt 1000
@@ -2343,7 +2492,7 @@ async function _openNewPosition(pool, adapter) {
         // Fehler bricht _openNewPosition ab (kein Tiny-Position-Lock-in).
         // 0 statt erfundenem 1000er-Fallback: ohne Vorposition/Config greift unten
         // bewusst der "echter Erststart" Zweig (volles Wallet), kein Phantom-Ziel.
-        const targetUsdc = lastPos?.capital_usdc ?? pool.capitalUSDC ?? 0;
+        const targetUsdc = reopenCapitalUsd ?? pool.capitalUSDC ?? 0;
         const balanceRes = await _balanceWalletForPair(pool, currentPrice, targetUsdc);
         if (!balanceRes.success) {
             console.error(`[bot:${pool.id}] _openNewPosition abgebrochen: Wallet-Balance fehlgeschlagen — ${balanceRes.reason}`);
@@ -2373,7 +2522,7 @@ async function _openNewPosition(pool, adapter) {
         // tokenA = USDC, tokenB = volatiles Asset (z.B. EURC)
         const tokenABal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenA, pool.decimalsA);
         const tokenBBal   = await getTokenBalanceFresh(getKeypair().publicKey, pool.tokenB, pool.decimalsB);
-        const _histCapA   = lastPos?.capital_usdc ?? tokenABal;
+        const _histCapA   = reopenCapitalUsd ?? tokenABal;
         // LIQ#0341: _histCapA gedeckelt auf real verfügbares Wallet-Kapital (siehe
         // _preSwapIfNeeded) — sonst reißt der Split ein Ziel an, das größer ist als das,
         // was seit dem letzten Close noch im Wallet liegt.
@@ -2398,7 +2547,7 @@ async function _openNewPosition(pool, adapter) {
         // was seit dem letzten Close noch im Wallet liegt (Vorfall pub1 27.08.2026,
         // SOL/USDC: 217 USDC stale Ziel vs. 93 USDC real verfügbar → 0,89 USDC Mini-Position).
         const reopenArgsStd = {
-            lastPositionCapitalUsd: lastPos?.capital_usdc ?? null,
+            lastPositionCapitalUsd: reopenCapitalUsd,
             quoteSideUsd:           tokenBBal,
             walletTotalUsd:         tokenABal * currentPrice + tokenBBal,
             isPreservationReopen:   _isPreservationReopen(pool.id),
@@ -2483,6 +2632,13 @@ async function _openNewPosition(pool, adapter) {
         return null;
     }
 
+    // Nachgeholter Rebalance-Open: USDC, das bei einem Pool ohne USDC-Seite jetzt schon im
+    // Wallet liegt, ist nicht aus diesem Rebalance — der Reconciler lässt es liegen
+    // (dieselbe Schutzregel wie preExistingUsdc in _doRebalance).
+    const abortedPreExistingUsdc = (abortedReb && pool.tokenA !== USDC_MINT && pool.tokenB !== USDC_MINT)
+        ? await getTokenBalanceFresh(getKeypair().publicKey, USDC_MINT, 6)
+        : 0;
+
     try {
         await assertSufficientSol(getKeypair().publicKey);
         const result = await adapter.openPosition(
@@ -2517,8 +2673,9 @@ async function _openNewPosition(pool, adapter) {
 
         const realCapitalUsdc = _calcUsdValue(pool, db, currentPrice, realTokenA, realTokenB);
 
-        // Echte neue Position (kein Rebalancing) → PnL-History zurücksetzen
-        clearPositionSnapshots(db, pool.id);
+        // Echte neue Position (kein Rebalancing) → PnL-History zurücksetzen. Der nachgeholte
+        // Rebalance-Open setzt die Kette fort und lässt die Reihe stehen wie _doRebalance.
+        if (!abortedReb) clearPositionSnapshots(db, pool.id);
         const posId = insertPosition(db, {
             poolId:       pool.id,
             nftMint:      result.nftMint,
@@ -2552,13 +2709,78 @@ async function _openNewPosition(pool, adapter) {
         // ein- oder ausgezahlt. Kein capital_flows-Eintrag hier (cleanup-Reinvest,
         // wird über fees_to_wallet in calcPnl korrekt erfasst).
 
-        _resetPoolSettings(pool.id);
+        if (abortedReb) {
+            // LIQ#000866: zweite Hälfte des abgebrochenen Rebalances — dieselben Schritte wie
+            // in _doRebalance nach dem Open, inklusive rebalance_history mit leftover_usdc.
+            // Pool-Session-Zustand bleibt wie beim Rebalance erhalten (kein _resetPoolSettings).
+            _ensureAutoCompoundEnabled(pool.id);
+            try {
+                await _finishRebalanceOpen(pool, adapter, {
+                    newPosId: posId, nftMint: result.nftMint, range, price: currentPrice,
+                    deployedUsdc: realCapitalUsdc, freedUsdc: abortedFreedUsd,
+                    preExistingUsdc: abortedPreExistingUsdc,
+                    oldPosition: abortedReb.oldPosition,
+                    preValue:    abortedReb.preValueUsd,
+                    preHwm:      abortedReb.oldPosition.hwm_usd ?? null,
+                    preEntry:    abortedReb.oldPosition.entry_usd ?? null,
+                    preD2Armed:  abortedReb.oldPosition.d2_armed_at ?? null,
+                    reason:      'rebalance',
+                    costSol:     abortedReb.closeFeeSol + (Number(openPosFee) || 0),
+                    claimedA:    abortedReb.claimedA,
+                    claimedB:    abortedReb.claimedB,
+                    logPrefix:   '[bot:rebalance-retry]',
+                });
+            } catch (err) {
+                console.error(`[bot:${pool.id}] Abschluss des nachgeholten Rebalances fehlgeschlagen: ${err.message}`);
+                try { await notify.error(`Rebalance ${pool.displayPair ?? pool.pair}`, new Error(`Nachgeholter Open: Rest nicht gebucht (${err.message})`)); } catch { /* egal */ }
+            }
+        } else {
+            // 🔒 Residual-Sweep (KB `trailing-stop-kapitalfluss-blindstelle.md`, Abschnitt „Offen"):
+            // Orca legt bei openPosition() den exakten Token-Mix aus der Liquidität fest, nicht aus
+            // den angeforderten amountA/amountB — der Rest der nicht bindenden Seite blieb bisher
+            // unangetastet im Wallet liegen (Fall Pos. 81: 32 von ~121 USDC investiert). Derselbe
+            // Mechanismus wie bei jedem Cleanup-Deposit (`deposit-lib.js`): Budget ist exakt das,
+            // was für DIESE Position vorgesehen war (guardTargetUsdc s.o.) — kein größeres Budget,
+            // sonst würde ein Cleanup-Cap oder ein bewusst kleines Reopen-Ziel über die Hintertür
+            // ausgehebelt. Wirft nie: Schlägt der Sweep fehl, bleibt der Rest liegen, der nächste
+            // Cleanup-Lauf verwertet ihn wie bisher.
+            const openBudgetUsdc = guardTargetUsdc != null ? guardTargetUsdc : Infinity;
+            const openSweep = await sweepResidualIntoPosition(pool, result.nftMint, {
+                keypair: getKeypair(), db, adapter, currentPrice,
+                priceLower: range.priceLower, priceUpper: range.priceUpper,
+                budgetLeftUsdc: Math.max(0, openBudgetUsdc - realCapitalUsdc),
+                // volatilePair-Pools bewerten tokenA/tokenB nicht direkt in USD (siehe
+                // _usdPerSide) — ohne quotePrice würde der Sweep mit 0 rechnen und nie greifen.
+                ...(pool.volatilePair ? { quotePrice: _getQuotePrice(pool, db) } : {}),
+                swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+                logPrefix: '[bot:open]',
+            });
+            if (openSweep) {
+                updatePositionCapital(db, posId, realCapitalUsdc + openSweep.usdc);
+                updatePositionHodl(db, posId, openSweep.tokenEstA, openSweep.tokenEstB);
+                insertTransaction(db, {
+                    poolId:   pool.id,
+                    type:     'deposit',
+                    amountA:  openSweep.tokenEstA,
+                    amountB:  openSweep.tokenEstB,
+                    usdValue: openSweep.usdc,
+                    txHash:   openSweep.txHash,
+                    txFeeSol: await getTxFee(openSweep.txHash),
+                    note:     'Residual-Sweep nach Neueröffnung',
+                });
+                console.log(`[bot:${pool.id}] Residual-Sweep: +${openSweep.usdc.toFixed(2)} USDC nachinvestiert`);
+            }
 
-        // Referenz des Trailing Stops sofort messen. Nach _resetPoolSettings, damit die
-        // Stufe-2-Prüfung in updateHwm die frische Pool-Konfiguration sieht.
-        await establishPositionBaseline(
-            db, pool, adapter, result.nftMint, currentPrice, { logPrefix: '[bot:open]' },
-        );
+            _resetPoolSettings(pool.id);
+
+            // Referenz des Trailing Stops sofort messen — NACH dem Sweep, damit sie den
+            // tatsächlichen Endzustand der Position abbildet (sonst würde der nächste Bot-Tick
+            // den Sweep als unerklärten Kapitalfluss sehen). Nach _resetPoolSettings, damit die
+            // Stufe-2-Prüfung in updateHwm die frische Pool-Konfiguration sieht.
+            await establishPositionBaseline(
+                db, pool, adapter, result.nftMint, currentPrice, { logPrefix: '[bot:open]' },
+            );
+        }
 
         await notify.positionOpened(pool, {
             priceLower: range.priceLower,
@@ -2583,7 +2805,7 @@ async function _openNewPosition(pool, adapter) {
                   ORDER BY created_at DESC LIMIT 1`
             ).get(pool.id, Date.now() - 30 * 60_000);
 
-            if (recentClose) {
+            if (recentClose && !abortedReb) {
                 // V_before korrekt in USD berechnen: close-and-reopen.js nutzte die naive
                 // Formel (amountA*price+amountB) ohne quotePrice-Faktor → falscher Wert für
                 // volatilePairs (z.B. SOL/ORCA, SOL/HYPE). _calcUsdValue gibt echten USDC-Wert.
@@ -2678,6 +2900,155 @@ async function _openNewPosition(pool, adapter) {
 
 // ─── Rebalancing ──────────────────────────────────────────────────────────────
 
+/**
+ * Welcher Teil der vor einem Rebalance geclaimten Fees wird weitergeleitet (sendTo), welcher
+ * bleibt im Wallet und gehört zum freigesetzten Kapital? Nach den Fee-Claim-Einstellungen
+ * des Pools: Auto-Compound aus → alles weiterleiten; Anteil < 100 % → den Rest weiterleiten.
+ * Ohne sendTo bleibt alles im Wallet.
+ */
+function _rebalanceFeeSplit(poolId, claimedA, claimedB) {
+    const ac       = _getFeeClaimSettings(poolId);
+    const fraction = Number.isFinite(Number(ac?.fraction))
+        ? Math.min(100, Math.max(10, Number(ac.fraction))) : 100;
+    const sendTo   = (typeof ac?.sendTo === 'string' && ac.sendTo.trim()) ? ac.sendTo.trim() : null;
+    let sendA = 0, sendB = 0;
+    if (sendTo) {
+        if (ac?.enabled === false) {
+            sendA = claimedA; sendB = claimedB;
+        } else if (fraction < 100) {
+            const f = fraction / 100;
+            sendA = claimedA * (1 - f); sendB = claimedB * (1 - f);
+        }
+    }
+    return {
+        sendTo, swapUsdc: ac?.swapToUsdc === true, sendA, sendB,
+        keepA: Math.max(0, claimedA - sendA), keepB: Math.max(0, claimedB - sendB),
+    };
+}
+
+/**
+ * Zweite Hälfte eines Rebalances nach dem Open der neuen Position: Reconcile, Residual-Sweep,
+ * Rest-Meldung, Übertrag von Höchststand und Einstiegsreferenz, Referenzmessung und die
+ * rebalance_history-Zeile mit `leftover_usdc` (Zugang der Verschiebungs-Bilanz).
+ *
+ * Aufrufer: `_doRebalance` (Open im selben Durchlauf) und `_openNewPosition`, wenn der Open
+ * eines Rebalances abgebrochen war und im nächsten Tick nachgeholt wird (LIQ#000866). Beide
+ * Pfade müssen dieselbe Buchung erzeugen, sonst fehlt der Rest in Bilanz und PnL.
+ *
+ * @returns {number} insgesamt eingesetztes Kapital (Open + Reconcile + Sweep) in USDC
+ */
+async function _finishRebalanceOpen(pool, adapter, ctx) {
+    const {
+        newPosId, nftMint, range, price, deployedUsdc, freedUsdc,
+        preExistingUsdc = 0, preExistingA = 0, preExistingB = 0,
+        oldPosition, preValue, preHwm, preEntry, preD2Armed,
+        reason, costSol, claimedA, claimedB, logPrefix,
+    } = ctx;
+
+    // 5. Reconciler: iterativ Wallet-Reste (inkl. idle USDC bei nicht-USDC-Pools)
+    //    swappen und via increaseLiquidity in die frische Position nachzahlen.
+    //    Funktioniert für alle Pool-Typen (USDC / volatilePair).
+    // Doppelter Schutz gegen Sweepen von Fremd-/Altkapital:
+    //   1. Budget-Cap (maxReconcileUsdc): nur die Differenz zwischen freigesetztem
+    //      Kapital (freedUsdc) und dem beim Open bereits deployten Betrag wird
+    //      nachgezahlt.
+    //   2. Topf-A-Baseline (preExistingA/B, nur Nicht-volatilePair im Rebalance selbst):
+    //      der vor dem Rebalance stehende Wallet-Bestand bleibt physisch unangetastet,
+    //      selbst wenn das Budget mehr zuließe.
+    const reconcileBudget = Math.max(0, freedUsdc - deployedUsdc);
+    const reconciledUsdc = await _reconcileWalletIntoPosition(pool, adapter, {
+        id:          newPosId,
+        nftMint,
+        capitalUsdc: deployedUsdc,
+        priceLower:  range.priceLower,
+        priceUpper:  range.priceUpper,
+    }, price, {
+        preExistingUsdc, maxReconcileUsdc: reconcileBudget, preExistingA, preExistingB,
+    });
+
+    // 5b. Residual-Sweep (LIQ#000841, Stufe 1): Der Reconciler lässt regelmäßig 1-3 % übrig
+    //     (98,5-%-Wallet-Cap beim Open, Abschlag je Iteration, Orca nimmt nur die bindende
+    //     Seite). Den Rest zahlt derselbe Sweep nach, der auch Cleanup-Deposits nachfasst:
+    //     absolutes Budget, CLMM-Ratio der echten Range, mehrere Runden. Budget = Rest, damit
+    //     nie mehr als das freigesetzte Kapital eingesetzt wird. Wirft nie; scheitert er,
+    //     bleibt der Rest als Verschiebung stehen und der tägliche Check holt ihn nach.
+    let sweptUsdc = 0;
+    const residualBeforeSweep = Math.max(0, freedUsdc - deployedUsdc - reconciledUsdc);
+    if (residualBeforeSweep >= SHIFT_STAGE1_MIN_USDC) {
+        const sweep = await sweepResidualIntoPosition(pool, nftMint, {
+            keypair: getKeypair(), db, adapter, currentPrice: price,
+            priceLower: range.priceLower, priceUpper: range.priceUpper,
+            budgetLeftUsdc: residualBeforeSweep,
+            ...(pool.volatilePair ? { quotePrice: _getQuotePrice(pool, db) } : {}),
+            swapSlippageBps: PRESWAP_SLIPPAGE_BPS,
+            logPrefix,
+        });
+        if (sweep && sweep.usdc > 0) {
+            sweptUsdc = sweep.usdc;
+            await _bookShiftDeposit(pool, newPosId, deployedUsdc + reconciledUsdc, sweep, 'Residual-Sweep nach Rebalance');
+            console.log(`[bot:${pool.id}] Residual-Sweep nach Rebalance: +${sweep.usdc.toFixed(2)} USDC nachinvestiert (Rest vorher ${residualBeforeSweep.toFixed(2)})`);
+        }
+    }
+
+    // 6. Pre-Flight-Guard: bleibt nach Reconcile und Sweep ein nennenswerter Rest, melden.
+    //    Der Rest ist kein Verlust (liegt im Wallet) und steht in der Verschiebungs-Bilanz;
+    //    der tägliche Check zahlt ihn ab SHIFT_TOPUP_MIN_USDC nach.
+    const totalDeployed   = deployedUsdc + reconciledUsdc + sweptUsdc;
+    const deploymentRatio = freedUsdc > 0 ? totalDeployed / freedUsdc : 1;
+    const leftoverNow     = Math.max(0, freedUsdc - totalDeployed);
+    if (shiftNeedsAlert(freedUsdc, leftoverNow)) {
+        const msg = `Rebalance: ${totalDeployed.toFixed(2)} / ${freedUsdc.toFixed(2)} USDC wieder eingesetzt (${(deploymentRatio * 100).toFixed(1)} %). ${leftoverNow.toFixed(2)} USDC liegen im Wallet und werden nachgezahlt, sobald es sich lohnt (ab ${SHIFT_TOPUP_MIN_USDC} USDC).`;
+        console.warn(`[bot:${pool.id}] ${msg}`);
+        try { await notify.info(`Rebalance ${pool.displayPair ?? pool.pair}`, msg); } catch { /* notify-Fehler nicht propagieren */ }
+    } else {
+        console.log(`[bot:${pool.id}] Deployment-Ratio OK: ${(deploymentRatio * 100).toFixed(1)}% (${totalDeployed.toFixed(2)} / ${freedUsdc.toFixed(2)} USDC)`);
+    }
+
+    // 7b. Höchststand übertragen — relativ (`hwm_flow_ratio`), nicht als absoluter
+    //     USDC-Abstand. Bis 2026-08-22 lief hier `preHwm − preValue − residual`; verlor das
+    //     Rebalancing Kapital ins Wallet, wurde der Übertrag negativ und das
+    //     `Math.max(currentUsd, …)` in updatePositionHwm() verschluckte ihn komplett — der
+    //     Höchststand landete auf dem neuen Positionswert, der aufgelaufene Abstand war weg.
+    //     Ein Residual braucht hier keinen Sonderfall mehr: schrumpft die Position, schrumpft
+    //     die Referenz im selben Verhältnis mit, der prozentuale Abstand bleibt.
+    //     Nachweis: bin/test-trailing-stop-sim.js, Gruppe D.
+    const hwmRatio = carryHwmToRebalancedPosition(db, newPosId, preValue, preHwm);
+    console.log(`[bot:${pool.id}] Höchststand übertragen: preHwm=${(preHwm ?? 0).toFixed(2)}, preValue=${(preValue ?? 0).toFixed(2)}, totalDeployed=${totalDeployed.toFixed(2)}, Abstand ${hwmRatio != null ? `${((1 - hwmRatio) * 100).toFixed(2)} %` : 'nicht übertragbar (harter Reset)'} → wird beim ersten Snapshot angewendet`);
+
+    // 7c. Zweistufiger Trailing Stop: Einstiegsreferenz + Stufe-2-Scharfschaltung mitnehmen.
+    carryEntryToRebalancedPosition(db, newPosId, preValue, preEntry, preD2Armed);
+    console.log(`[bot:${pool.id}] Trailing-Stop-Stufe übertragen: entry=${preEntry != null ? preEntry.toFixed(2) : 'n/a'} USDC, Stufe 2 ${preD2Armed ? 'scharf (bleibt scharf)' : 'noch nicht scharf'}`);
+
+    // 7d. Referenz sofort messen, statt bis zum nächsten Snapshot zu warten. Muss NACH 7b/7c
+    //     stehen: die Baseline etabliert die HWM und verbraucht dabei den gerade gesetzten
+    //     Übertrag — läge sie davor, ginge der Abstand zum alten Höchststand verloren.
+    await establishPositionBaseline(db, pool, adapter, nftMint, price, { logPrefix });
+
+    // 7. Rebalancing-Ereignis dokumentieren (nach Reconcile, damit lp_value_after bekannt ist).
+    insertRebalanceHistory(db, {
+        poolId:        pool.id,
+        reason,
+        oldPositionId: oldPosition.id,
+        newPositionId: newPosId,
+        oldTickLower:  oldPosition.tick_lower,
+        oldTickUpper:  oldPosition.tick_upper,
+        newTickLower:  range.tickLower,
+        newTickUpper:  range.tickUpper,
+        priceAtEvent:  price,
+        costSol,
+        feesClaimedA:  claimedA,
+        feesClaimedB:  claimedB,
+        lpValueBefore: preValue,
+        lpValueAfter:  totalDeployed,
+        // LIQ#000558: exakter Rest, der beim Reconcile nicht mehr reinvestiert wurde
+        // (derselbe Wert, der oben ggf. den Underdeployment-Hinweis auslöst) — bislang
+        // nur transient geloggt, jetzt dauerhaft pro Rebalance festgehalten.
+        leftoverUsdc:  leftoverNow,
+    });
+
+    return totalDeployed;
+}
+
 async function _doRebalance(pool, position, state, adapter, reason = 'out_of_range') {
     // Cooldown prüfen (manuelle Trigger ignorieren den Cooldown)
     const cooldownMin = config.rebalance.cooldownMinutes;
@@ -2741,6 +3112,9 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
 
     // 1. Fees zuerst claimen (sind sonst verloren)
     let claimedA = 0, claimedB = 0;
+    // Davon im Wallet verblieben (nicht per sendTo weitergeleitet) — Teil des freigesetzten
+    // Kapitals, das der Rebalance wieder einsetzen darf (LIQ#000841).
+    let claimedKeepA = 0, claimedKeepB = 0;
     if (state.feesOwedA > 0 || state.feesOwedB > 0) {
         try {
             const feeResult = await adapter.collectFees(pool, position.nft_mint, {
@@ -2748,6 +3122,8 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
             });
             claimedA = feeResult.amountA;
             claimedB = feeResult.amountB;
+            claimedKeepA = claimedA;
+            claimedKeepB = claimedB;
             const rebPrice = getPoolStats(db, pool.id, 1)[0]?.price ?? null;
             const rebUsdValue = rebPrice != null ? _calcUsdValue(pool, db, rebPrice, claimedA, claimedB) : null;
             insertFeeHistory(db, {
@@ -2770,27 +3146,11 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
             // _reinvest entfällt hier – der Reinvest-Anteil der Fees geht beim
             // Reopen automatisch über die Wallet-Balance in die neue Position ein.
             lastFeeClaim.set(pool.id, Date.now()); // verhindert Doppel-Claim im nächsten Zyklus
-            const rebAc       = _getFeeClaimSettings(pool.id);
-            const rebFraction = Number.isFinite(Number(rebAc?.fraction))
-                ? Math.min(100, Math.max(10, Number(rebAc.fraction))) : 100;
-            const rebSendTo   = (typeof rebAc?.sendTo === 'string' && rebAc.sendTo.trim())
-                ? rebAc.sendTo.trim() : null;
-            const rebSwapUsdc = rebAc?.swapToUsdc === true;
-            const rebAcEnabled = rebAc?.enabled !== false;
-
-            if (rebSendTo) {
-                let sendA, sendB;
-                if (!rebAcEnabled) {
-                    // AC deaktiviert → alle Fees weiterleiten
-                    sendA = claimedA; sendB = claimedB;
-                } else if (rebFraction < 100) {
-                    // Reinvest-Anteil verbleibt in Wallet, Rest weiterleiten
-                    const f = rebFraction / 100;
-                    sendA = claimedA * (1 - f); sendB = claimedB * (1 - f);
-                }
-                if (sendA > 0 || sendB > 0) {
-                    await _claimFeeSendRemainder(pool, sendA, sendB, rebSendTo, rebSwapUsdc);
-                }
+            const split = _rebalanceFeeSplit(pool.id, claimedA, claimedB);
+            if (split.sendA > 0 || split.sendB > 0) {
+                claimedKeepA = split.keepA;
+                claimedKeepB = split.keepB;
+                await _claimFeeSendRemainder(pool, split.sendA, split.sendB, split.sendTo, split.swapUsdc);
             }
         } catch (err) {
             console.error(`[bot:${pool.id}] Fee-Claim vor Rebalancing fehlgeschlagen: ${err.message}`);
@@ -3003,12 +3363,24 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         const freedB = Math.max(0, walletBRaw - baseWalletB);
         newCapital = _calcUsdValue(pool, db, newStats.price, freedA, freedB);
     } else {
-        // volatilePair: unverändertes Verhalten. position.capital_usdc = Wert beim
-        // Öffnen; nimm das Minimum (Wallet kann durch IL weniger enthalten als beim
-        // Öffnen investiert wurde).
-        newCapital = position.capital_usdc > 0
-            ? Math.min(position.capital_usdc, walletCapital)
-            : walletCapital;
+        // volatilePair (LIQ#000841): freigesetzt ist, was der Close tatsächlich geliefert
+        // hat (Close-Mengen) plus die im Wallet verbliebenen geclaimten Fees, bewertet zum
+        // aktuellen Preis. Gedeckelt auf den Wallet-Wert (Slippage, Rundung). Eine Wallet-
+        // Baseline gibt es hier nicht (SOL/Quote-Token gehören auch anderen Pools), die
+        // bekannten Close-Mengen sind der Deckel.
+        // Bis 20.09.2026: min(position.capital_usdc, Wallet). capital_usdc wächst durch
+        // Fee-Reinvest nie, der Zuwachs blieb bei jedem Rebalance im Wallet (BNB/SOL
+        // 18.09.: 20,3 von 320,7 USDC) — und war in leftover_usdc unsichtbar, weil er VOR
+        // dessen Berechnung abgeschnitten wurde.
+        const freedKnownUsd = _calcUsdValue(
+            pool, db, newStats.price,
+            (Number(closeAmountA) || 0) + claimedKeepA,
+            (Number(closeAmountB) || 0) + claimedKeepB,
+        );
+        // Close-Mengen unbekannt (Adapter lieferte nichts): altes Verhalten als Rückfall.
+        newCapital = volatileRebalanceCapital({
+            freedKnownUsd, walletUsd: walletCapital, oldCapitalUsd: position.capital_usdc,
+        });
     }
 
     console.log(`[bot:${pool.id}] Rebalance-Kapital aus Wallet: ${newCapital.toFixed(2)} USDC`);
@@ -3203,85 +3575,17 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         notify.minimumValueCleared(pool, minValueUsd, 'rebalance').catch(() => {});
     }
 
-    // 5. Reconciler: iterativ Wallet-Reste (inkl. idle USDC bei nicht-USDC-Pools)
-    //    swappen und via increaseLiquidity in die frische Position nachzahlen.
-    //    Funktioniert für alle Pool-Typen (USDC / volatilePair).
-    // Doppelter Schutz gegen Sweepen von Fremd-/Altkapital:
-    //   1. Budget-Cap (maxReconcileUsdc): nur die Differenz zwischen freigesetztem
-    //      Kapital (newCapital) und dem beim Open bereits deployten Betrag wird
-    //      nachgezahlt.
-    //   2. Topf-A-Baseline (preExistingA/B, nur Nicht-volatilePair): der vor dem
-    //      Rebalance stehende Wallet-Bestand bleibt physisch unangetastet, selbst
-    //      wenn das Budget mehr zuließe. newCapital ist hier bereits = freigesetztes
-    //      Kapital (Wallet über Baseline), nicht der alte Buchwert — der Pool wird
-    //      also nicht mehr getrimmt.
-    const reconcileBudget = Math.max(0, newCapital - rebCapitalUsdc);
-    const reconciledUsdc = await _reconcileWalletIntoPosition(pool, adapter, {
-        id:          newPosId,
-        nftMint:     openResult.nftMint,
-        capitalUsdc: rebCapitalUsdc,
-        priceLower:  newRange.priceLower,
-        priceUpper:  newRange.priceUpper,
-    }, newStats.price, {
-        preExistingUsdc, maxReconcileUsdc: reconcileBudget,
+    // 5.–7. Reconcile, Residual-Sweep, Rest-Meldung, HWM-/Einstiegsübertrag, Referenz und
+    //       rebalance_history — gemeinsam mit dem nachgeholten Open (LIQ#000866).
+    const totalDeployed = await _finishRebalanceOpen(pool, adapter, {
+        newPosId, nftMint: openResult.nftMint, range: newRange, price: newStats.price,
+        deployedUsdc: rebCapitalUsdc, freedUsdc: newCapital,
+        preExistingUsdc,
         preExistingA: _preserveBaseline ? baseWalletA : 0,
         preExistingB: _preserveBaseline ? baseWalletB : 0,
-    });
-
-    // 6. Pre-Flight-Guard: wenn weniger als 90% des Soll-Kapitals deployed wurden,
-    //    laut Alarm schlagen — sonst bleibt das Kapital unbemerkt im Wallet liegen.
-    const totalDeployed   = rebCapitalUsdc + reconciledUsdc;
-    const deploymentRatio = newCapital > 0 ? totalDeployed / newCapital : 1;
-    if (deploymentRatio < 0.90) {
-        const msg = `Rebalance-Underdeployment: ${totalDeployed.toFixed(2)} / ${newCapital.toFixed(2)} USDC deployed (${(deploymentRatio * 100).toFixed(1)}%). Kapital liegt idle im Wallet.`;
-        console.warn(`[bot:${pool.id}] ${msg}`);
-        try { await notify.info(`Rebalance ${pool.displayPair ?? pool.pair}`, msg); } catch { /* notify-Fehler nicht propagieren */ }
-    } else {
-        console.log(`[bot:${pool.id}] Deployment-Ratio OK: ${(deploymentRatio * 100).toFixed(1)}% (${totalDeployed.toFixed(2)} / ${newCapital.toFixed(2)} USDC)`);
-    }
-
-    // 7b. Höchststand übertragen — relativ (`hwm_flow_ratio`), nicht als absoluter
-    //     USDC-Abstand. Bis 2026-08-22 lief hier `preHwm − preValue − residual`; verlor das
-    //     Rebalancing Kapital ins Wallet, wurde der Übertrag negativ und das
-    //     `Math.max(currentUsd, …)` in updatePositionHwm() verschluckte ihn komplett — der
-    //     Höchststand landete auf dem neuen Positionswert, der aufgelaufene Abstand war weg.
-    //     Ein Residual braucht hier keinen Sonderfall mehr: schrumpft die Position, schrumpft
-    //     die Referenz im selben Verhältnis mit, der prozentuale Abstand bleibt.
-    //     Nachweis: bin/test-trailing-stop-sim.js, Gruppe D.
-    const hwmRatio = carryHwmToRebalancedPosition(db, newPosId, preValue, preHwm);
-    console.log(`[bot:${pool.id}] Höchststand übertragen: preHwm=${(preHwm ?? 0).toFixed(2)}, preValue=${(preValue ?? 0).toFixed(2)}, totalDeployed=${totalDeployed.toFixed(2)}, Abstand ${hwmRatio != null ? `${((1 - hwmRatio) * 100).toFixed(2)} %` : 'nicht übertragbar (harter Reset)'} → wird beim ersten Snapshot angewendet`);
-
-    // 7c. Zweistufiger Trailing Stop: Einstiegsreferenz + Stufe-2-Scharfschaltung mitnehmen.
-    carryEntryToRebalancedPosition(db, newPosId, preValue, preEntry, preD2Armed);
-    console.log(`[bot:${pool.id}] Trailing-Stop-Stufe übertragen: entry=${preEntry != null ? preEntry.toFixed(2) : 'n/a'} USDC, Stufe 2 ${preD2Armed ? 'scharf (bleibt scharf)' : 'noch nicht scharf'}`);
-
-    // 7d. Referenz sofort messen, statt bis zum nächsten Snapshot zu warten. Muss NACH 7b/7c
-    //     stehen: die Baseline etabliert die HWM und verbraucht dabei den gerade gesetzten
-    //     Übertrag — läge sie davor, ginge der Abstand zum alten Höchststand verloren.
-    await establishPositionBaseline(
-        db, pool, adapter, openResult.nftMint, newStats.price, { logPrefix: '[bot:rebalance]' },
-    );
-
-    // 7. Rebalancing-Ereignis dokumentieren (nach Reconcile, damit lp_value_after bekannt ist).
-    insertRebalanceHistory(db, {
-        poolId:        pool.id,
-        reason,
-        oldPositionId: position.id,
-        newPositionId: newPosId,
-        oldTickLower:  position.tick_lower,
-        oldTickUpper:  position.tick_upper,
-        newTickLower:  newRange.tickLower,
-        newTickUpper:  newRange.tickUpper,
-        priceAtEvent:  newStats.price,
-        costSol:       closeFee + openRebFee,
-        feesClaimedA:  claimedA,
-        feesClaimedB:  claimedB,
-        lpValueBefore: preValue,
-        lpValueAfter:  totalDeployed,
-        // LIQ#000558: exakter Rest, der beim Reconcile nicht mehr reinvestiert wurde
-        // (derselbe Wert, der oben ggf. den Underdeployment-Hinweis auslöst) — bislang
-        // nur transient geloggt, jetzt dauerhaft pro Rebalance festgehalten.
-        leftoverUsdc:  Math.max(0, newCapital - totalDeployed),
+        oldPosition: position, preValue, preHwm, preEntry, preD2Armed,
+        reason, costSol: closeFee + openRebFee, claimedA, claimedB,
+        logPrefix: '[bot:rebalance]',
     });
 
     console.log(`[bot:${pool.id}] Rebalancing abgeschlossen → neue Range ${newRange.priceLower.toFixed(2)} – ${newRange.priceUpper.toFixed(2)} (Grund: ${reason})`);
@@ -3460,7 +3764,7 @@ async function _handleFeeClaimReward(pool, position, amountA, amountB, adapter, 
         // unangetastet — die Reserve wird aus dem Anteil bedient, der ohnehin im
         // System bleiben sollte, nicht aus einer Auszahlung.
         const held     = await _holdBackFeesForSol(pool, amountA * f, amountB * f, price);
-        await _reinvest(pool, position, held.amountA, held.amountB, adapter, price, state);
+        await _reinvestWithPending(pool, position, held.amountA, held.amountB, adapter, price, state);
 
         if (fraction < 100 && sendTo) {
             const remA = amountA * (1 - f);
@@ -3488,6 +3792,7 @@ async function _claimFeeSendRemainder(pool, amountA, amountB, sendTo, swapToUsdc
                 sendTo,
                 logPrefix,
                 slippageBps: config.rm.swapSlippageBps,
+                db,
             });
         }
         const transferTxHash = await executeTransferStep(pool, {
@@ -3622,20 +3927,29 @@ const _collectFeesFailCount   = new Map();
 // (z.B. Helius 502) heilen sich meist beim nächsten Zyklus selbst (LB#0257/Core#0256).
 const _positionStateFailCount = new Map();
 
-async function _reinvest(pool, position, amountA, amountB, adapter, price = null, state = null) {
-    if (amountA <= 0 && amountB <= 0) return;
+/**
+ * Reinvest-Ergebnis für die Vormerkung (LIQ#000868):
+ *   'ok'    – eingezahlt (Überschuss der nicht bindenden Seite bleibt wie immer im Wallet)
+ *   'dust'  – Quote 0, Staub bleibt im Wallet
+ *   'retry' – TX gescheitert oder Wallet-Seite leer: Menge vormerken und nachholen
+ *   'hold'  – bewusst nicht reinvestiert (SOL-Guard, fremder Exit): nicht vormerken,
+ *             die Tokens gehören dem SOL-Topup bzw. dem Exit
+ * @returns {Promise<{status: 'ok'|'dust'|'retry'|'hold'|'none', reason?: string}>}
+ */
+async function _reinvest(pool, position, amountA, amountB, adapter, price = null, state = null, note = null) {
+    if (amountA <= 0 && amountB <= 0) return { status: 'none' };
 
     // 🔒 LIQ#0316: gehört tokenA/tokenB gerade zu einem Exit auf einem ANDEREN Pool,
     // kein Reinvest — sonst würde fremdes Exit-Kapital hier reinvestiert.
     const reinvestBlock = foreignExitBlock(db, pool, `[bot:${pool.id}]`);
     if (reinvestBlock.blocked) {
-        console.log(`[bot:${pool.id}] Reinvest übersprungen: ${reinvestBlock.reason}`);
-        return;
+        console.log(`[bot:${pool.id}] Reinvest übersprungen: ${reinvestBlock.reason} (Fees bleiben im Wallet, kein Nachholen)`);
+        return { status: 'hold', reason: 'fremder Exit' };
     }
 
     // Reinvest nur wenn SOL-Reserve erfüllt ist – bei niedrigem SOL wird geclaimed aber nicht reinvestiert
     // (zweistufig mit Topup-Versuch seit 2026-07-30, siehe _ensureSolForInvest)
-    if (await _ensureSolForInvest(pool.id, 'Reinvest') == null) return;
+    if (await _ensureSolForInvest(pool.id, 'Reinvest') == null) return { status: 'hold', reason: 'SOL-Reserve' };
 
     // Tatsächliche Wallet-Balance lesen und auf geclaimte Menge cappen.
     // Verhindert "insufficient funds" wenn die Ratio des Pools von der Claim-Ratio abweicht.
@@ -3656,7 +3970,7 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
 
     if (useA <= 0 || useB <= 0) {
         console.log(`[bot:${pool.id}] Reinvest abgebrochen: Token(s) nicht verfügbar (useA=${useA.toFixed(6)} useB=${useB.toFixed(4)})`);
-        return;
+        return { status: 'retry', reason: 'Token-Seite leer' };
     }
 
     console.log(`[bot:${pool.id}] Reinvest: ${useA.toFixed(6)} TokenA + ${useB.toFixed(2)} TokenB` +
@@ -3668,17 +3982,26 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
         // txHash === null: Quote war 0 (Staub) – orca.js hat übersprungen, kein DB-Eintrag nötig
         if (!result.txHash) {
             console.log(`[bot:${pool.id}] Reinvest übersprungen: Betrag zu gering (Staub bleibt im Wallet)`);
-            return;
+            return { status: 'dust' };
         }
 
         const reinvestFee = await getTxFee(result.txHash);
+        // LIQ#000893: increaseLiquidity zahlt nur die bindende Seite in voller Höhe ein,
+        // der Überschuss der anderen Seite bleibt im Wallet. useA/useB sind die geclaimte
+        // (angefragte) Menge, nicht die tatsächlich eingezahlte – result.tokenEstA/B (Ist-Mengen
+        // aus den TX-Legs, siehe orca.js) sind die richtige Quelle für Buchung und PnL.
+        const bookedA = result.tokenEstA != null ? result.tokenEstA : useA;
+        const bookedB = result.tokenEstB != null ? result.tokenEstB : useB;
+        if (result.tokenEstA == null || result.tokenEstB == null) {
+            console.warn(`[bot:${pool.id}] Reinvest: tokenEstA/B fehlt im Adapter-Ergebnis – Buchung mit geclaimter statt eingezahlter Menge (Überschuss-Bug LIQ#000893 nicht vermeidbar)`);
+        }
         insertTransaction(db, {
             poolId: pool.id, type: 'reinvest',
-            amountA: useA, amountB: useB,
+            amountA: bookedA, amountB: bookedB,
             usdValue: price != null
-                ? _calcUsdValue(pool, db, price, useA, useB)
+                ? _calcUsdValue(pool, db, price, bookedA, bookedB)
                 : null,
-            txHash: result.txHash, txFeeSol: reinvestFee, note: null,
+            txHash: result.txHash, txFeeSol: reinvestFee, note,
         });
 
         // Liquidität im State sofort aktualisieren, damit der folgende Snapshot
@@ -3690,6 +4013,7 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
 
         console.log(`[bot:${pool.id}] Reinvest TX: ${result.txHash}`);
         _reinvestFailCount.delete(pool.id); // Erfolg → Zähler zurücksetzen
+        return { status: 'ok' };
     } catch (err) {
         // 0x17b5 = PriceSlippageOutOfBounds: Preis bewegt sich zwischen Quote und TX-Ausführung.
         // Selbstlösend beim nächsten Reinvest-Zyklus — kein Telegram-Alarm nötig.
@@ -3697,8 +4021,8 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
         // Sonderfall: Orca common-sdk wirft `new Error(confirmTxErr.toString())` — wenn
         // confirmTxErr ein Plain-Object ist (Solana TransactionError), liefert toString()
         // "[object Object]". Der eigentliche Fehlercode ist dann unbekannt, aber das Muster
-        // deutet auf einen transienten TX-Fehler hin (Slippage/Blockhash). Reinvest wird
-        // beim nächsten Claim-Zyklus automatisch wiederholt.
+        // deutet auf einen transienten TX-Fehler hin (Slippage/Blockhash). Wiederholt wird
+        // über die Vormerkung (LIQ#000868): beim nächsten Claim oder im Nachhol-Versuch.
         const msg = typeof err.message === 'string' ? err.message : '';
         const isTransient =
             err.name === 'TransactionExpiredBlockheightExceededError' ||
@@ -3708,7 +4032,7 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
             msg === '[object Object]';
         const errDesc = msg || JSON.stringify(err);
         if (isTransient) {
-            console.warn(`[bot:${pool.id}] increaseLiquidity transient (wird im nächsten Zyklus wiederholt): ${errDesc.split('\n')[0]}`);
+            console.warn(`[bot:${pool.id}] increaseLiquidity transient (Menge wird vorgemerkt und nachgeholt): ${errDesc.split('\n')[0]}`);
             _reinvestFailCount.delete(pool.id); // transient zählt nicht als bestätigter Fehler
         } else {
             const fails = (_reinvestFailCount.get(pool.id) ?? 0) + 1;
@@ -3720,7 +4044,60 @@ async function _reinvest(pool, position, amountA, amountB, adapter, price = null
                 console.warn(`[bot:${pool.id}] increaseLiquidity Fehler (1/2 – warte auf Bestätigung im nächsten Zyklus): ${errDesc.split('\n')[0]}`);
             }
         }
+        return { status: 'retry', reason: errDesc.split('\n')[0].slice(0, 200) };
     }
+}
+
+/**
+ * Reinvest mit Vormerkung (LIQ#000868): nimmt eine noch offene, gültige Vormerkung zum
+ * neuen Claim-Anteil dazu, und merkt bei 'retry' die gesamte Menge neu vor. Aufrufer:
+ * _handleFeeClaimReward (neuer Claim) und _retryPendingReinvest (ohne Claim, amountA/B = 0).
+ *
+ * @returns {Promise<string>} Status aus _reinvest
+ */
+async function _reinvestWithPending(pool, position, amountA, amountB, adapter, price, state, { standalone = false } = {}) {
+    const now     = Date.now();
+    const pending = getPendingReinvest(db, pool.id);
+    let valid = false;
+    if (pending) {
+        const v = pendingValidity(pending, { now, chainStartMs: chainStartOpenedAt(db, position.id, position.opened_at) });
+        valid = v.valid;
+        if (!valid) {
+            console.log(`[bot:${pool.id}] Ausstehender Reinvest verworfen (${v.reason}): ${pending.amount_a.toFixed(6)} TokenA + ${pending.amount_b.toFixed(4)} TokenB bleiben im Wallet`);
+            clearPendingReinvest(db, pool.id);
+        }
+    }
+    const m = mergeWithPending(amountA, amountB, pending, valid, now);
+    if (valid) {
+        console.log(`[bot:${pool.id}] Ausstehender Reinvest wird nachgeholt: +${m.carriedA.toFixed(6)} TokenA + ${m.carriedB.toFixed(4)} TokenB`
+            + ` (vorgemerkt seit ${new Date(pending.first_at).toISOString()}, ${standalone ? `Versuch ${pending.attempts + 1}` : 'mit neuem Claim'})`);
+    }
+
+    const res = await _reinvest(pool, position, m.amountA, m.amountB, adapter, price, state, valid ? 'nachgeholt' : null);
+
+    const usd  = res.status === 'retry' && price != null ? _calcUsdValue(pool, db, price, m.amountA, m.amountB) : null;
+    const next = pendingAfterOutcome({
+        status: res.status, merged: m, pending, valid, standalone,
+        reason: res.reason ?? null, usdValue: usd, poolId: pool.id, now,
+    });
+    if (next.action === 'set') {
+        setPendingReinvest(db, next.row);
+        console.warn(`[bot:${pool.id}] Reinvest vorgemerkt: ${m.amountA.toFixed(6)} TokenA + ${m.amountB.toFixed(4)} TokenB`
+            + (usd != null ? ` (~${usd.toFixed(2)} USDC)` : '') + ` — Grund: ${res.reason}`);
+    } else if (next.action === 'clear') {
+        clearPendingReinvest(db, pool.id);
+    }
+    return res.status;
+}
+
+/**
+ * Nachhol-Versuch ohne neuen Claim (LIQ#000868). Aufruf nur unter dem Bot-Op-Lock, in Range
+ * und ohne laufenden Cleanup. @returns {Promise<boolean>} true, wenn eingezahlt wurde.
+ */
+async function _retryPendingReinvest(pool, position, state, adapter) {
+    const price  = getPoolStats(db, pool.id, 1)[0]?.price ?? null;
+    const status = await _reinvestWithPending(pool, position, 0, 0, adapter, price, state, { standalone: true });
+    return status === 'ok';
 }
 
 // ─── Portfolio-Snapshot ───────────────────────────────────────────────────────
@@ -4021,8 +4398,7 @@ async function mainLoop() {
         // Pyth-Preise für Quote-Tokens einmal pro Zyklus aktualisieren
         await refreshReferencePrices(db);
 
-        // Periodischer Retry unvollständiger Exit-Ausführungen (Score-Limit/Ranking/
-        // Trailing-Stop). Diese Resume-Funktionen liefen bisher NUR beim Bot-Start –
+        // Periodischer Retry unvollständiger Exit-Ausführungen (Ranking/Trailing-Stop). Diese Resume-Funktionen liefen bisher NUR beim Bot-Start –
         // ein Pool, der mitten in einer Exit-Ausführung (z.B. transienter Blockhash-
         // Fehler) auf active=false gesetzt wurde, fiel danach komplett aus dem
         // Hauptloop (siehe "Stats für inaktive Pools" unten) und hing bis zum
@@ -4030,11 +4406,6 @@ async function mainLoop() {
         // RESUME_RETRY_INTERVAL_MS erneut versuchen, unabhängig vom pool.active-Status.
         if (Date.now() - lastResumeRetry >= RESUME_RETRY_INTERVAL_MS) {
             lastResumeRetry = Date.now();
-            try {
-                await resumePendingScoreLimitExecutions(db);
-            } catch (err) {
-                console.error(`[bot] Score-Limit-Resume (periodisch) fehlgeschlagen: ${err.message}`);
-            }
             try {
                 await resumePendingTsExecutions(db);
             } catch (err) {
@@ -4142,7 +4513,7 @@ async function mainLoop() {
             if (!running) break;
 
             // TVL-Schutz-Check: höchste Priorität (TVL-Einbruch ist das gravierendste
-            // Signal). Läuft vor Score-Limit / Trailing-Stop.
+            // Signal). Läuft vor dem Trailing-Stop.
             // Bei L2 (Voll-Exit) wird der Pool deaktiviert → continue.
             // Bei L1 (Teil-Abzug) bleibt der Pool aktiv → KEIN continue, normales
             // Processing läuft weiter (Position besteht noch).
@@ -4163,28 +4534,7 @@ async function mainLoop() {
                 continue;
             }
 
-            // Score-Limit-Check: vor normalem Pool-Processing.
-            // isInRange = false wenn Pool bereits in einem laufenden OOR-Zustand ist
-            // (outOfRangeSince gesetzt vom vorherigen Tick) → Counter einfrieren.
-            const poolIsOor = outOfRangeSince.has(pool.id);
-            try {
-                if (shouldTriggerScoreLimit(pool, db, !poolIsOor)) {
-                    console.log(`[bot:${pool.id}] Score-Limit-Trigger erkannt – starte Score-Limit-Ausführung`);
-                    await executeScoreLimit(pool, db);
-                    // Pool wurde deaktiviert – Dashboard sofort aktualisieren, dann überspringen.
-                    await refreshAfterAction(db, { log: msg => console.log(`[bot:${pool.id}] ${msg}`) });
-                    lastExport.ts = Date.now();
-                    continue;
-                }
-                // Counter ist jetzt aktuell → Vorwarnung prüfen (feuert bei count = 1)
-                await checkScoreLimitWarning(pool, db, !poolIsOor).catch(() => {});
-            } catch (err) {
-                console.error(`[bot:${pool.id}] Score-Limit-Ausführung fehlgeschlagen: ${err.message}`);
-                continue;
-            }
-
-
-            // Trailing-Stop-Check (1/2): nach Score-Limit, vor normalem Pool-Processing.
+            // Trailing-Stop-Check (1/2): nach TVL-Schutz, vor normalem Pool-Processing.
             // Bewertet den Snapshot des vorigen Zyklus — fängt einen Trigger ab, bevor
             // Kosten für Claim/Rebalance in einen Pool fließen, der ohnehin verlassen wird.
             if (await _trailingStopCheck(pool)) continue;

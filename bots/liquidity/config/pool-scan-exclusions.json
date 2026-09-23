@@ -13,22 +13,40 @@
       "addedAt": "2026-09-08"
     },
     {
-      "address": "GVJ3uPdWMQto2NeC3KPcxGGZAUDGgxTWYQ519b7YKAyy",
-      "pair": "ZCAT/SOL",
-      "reason": "LIQ#0485 (2026-09-09): Token-2022 (tokenB, ZCAT/\"Anonymous Cat\" trägt zusätzlich transferFeeConfig) + adaptiveFeeEnabled — beide Abbruchkriterien, kein xStock-Ausnahmemuster (reiner Meme-Coin). hasWarning:true von Orca gesetzt; empirisch geprüft (Stichprobe aus 23 Pools, 0/15 eigene Bestandspools mit Warning) korreliert das Flag hier mit fehlender Preishistorie: 8 von 14 6h-Slots in priceHistory7d leer, Pool erst ~4 Tage alt. 24h-Volumen (800.495 USDC) macht 87,5% des gesamten 7d-Volumens aus (7d=30d-Volumen identisch) — Einmal-Spike-Muster wie bei ANSEM/SOL. Preis schwankte zuletzt zwischen 720 und 1145 (≈59% Spanne).",
-      "addedAt": "2026-09-09"
-    },
-    {
-      "address": "6ash7NazTfoeszf7UkKufy8JLTZyaJJtCdkWvsjwpb1d",
-      "pair": "STONK/SOL (0,16 %-Tier)",
-      "reason": "LIQ#0527: Duplikat-Pool zum bereits produktiven liq-stonk-sol (AfrddTGY…, 0,65 %-Tier). Kein Token-2022, kein hasWarning — aber Liquidität liegt eindeutig im Bestandspool, nicht hier (Gegenbeispiel zum HYPE/USDC-Präzedenzfall): TVL 1,79 Mio. vs. 174,8k USDC, 24h-Volumen 8,996 Mio. vs. 328,2k USDC im Kandidaten (Stand 2026-09-10). Ein Import würde Kapital in die deutlich flachere, weniger gehandelte Instanz desselben Paars lenken, keinen Zusatznutzen bringen.",
-      "addedAt": "2026-09-10"
-    },
-    {
       "address": "AFdizLL2M716aPcV8gu4azEL3JxFpT7wWFgjVwNU3RNm",
       "pair": "RUSH/USDC",
-      "reason": "LIQ#0534: kein Token-2022 (beide Seiten Standard-SPL), hasWarning:false — aber priceHistory7d nur 2 von 14 Slots gefuellt (Pool <1 Tag alt, 24h=7d=30d-Volumen identisch bestaetigt das) UND Preis brach in dieser kurzen Zeit von 129,67 auf 54,13 USDC ein (-58% in ~12h). Klassisches Pump-and-Dump-Muster trotz hasWarning:false — das Flag ist laut KB-Checkliste kein Freibrief, wenn andere rote Flaggen vorliegen.",
+      "reason": "LIQ#0534, neu bewertet 2026-09-21 (LIQ#000855): Preishistorie jetzt 14/14, der Preis hat sich bei 42-50 USDC stabilisiert (Ersteinbruch von 129,67 auf 54,13 bleibt Pump-and-Dump-Muster). adaptiveFeeEnabled, kein Token-2022, hasWarning false. Aber das Handelsinteresse ist verpufft: 24h-Volumen 63k gegen einen 7d-Tagesschnitt von 300k, Fees24h 447 USDC bei 537k TVL. Kein Grund zur Aufnahme, bei nachhaltig steigendem Volumen erneut ansehen.",
       "addedAt": "2026-09-11"
+    },
+    {
+      "address": "D3P1NfTww6ib5bW885XypnHTho1BmtyAq9saFgfzjbyw",
+      "pair": "EMBER/SOL",
+      "reason": "LIQ#0564, neu bewertet 2026-09-21 (LIQ#000855): Preishistorie jetzt 14/14, aber hasWarning weiterhin true, adaptiveFeeEnabled, Preis schwankt stark (4350 bis 12640 in 7 Tagen). TVL auf 148k gefallen (vorher 358k), 24h-Volumen nur 12k gegen 1,08 Mio. im 7d-Fenster, also Einmal-Spike-Muster. Bleibt blacklist.",
+      "addedAt": "2026-09-12"
+    },
+    {
+      "address": "G1vH3TjRLfYebrPykMJDJ4yjrircGWsBbXUMQwtb3U5e",
+      "pair": "EDEL/SOL",
+      "reason": "LIQ#0641: kein Token-2022 (beide Seiten Standard-SPL), aber adaptiveFeeEnabled:true (Basis-Tier 2%, tickSpacing 256) + hasWarning:true. 7d-Volumen = 30d-Volumen (148.071 USDC identisch) — Pool jünger als 30 Tage, gesamter Handelsumsatz fiel in die letzten 7 Tage. Preis fällt in priceHistory7d monoton von 10291 auf 7426 USDC (-27,8% über 7 Tage, davon -12,2% allein im letzten 24h-Fenster) — kein Einmal-Spike, sondern anhaltender Abwärtstrend bei ~251k USDC TVL. Mehrere unabhängige rote Flaggen bei hasWarning:true → blacklist statt maybeLater.",
+      "addedAt": "2026-09-14"
+    },
+    {
+      "address": "5zpyutJu9ee6jFymDGoK7F6S5Kczqtc9FomP3ueKuyA9",
+      "pair": "BONK/SOL (0,05 %-Tier)",
+      "reason": "LIQ#000683: Duplikat-Pool zum produktiven liq-bonk-sol (BqnpCd…, 1 %-Tier). Kein Token-2022, kein adaptiveFee, kein hasWarning — der Kandidat hat zwar mehr TVL (280k vs. 136k USDC) und weit mehr Volumen (24h 2,79 Mio. vs. 61k USDC), verdient je TVL aber ein Vielfaches weniger: Fees 7d 3.205 vs. 16.448 USDC, 30d 6.192 vs. 18.339 USDC (7d-Rendite auf TVL 1,1 % vs. 12,1 %). Hohes Volumen bei Mini-Fee-Tier ist Arbitrage-Durchlauf, kein Zusatznutzen für LP-Kapital (Präzedenzfall STONK/SOL 0,16 %). Stand 2026-09-15.",
+      "addedAt": "2026-09-15"
+    },
+    {
+      "address": "Fg2LFEoxyMPgNX6MtS5f56izkUdcnWJHMBpqXChzTisE",
+      "pair": "SOL/EDEL",
+      "reason": "Regel 7 (strukturell uninteressant unabhängig vom technischen Blocker): automatische Einstufung regel-5-jung traf mit frischen Daten nicht mehr zu (priceHistory7d vollständig 14/14 gefüllt, kein Jung-Pool-Lückenmuster) - Prüfskript meldet dafür jetzt keine-regel. Eigene fachliche Prüfung: Preis fällt über die GESAMTE 7-Tage-Historie kontinuierlich (SOL-Ratio 9839 auf 3853, -61%), kein auf ein einzelnes 12h-Fenster konzentrierter Ausreißer wie beim SILV-Präzedenzfall (LIQ#0534). Turnover niedrig (0,65x TVL), Fee-Yield rückläufig. WebSearch (claude-code, siehe Ticket-Notiz) fand keinen belastbaren Nachweis für ein seriöses Edel-Projekt auf dieser Solana-Adresse (nur unverwandtes EDEL-Token auf Base-Chain). Struktureller Crash über die volle Historie ohne erkennbaren Emittenten - kein plausibler Anlagefall.",
+      "addedAt": "2026-09-16"
+    },
+    {
+      "address": "HFCMZM2NiLG74Fsx15VL3WFn5pR2ZxDNuXe1STntE8oh",
+      "pair": "AVAX/USDC",
+      "reason": "LIQ#000861, Regel 4 (adaptiveFee + hasWarning + weitere rote Flagge), Orca-API-Stand 2026-09-21: adaptiveFeeEnabled, hasWarning:true, Fee-Tier 1 %. Pool ist maximal ~1 Tag alt (Volumen 24h 3,55 Mio = 7d = 30d) und macht an einem Tag 157k USDC Fees auf 245k USDC TVL (Turnover 14,5x, Fee-Rendite 64 % der TVL pro Tag) - kein nachhaltiger Wert, Anlauf-/Wash-Muster. Kein Token-2022.",
+      "addedAt": "2026-09-21"
     }
   ],
   "maybeLater": [
@@ -51,28 +69,10 @@
       "addedAt": "2026-08-02"
     },
     {
-      "address": "4AFAkCSkSNmra64irggEFd8ZtF4WCtFe51qVaFFNBL2D",
-      "pair": "PUMP/USDC",
-      "reason": "Token-2022 (tokenA, zusätzlich transferHook-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster. Anderer Whirlpool als der bestehende liq-pump-sol (SOL/PUMP, adaptiveFeeEnabled:false, statisch) — gleicher Token, aber andere Pool-Instanz mit dynamischer Fee. TVL ~224k USDC, Fees24h ~1026 USDC. Aktuell keine Kapazität, den Fix umzusetzen.",
-      "addedAt": "2026-08-02"
-    },
-    {
       "address": "yXQzwv3hGxpEyaxPtbsQJdY31vjfh8E6fuVoGvYshio",
       "pair": "WINGS/USDC",
       "reason": "Token-2022 (tokenA, WINGS, metadataPointer/tokenMetadata-Extension) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (WINGS = Wingbits, DePIN-Flugtracking-Token, kein Backed-Finance-Token). TVL ~332.7k USDC, Fees24h ~1654 USDC. Volumenmuster auffällig: 24h-Volumen (185.9k) macht bereits 71% des 7d-Volumens (260.3k) aus, volumeDelta 24h ≈ +204% — Indiz für Einmal-Spike statt stetiger Nachfrage, bei erneuter Prüfung gegenchecken. Aktuell keine Kapazität, den Fix umzusetzen.",
       "addedAt": "2026-08-07"
-    },
-    {
-      "address": "5KqohoeGjTjyHAFJJywK4J7fkFuK82PfMyuseGgLKZu2",
-      "pair": "SOL/USDG",
-      "reason": "Token-2022 (tokenB, USDG) + adaptiveFeeEnabled — beide Abbruchkriterien unabhängig verletzt, kein xStock-Ausnahmemuster (USDG ist Global-Dollar/Paxos-Stablecoin, kein Backed-Finance-Token). Beide Blocker technischer Natur, kein struktureller Makel: Stablecoin-Pool, in schlechten Märkten als Parkmöglichkeit interessant (vgl. bereits gelistetes USDG/USDe). TVL ~3,92 Mio USDC, Fees24h ~1115 USDC. Bei Umbau-Kapazität (Token-2022-Support + Live-Fee-Unterstützung) neu bewerten.",
-      "addedAt": "2026-08-21"
-    },
-    {
-      "address": "FagzCdPjLjJ4kmeLqRa86MEhzppyzZbMxaiBEsKcRw3P",
-      "pair": "whETH/ZEC",
-      "reason": "Neubewertung 2026-09-08 (LIQ#0467): adaptiveFeeEnabled ist seit LIQ#0394 kein Blocker mehr. Neuer Vorbehalt: Fee-APR-Fenster fallen deutlich (24h/7d/30d ≈ 14%/55%/88%) — abklingendes Interesse statt stetiger Nachfrage. TVL ~123k USDC, dünnes Volumen (24h ~10,9k, Vol/TVL 0,09). Beide Tokens fahren wir bereits in anderen Pools (liq-weth-sol, liq-zec-usdc, liq-sol-zec), das Paar selbst wäre neu. Weiter zurückstellen, bei nächster Prüfung Trendumkehr gegenchecken.",
-      "addedAt": "2026-08-22"
     },
     {
       "address": "5H7c1wUYrE3uaEGNfaXLoR4jnUcmyNCRrhfk6oaVxFWt",
@@ -81,40 +81,34 @@
       "addedAt": "2026-09-05"
     },
     {
-      "address": "BM1KpngQa9efH9k6cDvRGatGqE95xbZdLKJHdFKcmBMC",
-      "pair": "TAO/SOL",
-      "reason": "LIQ#0485 (2026-09-09): kein Token-2022-Blocker (beide Tokens Standard-SPL), aber hasWarning:true von Orca gesetzt. Empirisch geprüft (Stichprobe aus 23 Pools) korreliert das Flag mit fehlender Preishistorie: 11 von 14 6h-Slots in priceHistory7d leer — der jüngste Pool der gesamten Stichprobe, erst ~1,5 Tage Preisdaten vorhanden. 7d-Volumen = 30d-Volumen (106.035 USDC identisch). TAO/Bittensor ist als Projekt etabliert (>1 Mrd. USD Marktkapitalisierung), aber diese konkrete Pool-Instanz hat noch keine belastbare Historie — gleiches Muster wie beim bereits zurückgestellten LIT/SOL. Bei nächster Prüfung erneut bewerten, sobald priceHistory7d vollständig ist.",
-      "addedAt": "2026-09-09"
+      "address": "9R9nmGDRdLLwWjc9raRjaRoZZNXiXQBEPGFRj6SfSkPQ",
+      "pair": "PRIME/PYUSD",
+      "reason": "LIQ#0564: Token-2022 (tokenA, PYUSD = PayPal/Paxos-Stablecoin mit confidentialTransferMint/metadataPointer/permanentDelegate/transferFeeConfig/transferHook fuer regulatorische Zwecke) — kein xStock-Ausnahmemuster (Backed Finance), aber gleiches Muster wie bereits gefuehrtes USDG/USDe bzw. SOL/USDG (dort ebenfalls ein Paxos-Stablecoin mit Token-2022-Compliance-Extensions auf einer Seite). adaptiveFeeEnabled:false, hasWarning:false, priceHistory7d vollstaendig (14/14) und sehr stabil (~0,945 PYUSD/PRIME) — kein struktureller Makel, reiner Stable-zu-Stable-Pool als Parkmoeglichkeit. TVL 9,63 Mio USDC, Fees24h ~1.955 USDC (24h/7d/30d-Volumen skaliert plausibel, kein Einmal-Spike).",
+      "addedAt": "2026-09-12"
     },
     {
       "address": "AhRKZqCo3UtfyGKBWDG4Z9ZHT7mq66k89zryT2hSJC6G",
       "pair": "NEAR/SOL",
-      "reason": "LIQ#0527: hasWarning:true, kein Token-2022 (beide Seiten Standard-SPL), adaptiveFeeEnabled:true (kein Blocker mehr seit LIQ#0394). priceHistory7d nur 5 von 14 Slots gefüllt — Pool zu jung für eine belastbare Bewertung, keine sonstige rote Flagge (24h/7d-Volumen 161,6k/194,5k skaliert plausibel, kein Einmal-Spike). TVL 210,8k USDC, Fees24h 2.733 USDC. Bei nächster Prüfung erneut ansehen, sobald priceHistory7d vollständig ist.",
-      "addedAt": "2026-09-10"
+      "reason": "LIQ#000683: kein Token-2022 (NEAR über NEAR Intents auf Solana, Standard-SPL), aber adaptiveFeeEnabled:true (Basis-Tier 1 %, tickSpacing 128) + hasWarning:true — bemerkenswert, weil priceHistory7d vollständig ist (14/14): das Flag meint hier also nicht nur fehlende Preishistorie, Ursache unbekannt. 7d-Volumen (945k) ≈ 30d-Volumen (954k USDC): 99 % des Monatsumsatzes fielen in die letzten 7 Tage, der Handel in dieser Pool-Instanz ist praktisch erst ~1 Woche alt. Kein Crash (Kursverhältnis schwankt im 7d-Fenster um ±10 %), TVL 530k USDC, Fees24h ~2.443 USDC. Fachlich plausibel (etablierter Token), aber zu wenig belastbare Historie. Wiedervorlage beim nächsten Scan, sobald 7d/30d-Volumen auseinanderlaufen und hasWarning weg ist.",
+      "addedAt": "2026-09-15"
     },
     {
-      "address": "5mwvuSwa81XwKUmJeaQ23eH9TbcdAzrQHNJ8C1oh5Ew5",
-      "pair": "COST/USDC",
-      "reason": "LIQ#0527: Token-2022 (tokenA, COST = \"Costco Wholesale - Backpack Securities\") mit Extensions (confidentialTransferMint/metadataPointer/pausableConfig/permanentDelegate/scaledUiAmountConfig/tokenMetadata/transferHook) + adaptiveFeeEnabled — Tags aehneln stark dem bekannten xStock-Muster (Backed Finance), Emittent ist hier aber \"Backpack Securities\", ein bisher nicht bewerteter Anbieter. Zusaetzlich Pool erst ~1 Tag alt (priceHistory7d nur 2/14 Slots gefuellt, 24h=7d=30d-Volumen identisch). Wiedervorlage siehe Folgeticket (Anbieter-Recherche + neue Preishistorie).",
-      "addedAt": "2026-09-10"
+      "address": "CaMgMgo7qbHEC1LqLJzhBqLkdSFztjixFREuSfTMVwCh",
+      "pair": "STONK/USDC",
+      "reason": "Regel 6 (technischer Blocker sonst gelöst, fachlich plausibel): Blocker ist ausschließlich adaptiveFeeEnabled (kein Token-2022, beide Seiten Standard-SPL), seit LIQ#0394 rechnen alle Schätzer mit dem effektiven Fee-Satz statt der Konstante - Blocker technisch entschärft, Aufnahme neuer Kandidaten bleibt laut Checkliste trotzdem Einzelfallentscheidung, nicht automatisch importierbar. STONK = StonkFun-Launchpad-Token, ca. 180 Mio USD Mcap, mint/freeze-Authority null, kein Rug-Signal. Volumen sauber (Turnover ca. 5,3x TVL, 24h-Delta +18,7% unter Spike-Schwelle). Preis fällt seit 7 Tagen kontinuierlich (ca. 0,30 auf 0,156 USD, -48%), Fee-APR-Fenster rückläufig (24h<7d<30d) - Abkühlung nach Hype-Phase, kein struktureller Makel, aber noch nicht reif für sofortigen Import. Bei nächster Prüfung erneut ansehen, insbesondere ob sich der Preisverfall stabilisiert.",
+      "addedAt": "2026-09-16"
     },
     {
-      "address": "6EVgUURuvprazVdpd717E9uqruHcqRPbhRKDm5Czdidu",
-      "pair": "BABA/USDC",
-      "reason": "LIQ#0527: identisches Muster wie COST/USDC (gleicher Emittent \"Backpack Securities\", gleiche Token-2022-Extensions, adaptiveFeeEnabled, Pool erst ~1 Tag alt mit nur 2/14 gefuellten priceHistory7d-Slots). Wiedervorlage siehe Folgeticket (Anbieter-Recherche + neue Preishistorie).",
-      "addedAt": "2026-09-10"
+      "address": "GupqDENX2H7xFSUtGwWkvXYNg3eFriX2K3KeHniWTARf",
+      "pair": "STONK/USDC (0,16 %-Tier)",
+      "reason": "LIQ#000861, Regel 6 (technischer Blocker sonst gelöst, fachlich plausibel), Orca-API-Stand 2026-09-21: Blocker nur adaptiveFeeEnabled (kein Token-2022, kein hasWarning), Geschwister-Pool zum bereits zurückgestellten STONK/USDC 0,30 % (CaMgMg…, TVL dort inzwischen 12,5k, Liquidität ist hierher gewandert). TVL 274k, Turnover 24h 3,5x, Fees 24h 2.536 USDC (0,9 % der TVL/Tag). Pool erst ~2-3 Tage alt (Volumen 7d ≈ 30d), Tier 0,16 % mit Arbitrage-Anteil im Volumen (Muster STONK/SOL 0,16 %, BONK/SOL 0,05 %) - Fee-Rendite über eine belastbare Woche noch nicht prüfbar. Bei Wiedervorlage: Fees 7d/TVL gegen das 0,30 %-Geschwister und die Preisstabilität prüfen; bei stabiler Rendite dann Import statt beider Einzelfälle.",
+      "addedAt": "2026-09-21"
     },
     {
-      "address": "7gkB2D1SqhUYgKrSpDU5cma4tK9efijHouYituABdJcG",
-      "pair": "DJT/USDC",
-      "reason": "LIQ#0534: identisches Muster wie COST/USDC und BABA/USDC (2026-09-10) — Emittent \"Backpack Securities\" (DJT = Trump Media & Technology Group tokenisiert), Token-2022 mit denselben Extensions (confidentialTransferMint/metadataPointer/pausableConfig/permanentDelegate/scaledUiAmountConfig/tokenMetadata/transferHook), adaptiveFeeEnabled. Pool ~2 Tage alt (4/14 priceHistory7d-Slots gefuellt), Preis stabil (kein Crash). Kein xStock-Ausnahmemuster (nur Backed Finance ist bestätigt), Anbieter \"Backpack Securities\" weiterhin nicht recherchiert. Gleiche Wiedervorlage wie COST/BABA.",
-      "addedAt": "2026-09-11"
-    },
-    {
-      "address": "G1vH3TjRLfYebrPykMJDJ4yjrircGWsBbXUMQwtb3U5e",
-      "pair": "EDEL/SOL",
-      "reason": "LIQ#0534: kein Token-2022 (beide Seiten Standard-SPL), hasWarning:true. priceHistory7d nur 8 von 14 Slots gefuellt — Pool ~4 Tage alt, noch keine vollstaendige 7-Tage-Historie. Keine sonstige rote Flagge: Preis moderat ruecklaeufig (~11% ueber 4 Tage, kein Crash), kein Einmal-Spike-Muster im Volumen. Bei naechster Pruefung erneut ansehen, sobald priceHistory7d vollstaendig ist.",
-      "addedAt": "2026-09-11"
+      "address": "9TT3NbWogWjbQh7b3s1hfcqYF7VJHmg8uNcXDjtPRnh4",
+      "pair": "AQUA/SOL",
+      "reason": "LIQ#000917: Token-2022 (tokenA, nur 1 von 5 xStock-Tags — transferFeeConfig — kein xStock-Muster), adaptiveFee false, hasWarning true. priceHistory7d vollständig (14/14 Slots), aber Preis läuft 0,00000043→0,0000077 USD, also +18x über 7 Tage, davon +139% allein im letzten 24h-Fenster (priceDelta 1,399). 7d-Volumen == 30d-Volumen exakt identisch — Pool < 7 Tage alt, kein Handel vor dem Beobachtungsfenster. Turnover (2,86x TVL) und 24h/7d-Skalierung wirken isoliert unauffällig, deshalb kein Treffer bei Regel 2/5 (keine Null-Lücken, also kein reines Jung-Pool-Datenlücken-Muster). WebSearch zum Ticker AQUA findet mehrere unterschiedliche Projekte unter demselben Symbol, die konkrete Mint-Adresse (AQVcP67…) ist in keiner Quelle auffindbar — Emittent nicht identifizierbar. Auf Entscheidung des Betreibers maybeLater statt blacklist (Empfehlung wäre wegen fehlender Emittenten-Identifikation und ungebremster Pump-Kurve blacklist gewesen). Bei Wiedervorlage: Emittent erneut recherchieren, Preisverlauf auf Stabilisierung prüfen.",
+      "addedAt": "2026-09-23"
     }
   ]
 }

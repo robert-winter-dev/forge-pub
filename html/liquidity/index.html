@@ -6,10 +6,10 @@
     <title data-i18n="liq.page_title">FORGE - public: Liquidity Bot</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260329a">
-    <link rel="stylesheet" href="css/layout.css?v=20260910a">
+    <link rel="stylesheet" href="css/layout.css?v=20260923b">
     <link rel="stylesheet" href="../css/shared.css?v=20260822a">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/components.css?v=20260911a">
+    <link rel="stylesheet" href="css/components.css?v=20260921p">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
@@ -113,7 +113,7 @@
                 <div class="metric">
                     <span class="label has-tooltip"
                           data-tooltip-title="Fee-APR (24h, netto)"
-                          data-tooltip-content="Annualisierte Netto-Rendite auf Basis der letzten 24h: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Durchschnitt aller aktiven Pools." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr_24h.title,data-tooltip-content:liq.tip.fee_apr_24h" data-i18n="liq.fee_apr_24h">Fee-APR (24h)</span>
+                          data-tooltip-content="Annualisierte Netto-Rendite auf Basis der letzten 24h: (Claimed Fees − Kosten) / Baseline-Kapital × 365. Durchschnitt aller aktiven Pools." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr_24h.title,data-tooltip-content:liq.tip.fee_apr_24h" data-i18n="liq.fee_apr_24h">Fee-APR (24h)</span>
                     <div class="value-group" id="renditeGroup" data-type="neutral">
                         <span class="value" id="renditeValue">—</span>
                         <span class="unit">%</span>
@@ -178,17 +178,17 @@
 
         </div>
 
-        <!-- Row 3b: Opportunity-Score (LMB#0116, Phase 1) -->
-        <section class="card card-full" id="opportunityScoreCard">
+        <!-- Row 3b: Opportunity (LMB#0116, Phase 1; Score-Spalte entfernt LIQ#000930) -->
+        <section class="card card-full" id="opportunityCard">
             <h2>
                 <span data-i18n="liq.opportunity">Opportunity</span>
                 <input type="search" id="oppSearchInput" placeholder="Pool suchen…" autocomplete="off"
                        style="margin-left:12px;padding:2px 8px;width:140px;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#f1f5f9;font-size:0.78rem;outline:none;vertical-align:middle" data-i18n-attr="placeholder:liq.search_pool">
                 <select id="oppTypeFilterSelect" class="opp-type-filter-select"></select>
-                <div class="chart-range-btns" id="opportunityScoreTimeframeBtns"></div>
+                <div class="chart-range-btns" id="opportunityTimeframeBtns"></div>
             </h2>
-            <div id="opportunityScoreContainer">
-                <p class="empty-state" id="opportunityScoreEmpty" data-i18n="liq.no_score_data">— Keine Score-Daten verfügbar</p>
+            <div id="opportunityContainer">
+                <p class="empty-state" id="opportunityEmpty" data-i18n="liq.no_opportunity_data">— Keine Pools verfügbar</p>
             </div>
         </section>
 
@@ -204,8 +204,8 @@
                     </div>
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
-                              data-tooltip-title="Payed Fees"
-                              data-tooltip-content="Summe aller Solana-TX-Fees (in USDC) für heute. Klick zeigt Einzeltransaktionen." data-i18n-attr="data-tooltip-title:liq.tip.payed_fees.title,data-tooltip-content:liq.tip.payed_fees" data-i18n="liq.payed_fees">Payed Fees</span>
+                              data-tooltip-title="Kosten"
+                              data-tooltip-content="Summe aller Solana-TX-Kosten (in USDC) für heute – Fees, Rebalancing und sonstige Aktionen, die das Guthaben verringern. Klick zeigt Einzeltransaktionen." data-i18n-attr="data-tooltip-title:liq.tip.costs.title,data-tooltip-content:liq.tip.costs" data-i18n="liq.costs">Kosten</span>
                         <span class="stat-card-value" id="statPayedFeesToday">—</span>
                     </div>
                     <div class="stat-card-row">
@@ -217,7 +217,7 @@
                     <div class="stat-card-row">
                         <span class="stat-card-label has-tooltip"
                               data-tooltip-title="Fee-APR"
-                              data-tooltip-content="Annualisierte Netto-Rendite auf Basis der geclaimten Fees: (Claimed Fees − Payed Fees) / Baseline-Kapital × 365. Identisch mit dem APR-Wert rechts oben." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr.title,data-tooltip-content:liq.tip.fee_apr" data-i18n="liq.fee_apr">Fee-APR</span>
+                              data-tooltip-content="Annualisierte Netto-Rendite auf Basis der geclaimten Fees: (Claimed Fees − Kosten) / Baseline-Kapital × 365. Identisch mit dem APR-Wert rechts oben." data-i18n-attr="data-tooltip-title:liq.tip.fee_apr.title,data-tooltip-content:liq.tip.fee_apr" data-i18n="liq.fee_apr">Fee-APR</span>
                         <span class="stat-card-value" id="statRenditeToday" data-type="neutral">—</span>
                     </div>
                     <div class="stat-card-row">
@@ -234,7 +234,7 @@
                         <span data-i18n="liq.yesterday">Gestern</span> <span class="stat-card-date" id="statDateYesterday"></span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label" data-i18n="liq.payed_fees">Payed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.costs">Kosten</span>
                         <span class="stat-card-value" id="statPayedFeesYesterday">—</span>
                     </div>
                     <div class="stat-card-row">
@@ -257,7 +257,7 @@
                         <span data-i18n="liq.month">Monat</span> <span class="stat-card-date" id="statDateMonth"></span>
                     </div>
                     <div class="stat-card-row">
-                        <span class="stat-card-label" data-i18n="liq.payed_fees">Payed Fees</span>
+                        <span class="stat-card-label" data-i18n="liq.costs">Kosten</span>
                         <span class="stat-card-value" id="statPayedFeesMonth">—</span>
                     </div>
                     <div class="stat-card-row">
@@ -345,20 +345,26 @@
             </div>
             <!-- Tab-Navigation -->
             <div class="modal-tabs" id="posValueModalTabs">
-                <button class="modal-tab-btn active" id="posValueTabValue" data-tab="value" data-i18n="liq.value_usdc">Wert USDC</button>
-                <button class="modal-tab-btn" id="posValueTabDetails" data-tab="details" data-i18n="liq.pnl_details">PnL-Details</button>
+                <!-- Reihenfolge seit LIQ#000867: Details zuerst, dann Pool-Entwicklung (Chart). -->
+                <button class="modal-tab-btn active" id="posValueTabDetails" data-tab="details" data-i18n="liq.pnl_details">Details</button>
+                <button class="modal-tab-btn" id="posValueTabValue" data-tab="value" data-i18n="liq.pool_development">Pool-Entwicklung</button>
+                <span class="modal-tabs-note" id="posValueOpenAge"></span>
             </div>
-            <!-- Tab: Wert USDC (Chart) -->
-            <div class="modal-tab-panel active" id="posValuePanelLp">
+            <div class="modal-tab-stack">
+            <!-- Tab: Pool-Entwicklung (Chart). Bestimmt die Höhe des Stapels. -->
+            <div class="modal-tab-panel" id="posValuePanelLp">
                 <div class="chart-range-btns" id="posValueRangeBtns"></div>
                 <div style="position:relative;margin-top:0.5rem">
                     <svg id="posValueChartSvg" width="100%" style="display:none"></svg>
                     <p class="chart-empty" id="posValueChartEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
                 </div>
             </div>
-            <!-- Tab: PnL-Details (Einzahlung / Maximum / Aktuell) -->
-            <div class="modal-tab-panel" id="posValuePanelDetails">
+            <!-- Tab: Details — oben zwei Kennzahlen (Bester Stand / Schlechtester Stand),
+                 darunter die Überleitung Eingezahlt → Wert heute als Wasserfall (LIQ#000867) -->
+            <div class="modal-tab-panel active" id="posValuePanelDetails">
                 <div id="posValueDetailsTable" class="pos-value-details"></div>
+                <div id="posValueBreakdown" class="pv-wf"></div>
+            </div>
             </div>
         </div>
     </div>
@@ -427,18 +433,6 @@
                 <button class="modal-close" id="poolTxModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="tx-modal-list" id="poolTxList"></div>
-        </div>
-    </div>
-
-    <!-- InvestScore Modal -->
-    <div id="investScoreModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="investScoreModalTitle">
-        <div class="modal-box pool-chart-modal-box">
-            <div class="modal-header">
-                <h3 id="investScoreModalTitle" data-i18n="liq.tab.opportunity_score">Opportunity Score</h3>
-                <button class="modal-close" id="investScoreModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
-            </div>
-            <div id="oppScoreRangeBtns" class="chart-range-btns"></div>
-            <div class="modal-tab-panel active" id="oppScoreChartPanel" style="min-height:240px"></div>
         </div>
     </div>
 
@@ -546,6 +540,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260911b"></script>
+    <script type="module" src="js/app.js?v=20260923k"></script>
 </body>
 </html>

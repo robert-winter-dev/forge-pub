@@ -54,7 +54,7 @@ import { t } from '../../../lib/i18n.js';
 import * as notify           from '../lib/notify.js';
 import { getTokenUsdPrice }  from '../lib/deposit-lib.js';
 import { getSplTokensUsd }   from '../lib/wallet-monitor-client.js';
-import { refreshAfterAction, writePositionSnapshotFromDelta } from '../lib/refresh-state.js';
+import { refreshAfterAction, writePositionSnapshotFromDelta, establishPositionBaseline } from '../lib/refresh-state.js';
 import {
     acquireManualLock, releaseManualLock,
     isCleanupRunning, isSlLocked, isRebalanceLocked,
@@ -211,7 +211,7 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     }
     console.log(`[withdraw] ${t('cli.liq.topup_swapping', { sol: currentBalance.toFixed(4), min: minNeeded.toFixed(4), usdc: neededUsdc.toFixed(2) })}`);
     try {
-        await swapTokens({
+        const { amountOut, txSignature } = await swapTokens({
             inputMint:      USDC_MINT,
             outputMint:     WSOL_MINT,
             inputDecimals:  6,
@@ -219,6 +219,21 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
             amount:         neededUsdc,
             wallet:         getKeypair(),
             connection:     getConnection(),
+        });
+        const swapFee = await getTxFee(txSignature).catch(() => null);
+        // usd_value_in/out (LIQ#0896): USDC exakt (Eingang), SOL über denselben
+        // solPrice, der oben bereits neededUsdc bestimmt hat.
+        insertTransaction(db, {
+            poolId:      null,
+            type:        'swap',
+            amountA:     neededUsdc,
+            amountB:     amountOut,
+            usdValue:    neededUsdc,
+            usdValueIn:  neededUsdc,
+            usdValueOut: solPrice > 0 ? amountOut * solPrice : null,
+            txHash:      txSignature,
+            txFeeSol:    swapFee,
+            note:        'withdraw sol-topup USDC→SOL',
         });
         const newBalance = await getUsableSolBalanceFresh(getKeypair().publicKey);
         console.log(`[withdraw] ${t('cli.liq.topup_ok', { sol: newBalance.toFixed(4) })}`);
@@ -497,12 +512,13 @@ const newCapital = Math.max(0, oldCapital - withdrawnUsdc);
 updatePositionCapital(db, position.id, newCapital);
 updatePositionHodl(db, position.id, -result.tokenEstA, -result.tokenEstB);
 
-// Sofort-Snapshot: Dashboard zeigt neuen LP-Wert sofort, ohne auf den nächsten Bot-Tick zu warten.
-// Nur bei Teilentnahme — bei vollständiger Entnahme (isFull) ist die Position geschlossen.
-// writePositionSnapshotFromDelta nutzt die zentrale makeToUsd-Logik (inkl. volatilePair-Zweig
-// mit Quote-Token-USD-Konversion), damit Pools wie ORCA/SOL oder HYPE/SOL korrekt in USD
-// gerechnet werden statt in SOL-Einheiten.
-if (result.fraction < 0.999) {
+// Sofort-Snapshot: Dashboard zeigt neuen LP-Wert sofort, ohne auf den nächsten Bot-Tick zu
+// warten. Nur bei Teilentnahme — bei vollständiger Entnahme (isFull) ist die Position
+// geschlossen. writePositionSnapshotFromDelta nutzt die zentrale makeToUsd-Logik (inkl.
+// volatilePair-Zweig mit Quote-Token-USD-Konversion), damit Pools wie ORCA/SOL oder HYPE/SOL
+// korrekt in USD gerechnet werden statt in SOL-Einheiten. Dient hier nur noch als Fallback,
+// falls der gemessene Re-Read direkt unten fehlschlägt (siehe dort).
+function writeDeltaFallback() {
     writePositionSnapshotFromDelta(db, pool, -result.tokenEstA, -result.tokenEstB, currentPrice);
 }
 
@@ -539,15 +555,28 @@ if (isFull) {
 }
 
 // Trailing-Stop-Referenz bei Teilentnahme nachziehen: Der Abstand zum Höchststand bleibt
-// erhalten, den neuen absoluten Referenzwert etabliert der nächste Bot-Snapshot.
-// Bei Vollentnahme entfällt dies (Position closed).
+// erhalten. Bei Vollentnahme entfällt dies (Position closed).
 // posValueEstimate stammt aus dem letzten Snapshot VOR der Entnahme — genau der gemessene
-// Wert, den rebaseHwmForCapitalFlow() braucht (der Delta-Snapshot oben ist schätzungsbasiert).
+// Wert, den rebaseHwmForCapitalFlow() braucht.
+//
+// 🔒 Messlücke (KB `trailing-stop-kapitalfluss-blindstelle.md`, Abschnitt „Offen"): Bis hierhin
+// steht nur das VERHÄLTNIS fest (hwm_usd/entry_usd sind NULL, hwm_flow_ratio gesetzt) — den
+// neuen absoluten Wert etabliert erst der nächste Aufruf von updateHwm(), und der lief bisher
+// frühestens beim nächsten Bot-Tick (bis zu 5 Min. blind). Derselbe Fall wie beim Zufluss vor
+// LIQ#0321: establishPositionBaseline() macht genau das sofort — ein frischer On-Chain-Read
+// (fresh:true, umgeht den 10-s-Proxy-Cache), daraus ein GEMESSENER Snapshot
+// (writePositionSnapshotFromState statt Quote-Delta) und direkt updateHwm(). Das konsumiert
+// den gerade gesetzten hwm_flow_ratio/entry_flow_ratio sofort statt fünf Minuten blind zu
+// bleiben. Schlägt der Re-Read fehl (RPC-Fehler o.ä.), bleibt es beim alten Verhalten:
+// Schätz-Snapshot fürs Dashboard, Referenz folgt beim nächsten Bot-Tick.
 if (!isFull) {
     const hwmRebase = rebaseHwmForCapitalFlow(db, position.id, posValueEstimate);
     if (hwmRebase.applied) {
         console.log(`[withdraw] ${t('cli.liq.hwm_rebased', { pct: hwmRebase.drawdownPct.toFixed(2) })}`);
     }
+
+    const measured = await establishPositionBaseline(db, pool, adapter, position.nft_mint, currentPrice, { logPrefix: '[withdraw]' });
+    if (!measured) writeDeltaFallback();
 }
 
 // Pool Mindestwert deaktivieren: Nach einer Auszahlung ist der konfigurierte Wert
@@ -574,6 +603,7 @@ if (swapToUsdcFlag || sendToAddr) {
                 sendTo: sendToAddr,
                 logPrefix: '[withdraw]',
                 forceCoins: true,
+                db,
             });
         }
         if (sendToAddr) {

@@ -300,6 +300,7 @@ async function stepSwap(pool, db, execId, levelCfg, coinsA, coinsB, isFullClose 
         sendTo:      levelCfg.sendTo,
         logPrefix:   `[tvl-protection:${pool.id}]`,
         slippageBps: config.rm.swapSlippageBps,
+        db,
         onSwapped:   (swappedUsdc) => {
             updateTvlExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
             // isFullClose: nur der Voll-Close hat eine close_position-Zeile, die den

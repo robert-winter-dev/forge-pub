@@ -24,6 +24,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
+import compression from 'compression';
 import { PATHS } from '../../config/paths.js';
 import botsRouter      from './routes/bots.js';
 import configRouter    from './routes/config.js';
@@ -35,7 +36,6 @@ import lendingActionsRouter  from './routes/lending-actions.js';
 import addressesRouter       from './routes/addresses.js';
 import messagesRouter from './routes/messages.js';
 import premiumRouter  from './routes/premium.js';
-import strategyRouter from './routes/strategy.js';
 import updateRouter   from './routes/update.js';
 import authRouter     from './routes/auth.js';
 import { siteAuthGate } from './lib/site-auth.js';
@@ -69,6 +69,9 @@ if (!fs.existsSync(CERT_FILE) || !fs.existsSync(KEY_FILE)) {
 
 // ── Express App ───────────────────────────────────────────────────────────────
 const app = express();
+// gzip für JSON/HTML/JS/CSS (CORE#000804): data.json 5,8 MB → ~0,5 MB, data-history.json
+// 20 MB → ~3 MB. Über VPN/Mobilfunk der größte Hebel für die Ladezeit.
+app.use(compression());
 app.use(express.json());
 
 // Passwortschutz (System > Settings, optional, per Ticket 2026-08-26) – VOR allen
@@ -95,7 +98,6 @@ app.use('/api/lending',   lendingActionsRouter);
 app.use('/api/addresses', addressesRouter);
 app.use('/api/messages',  messagesRouter);
 app.use('/api/premium',   premiumRouter);
-app.use('/api/strategy',  strategyRouter);
 app.use('/api/update',    updateRouter);
 // Master-only (Systemdaten-Freigabe) – die Route riegelt sich selbst ab, siehe dort.
 app.use('/api/health-share', healthShareRouter);
@@ -206,6 +208,7 @@ server.on('error', (err) => {
 
 // ── HTTP CA-Download-Server ───────────────────────────────────────────────────
 const caApp = express();
+caApp.use(compression());
 
 // /forge/ same-origin verfügbar machen (nav.js, Logo, CSS): ein Cross-Origin-Import
 // von https://host:3200 aus dieser HTTP-Seite (Port 3201) scheitert an CORS

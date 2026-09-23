@@ -42,8 +42,8 @@
  */
 
 import { Router } from 'express';
-import { t } from '../../../lib/i18n.js';
-import { notificationText } from '../../../lib/notify-render.js';
+import { t, getLang } from '../../../lib/i18n.js';
+import { notificationText, formatNumber } from '../../../lib/notify-render.js';
 import { pnlForPeriod } from '../../../lib/pnl.js';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
@@ -62,8 +62,9 @@ const BOT_NAME_BY_ID = Object.fromEntries(BOT_IDS.map(id => [id, getBotConfig(id
 // Risk-Management-Kategorien (2026-08-25, Message Center > Einstellungen >
 // Benachrichtigungen > "Risk-Management"): alle Meldungen, die ein Risikomanagement-
 // Ereignis auslöst – Trailing Stop, TVL-Schutz, Score-Limit, plus die gemeinsame
-// rm-warning/rm-executed-Fassade (deckt sowohl Trailing Stop als auch Score-Limit
-// ab, siehe bots/liquidity/lib/trailing-stop.js + score-limit.js). Anders als
+// rm-warning/rm-executed-Fassade (siehe bots/liquidity/lib/trailing-stop.js). Das
+// Score-Limit ist seit LIQ#000925 entfernt; seine Kategorien bleiben hier, damit
+// Altmeldungen weiter unter Risk-Management zählen. Anders als
 // System/Bots/Support/Premium ist das KEINE eigene Rubrik, sondern ein Unterfilter
 // innerhalb von "Bots" (die Kategorien kommen ausschließlich vom Liquidity-Bot) –
 // betrifft deshalb nur den Ungelesen-Zähler der Rubrik Bots, nicht die Sichtbarkeit
@@ -155,14 +156,21 @@ function extractDailyReport(msgKey, msgParams) {
  * der Detailansicht bekommt einen Wiederholungszähler ("Warnung: … (2)") bzw.
  * die Erholungs-Kennzeichnung ("Hinweis: … wiederhergestellt").
  */
-function extractSolLow(msgKey, msgParams) {
+export function extractSolLow(msgKey, msgParams) {
     if (msgKey !== 'notify.liq.sol_low' && msgKey !== 'notify.liq.sol_recovered') return null;
     let p = msgParams;
     if (typeof p === 'string') {
         try { p = JSON.parse(p); } catch { return null; }
     }
-    if (msgKey === 'notify.liq.sol_recovered') return { recovered: true, reserve: p?.reserve ?? null };
-    return { recovered: false, count: p?.count ?? null, reserve: p?.reserve ?? null };
+    // Seit LIQ#000886 kommt `reserve` als { n, d }-Objekt (Konvention 4) statt als
+    // fertig formatierter String mit hartem Komma — hier für die Betreffzeile in
+    // der Sprache der Installation formatiert. Altmeldungen (String) bleiben
+    // unverändert durchgereicht.
+    const reserve = (p?.reserve && typeof p.reserve === 'object' && typeof p.reserve.n === 'number')
+        ? formatNumber(p.reserve.n, getLang(), { d: p.reserve.d })
+        : (p?.reserve ?? null);
+    if (msgKey === 'notify.liq.sol_recovered') return { recovered: true, reserve };
+    return { recovered: false, count: p?.count ?? null, reserve };
 }
 
 /**
@@ -235,10 +243,21 @@ export function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
             : (typeof p.scenario === 'object' && p.scenario.k) ? t(p.scenario.k, p.scenario.p)
             : String(p.scenario);
         const actionText = p._action ? t(String(p._action)) : null;
+        // Seit LIQ#000886 kommen Beträge in msg_params als { n, d, sign }-Objekt
+        // (Konvention 4, lib/notify-render.js) statt als fertig formatierter String
+        // (`toFixed()`). numOf() liest beide Formen: das neue Objekt über `.n`, den
+        // alten String/die alte Zahl weiter über parseFloat() — Altmeldungen vor
+        // diesem Ticket bleiben so lesbar, ohne Migration.
+        const numOf = (v) => {
+            if (v == null) return null;
+            if (typeof v === 'object' && typeof v.n === 'number') return v.n;
+            const n = parseFloat(v);
+            return Number.isFinite(n) ? n : null;
+        };
         // pnlUsdcNum bleibt die Rohzahl (für die %-Berechnung unten), pnlUsdc die
         // formatierte Anzeige – Backfill nur wenn msg_params noch keinen PnL trägt
         // (Altmeldungen von vor dieser Erweiterung).
-        let pnlUsdcNum = p.pnlLine?.p?.pnl != null ? parseFloat(p.pnlLine.p.pnl) : null;
+        let pnlUsdcNum = p.pnlLine?.p?.pnl != null ? numOf(p.pnlLine.p.pnl) : null;
         if (pnlUsdcNum == null) pnlUsdcNum = backfillLegacyExitPnl(liquidityDb, p.pair, timestamp);
         const pnlUsdc = pnlUsdcNum != null ? `${pnlUsdcNum >= 0 ? '+' : ''}${pnlUsdcNum.toFixed(2)}` : null;
 
@@ -253,7 +272,7 @@ export function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
         // capitalUsdcRaw fallen auf den alten Nenner zurück, damit ihr Prozentwert
         // zu ihrer eigenen Zahl passt.
         const investNum  = p.capitalUsdcRaw ?? null;
-        const lpValueNum = p.lpValue != null ? parseFloat(p.lpValue) : null;
+        const lpValueNum = p.lpValue != null ? numOf(p.lpValue) : null;
         const pctBase    = investNum ?? lpValueNum;
         const pnlPct = (pnlUsdcNum != null && pctBase != null && pctBase !== 0)
             ? `${pnlUsdcNum >= 0 ? '+' : ''}${(pnlUsdcNum / pctBase * 100).toFixed(2)}%`
@@ -264,7 +283,7 @@ export function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
         // konfiguriert/nötig). Bewusst der Betrag, der in der Wallet ankam: zusammen
         // mit "Invest Betrag" oben ergibt er genau den PnL.
         const swappedNum = p.exitAmountRaw
-            ?? (p.swappedLine?.p?.usdc != null ? parseFloat(p.swappedLine.p.usdc) : null);
+            ?? (p.swappedLine?.p?.usdc != null ? numOf(p.swappedLine.p.usdc) : null);
         const exitAmountNum = swappedNum ?? lpValueNum;
 
         const fix2 = (v) => (v != null && Number.isFinite(v) ? v.toFixed(2) : null);
@@ -315,7 +334,7 @@ export function extractRiskExit(msgKey, msgParams, timestamp, liquidityDb) {
             // ── Ausstieg ──────────────────────────────────────────────────────
             exitStartedAtMs: p.exitStartedAtMs ?? null,
             exitAmountUsdc:  amount2(exitAmountNum),
-            exitCostUsdc:    fix2(p.exitCostRaw ?? (p.swappedLine?.p?.cost != null ? parseFloat(p.swappedLine.p.cost) : null)),
+            exitCostUsdc:    fix2(p.exitCostRaw ?? (p.swappedLine?.p?.cost != null ? numOf(p.swappedLine.p.cost) : null)),
             // Abschluss der Meldung = Ende der Laufzeit (für die Zusammenfassung oben).
             exitAtMs:      timestamp ?? null,
             actionText,
@@ -460,8 +479,9 @@ router.get('/support/stream', async (req, res) => {
 // Seit 2026-08-16 ein reines Fenster (limit/offset) statt fester Seiten à 10 Zeilen:
 // die Liste im Message Center lädt beim Herunterscrollen nach (Infinite Scroll,
 // siehe loadMoreSystem() in message.js), es gibt keine Seitenzahlen mehr. Der
-// Höchstwert 100 entspricht dem Fenster, das notify-db.js per Pruning nach jedem
-// Insert offen hält (MAX_NOTIFICATIONS) – mehr Zeilen kann es gar nicht geben.
+// Höchstwert 100 entspricht dem Fenster, das notify-db.js per Pruning je Rubrik
+// (System/Bots getrennt) nach jedem Insert offen hält (MAX_NOTIFICATIONS_PER_CATEGORY,
+// CORE#000719) – mehr Zeilen der jeweiligen Rubrik kann es gar nicht geben.
 // page= wird weiterhin akzeptiert (1-basiert, mit perPage=limit), damit ältere
 // geöffnete Tabs nach einem Deploy nicht ins Leere laufen.
 // q durchsucht message/category/bot_id/level (2026-07-30: Sender-Dropdown durch

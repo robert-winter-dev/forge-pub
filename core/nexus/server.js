@@ -41,10 +41,17 @@ import { TxQueue }           from './tx-queue.js';
 import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
-import { insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting, getFeatureFlag, setFeatureFlag } from './notify-db.js';
+import { sanitizeCaller }      from '../../lib/rpc-caller.js';
+import { getDb, insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting, getFeatureFlag, setFeatureFlag } from './notify-db.js';
 import { checkDedup, setDedupRowId, checkRateLimit, fmtTime } from './dedup.js';
 import { visibility, checkLogOnlyKeys } from './notify-visibility.js';
 import { readMaintenanceFlag } from '../maintenance.js';
+import { decideBudgetAlert, prevFromRow } from './helius-budget-alert.js';
+import {
+    FallbackState, FALLBACK_URL_DEFAULT, FALLBACK_LIMIT, splitRequest, mergeResponses, unavailableError,
+} from './rpc-fallback.js';
+import { renderNotification } from '../../lib/notify-render.js';
+import { getLang } from '../../lib/i18n.js';
 import { envFile } from '../../config/paths.js';
 
 // .env laden (dotenv via require, da wir ESM nutzen)
@@ -212,6 +219,14 @@ const loopscaleLimiter = new RateLimiter('loopscale', 40);
 // Helius Free Tier: 10 req/s → 8 req/s (20% Sicherheitspuffer), 1-Sekunden-Fenster
 const heliusLimiter    = new RateLimiter('helius',    8, 1_000);
 
+// Fallback-RPC bei erschöpftem Helius-Kontingent (CORE#000814): öffentlicher Solana-RPC,
+// eigener Limiter mit dessen (viel strengeren) Grenzen. Der heliusLimiter bleibt unberührt,
+// im Fallback-Betrieb geht kein Aufruf durch ihn. FALLBACK_RPC_URL=off schaltet ab.
+const FALLBACK_RPC_URL  = (process.env.FALLBACK_RPC_URL ?? FALLBACK_URL_DEFAULT).trim();
+const FALLBACK_ENABLED  = FALLBACK_RPC_URL !== '' && FALLBACK_RPC_URL.toLowerCase() !== 'off';
+const fallbackLimiter   = new RateLimiter('solana-public', FALLBACK_LIMIT.maxRequests, FALLBACK_LIMIT.windowMs);
+const fallbackState     = new FallbackState();
+
 // Blob-Fetch (Premium-Auslieferung, Filebase + Backup-Host): kein dokumentiertes
 // Limit → konservativ 1 req/s (CLAUDE.md-Vorgabe bei undokumentierten Limits).
 // Vorfall 2026-08-03 (forge-pub1): ein Backlog-Replay hat Dutzende parallele,
@@ -323,10 +338,34 @@ function orcaV2Ttl(path) {
 const orcaV2Cache = new HttpCache('orcav2', orcaV2Ttl);
 setInterval(() => orcaV2Cache.evict(), 60_000);
 
-// Stündlicher Budget-Check: warnt wenn monatliche Hochrechnung > 800K Credits
+// Stündlicher Budget-Check: warnt wenn monatliche Hochrechnung > 800K Credits.
+// Journal jede Stunde; ins Message Center nur nach Cooldown/Eskalation (CORE#000806,
+// Regeln in helius-budget-alert.js). Vorher lief die Warnung nur per console.error und
+// erreichte tagelang niemanden. Der Zustand wird nach einem Neustart aus der letzten
+// Meldung in nexus.db wiederhergestellt, sonst käme nach jedem Restart eine neue.
+let budgetAlertPrev;
+function notifyBudget(s) {
+    try {
+        if (budgetAlertPrev === undefined) {
+            budgetAlertPrev = prevFromRow(getDb().prepare(
+                `SELECT timestamp, msg_key FROM notifications WHERE bot_id = 'nexus' AND category = 'helius-budget' ORDER BY timestamp DESC LIMIT 1`
+            ).get());
+        }
+        const { send, next } = decideBudgetAlert(budgetAlertPrev, s, Date.now());
+        budgetAlertPrev = next;
+        if (!send) return;
+        const params = { proj: s.projectedMonthly.toLocaleString('de-DE'), hitRate: s.hitRatePct };
+        const message = renderNotification({ msgKey: send.msgKey, params, displayName: 'System', timestamp: Date.now() }, getLang());
+        insertNotification('nexus', send.level, 'helius-budget', message, null, false, 'System', { msgKey: send.msgKey, params });
+    } catch (e) {
+        console.error(`[cache:helius] Meldung ans Message Center fehlgeschlagen: ${e.message}`);
+    }
+}
+
 setInterval(() => {
     const s = rpcCache.getStats();
     if (s.projectedMonthly === null) return;
+    notifyBudget(s);
     const proj = s.projectedMonthly.toLocaleString('de-DE');
     if (s.overBudget) {
         console.error(`[cache:helius] ⛔ BUDGET ÜBERSCHRITTEN – Hochrechnung: ${proj}/Mo > 1 Mio. Free Tier | Hit-Rate: ${s.hitRatePct}%`);
@@ -428,6 +467,12 @@ app.post('/tx/submit', (req, res) => {
         return res.status(503).json({ error: 'HELIUS_API_KEY nicht konfiguriert' });
     }
 
+    // CORE#000814: Der Fallback deckt nur Lesezugriffe ab. Eine Transaktion würde an Helius
+    // scheitern (Kontingent leer); lieber sofort ehrlich ablehnen als in der Queue verpuffen.
+    if (FALLBACK_ENABLED && fallbackState.active) {
+        return res.status(503).json({ error: 'Fallback-RPC aktiv (Helius-Kontingent erschöpft): Transaktionen sind nicht möglich' });
+    }
+
     const ticketId = txQueue.submit(serializedTx, skipPreflight ?? false);
     return res.status(202).json({ ticketId });
 });
@@ -471,7 +516,6 @@ app.get('/tx/status/:ticketId', (req, res) => {
 
 // warn-Kategorien die trotzdem eine Telegram-Notification auslösen (Exit-Strategien)
 const TELEGRAM_WARN_CATEGORIES = new Set([
-    'score-limit', 'score-limit-done',
     'trailing-stop', 'trailing-stop-done',
     'range-hint',
     'new-pool-alert',
@@ -674,10 +718,12 @@ app.get('/health', (_req, res) => {
             kamino:       kaminoLimiter.getStats(),
             loopscale:    loopscaleLimiter.getStats(),
             helius:       heliusLimiter.getStats(),
+            solanaPublic: fallbackLimiter.getStats(),
             gecko:        geckoLimiter.getStats(),
             orcav2:       orcaV2Limiter.getStats(),
             blobFetch:    blobFetchLimiter.getStats(),
         },
+        rpcFallback: { enabled: FALLBACK_ENABLED, ...fallbackState.snapshot() },
         jupiterCircuit: jupiterCircuit.getStats(),
         recalLock: recalLock
             ? { held: true, pair: recalLock.pair, heldForMs: lockAge, heldFor: fmtMs(lockAge) }
@@ -1130,6 +1176,99 @@ app.all('/orcav2/*', async (req, res) => {
 // Hinweis: Nur HTTP-JSON-RPC wird proxied. WebSocket-Subscriptions (onAccountChange etc.)
 // gehen weiterhin direkt zu Helius – diese zählen nicht gegen das HTTP-Limit.
 
+// ─── Fallback-RPC (CORE#000814) ───────────────────────────────────────────────
+//
+// Bei erschöpftem Helius-Kontingent (429 „max usage reached") werden LESENDE Aufrufe an den
+// öffentlichen Solana-RPC umgeleitet. Alles, was dort nicht existiert (getAsset) oder nicht
+// lesend ist (sendTransaction), scheitert laut. Regeln und Begründung: rpc-fallback.js und
+// KB Core/helius-credit-budget.md. Umschalten und Zurückschalten erzeugen je eine Meldung im
+// Message Center, sonst liefe der Notbetrieb womöglich tagelang unbemerkt.
+
+function notifyFallback(kind, params) {
+    const msgKey = kind === 'on' ? 'notify.sys.rpc_fallback_on' : 'notify.sys.rpc_fallback_off';
+    const level  = kind === 'on' ? 'error' : 'info';   // „nichts zu tun" gehört auf info
+    console.warn(`[nexus:fallback] ${kind === 'on' ? '⚠️  UMGESCHALTET auf' : '✅ ZURÜCK auf Helius von'} ${params.fallback ?? FALLBACK_RPC_URL}`);
+    try {
+        const message = renderNotification({ msgKey, params, displayName: 'System', timestamp: Date.now() }, getLang());
+        insertNotification('nexus', level, 'rpc-fallback', message, null, false, 'System', { msgKey, params });
+    } catch (e) {
+        console.error(`[nexus:fallback] Meldung ans Message Center fehlgeschlagen: ${e.message}`);
+    }
+}
+
+async function serveFromFallback(res, body, useCache) {
+    const { isBatch, items, allowed } = splitRequest(body);
+    let upstreamItems = [];
+
+    if (allowed.length > 0) {
+        const waitedMs = await fallbackLimiter.wait();
+        if (waitedMs > 0) console.warn(`[nexus:fallback] Limiter ${waitedMs} ms gewartet (öffentlicher RPC: ${FALLBACK_LIMIT.maxRequests}/${FALLBACK_LIMIT.windowMs / 1000}s)`);
+        console.log(`[nexus:fallback] UPSTREAM   ${isBatch ? `batch(${allowed.length})` : allowed[0].method}`);
+
+        const up = await fetch(FALLBACK_RPC_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(isBatch ? allowed : allowed[0]),
+            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        });
+        const text = await up.text();
+        if (up.status !== 200) {
+            console.warn(`[nexus:fallback] ← ${up.status} | Body: ${text.slice(0, 200)}`);
+            if (up.status === 429) fallbackLimiter.penalize(5_000);
+            return res.status(up.status).header('X-Forge-Upstream', 'fallback')
+                .header('content-type', up.headers.get('content-type') ?? 'application/json').send(text);
+        }
+        let parsed;
+        try { parsed = JSON.parse(text); }
+        catch { return res.status(502).json({ error: 'Fallback-RPC lieferte kein JSON' }); }
+        upstreamItems = Array.isArray(parsed) ? parsed : [parsed];
+    }
+
+    fallbackState.served  += allowed.length;
+    fallbackState.refused += items.length - allowed.length;
+
+    const merged = mergeResponses(items, upstreamItems);
+    if (isBatch) {
+        return res.status(200).header('X-Forge-Upstream', 'fallback').header('X-Forge-Cache', 'MISS').json(merged);
+    }
+    const single = merged[0];
+    if (single.error?.data?.forgeFallback) {
+        console.warn(`[nexus:fallback] ABGELEHNT  ${single.error.data.method} (im Fallback nicht verfügbar)`);
+        return res.status(503).header('X-Forge-Upstream', 'fallback').json(single);
+    }
+    if (useCache && single.result !== undefined && single.error === undefined) {
+        rpcCache.set(body.method, body.params, JSON.stringify(single));
+    }
+    return res.status(200).header('X-Forge-Upstream', 'fallback').header('X-Forge-Cache', 'MISS').json(single);
+}
+
+// Sondierung: Solange der Fallback aktiv ist, fragt Nexus Helius alle paar Minuten mit einem
+// billigen Aufruf. Rückgeschaltet wird erst nach mehreren Erfolgen in Folge und einer
+// Mindestdauer (FallbackState), damit nichts zwischen den Anbietern pendelt.
+let _probing = false;
+async function probeHelius() {
+    if (_probing || !FALLBACK_ENABLED || !fallbackState.probeDue(Date.now())) return;
+    _probing = true;
+    let ok = false;
+    try {
+        await heliusLimiter.wait();
+        const r = await fetch(HELIUS_RPC_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot' }),
+            signal: AbortSignal.timeout(10_000),
+        });
+        const j = JSON.parse(await r.text());
+        ok = r.status === 200 && j.error === undefined && j.result !== undefined;
+    } catch { ok = false; }
+    finally { _probing = false; }
+    const back = fallbackState.recordProbe(ok, Date.now());
+    console.log(`[nexus:fallback] Sondierung Helius: ${ok ? 'ok' : 'weiter erschöpft/gestört'} (${fallbackState.okProbes}/${fallbackState.probesNeeded})`);
+    if (back) notifyFallback('off', { minutes: Math.round(back.activeMs / 60_000) });
+}
+setInterval(probeHelius, 60_000).unref();
+
+
 /**
  * Gemeinsamer Handler für /rpc und /rpc/fresh.
  * @param {boolean} useCache  true = Cache-Lookup + Cache-Write, false = immer Upstream
@@ -1139,23 +1278,30 @@ async function handleRpc(req, res, useCache) {
         return res.status(503).json({ error: 'HELIUS_API_KEY nicht konfiguriert' });
     }
 
-    const waitedMs = await heliusLimiter.wait();
-    if (waitedMs > 0) {
-        const stats = heliusLimiter.getStats();
-        await sendThrottleAlert('helius', waitedMs, stats.requestsInWindow, stats.maxInWindow, stats.windowSec);
+    // Fallback-Betrieb: kein Aufruf geht durch den heliusLimiter (CORE#000814)
+    const inFallback = FALLBACK_ENABLED && fallbackState.active;
+    if (!inFallback) {
+        const waitedMs = await heliusLimiter.wait();
+        if (waitedMs > 0) {
+            const stats = heliusLimiter.getStats();
+            await sendThrottleAlert('helius', waitedMs, stats.requestsInWindow, stats.maxInWindow, stats.windowSec);
+        }
     }
 
     const body    = req.body;
     const isBatch = Array.isArray(body);
     const method  = isBatch ? null : body?.method;
     const params  = isBatch ? null : body?.params;
+    // CORE#000846: Verursacher aus dem Header. sanitizeCaller() bildet Fehlendes und
+    // Unerlaubtes auf 'unknown' ab — der Call wird immer gezählt, nur ggf. ohne Zuordnung.
+    const caller  = sanitizeCaller(req.get('x-forge-caller'));
 
     // ── Cache-Lookup (nur Single-Requests) ───────────────────────────────────
     if (useCache && method) {
         const cached = rpcCache.get(method, params);
         if (cached !== null) {
             console.log(`[nexus:helius] CACHE HIT  ${method}`);
-            rpcRecord(method, 'hit');
+            rpcRecord(method, 'hit', caller);
             return res
                 .header('content-type', 'application/json')
                 .header('X-Forge-Cache', 'HIT')
@@ -1163,13 +1309,15 @@ async function handleRpc(req, res, useCache) {
         }
     }
 
+    if (inFallback) return serveFromFallback(res, body, useCache);
+
     // ── Upstream-Call ─────────────────────────────────────────────────────────
     rpcCache.recordUpstream();
     const label = isBatch ? `batch(${body.length})` : (method ?? '?');
     console.log(`[nexus:helius] UPSTREAM   ${label}${useCache ? '' : ' [fresh]'}`);
-    if (isBatch)        rpcRecord('batch',  'batch');
-    else if (!useCache) rpcRecord(method,   'fresh');
-    else                rpcRecord(method,   'miss');
+    if (isBatch)        rpcRecord('batch',  'batch', caller);
+    else if (!useCache) rpcRecord(method,   'fresh', caller);
+    else                rpcRecord(method,   'miss',  caller);
 
     const upstream = await fetchWithRetry(
         HELIUS_RPC_URL,
@@ -1182,8 +1330,21 @@ async function handleRpc(req, res, useCache) {
     if (upstream.status >= 400) {
         console.warn(`[nexus:helius] ← ${upstream.status} | ${label} | Body: ${text.slice(0, 200)}`);
         if (upstream.status === 429) {
+            // CORE#000811: Kontingent-Erschöpfung beobachten statt hochrechnen. fetchWithRetry gibt
+            // ein 429 nur nach erschöpften Retries zurück – bei 8 von 10 erlaubten req/s ist ein
+            // anhaltendes reines Rate-Limit nicht plausibel, daher zählt auch der Rest als Verdacht
+            // (falls Helius den Wortlaut ändert). Zählung getrennt, Rate-Limit-Verhalten unverändert.
+            rpcRecord(isBatch ? 'batch' : method, /max usage/i.test(text) ? 'quota_denied' : 'quota_suspect', caller);
             heliusLimiter.penalize(2_000);
             console.warn('[nexus:helius] 429 upstream – Backoff 2 s aktiviert (nach Retries erschöpft)');
+            if (/max usage reached/i.test(text)) {
+                if (FALLBACK_ENABLED) {   // CORE#000814: lesend auf den öffentlichen RPC ausweichen
+                    if (fallbackState.activate(Date.now())) {
+                        notifyFallback('on', { fallback: new URL(FALLBACK_RPC_URL).host });
+                    }
+                    return serveFromFallback(res, body, useCache);
+                }
+            }
         }
     }
 

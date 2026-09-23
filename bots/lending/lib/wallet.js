@@ -24,6 +24,7 @@ import {
     LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
 import { readFileSync }   from 'fs';
 import bs58               from 'bs58';
 import { config }         from './config.js';
@@ -78,6 +79,7 @@ export function getConnection() {
         _connection = new Connection(config.rpcUrl, {
             commitment:  COMMITMENT,
             wsEndpoint:  process.env.HELIUS_WS_URL || undefined,
+            httpHeaders: rpcCallerHeaders(),
         });
     }
     return _connection;

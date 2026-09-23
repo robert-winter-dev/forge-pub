@@ -15,13 +15,6 @@ import { POOL_SETTINGS_DEFAULTS } from '../../../lib/pool-settings-defaults.js';
 const __dirname   = dirname(fileURLToPath(import.meta.url));
 const SETTINGS_DB = PATHS.settingsDb;
 
-export const DEFAULT_SCORE_LIMIT = {
-    enabled:    false,
-    minScore:   30,
-    swapToUsdc: true,
-    sendTo:     '',
-};
-
 // TVL-Schutz-Default: jeder Pool startet mit aktiver Stufe 1 (100 % Exit + Swap→USDC).
 // Angeglichen 2026-08-15 an die gelebte Konfiguration aller Pools — vorher lief der
 // Voll-Exit über eine (inzwischen entfernte) zweite Stufe und ein neuer Pool startete
@@ -104,7 +97,7 @@ export function ensureTrailingStopMinimumReset(poolId) {
  * +2,15 % konnte nicht auslösen, weil die wirksame Schwelle 10 % statt 2 % war. Gleiches Muster
  * bei `liq-wbtc-sol` (Typ `volatil_1`).
  *
- * 🔒 Wie bei `ensureScoreLimitEnabled` gilt: Eine **vorhandene** Sektion ist eine
+ * 🔒 Eine **vorhandene** Sektion ist eine
  * Nutzerentscheidung und wird nie überschrieben. Diese Funktion greift ausschließlich beim
  * Neuzugang. Bestehende Fehlstände korrigiert die Migration
  * `lib/migrations/0004-trailing-stop-pool-type-defaults.js` (`node bin/migrate.js`).
@@ -207,58 +200,6 @@ export function readPoolTypeTrailingStop(db, poolType) {
         return result;
     } catch {
         return null;
-    }
-}
-
-/**
- * Richtet das InvestScore Limit ein, wenn ein Pool noch gar keine Score-Limit-
- * Einstellung hat. Wird beim Deposit (Pool-Aktivierung) aufgerufen.
- *
- * 🔒 Ein vorhandenes `scoreLimit.enabled` wird respektiert, egal ob an oder aus —
- * seit Pool-Einstellungen den Kapitalabzug überleben (resetPoolSessionState in
- * lib/config.js), ist der gespeicherte Zustand eine Nutzerentscheidung und keine
- * Altlast mehr — sie stillschweigend zu überschreiben wäre genau das Muster, das
- * mit dem Umbau abgeschafft wurde.
- *
- * Ein Pool ohne jede Score-Limit-Sektion ist dagegen ein Neuzugang — der bekommt
- * den Default (`DEFAULT_SCORE_LIMIT.enabled`, seit 2026-08-21 aus).
- */
-export function ensureScoreLimitEnabled(poolId) {
-    try {
-        const db = new Database(SETTINGS_DB);
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS pool_settings (
-                bot_id   TEXT NOT NULL,
-                pool_id  TEXT NOT NULL,
-                settings TEXT NOT NULL DEFAULT '{}',
-                PRIMARY KEY (bot_id, pool_id)
-            )
-        `);
-
-        const row = db.prepare(
-            `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
-        ).get(config.botId, poolId);
-
-        const current = row ? JSON.parse(row.settings) : {};
-
-        // Sektion vorhanden → der Zustand ist eine Nutzerentscheidung, egal ob an oder aus.
-        if (current.scoreLimit && typeof current.scoreLimit === 'object') {
-            db.close();
-            return;
-        }
-
-        current.scoreLimit = { ...DEFAULT_SCORE_LIMIT };
-
-        db.prepare(`
-            INSERT INTO pool_settings (bot_id, pool_id, settings) VALUES ('liquidity', ?, ?)
-            ON CONFLICT(bot_id, pool_id) DO UPDATE SET settings = excluded.settings
-        `).run(poolId, JSON.stringify(current));
-
-        db.close();
-        console.log(`[settings-auto] ${poolId}: InvestScore Limit Default gesetzt (enabled=${current.scoreLimit.enabled}, minScore=${current.scoreLimit.minScore})`);
-    } catch (err) {
-        // Nicht-kritisch – Deposit soll nicht scheitern wegen Settings-Fehler
-        console.warn(`[settings-auto] ${poolId}: InvestScore Limit Default konnte nicht gesetzt werden: ${err.message}`);
     }
 }
 

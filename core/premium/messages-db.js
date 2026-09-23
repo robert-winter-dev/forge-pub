@@ -184,10 +184,10 @@ export function recordPremiumMessage(text) {
 }
 
 // Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
-// je Rubrik an – hier hart begrenzt, analog zu MAX_NOTIFICATIONS in
-// core/nexus/notify-db.js für die System-Rubrik, damit die Tabelle nicht unbegrenzt
-// wächst und die UI-Grenze auch tatsächlich zutrifft, statt nur eine Auslese-
-// Obergrenze zu sein.
+// je Rubrik an – hier hart begrenzt, analog zu MAX_NOTIFICATIONS_PER_CATEGORY in
+// core/nexus/notify-db.js für System/Bots (CORE#000719), damit die Tabelle nicht
+// unbegrenzt wächst und die UI-Grenze auch tatsächlich zutrifft, statt nur eine
+// Auslese-Obergrenze zu sein.
 const MAX_MESSAGES_PER_CATEGORY = 100;
 
 /**

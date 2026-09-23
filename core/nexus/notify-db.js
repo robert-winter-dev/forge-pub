@@ -9,6 +9,7 @@ import { createRequire } from 'module';
 import { resolve, dirname } from 'path';
 import { fileURLToPath }   from 'url';
 import { PATHS }           from '../../config/paths.js';
+import { getBotConfig, listBots } from '../../lib/bot-registry.js';
 
 const require   = createRequire(import.meta.url);
 const Database  = require('better-sqlite3');
@@ -111,11 +112,19 @@ export function getDb() {
  *        migrate-reports.js). Normale Aufrufer lassen das weg.
  * @returns {number} Inserted ID
  */
-// Message-Center-UI zeigt max. 10 Seiten à 10 Zeilen (= 100, Vorgabe vom 2026-08-08)
-// an (siehe messages.js GET /system) — hier hart begrenzt, damit die Tabelle nicht
-// unbegrenzt wächst und die UI-Grenze auch tatsächlich zutrifft, statt nur eine
-// Auslese-Obergrenze zu sein.
-const MAX_NOTIFICATIONS = 100;
+// Message-Center-UI zeigt je Rubrik max. 10 Seiten à 10 Zeilen (= 100, CORE#000719,
+// vorher ein GEMEINSAMER Cap über System+Bots zusammen seit 2026-08-08) — hier je
+// Rubrik hart begrenzt, damit die Tabelle nicht unbegrenzt wächst und die UI-Grenze
+// auch tatsächlich pro Rubrik zutrifft, statt nur eine gemeinsame Auslese-Obergrenze
+// zu sein (sonst konnte eine sehr aktive Rubrik die andere komplett verdrängen).
+const MAX_NOTIFICATIONS_PER_CATEGORY = 100;
+
+// Dieselbe Bot-vs-System-Erkennung wie resolveBotName() in
+// bots/settings/routes/messages.js, hier aber für den WRITE-Pfad (Pruning) statt
+// nur für die Anzeige benötigt — bewusst aus derselben Registry abgeleitet statt
+// eine zweite Liste zu pflegen, die auseinanderlaufen könnte.
+const BOT_IDS   = listBots().map(([id]) => id);
+const BOT_NAMES = BOT_IDS.map(id => getBotConfig(id).displayName);
 
 export function insertNotification(botId, level, category, message, context, sentTelegram, displayName = null, i18n = null, timestamp = Date.now()) {
     const db   = getDb();
@@ -136,10 +145,24 @@ export function insertNotification(botId, level, category, message, context, sen
         i18n?.params != null ? JSON.stringify(i18n.params) : null,
     );
 
+    // COALESCE ist Pflicht: bei display_name IS NULL (Alt-Zeilen, siehe Kommentar
+    // oben) macht ein rohes "display_name IN (...)" die Bedingung dreiwertig
+    // (NULL statt FALSE) — dann matcht wegen SQL-Boolescher-Logik weder der
+    // Bot- noch der (NOT ...)-System-Zweig, und die Zeile wird nie geprunt.
+    const botCondition = `(bot_id IN (${BOT_IDS.map(() => '?').join(',')}) OR COALESCE(display_name, '') IN (${BOT_NAMES.map(() => '?').join(',')}))`;
+    const botParams    = [...BOT_IDS, ...BOT_NAMES];
+
     db.prepare(`
         DELETE FROM notifications
-        WHERE id NOT IN (SELECT id FROM notifications ORDER BY id DESC LIMIT ?)
-    `).run(MAX_NOTIFICATIONS);
+        WHERE ${botCondition}
+          AND id NOT IN (SELECT id FROM notifications WHERE ${botCondition} ORDER BY id DESC LIMIT ?)
+    `).run(...botParams, ...botParams, MAX_NOTIFICATIONS_PER_CATEGORY);
+
+    db.prepare(`
+        DELETE FROM notifications
+        WHERE NOT ${botCondition}
+          AND id NOT IN (SELECT id FROM notifications WHERE NOT ${botCondition} ORDER BY id DESC LIMIT ?)
+    `).run(...botParams, ...botParams, MAX_NOTIFICATIONS_PER_CATEGORY);
 
     return result.lastInsertRowid;
 }

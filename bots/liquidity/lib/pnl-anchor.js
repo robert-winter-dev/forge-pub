@@ -31,6 +31,38 @@ export function resolvePnlAnchorMs(lastExternalDepositMs, pnlAnchorResetAtMs, op
 }
 
 /**
+ * Vorgänger einer Position, deren Rebalance nach dem Close nicht sofort neu öffnen konnte
+ * (LIQ#000803). Scheitert der Pre-Swap oder das Open, bleibt die alte Position geschlossen
+ * (Close-TX mit note='rebalance'), und ein späterer Bot-Tick eröffnet regulär neu — ohne
+ * `rebalance_history`-Zeile, weil die erst am Ende eines erfolgreichen Rebalancings entsteht.
+ * Ohne diese Brücke riss die Kette dort ab und "In/Out" zeigte nur noch die Zeit seit der
+ * Neueröffnung (USELESS/SOL, 18.09.2026 21:16 Close → 21:21 Open).
+ *
+ * Bedingungen (alle zugleich): direkte Vorgängerposition im selben Pool, deren Close-TX
+ * ein 'rebalance' war, und nach diesem Close keine zweite Position vor der aktuellen.
+ * Ein echter Ausstieg (Withdraw, Trailing Stop) hat eine andere Close-Notiz und trennt weiter.
+ *
+ * @returns {number|null} positions.id des Vorgängers oder null
+ */
+function _abortedRebalancePredecessorId(db, positionId, openedAtMs) {
+    const cur = db.prepare(`SELECT pool_id FROM positions WHERE id = ?`).get(positionId);
+    if (!cur?.pool_id) return null;
+    const prev = db.prepare(`
+        SELECT id, closed_at FROM positions
+         WHERE pool_id = ? AND id != ? AND opened_at < ? AND closed_at IS NOT NULL
+         ORDER BY opened_at DESC LIMIT 1
+    `).get(cur.pool_id, positionId, openedAtMs);
+    if (!prev || !(prev.closed_at > 0) || prev.closed_at > openedAtMs) return null;
+    const closeTx = db.prepare(`
+        SELECT 1 FROM transactions
+         WHERE pool_id = ? AND type = 'close_position' AND note = 'rebalance'
+           AND created_at BETWEEN ? AND ?
+         LIMIT 1
+    `).get(cur.pool_id, prev.closed_at - 120000, prev.closed_at + 120000);
+    return closeTx ? prev.id : null;
+}
+
+/**
  * Eröffnung der Position, mit der die aktuelle Kette wirtschaftlich begonnen hat —
  * geht über `rebalance_history` (old_position_id/new_position_id) so weit zurück, wie
  * die Kette reicht, und stoppt an der ersten Position, die nicht selbst aus einem
@@ -61,8 +93,9 @@ export function chainStartOpenedAt(db, positionId, openedAtMs) {
         const rb = db.prepare(
             `SELECT old_position_id FROM rebalance_history WHERE new_position_id = ? LIMIT 1`
         ).get(curId);
-        if (!rb?.old_position_id) break;
-        const prev = db.prepare(`SELECT id, opened_at FROM positions WHERE id = ?`).get(rb.old_position_id);
+        const prevId = rb?.old_position_id ?? _abortedRebalancePredecessorId(db, curId, curOpenedAt);
+        if (!prevId) break;
+        const prev = db.prepare(`SELECT id, opened_at FROM positions WHERE id = ?`).get(prevId);
         if (!prev) break;
         curId = prev.id;
         curOpenedAt = prev.opened_at;
@@ -84,4 +117,28 @@ export function resolvePnlAnchorSource(lastExternalDepositMs, pnlAnchorResetAtMs
     const rst = pnlAnchorResetAtMs > 0   ? pnlAnchorResetAtMs   : -Infinity;
     if (dep === -Infinity && rst === -Infinity) return 'opened';
     return rst > dep ? 'reset' : 'deposit';
+}
+
+/**
+ * Anker für die PnL-Extrempunkte — Maximum/Minimum/Aktuell im Reiter „PnL-Details" des
+ * Anteil-Modals (LIQ#000612).
+ *
+ * Bewusst NICHT `resolvePnlAnchorMs()`: Dort gewinnt die letzte externe Einzahlung, und
+ * genau das macht Höchst-/Tiefstand direkt nach einem Nachschuss wertlos — das Fenster
+ * enthält dann nur noch den aktuellen Punkt, alle drei Spalten zeigen dieselbe Zahl
+ * (Befund 13.09.2026, USELESS/SOL nach 200-USDC-Einzahlung: dreimal 17:19 Uhr, dreimal
+ * +0,00 %). Ein Nachschuss ist kein Neustart der Kurve; die Kapitalbasis je Kurvenpunkt
+ * in `pnlPeakForPeriod()` (lib/pnl.js, seit LIQ#000572) fängt ihn bereits korrekt ab.
+ *
+ * Zwei Kandidaten, der spätere gewinnt:
+ *   1. Beginn der aktuellen Rebalance-Kette (`chainStartOpenedAt()`) — „Eröffnung des Pools"
+ *   2. ein manueller „Höchststand zurücksetzen"-Klick (positions.pnl_anchor_reset_at) —
+ *      der einzige Vorgang, der die Extrempunkte bewusst neu starten soll
+ *
+ * @param {number} chainStartMs                          opened_at der ältesten Position der Kette
+ * @param {number|null|undefined} pnlAnchorResetAtMs    positions.pnl_anchor_reset_at
+ * @returns {number} fromMs für pnlPeakForPeriod() / pnlForPeriod()
+ */
+export function resolvePnlExtremaAnchorMs(chainStartMs, pnlAnchorResetAtMs) {
+    return pnlAnchorResetAtMs > chainStartMs ? pnlAnchorResetAtMs : chainStartMs;
 }

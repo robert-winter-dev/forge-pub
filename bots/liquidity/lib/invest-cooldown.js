@@ -1,7 +1,7 @@
 /**
  * FORGE Liquidity – Invest-Cooldowns (lib/invest-cooldown.js)
  *
- * Nach jeder kapitalfreigebenden Auslösung (Trailing Stop, TVL-Schutz, Score-Limit)
+ * Nach jeder kapitalfreigebenden Auslösung (Trailing Stop, TVL-Schutz)
  * ist ein Pool für `cooldownHours` vom Invest ausgeschlossen: in einen Pool, den ein
  * Schutzmechanismus gerade geräumt hat, soll „Bester Pool" nicht im selben Atemzug
  * wieder einzahlen.
@@ -14,21 +14,20 @@
  * im Trailing-Stop-Cooldown, sichtbar war das nirgends).
  *
  * Cooldown-Ausschlüsse landen bewusst NICHT in `cleanup_decisions.excluded`: dort stehen
- * die vom Invest-Guard verworfenen Kandidaten (TVL/Score-Limit-Regel), der Cooldown greift
+ * die vom Invest-Guard verworfenen Kandidaten (TVL-/Max-Investment-Regel), der Cooldown greift
  * eine Stufe davor.
  */
 
 import {
-    getLastTsExecutionAt, getLastTvlExecutionAt, getLastScoreLimitExecutionAt,
+    getLastTsExecutionAt, getLastTvlExecutionAt,
 } from './db.js';
 import { loadTsConfig }                    from './trailing-stop.js';
 import { loadTvlConfig }                   from './tvl-protection.js';
-import { loadConfig as loadScoreLimitCfg } from './score-limit.js';
 
 /** Fällt ein Pool ohne (gültige) cooldownHours-Angabe an, gilt diese Untergrenze.
  *  6 h seit 2026-09-03 (LIQ#0359) — gleicher Wert wie der Trailing-Stop-Default in
- *  lib/pool-settings-defaults.js; TVL-Schutz (12 h) und Score-Limit (1 h) tragen ihre
- *  Werte in jeder Pool-Zeile explizit, dieser Fallback greift nur bei fehlendem Feld. */
+ *  lib/pool-settings-defaults.js; der TVL-Schutz (12 h) trägt seinen
+ *  Wert in jeder Pool-Zeile explizit, dieser Fallback greift nur bei fehlendem Feld. */
 const DEFAULT_COOLDOWN_HOURS = 6;
 
 /**
@@ -38,7 +37,6 @@ const DEFAULT_COOLDOWN_HOURS = 6;
 const SOURCES = [
     { key: 'trailingStop',  reason: 'Trailing Stop', settingsKey: 'trailingStop',  lastAt: getLastTsExecutionAt,          loadCfg: loadTsConfig },
     { key: 'tvlProtection', reason: 'TVL-Schutz',    settingsKey: 'tvlProtection', lastAt: getLastTvlExecutionAt,         loadCfg: loadTvlConfig },
-    { key: 'scoreLimit',    reason: 'Score-Limit',   settingsKey: 'scoreLimit',    lastAt: getLastScoreLimitExecutionAt,  loadCfg: loadScoreLimitCfg },
 ];
 
 /**
@@ -49,7 +47,7 @@ const SOURCES = [
  * @param {object} [opts]
  * @param {object|null} [opts.settings]  bereits geladener pool_settings-Eintrag; ohne
  *        Angabe wird je Quelle einzeln aus settings.db gelesen. export.js hat die
- *        Settings ohnehin schon im Speicher — das spart drei DB-Öffnungen je Pool.
+ *        Settings ohnehin schon im Speicher — das spart zwei DB-Öffnungen je Pool.
  * @param {number} [opts.now]
  * @returns {Array<{key:string, reason:string, untilMs:number}>}
  */

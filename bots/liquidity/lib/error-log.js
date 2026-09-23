@@ -8,13 +8,11 @@
  * eine kurze Referenz (Datei + Uhrzeit) für die neutrale User-Meldung.
  */
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { FORGE_TZ, todayTz } from '../../../core/config.js';
 import { PATHS } from '../../../config/paths.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const LOG_DIR   = join(PATHS.liquidityLogs, 'action-errors');
+const LOG_DIR = join(PATHS.liquidityLogs, 'action-errors');
 
 /**
  * @param {string} context  Kurzbeschreibung (z.B. "deposit openPosition MPLX/USDC")
@@ -30,7 +28,7 @@ export function logActionError(context, err) {
     const relFile = `logs/action-errors/${dateStr}.log`;
     const detail = err?.stack || err?.message || String(err);
     appendFileSync(
-        resolve(__dirname, '..', relFile),
+        join(LOG_DIR, `${dateStr}.log`),
         `\n[${dateStr} ${timeStr}] ${context}\n${detail}\n`,
         'utf8',
     );

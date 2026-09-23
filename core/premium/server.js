@@ -167,10 +167,6 @@ function classifyPremiumCommand(text) {
         // pro 10-Min-Zustellung"-Spam-Quelle ab, siehe Kommentar bei premium-blob-sealed
         // weiter unten (subscribeDirectMessages) und core/premium/blob-health-check.js.
         'premium-autopay-enabled', 'premium-autopay-disabled', 'premium-pay-failed', 'premium-outage',
-        // Fällt Premium weg, schaltet die aktive Strategie auf Standard zurück und nimmt
-        // ihre Felder zurück (LIQ#0382, bots/settings/lib/strategy-apply.js
-        // rollbackStrategyOnPremiumLoss()) — rein lokales Ereignis wie 'premium-payment'.
-        'premium-strategy-rollback',
         // Versions-Gate (2026-08-06): Fork meldet bei jedem premium-pay.js-Lauf seine
         // Softwareversion, Master antwortet nur, wenn sie unter der Mindestversion liegt.
         'premium-version-check', 'premium-version-too-old',
@@ -317,12 +313,6 @@ function humanizePremiumMessage(direction, cmd) {
                 : sd('pay_failed', { detail: cmd.detail ?? t('msg.premium.unknown_error') });
         case 'premium-outage':
             return sd(cmd.state === 'recovered' ? 'outage_over' : 'outage');
-        case 'premium-strategy-rollback':
-            return sd('strategy_rollback', {
-                strategyId: cmd.strategyId ?? '?',
-                reverted:   cmd.reverted   ?? 0,
-                skipped:    cmd.skipped    ?? 0,
-            });
         case 'premium-version-check':
             return direction === 'in'
                 ? sd('version_in', { version: cmd.version ?? '?' })

@@ -44,7 +44,7 @@
 
 import { parseArgs }   from 'node:util';
 import { config, setPoolActive, isPoolEnabled, resolvePoolArg } from '../lib/config.js';
-import { ensureScoreLimitEnabled, ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
+import { ensureTvlProtectionDefaults, ensureTrailingStopMinimumReset,
          ensureTrailingStopDefaults } from '../lib/settings-auto.js';
 import {
     openDatabase, syncPools, getOpenPosition,
@@ -55,9 +55,6 @@ import {
 // Performance-Segments seit v0.3.47 nicht mehr geschrieben — Baseline = netDeposited.
 import { getAdapter }        from '../lib/pool-adapter/index.js';
 import { calculateRange }    from '../lib/range.js';
-import { applyStrategyOffsetToComputedRange } from '../lib/strategy-range-offset.js';
-import Database               from 'better-sqlite3';
-import { PATHS }              from '../../../config/paths.js';
 import {
     getKeypair, getUsdcBalance, getUsableSolBalance, getTokenBalance,
     getTokenBalanceFresh, getUsableSolBalanceFresh, getSolBalanceFresh,
@@ -99,37 +96,6 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const MIN_USDC_DEPOSIT_STANDARD = 1.00;
 const MIN_USDC_DEPOSIT_BTCPAIR  = 2.00;
 const MIN_USDC_DEPOSIT_NEW      = 5.00;
-
-const SETTINGS_DB = PATHS.settingsDb;
-
-/**
- * Liest die aktive Strategie (LIQ#0369/#0377) aus `strategy_state` in settings.db.
- * `strategy_id IS NULL`, keine Zeile oder eine fehlende Tabelle (Neuinstallation vor
- * Migration 0009, oder DB nicht lesbar) bedeuten alle "Standard" — kein Versatz.
- * Gleiches Muster wie `_loadActiveStrategyId()` in bin/bot.js und bin/cleanup.js.
- */
-function _loadActiveStrategyId() {
-    try {
-        const sdb = new Database(SETTINGS_DB, { readonly: true, fileMustExist: true });
-        const row = sdb.prepare(`SELECT strategy_id FROM strategy_state WHERE id = 1`).get();
-        sdb.close();
-        return row?.strategy_id ?? null;
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Wendet den Strategie-Versatz (LIQ#0377) auf ein bereits berechnetes calculateRange()-
- * Ergebnis an; fällt bei "Standard"/gesperrtem Pool/Versatz 0 unverändert auf `rawRange`
- * zurück. Dünner Wrapper um applyStrategyOffsetToComputedRange() für die beiden --new-
- * Aufrufstellen unten (Zeile ~530 und ~1294 im Original).
- */
-function _rangeWithStrategyOffset(pool, currentPrice, db, rawRange) {
-    return applyStrategyOffsetToComputedRange(
-        _loadActiveStrategyId(), pool, currentPrice, db, rawRange,
-    ) ?? rawRange;
-}
 
 // ─── CLI-Args ─────────────────────────────────────────────────────────────────
 
@@ -335,7 +301,7 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
     }
     console.log(`[deposit] ${t('cli.liq.topup_swapping', { sol: currentBalance.toFixed(4), min: minNeeded.toFixed(4), usdc: neededUsdc.toFixed(2) })}`);
     try {
-        await swapTokens({
+        const { amountOut, txSignature } = await swapTokens({
             inputMint:      USDC_MINT,
             outputMint:     WSOL_MINT,
             inputDecimals:  6,
@@ -343,6 +309,21 @@ async function _autoTopUpSol(currentBalance, minNeeded) {
             amount:         neededUsdc,
             wallet:         getKeypair(),
             connection:     getConnection(),
+        });
+        const swapFee = await getTxFee(txSignature).catch(() => null);
+        // usd_value_in/out (LIQ#0896): USDC exakt (Eingang), SOL über denselben
+        // solPrice, der oben bereits neededUsdc bestimmt hat.
+        insertTransaction(db, {
+            poolId:      null,
+            type:        'swap',
+            amountA:     neededUsdc,
+            amountB:     amountOut,
+            usdValue:    neededUsdc,
+            usdValueIn:  neededUsdc,
+            usdValueOut: solPrice > 0 ? amountOut * solPrice : null,
+            txHash:      txSignature,
+            txFeeSol:    swapFee,
+            note:        'deposit sol-topup USDC→SOL',
         });
         const newBalance = await getUsableSolBalanceFresh(getKeypair().publicKey);
         console.log(`[deposit] ${t('cli.liq.topup_ok', { sol: newBalance.toFixed(4) })}`);
@@ -534,6 +515,10 @@ if (stats.tvlUsd != null) {
         tvlUsd:       stats.tvlUsd,
         volume24hUsd: stats.volume24hUsd,
         apr24h:       stats.apr24h,
+        // Ohne diese Felder rechnet export.js' NP-Schätzung mit der neuesten (dieser) Zeile
+        // auf Schätz-APR zurück → InvestScore-Einbruch bis zur nächsten Bot-Zeile (LIQ#000774).
+        liquidityInRange: stats.liquidityInRange ?? null,
+        fees24hUsd:       stats.fees24hUsd       ?? null,
     });
 }
 
@@ -564,8 +549,7 @@ if (pool.volatilePair) {
 // Kapitals bleibt beim Deposit liegen (Orca nimmt nur die bindende Seite).
 // Fall B unten benutzt exakt diese Range weiter, deshalb wird sie hier einmal berechnet.
 const newRange = (!position && args.new)
-    ? _rangeWithStrategyOffset(pool, currentPrice, db,
-        calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db))
+    ? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db)
     : null;
 const planLower = position?.price_lower ?? newRange?.priceLower;
 const planUpper = position?.price_upper ?? newRange?.priceUpper;
@@ -717,6 +701,15 @@ if (position && pool.volatilePair && hasUsdc && !useModeBOrC) {
 // der User auch dann einzahlen kann, wenn er nur USDC im Wallet hat.
 // Modus B + --tokenb: kein Auto-Swap (User wählt explizit andere Pfade).
 let swappedVolatileB = false; // Merker: Swap B lief durch (für OOR-Recovery unten)
+
+// Modus A (--usdc X): Zielmengen je Pool-Seite in Token-Einheiten, vollständig aus den
+// X USDC gekauft. Vorhandene Token-Bestände im Wallet zählen bewusst NICHT mit — sonst
+// deckt z.B. herumliegendes SOL einen Teil von X, und genau dieser Teil bleibt als USDC
+// liegen, bei jedem weiteren Versuch wieder (xSOL/SOL auf pub1, 22.09.2026: 38 → 13 → 4,8).
+// Fall A/B deckeln die Einzahlung auf diese Mengen, damit nur X eingesetzt wird.
+// Siehe KB `Liquidity Bot/manuelles-deposit-rest.md` (Quelle 4).
+let modeATarget = null;   // { a, b } oder null (nicht Modus A)
+
 if (pool.volatilePair && hasUsdc && !useModeBOrC) {
     let { tokenANeeded, tokenBNeeded } = volatilePairTargets(
         depositAmount, currentPrice, planLower, planUpper, usdPerTokenA, usdPerTokenB,
@@ -726,24 +719,20 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
     walletUsdc = await getTokenBalanceFresh(keypair.publicKey, USDC_MINT, 6);
     console.log(`[deposit] ${t('cli.ld.volatile_wallet', { a: walletTokenA.toFixed(8), tokenA: tokenALabel, b: walletTokenB.toFixed(8), tokenB: tokenBLabel, usdc: walletUsdc.toFixed(2) })}`);
 
-    // Defizit pro Seite ermitteln, jeweils mit +0,5 % Puffer für Slippage.
-    // Bewusst knapp: der Puffer deckt genau die Swap-Slippage (0,5 %), mehr wäre
-    // Überschuss, der als volatiler Token im Wallet liegen bliebe. Ein zu knapper
-    // Swap ist der harmlosere Fehler — die Rest-Einzahlung am Ende gleicht ihn aus.
+    // Beide Seiten vollständig aus USDC kaufen (siehe modeATarget oben), jeweils mit
+    // +0,5 % Puffer: der deckt genau die Swap-Slippage, mehr wäre Überschuss, der als
+    // volatiler Token im Wallet liegen bliebe. Ein zu knapper Swap ist der harmlosere
+    // Fehler — die Rest-Einzahlung am Ende gleicht ihn aus.
     const usdValueA = usdPerTokenA;
     const usdValueB = usdPerTokenB;
-    let deficitA = Math.max(0, tokenANeeded - walletTokenA);
-    let deficitB = Math.max(0, tokenBNeeded - walletTokenB);
-    let usdcForA  = deficitA > 0 ? (deficitA * usdValueA) * 1.005 : 0;
-    let usdcForB  = deficitB > 0 ? (deficitB * usdValueB) * 1.005 : 0;
+    let usdcForA  = tokenANeeded * usdValueA * 1.005;
+    let usdcForB  = tokenBNeeded * usdValueB * 1.005;
     let totalUsdcNeeded = usdcForA + usdcForB;
 
-    // Reicht das USDC für beide Pool-Swaps nicht mehr — typisch wenn der vorgelagerte
-    // SOL-Top-Up (USDC→SOL) bei niedrigem SOL-Stand USDC verbraucht hat, was die
-    // Frontend-„Max"-Berechnung nicht einplant —, wird der Deposit-Betrag auf das real
-    // verfügbare USDC heruntergezogen statt abzubrechen. Bestehende tokenA/B-Bestände
-    // bleiben fix; das Herunterskalieren reduziert nur den per Swap zu deckenden Bedarf,
-    // sodass totalUsdcNeeded nach der Neuberechnung sicher ≤ walletUsdc liegt.
+    // Reicht das USDC für beide Pool-Swaps nicht — die „Max"-Vorgabe der Oberfläche ist
+    // der volle USDC-Bestand, der Swap-Puffer und ein vorgelagerter SOL-Top-Up kommen
+    // obendrauf —, wird der Betrag auf das real verfügbare USDC heruntergezogen statt
+    // abzubrechen.
     if (totalUsdcNeeded > walletUsdc && totalUsdcNeeded > 0) {
         const scale = (walletUsdc * 0.997) / totalUsdcNeeded;
         const prev  = depositAmount;
@@ -752,14 +741,13 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
         // zu berechnen (identisch zu einem erneuten volatilePairTargets()-Aufruf).
         tokenANeeded    = tokenANeeded * scale;
         tokenBNeeded    = tokenBNeeded * scale;
-        deficitA        = Math.max(0, tokenANeeded - walletTokenA);
-        deficitB        = Math.max(0, tokenBNeeded - walletTokenB);
-        usdcForA        = deficitA > 0 ? (deficitA * usdValueA) * 1.005 : 0;
-        usdcForB        = deficitB > 0 ? (deficitB * usdValueB) * 1.005 : 0;
+        usdcForA        = usdcForA * scale;
+        usdcForB        = usdcForB * scale;
         totalUsdcNeeded = usdcForA + usdcForB;
         budgetUsdcTotal = depositAmount;   // Rest-Einzahlung darf nur das gekappte Budget nutzen
         console.log(`[deposit] ${t('cli.ld.volatile_capped', { old: prev.toFixed(2), new: depositAmount.toFixed(2), available: walletUsdc.toFixed(2), factor: scale.toFixed(4) })}`);
     }
+    modeATarget = { a: tokenANeeded, b: tokenBNeeded };
 
     if (usdcForA >= 1.0) {
         console.log(`[deposit] Auto-Swap A: ${usdcForA.toFixed(2)} USDC → ${tokenALabel}`);
@@ -780,6 +768,21 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
                     connection:     getConnection(),
                 });
                 console.log(`[deposit] Auto-Swap A OK: ${usdcForA.toFixed(2)} USDC → ${amountOut.toFixed(8)} ${tokenALabel} TX=${txSignature}`);
+                const swapFeeA = await getTxFee(txSignature).catch(() => null);
+                // usd_value_in/out (LIQ#0896): USDC exakt (Eingang), tokenA über
+                // denselben usdValueA (usdPerTokenA), der oben bereits usdcForA bestimmt hat.
+                insertTransaction(db, {
+                    poolId:      pool.id,
+                    type:        'swap',
+                    amountA:     usdcForA,
+                    amountB:     amountOut,
+                    usdValue:    usdcForA,
+                    usdValueIn:  usdcForA,
+                    usdValueOut: amountOut * usdValueA,
+                    txHash:      txSignature,
+                    txFeeSol:    swapFeeA,
+                    note:        `deposit auto-swap USDC→${tokenALabel}`,
+                });
                 // SOL als nativen Bestand lesen, sonst via SPL-Token-Account
                 walletTokenA = pool.tokenA === WSOL_MINT
                     ? await getUsableSolBalanceFresh(keypair.publicKey)
@@ -811,6 +814,21 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
                     connection:     getConnection(),
                 });
                 console.log(`[deposit] Auto-Swap B OK: ${usdcForB.toFixed(2)} USDC → ${amountOut.toFixed(8)} ${tokenBLabel} TX=${txSignature}`);
+                const swapFeeB = await getTxFee(txSignature).catch(() => null);
+                // usd_value_in/out (LIQ#0896): USDC exakt (Eingang), tokenB über
+                // denselben usdValueB (usdPerTokenB), der oben bereits usdcForB bestimmt hat.
+                insertTransaction(db, {
+                    poolId:      pool.id,
+                    type:        'swap',
+                    amountA:     usdcForB,
+                    amountB:     amountOut,
+                    usdValue:    usdcForB,
+                    usdValueIn:  usdcForB,
+                    usdValueOut: amountOut * usdValueB,
+                    txHash:      txSignature,
+                    txFeeSol:    swapFeeB,
+                    note:        `deposit auto-swap USDC→${tokenBLabel}`,
+                });
                 swappedVolatileB = true;
                 walletTokenB = pool.tokenB === WSOL_MINT
                     ? await getUsableSolBalanceFresh(keypair.publicKey)
@@ -908,14 +926,16 @@ if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
     // CLMM-korrekte Schätzung: tokenA-Bedarf aus Range-Ratio, nicht 50/50-Annahme
     const targetA      = clmmTokenAForDeposit(usdcBudgetB, currentPrice, planLower, planUpper);
     const [symA, symB] = pool.pair.split('/');
+    modeATarget = { a: targetA, b: usdcBudgetB };
 
-    if (walletTokenA < targetA) {
-        // Zu wenig tokenA → USDC → tokenA tauschen
+    {
+        // tokenA vollständig aus USDC kaufen, vorhandenes tokenA zählt nicht mit (siehe
+        // modeATarget oben).
         // +0,5 % Puffer: deckt genau die Swap-Slippage ab. Früher 1,5 % — das eine
         // Prozent Überschuss landete zuverlässig als tokenA-Rest im Wallet, weil Orca
         // beim Deposit nur die bindende Seite nimmt. Fällt der Swap jetzt minimal zu
         // knapp aus, zahlt die Rest-Einzahlung am Ende nach.
-        const deficitUsdc = (targetA - walletTokenA) * currentPrice * 1.005;
+        const deficitUsdc = targetA * currentPrice * 1.005;
         const swapAmount  = Math.min(deficitUsdc, walletUsdc * 0.99);
 
         if (swapAmount >= 1.0) {
@@ -938,6 +958,21 @@ if (!pool.usdcIsTokenA && !pool.volatilePair && !useTokenB && !useModeBOrC) {
                         connection:     getConnection(),
                     });
                     console.log(`[deposit] Pre-Swap OK: ${swapAmount.toFixed(2)} ${symB} → ${amountOut.toFixed(6)} ${symA} TX=${txSignature}`);
+                    const preSwapFee = await getTxFee(txSignature).catch(() => null);
+                    // usd_value_in/out (LIQ#0896): tokenB = USDC exakt (Eingang), tokenA
+                    // über denselben currentPrice, der oben bereits deficitUsdc bestimmt hat.
+                    insertTransaction(db, {
+                        poolId:      pool.id,
+                        type:        'swap',
+                        amountA:     swapAmount,
+                        amountB:     amountOut,
+                        usdValue:    swapAmount,
+                        usdValueIn:  swapAmount,
+                        usdValueOut: amountOut * currentPrice,
+                        txHash:      txSignature,
+                        txFeeSol:    preSwapFee,
+                        note:        `deposit pre-swap ${symB}→${symA}`,
+                    });
                     // Balances nach Swap frisch lesen (kein Cache)
                     walletTokenA = isSolPool
                         ? await getUsableSolBalanceFresh(keypair.publicKey)
@@ -973,12 +1008,12 @@ if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
     // Frische Reads (gecachte Werte können nach vorherigen Swaps stale sein)
     walletTokenA = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenA), pool.decimalsA);
     walletTokenB = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
+    modeATarget = { a: targetA, b: targetB };
 
-    if (walletTokenB < targetB) {
-        // tokenA → tokenB swappen, um Defizit auszugleichen
-        // swapAmount in USDC: deficitB / price (USDC-Wert von deficitB) × 1.015 Slippage-Puffer
-        const deficitB        = targetB - walletTokenB;
-        const swapAmountUsdc  = (deficitB / currentPrice) * 1.005;  // Puffer = Swap-Slippage, siehe oben
+    {
+        // tokenB vollständig aus USDC kaufen, vorhandenes tokenB zählt nicht mit (siehe
+        // modeATarget oben).
+        const swapAmountUsdc  = (targetB / currentPrice) * 1.005;  // Puffer = Swap-Slippage, siehe oben
         const maxSwapBudget   = budget - targetA;          // USDC die für Swap übrig bleiben (≈ USDC-Wert von targetB)
         const swapAmountFinal = Math.min(swapAmountUsdc, maxSwapBudget * 1.015, walletTokenA * 0.99);
 
@@ -1001,6 +1036,22 @@ if (pool.usdcIsTokenA && !useTokenB && !useModeBOrC) {
                         connection:     getConnection(),
                     });
                     console.log(`[deposit] Pre-Swap OK: ${swapAmountFinal.toFixed(2)} ${tokenALabel} → ${amountOut.toFixed(6)} ${tokenBLabel} TX=${txSignature}`);
+                    const preSwapFeeB = await getTxFee(txSignature).catch(() => null);
+                    // usd_value_in/out (LIQ#0896): tokenA = USDC exakt (Eingang), tokenB
+                    // über denselben currentPrice (tokenB je USDC), der oben bereits
+                    // swapAmountUsdc bestimmt hat.
+                    insertTransaction(db, {
+                        poolId:      pool.id,
+                        type:        'swap',
+                        amountA:     swapAmountFinal,
+                        amountB:     amountOut,
+                        usdValue:    swapAmountFinal,
+                        usdValueIn:  swapAmountFinal,
+                        usdValueOut: currentPrice > 0 ? amountOut / currentPrice : null,
+                        txHash:      txSignature,
+                        txFeeSol:    preSwapFeeB,
+                        note:        `deposit pre-swap ${tokenALabel}→${tokenBLabel}`,
+                    });
                     walletTokenA = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenA), pool.decimalsA);
                     walletTokenB = await getTokenBalanceFresh(keypair.publicKey, new PublicKey(pool.tokenB), pool.decimalsB);
                 } catch (err) {
@@ -1073,6 +1124,22 @@ if (position) {
                     connection:     getConnection(),
                 });
                 console.log(`[deposit] Rescue-Swap OK: ${rescueUsdc.toFixed(2)} USDC → ${amountOut.toFixed(6)} ${tokenALabel} TX=${txSignature}`);
+                const rescueFee = await getTxFee(txSignature).catch(() => null);
+                // usd_value_in/out (LIQ#0896): USDC exakt (Eingang), tokenA über
+                // denselben usdPerTokenA, der für diesen volatilePair-Pool oben bereits
+                // die Auto-Swap-Ziele bestimmt hat.
+                insertTransaction(db, {
+                    poolId:      pool.id,
+                    type:        'swap',
+                    amountA:     rescueUsdc,
+                    amountB:     amountOut,
+                    usdValue:    rescueUsdc,
+                    usdValueIn:  rescueUsdc,
+                    usdValueOut: amountOut * usdPerTokenA,
+                    txHash:      txSignature,
+                    txFeeSol:    rescueFee,
+                    note:        `deposit rescue-swap USDC→${tokenALabel}`,
+                });
             } catch (err) {
                 console.warn(`[deposit] ${t('cli.ld.rescue_failed', { error: err.message })}`);
             }
@@ -1093,6 +1160,8 @@ if (position) {
     //   Modus B:      User-Anker (manualAmountA), kein Check gegen estTokenANeeded
     const estTokenANeeded = useModeBOrC
         ? manualAmountA
+        : modeATarget
+            ? modeATarget.a
         : pool.volatilePair
             ? volatilePairTargets(depositAmount, currentPrice, state.priceLower, state.priceUpper, usdPerTokenA, usdPerTokenB).tokenANeeded
             : clmmTokenAForDeposit(usdcBudgetB, currentPrice, state.priceLower, state.priceUpper);
@@ -1119,13 +1188,18 @@ if (position) {
         : (useTokenB || pool.usdcIsTokenA || useModeBOrC) ? walletTokenB : walletUsdc;
     const depositAmountB = useModeBOrC
         ? manualAmountB
+        : modeATarget
+            ? modeATarget.b
         : pool.volatilePair
             ? volatilePairTargets(depositAmount, currentPrice, state.priceLower, state.priceUpper, usdPerTokenA, usdPerTokenB).tokenBNeeded
             : usdcBudgetB;
-    // amountA: Modus B/C nimmt User-Wahl, sonst kompletter Wallet-Balance (Orca deckelt intern).
+    // amountA: Modus B/C nimmt User-Wahl. Modus A deckelt auf Ziel × 1,1 (wie Fall B): die
+    // tokenB-Seite bindet, Orca nimmt von tokenA nur das Passende — ohne Deckel zog das
+    // ganze tokenA im Wallet mit und ersetzte einen Teil des USDC-Budgets. --tokenb
+    // (Legacy) nimmt weiter den ganzen Bestand.
     const amountA = useModeBOrC
         ? Math.min(manualAmountA, walletTokenA / SLIPPAGE_FACTOR * WALLET_SAFETY)
-        : walletTokenA / SLIPPAGE_FACTOR * WALLET_SAFETY;
+        : Math.min(modeATarget ? modeATarget.a * 1.1 : Infinity, walletTokenA / SLIPPAGE_FACTOR * WALLET_SAFETY);
     const amountB = useModeBOrC
         ? Math.min(manualAmountB, walletTokenBBal / SLIPPAGE_FACTOR * WALLET_SAFETY)
         : Math.min(depositAmountB, walletTokenBBal / SLIPPAGE_FACTOR * WALLET_SAFETY);
@@ -1296,7 +1370,6 @@ if (position) {
     if (setPoolActive(pool.id, true)) {
         console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
     }
-    ensureScoreLimitEnabled(pool.id);
     ensureTrailingStopDefaults(pool.id, pool.poolType, { arm: armTrailingStop });
     {
         const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;
@@ -1329,8 +1402,7 @@ if (position) {
 // zweiter Aufruf: der Pre-Swap muss zwingend mit genau der Range gerechnet haben,
 // die hier eröffnet wird, sonst passt der getauschte Token-Mix nicht zum Bedarf.
 const range = newRange
-    ?? _rangeWithStrategyOffset(pool, currentPrice, db,
-        calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db));
+    ?? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db);
 console.log(`[deposit] Range:   ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)} ${quoteSymbol(pool)}`);
 
 // Modus B/C: manualAmountA/B direkt, kein Wallet-Cap nötig (oben schon geprüft).
@@ -1339,6 +1411,8 @@ const volatileNewTargets = pool.volatilePair
     : null;
 const amountBNew = useModeBOrC
     ? Math.min(manualAmountB, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
+    : modeATarget
+        ? Math.min(modeATarget.b, (pool.volatilePair || pool.usdcIsTokenA ? (walletTokenB ?? 0) : walletUsdc) / SLIPPAGE_FACTOR)
     : pool.volatilePair
         ? Math.min(volatileNewTargets.tokenBNeeded, (walletTokenB ?? 0) / SLIPPAGE_FACTOR)
         : pool.usdcIsTokenA
@@ -1346,6 +1420,8 @@ const amountBNew = useModeBOrC
             : Math.min(usdcBudgetB, walletUsdc / SLIPPAGE_FACTOR);
 const estTokenANeededB = useModeBOrC
     ? manualAmountA
+    : modeATarget
+        ? modeATarget.a
     : pool.volatilePair
         ? volatileNewTargets.tokenANeeded
         : clmmTokenAForDeposit(usdcBudgetB, currentPrice, range.priceLower, range.priceUpper);
@@ -1553,7 +1629,6 @@ console.log(`[deposit] ${t('cli.ld.head_capital_real', { a: totalTokenA.toFixed(
 if (setPoolActive(pool.id, true)) {
     console.log(`[deposit] ${t('cli.liq.pool_activated', { pool: pool.pair })}`);
 }
-ensureScoreLimitEnabled(pool.id);
 ensureTrailingStopDefaults(pool.id, pool.poolType, { arm: armTrailingStop });
 {
     const tvlNow = db.prepare(`SELECT tvl_usd FROM pool_stats WHERE pool_id=? AND tvl_usd>0 ORDER BY recorded_at DESC LIMIT 1`).get(pool.id)?.tvl_usd ?? 0;

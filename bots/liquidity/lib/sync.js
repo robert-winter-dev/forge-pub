@@ -23,12 +23,12 @@ const SYNC_SCRIPT   = path.join(__dirname, '..', '..', '..', 'bin', 'sync.sh');
 // wirken sollen, weil sie "pro Zyklus frisch gelesen" werden. Das gilt für cleanup.js
 // (eigener Prozess, liest .env bei jedem Start neu), aber export.js läuft als Kindprozess
 // von bot.js und erbte bisher dessen process.env — das ist der Stand von bot.js' eigenem
-// Start und ändert sich nie zur Laufzeit. Die "Bester Pool jetzt"-Vorschau im Dashboard
-// zeigte dadurch trotz geänderter .env weiter den alten Schwellwert (Meldung
-// 2026-08-31: CLEANUP_MIN_SCORE auf 70 gesetzt, Dashboard schlug weiter einen
-// Pool mit Score 67 vor). Fix: diese Keys hier vor jedem Export frisch aus der .env lesen.
+// Start und ändert sich nie zur Laufzeit. Die damalige "Bester Pool jetzt"-Vorschau im
+// Dashboard (seit LIQ#000929 entfallen) zeigte dadurch trotz geänderter .env weiter den
+// alten Schwellwert (Meldung 2026-08-31). Fix: diese Keys hier vor jedem Export frisch
+// aus der .env lesen.
 const NO_RESTART_KEYS = [
-    'CLEANUP_MODE', 'CLEANUP_MIN_SCORE', 'CLEANUP_MAX_DEPOSIT', 'CLEANUP_MIN_DEPOSIT',
+    'CLEANUP_MODE', 'CLEANUP_MAX_DEPOSIT', 'CLEANUP_MIN_DEPOSIT',
     'CLEANUP_ENABLED', 'CLEANUP_DUST_ENABLED', 'CLEANUP_DUST_MIN_USDC',
     'CLEANUP_DUST_MAX_USDC', 'CLEANUP_TREND_GATE',
 ];

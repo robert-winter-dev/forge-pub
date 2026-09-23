@@ -25,11 +25,20 @@
  *     weg (Konvention 1 in notify-render.js), kein zweiter Katalogeintrag nötig.
  *   - Ein Textbaustein aus dem Code wird als `{ k, p }` übergeben, nicht als
  *     fertiger Satz.
+ *   - Beträge als `{ n, d, sign }` übergeben, nie als `toFixed()`-String: erst der
+ *     Renderer kennt die Zielsprache (Komma/Punkt, echtes Minuszeichen) — Konvention 4
+ *     in notify-render.js (LIQ#000885). Zeitpunkte entsprechend als `{ t: <ms> }`
+ *     (Konvention 5, LIQ#000886) statt `toLocaleString('de-DE')`. Freitext, den ein
+ *     Aufrufer HIER selbst zu einer Liste zusammenbaut (z.B. `newPoolsFound()`), nutzt
+ *     die exportierte `formatNumber()` aus notify-render.js statt eigener Formatierung.
+ *   - Der Handlungsbaustein sagt nur zu, was ein Automatismus wirklich tut. Gibt es
+ *     für den Befund keinen, heißt das Ergebnis `ACTION.decide` — nicht `observe`
+ *     (Core/message-center.md, „Handlungsbausteine", LIQ#000885).
  *
  * Bewusste Ausnahme: Freitext, den ein AUFRUFER formuliert (info(), rangeHint(),
- * opportunityParamCheck(), Begründungen des Premium-Datendienstes), wird
- * unverändert durchgereicht. Diese Texte entstehen außerhalb dieser Datei; sie zu
- * übersetzen ist Aufgabe der jeweiligen Quelle, nicht dieser Fassade.
+ * Begründungen des Premium-Datendienstes), wird unverändert durchgereicht. Diese
+ * Texte entstehen außerhalb dieser Datei; sie zu übersetzen ist Aufgabe der
+ * jeweiligen Quelle, nicht dieser Fassade.
  */
 
 import { describeError } from '../../../lib/error-messages.js';
@@ -37,7 +46,7 @@ import { FORGE_TZ }      from '../../../core/config.js';
 import { config }        from './config.js';
 import { getBotConfig }  from '../../../lib/bot-registry.js';
 import { markSolLowActive, incrementSolLowCount, isSolLowActive, resetSolLow } from './db.js';
-import { renderNotification } from '../../../lib/notify-render.js';
+import { renderNotification, formatNumber } from '../../../lib/notify-render.js';
 import { getLang, t, numLocale } from '../../../lib/i18n.js';
 // Preisformatierung liegt unter html/js/, weil das Dashboard dieselbe Regel braucht und
 // nur der html/-Baum ausgeliefert wird — Begründung im Kopf des Moduls.
@@ -90,8 +99,19 @@ function errorParts(err) {
 const ACTION = {
     /** Bot löst das selbst, es ist nichts zu tun. */
     selfHeal:  'notify.act.self_heal',
-    /** Lage im Blick behalten, noch keine Handlung nötig. */
+    /**
+     * Lage im Blick behalten, noch keine Handlung nötig. Der Text verspricht seit
+     * LIQ#000885 KEIN Eingreifen des Bots mehr — ob ein Automatismus greift, sagt
+     * die Meldung selbst und nennt ihn beim Namen (Score-Limit, TVL-Schutz, …).
+     */
     observe:   'notify.act.observe',
+    /**
+     * Für diesen Befund gibt es keinen Automatismus: der Bot handelt NICHT von
+     * selbst, der Nutzer muss entscheiden (LIQ#000885). Vorher hing an solchen
+     * Meldungen `observe` mit „der Bot greift selbst ein" — das wiegte in falscher
+     * Sicherheit, z.B. bei „Hinter Halten zurück" ohne aktiven Trailing Stop.
+     */
+    decide:    'notify.act.decide',
     /** Rein informativ, abgeschlossenes Ereignis. */
     fyi:       'notify.act.fyi',
     /** Position/Kapital wurde bewegt, Geld liegt in der Wallet. */
@@ -181,10 +201,10 @@ export async function positionOpened(pool, position) {
 
 /** Fees wurden geclaimed */
 export async function feesClaimed(pool, amountA, amountB, action, txHash, usdValue = null) {
-    const pair   = pool.displayPair ?? pool.pair;
-    const val    = usdValue ?? amountB;
-    const fmtVal = val >= 1 ? val.toFixed(2) : val >= 0.01 ? val.toFixed(4) : val.toFixed(6);
-    await send('info', 'trade', 'notify.liq.fees_claimed', { pair, value: fmtVal }, { pair });
+    const pair = pool.displayPair ?? pool.pair;
+    const val  = usdValue ?? amountB;
+    const dec  = val >= 1 ? 2 : val >= 0.01 ? 4 : 6;
+    await send('info', 'trade', 'notify.liq.fees_claimed', { pair, value: { n: val, d: dec } }, { pair });
 }
 
 /** Position ist out of range */
@@ -236,24 +256,27 @@ export async function tierTransition(pool, oldTier, newTier, scoreData) {
     const totalReturn = scoreData.totalReturnAprPct ?? scoreData.netEconPct;
     const dailyPnl    = scoreData.dailyPnlPct;
 
+    // HALTEN: kein Automatismus in diesem Moment — der Text nennt, was danach folgt
+    // (eigene Meldung bei ABZIEHEN, Cleanup bei INVESTIEREN), statt pauschal
+    // „der Bot greift selbst ein" (LIQ#000885).
     const tail = newTier === 'withdraw' ? 'notify.liq.tier_tail_withdraw'
                : newTier === 'invest'   ? 'notify.liq.tier_tail_invest'
-                                        : ACTION.observe;
+                                        : 'notify.liq.tier_tail_hold';
 
     await send(level, 'ranking', 'notify.liq.tier_transition', {
         pair:     pool.displayPair ?? pool.pair,
         oldLabel: known(oldTier) ? tierLabel(oldTier) : oldTier,
         newLabel: known(newTier) ? tierLabel(newTier) : newTier,
         totalLine: totalReturn != null
-            ? { k: 'notify.liq.tier_total', p: { value: `${totalReturn >= 0 ? '+' : ''}${totalReturn.toFixed(1)}` } }
+            ? { k: 'notify.liq.tier_total', p: { value: { n: totalReturn, d: 1, sign: true } } }
             : undefined,
         dailyLine: dailyPnl != null
-            ? { k: 'notify.liq.tier_daily', p: { value: `${dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(2)}` } }
+            ? { k: 'notify.liq.tier_daily', p: { value: { n: dailyPnl, d: 2, sign: true } } }
             : undefined,
         triggerLine: scoreData.withdrawTriggers?.length
             ? { k: 'notify.liq.tier_triggers', p: { triggers: scoreData.withdrawTriggers.join(', ') } }
             : undefined,
-        confidence: scoreData.confidence?.toFixed?.(0) ?? '?',
+        confidence: Number.isFinite(scoreData.confidence) ? { n: scoreData.confidence, d: 0 } : '?',
         _action:    tail,
     }, {
         pair:              pool.displayPair ?? pool.pair,
@@ -266,24 +289,126 @@ export async function tierTransition(pool, oldTier, newTier, scoreData) {
     });
 }
 
-/** APR unter Schwellenwert */
+/**
+ * APR unter Schwellenwert (Opt-in je Pool, `aprAlertEnabled`). Kein Automatismus
+ * hängt daran — der Bot schließt deswegen nichts; nur das Score-Limit im Risk-
+ * Management würde greifen, wenn die Bewertung darunter fällt. Deshalb `decide`,
+ * nicht `observe` (LIQ#000885).
+ */
 export async function aprAlert(pool, currentApr, threshold) {
     const pair = pool.displayPair ?? pool.pair;
     await send('warn', 'system', 'notify.liq.apr_alert', {
-        pair, apr: currentApr.toFixed(2), threshold,
-        _action: ACTION.observe,
+        pair, apr: { n: currentApr, d: 2 }, threshold: { n: threshold, d: 2 },
+        _action: ACTION.decide,
     }, { pair });
+}
+
+/**
+ * Offene Position liegt seit Tagen hinter bloßem Halten der beiden Token zurück
+ * (LIQ#000872, bin/lp-hodl-watch.js) — Warnung ohne Vorhersage, allein aus der
+ * Messung. Zahlen kommen fertig aus lib/pnl.js (pnlBreakdownForPeriod), hier keine
+ * eigene PnL-Mathematik.
+ *
+ * Text in einfacher Sprache mit fester Gliederung (LIQ#000885): Kernaussage je nach
+ * Lage (a: im Plus, aber hinter Halten · b: im Minus, Halten wäre im Plus · c: beide
+ * im Minus), dann die beiden Werte „heute" gegen „Halten", die letzten 3 Tage, die
+ * Ursache in Worten, der Stand des Trailing Stop (einzige automatische Reißleine) und
+ * `ACTION.decide` — der Bot schließt deswegen nichts von selbst. Wiederholung nach
+ * 24 h (Variante d) bekommt einen eigenen Titel und die Veränderung seit der letzten
+ * Meldung.
+ *
+ * @param {object} pool
+ * @param {object} params
+ * @param {number} params.days           Alter der Kette (Einstieg), nicht Dauer des Rückstands
+ * @param {number} params.edge72Usd      pnlUsd − marketUsd der letzten 72 h (< 0)
+ * @param {number} params.edgeChainUsd   pnlUsd − marketUsd seit Einstieg (< 0), inkl. ausgezahlter Fees
+ * @param {number} params.pnlUsd         PnL seit Einstieg (Wert heute − Eingezahlt)
+ * @param {number} params.marketUsd      PnL, den bloßes Halten gebracht hätte
+ * @param {number} params.valueUsd       Wert heute (Position + Wallet-Rest + ausgezahlte Fees)
+ * @param {number} params.hodlUsd        Wert, den bloßes Halten heute hätte
+ * @param {number} params.feesUsd
+ * @param {number} params.ilRebalanceUsd
+ * @param {{enabled: boolean, thresholdPct?: number}|null} [params.trailingStop]  aus settings.db; null → Zeile entfällt
+ * @param {{hours: number, edgeDeltaUsd: number}|null} [params.repeat]  Wiederholung: Stunden seit der letzten Meldung, Veränderung des Rückstands
+ * @param {number} [params.shareValueUsd]  Anteil-Modal „Wert heute" (ohne ausgezahlte Fees/Wallet-Rest); Zeile entfällt ohne Wert
+ * @param {number} [params.shareEdgeUsd]   Anteil-Modal „gegenüber Halten"; Zeile entfällt ohne Wert
+ */
+export async function lpBehindHodl(pool, params) {
+    const pair = pool.displayPair ?? pool.pair;
+    const usd  = (v, sign = true) => ({ n: v, d: 2, sign });
+    const gap  = -params.edgeChainUsd;       // Rückstand als positive Zahl („X USDC mehr")
+
+    // Der Baustein nennt Pool und Einstiegsalter selbst — verschachtelte Verweise sehen
+    // die äußeren Parameter nicht (Konvention 2), also gehören sie mit hinein.
+    const base = { pair, days: params.days, pnl: usd(params.pnlUsd) };
+    const lead = params.pnlUsd >= 0
+        ? { k: 'notify.liq.lp_behind_hodl_lead_plus',       p: { ...base, gap: usd(gap, false) } }
+        : params.marketUsd >= 0
+        ? { k: 'notify.liq.lp_behind_hodl_lead_minus',      p: { ...base, hodlPnl: usd(params.marketUsd) } }
+        : { k: 'notify.liq.lp_behind_hodl_lead_both_minus', p: { ...base, hodlPnl: usd(params.marketUsd) } };
+
+    const ts = params.trailingStop;
+    const tsLine = ts == null ? undefined
+        : ts.enabled ? { k: 'notify.liq.lp_behind_hodl_ts_on',  p: { pct: { n: ts.thresholdPct, d: 2 } } }
+        :              { k: 'notify.liq.lp_behind_hodl_ts_off' };
+
+    const rep = params.repeat;
+    const repeatLine = rep == null ? undefined
+        : { k: rep.edgeDeltaUsd <= 0 ? 'notify.liq.lp_behind_hodl_repeat_worse' : 'notify.liq.lp_behind_hodl_repeat_better',
+            p: { hours: rep.hours, delta: usd(Math.abs(rep.edgeDeltaUsd), false) } };
+
+    // Brücke zum Anteil-Modal (LIQ#000887): dieselbe Meldung nennt oben den Wert der
+    // Kette (inkl. ausgezahlter Fees/Wallet-Rest, pnlUsd/marketUsd) und hier den Anteil
+    // in der offenen Position (shareValueUsd/shareEdgeUsd) — sonst widersprechen sich
+    // Meldung und Modal scheinbar, obwohl beide richtig sind (KB pnl-rebalance-kette.md).
+    const shareLine = (params.shareValueUsd != null && params.shareEdgeUsd != null)
+        ? { k: 'notify.liq.lp_behind_hodl_share_line', p: { shareValue: usd(params.shareValueUsd, false), shareEdge: usd(params.shareEdgeUsd) } }
+        : undefined;
+
+    await send('warn', 'lp-hodl', rep ? 'notify.liq.lp_behind_hodl_again' : 'notify.liq.lp_behind_hodl', {
+        pair, days: params.days, lead,
+        value: usd(params.valueUsd, false), hodl: usd(params.hodlUsd, false),
+        gap72: usd(-params.edge72Usd, false),
+        repeatLine,
+        fees: usd(params.feesUsd), ilRebalance: usd(params.ilRebalanceUsd),
+        tsLine, shareLine,
+        _action: ACTION.decide,
+    }, { pair, ...params });
+}
+
+/**
+ * Orca-Protokollanteil weicht von der Konstante in lib/fee-model.js ab (LIQ#000884).
+ * Kategorie 'system' → nur Message Center, kein Telegram (nicht in TELEGRAM_WARN_CATEGORIES).
+ *
+ * Für den Nutzer in Prozent der Handelsgebühren, nicht in Basispunkten (LIQ#000885).
+ * Melden alle abweichenden Pools denselben Wert, reicht ein Satz — die Einzelliste
+ * (`list`, Pool-Namen wie auf Orca) nur bei gemischten Werten. Handlung: Claude Code
+ * Bescheid geben, die Konstante ändert niemand von selbst.
+ *
+ * @param {{count: number, total: number, expected: number, uniform: number|null, list: string}} p
+ *        expected/uniform in Basispunkten (Basis 10.000); uniform = gemeinsamer Wert aller
+ *        abweichenden Pools oder null bei gemischten Werten.
+ */
+export async function protocolFeeRateChanged({ count, total, expected, uniform = null, list }) {
+    const pct = bps => ({ n: bps / 100, d: 1 });
+    await send('warn', 'system', 'notify.liq.protocol_fee_rate_changed', {
+        count, total, expectedPct: pct(expected),
+        summary: uniform != null
+            ? { k: 'notify.liq.protocol_fee_rate_uniform', p: { count, total, actualPct: pct(uniform) } }
+            : { k: 'notify.liq.protocol_fee_rate_mixed',   p: { count, total, list } },
+    }, { count, total, expected, uniform, list });
 }
 
 // ─── TVL-Hilfsfunktion ────────────────────────────────────────────────────────
 
-const fmtM = v => (v >= 1_000_000 ? (v / 1_000_000).toFixed(1) + 'M' : (v / 1000).toFixed(0) + 'K');
+// fmtM() (M/K-Kompaktschreibweise) entfernt zugunsten der vollen, gruppierten Zahl über
+// formatNumber() — für Nicht-Fachleute eindeutiger als eine Kompaktform (LIQ#000886).
 
 /** TVL unter Warnschwelle (Stufe 1) */
 export async function tvlWarnAlert(pool, currentTvl, threshold) {
     const pair = pool.displayPair ?? pool.pair;
     await send('error', 'tvl', 'notify.liq.tvl_warn', {
-        pair, current: fmtM(currentTvl), threshold: fmtM(threshold),
+        pair, current: { n: currentTvl, d: 0 }, threshold: { n: threshold, d: 0 },
     }, { pair });
 }
 
@@ -291,7 +416,7 @@ export async function tvlWarnAlert(pool, currentTvl, threshold) {
 export async function tvlExitAlert(pool, currentTvl, threshold) {
     const pair = pool.displayPair ?? pool.pair;
     await send('error', 'tvl', 'notify.liq.tvl_exit', {
-        pair, current: fmtM(currentTvl), threshold: fmtM(threshold),
+        pair, current: { n: currentTvl, d: 0 }, threshold: { n: threshold, d: 0 },
         _action: ACTION.inWallet,
     }, { pair });
 }
@@ -303,7 +428,7 @@ export async function tvlExitAlert(pool, currentTvl, threshold) {
 export async function tvlExitCompleted(pool, tvl, threshold, exitInfo = {}) {
     const pair = pool.displayPair ?? pool.pair;
     await send('warn', 'tvl-done', 'notify.liq.tvl_exit_done', {
-        pair, tvl: tvl.toFixed(2), threshold: threshold.toFixed(0),
+        pair, tvl: { n: tvl, d: 2 }, threshold: { n: threshold, d: 0 },
         ...exitMetricsParams(pool, exitInfo),
         _action: ACTION.inWallet,
     }, { pair });
@@ -465,8 +590,8 @@ export async function solLow(db, solBalance) {
         if (isSolLowActive(db)) {
             resetSolLow(db);
             await send('info', 'wallet', 'notify.liq.sol_recovered', {
-                sol:     solBalance.toFixed(4),
-                reserve: String(config.solReserve).replace('.', ','),
+                sol:     { n: solBalance, d: 4 },
+                reserve: { n: config.solReserve, d: 2 },
                 _action: ACTION.fyi,
             });
         }
@@ -477,13 +602,13 @@ export async function solLow(db, solBalance) {
     _lastSolLowNotifyAt = Date.now();
     if (solBalance < 0.05) {
         await send('error', 'wallet', 'notify.liq.sol_low_critical', {
-            sol: solBalance.toFixed(4), _action: ACTION.topUp,
+            sol: { n: solBalance, d: 4 }, _action: ACTION.topUp,
         });
     } else {
         const count = incrementSolLowCount(db);
         await send('warn', 'wallet', 'notify.liq.sol_low', {
-            sol:     solBalance.toFixed(4),
-            reserve: String(config.solReserve).replace('.', ','),
+            sol:     { n: solBalance, d: 4 },
+            reserve: { n: config.solReserve, d: 2 },
             count,
             _action: ACTION.topUp,
         });
@@ -503,7 +628,7 @@ export async function solTopupFailed(pool, phase, solAfter) {
     const pair = pool.displayPair ?? pool.pair;
     await send('error', 'wallet', 'notify.liq.sol_topup_failed', {
         when:   inline(phase === 'pre' ? 'notify.common.before_liquidation' : 'notify.common.after_liquidation'),
-        sol:    solAfter.toFixed(4),
+        sol:    { n: solAfter, d: 4 },
         action: inline(ACTION.topUp),
     }, { pair, phase, solAfter });
 }
@@ -528,9 +653,9 @@ export async function warn(context, err) {
 export async function capitalFlowRecovered(pool, { usdValue, txHash, whenMs }) {
     await send('info', 'system', 'notify.liq.capital_recovered', {
         pair: pool.displayPair ?? pool.pair,
-        usd:  usdValue.toFixed(2),
+        usd:  { n: usdValue, d: 2 },
         tx:   txHash,
-        when: new Date(whenMs).toLocaleString('de-DE'),
+        when: { t: whenMs },
         _action: ACTION.fyi,
     }, { context: pool.id, txHash, usdValue });
 }
@@ -576,7 +701,7 @@ export async function capitalFlowNeedsReview(pool, { txHash, whenMs, kind, param
         // Solscan-Link statt roher Signatur: linkifyUrls() im Message Center macht
         // http(s)-URLs im Meldungstext automatisch klickbar (bots/settings/html/js/message.js).
         tx:   `https://solscan.io/tx/${txHash}`,
-        when: new Date(whenMs).toLocaleString('de-DE'),
+        when: { t: whenMs },
         ...(spec.reason ? { reason: { k: spec.reason, p: params } } : {}),
         _action: spec.action,
     }, { context: pool.id, txHash, kind, ...params });
@@ -595,12 +720,12 @@ export async function capitalFlowNeedsReview(pool, { txHash, whenMs, kind, param
 export async function feeMeasurementRejected(pool, { measuredUsd, lpValueUsd, previousUsd, impliedAprPct }) {
     await send('warn', 'system', 'notify.liq.fee_measurement_rejected', {
         pair:     pool.displayPair ?? pool.pair,
-        measured: measuredUsd.toFixed(2),
-        lp:       lpValueUsd.toFixed(2),
-        // Tausendertrennung in der Sprache der Installation — eine siebenstellige
-        // Zahl ohne Gruppierung liest niemand.
-        apr:      Math.round(impliedAprPct).toLocaleString(numLocale()),
-        previous: previousUsd.toFixed(4),
+        measured: { n: measuredUsd, d: 2 },
+        lp:       { n: lpValueUsd, d: 2 },
+        // Tausendertrennung übernimmt formatNumber() in der Sprache der Installation —
+        // eine siebenstellige Zahl ohne Gruppierung liest niemand.
+        apr:      { n: Math.round(impliedAprPct), d: 0 },
+        previous: { n: previousUsd, d: 4 },
         _action:  ACTION.fyi,
     }, { context: pool.id, measuredUsd, lpValueUsd, previousUsd, impliedAprPct });
 }
@@ -619,7 +744,7 @@ export async function depositAdded(pool, depositUsdc, amountA, amountB, txHash, 
         amountB: formatPrice(amountB, { sig: 6 }),
         tokenB:  quoteSymbol(pool),
         // `deposit` ist der tatsächlich eingezahlte USDC-Betrag und bleibt USDC.
-        deposit: depositUsdc.toFixed(2),
+        deposit: { n: depositUsdc, d: 2 },
         _action: ACTION.fyi,
     }, { pair });
 }
@@ -630,11 +755,11 @@ export async function withdrawCompleted(pool, usdcRequested, amountA, amountB, f
     const tokenA = pool.pair.split('/')[0];
     await send('info', 'trade', 'notify.liq.withdraw_completed', {
         pair,
-        amountA: amountA.toFixed(6),
+        amountA: { n: amountA, d: 6 },
         tokenA,
-        amountB: amountB.toFixed(2),
-        target:  usdcRequested.toFixed(2),
-        pct:     (fraction * 100).toFixed(2),
+        amountB: { n: amountB, d: 2 },
+        target:  { n: usdcRequested, d: 2 },
+        pct:     { n: fraction * 100, d: 2 },
         _action: ACTION.inWallet,
     }, { pair });
 }
@@ -699,51 +824,52 @@ export function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsd
     // einen Wert, den niemand gemessen hat. Fehlende Werte lassen ihre Zeile entfallen
     // (Konvention 1, notify-render.js), sie erfinden keine Null.
     const hwm = hwmUsd > 0 ? hwmUsd : null;
-    const hwmPct = (hwm != null && capitalUsdc != null && capitalUsdc !== 0)
-        ? ((hwm - capitalUsdc) / capitalUsdc) * 100
-        : null;
     const exitCostUsdc = (lpValueUsd != null && swappedUsdc != null) ? lpValueUsd - swappedUsdc : null;
+    // Prozent relativ zum eingezahlten Kapital — der Nenner, mit dem lib/pnl.js auch den
+    // Zähler bildet, in eine eigene, verschachtelte Katalog-Referenz statt einer fertigen
+    // Klammer im Code (LIQ#000886): so bleiben die Zellen selbst { n }-Zahlen. '' statt
+    // undefined, wenn die Zeile trotzdem stehen bleibt, aber ohne Prozentangabe (Konvention 1
+    // würde sonst die ganze Zeile verwerfen, nicht nur den Klammerzusatz).
+    const pctParen = pct => pct != null ? { k: 'notify.liq.rm_pct_paren', p: { pct: { n: pct, d: 2, sign: true } } } : '';
+    const hwmPct = (hwm != null && capitalUsdc != null && capitalUsdc !== 0)
+        ? ((hwm - capitalUsdc) / capitalUsdc) * 100 : null;
+    const pnlPct = (pnlUsdc != null && capitalUsdc != null && capitalUsdc !== 0)
+        ? (pnlUsdc / capitalUsdc * 100) : null;
     return {
-        lpValue: lpValueUsd != null ? lpValueUsd.toFixed(2) : undefined,
-        coinsA:  hasCoins ? coinsA.toFixed(6) : undefined,
+        lpValue: lpValueUsd != null ? { n: lpValueUsd, d: 2 } : undefined,
+        coinsA:  hasCoins ? { n: coinsA, d: 6 } : undefined,
         symA,
-        coinsB:  hasCoins ? coinsB.toFixed(6) : undefined,
+        coinsB:  hasCoins ? { n: coinsB, d: 6 } : undefined,
         symB,
         noSwapSuffix: hasCoins ? (swappedUsdc == null ? inline('notify.liq.rm_no_swap') : '') : undefined,
         swappedLine: (hasCoins && swappedUsdc != null)
             ? { k: 'notify.liq.rm_swapped', p: {
-                  usdc: swappedUsdc.toFixed(2),
-                  cost: lpValueUsd != null ? (lpValueUsd - swappedUsdc).toFixed(2) : undefined,
+                  usdc: { n: swappedUsdc, d: 2 },
+                  cost: lpValueUsd != null ? { n: lpValueUsd - swappedUsdc, d: 2 } : undefined,
               } }
             : undefined,
         // Vorzeichen immer explizit (+/−), damit auf einen Blick klar ist, ob der
-        // Ausstieg ein Gewinn oder Verlust war. Prozent relativ zum eingezahlten
-        // Kapital — der Nenner, mit dem lib/pnl.js auch den Zähler bildet. Vorher
-        // war es der Poolwert bei Schließung: bei −0,23 USDC macht das keinen
-        // sichtbaren Unterschied, bei einem größeren Ergebnis schon.
+        // Ausstieg ein Gewinn oder Verlust war.
         pnlLine: pnlUsdc != null
             ? { k: 'notify.liq.rm_pnl', p: {
-                  pnl:    `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)}`,
-                  pnlPct: (capitalUsdc != null && capitalUsdc !== 0)
-                      ? ` / ${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / capitalUsdc * 100).toFixed(2)}%`
+                  pnl:    { n: pnlUsdc, d: 2, sign: true },
+                  pnlPct: pnlPct != null
+                      ? { k: 'notify.liq.rm_pnl_pct', p: { pct: { n: pnlPct, d: 2, sign: true } } }
                       : '',
               } }
             : undefined,
         // ── Tabellenlayout (nur notify.liq.rm_executed) ────────────────────────
-        // Fertig formatierte Werte statt verschachtelter Katalog-Referenzen: eine
-        // Tabellenzeile ist eine Zeile, keine zwei. hwmPct relativ zum eingezahlten
-        // Kapital – zeigt, wie weit der Peak darüber lag, nicht relativ zum Poolwert
-        // bei Schließung (das ist pnlPct, andere Bezugsgröße).
-        investValue: capitalUsdc != null ? `${capitalUsdc.toFixed(2)} USDC` : undefined,
-        entryCostValue: entryCostUsdc != null ? `${entryCostUsdc.toFixed(2)} USDC` : undefined,
-        hwmValue:   hwm != null
-            ? `${hwm.toFixed(2)} USDC${hwmPct != null ? ` (${hwmPct >= 0 ? '+' : ''}${hwmPct.toFixed(2)}%)` : ''}`
-            : undefined,
-        costValue:    exitCostUsdc != null ? `${exitCostUsdc.toFixed(2)} USDC` : undefined,
-        swappedValue: swappedUsdc != null ? `${swappedUsdc.toFixed(2)} USDC` : undefined,
-        pnlValue: pnlUsdc != null
-            ? `${pnlUsdc >= 0 ? '+' : ''}${pnlUsdc.toFixed(2)} USDC${(capitalUsdc != null && capitalUsdc !== 0) ? ` (${pnlUsdc >= 0 ? '+' : ''}${(pnlUsdc / capitalUsdc * 100).toFixed(2)}%)` : ''}`
-            : undefined,
+        // Zellen als { n }-Zahlen, Einheit „USDC" und die optionale Prozent-Klammer stehen
+        // im Katalog (LIQ#000886) — vorher fertig als String gebaut, damit englische
+        // Meldungen automatisch deutsch formatierte Beträge zeigten.
+        investValue:    capitalUsdc != null ? { n: capitalUsdc, d: 2 } : undefined,
+        entryCostValue: entryCostUsdc != null ? { n: entryCostUsdc, d: 2 } : undefined,
+        hwmValue:       hwm != null ? { n: hwm, d: 2 } : undefined,
+        hwmPctLine:     hwm != null ? pctParen(hwmPct) : undefined,
+        costValue:      exitCostUsdc != null ? { n: exitCostUsdc, d: 2 } : undefined,
+        swappedValue:   swappedUsdc != null ? { n: swappedUsdc, d: 2 } : undefined,
+        pnlValue:       pnlUsdc != null ? { n: pnlUsdc, d: 2, sign: true } : undefined,
+        pnlPctLine:     pnlUsdc != null ? pctParen(pnlPct) : undefined,
         // Rohzahlen zusätzlich zu den fertig formatierten Strings oben: die
         // Message-Center-Detailansicht (extractRiskExit()/riskExitHtml()) baut daraus
         // ihre drei Tabellen (Einstieg / Maximum / Ausstieg) und braucht dafür Zahlen
@@ -772,7 +898,7 @@ export function exitMetricsParams(pool, { lpValueUsd, coinsA, coinsB, swappedUsd
 
 /**
  * Risk-Management Ausführung abgeschlossen – ersetzt alle szenario-spezifischen
- * Completed-Nachrichten (trailingStopCompleted, scoreLimitCompleted).
+ * Completed-Nachrichten (trailingStopCompleted).
  *
  * @param {object} exitInfo  { lpValueUsd, coinsA, coinsB, swappedUsdc, pnlUsdc } –
  *   alle optional, fehlende Werte lassen die zugehörige Zeile entfallen.
@@ -792,7 +918,7 @@ export async function rmExecuted(pool, scenarioLabel, exitInfo = {}) {
 /**
  * Szenario-Bezeichner der Risk-Management-Meldungen.
  *
- * Die Aufrufer (trailing-stop.js, score-limit.js) liefern ihn
+ * Der Aufrufer (trailing-stop.js) liefert ihn
  * seit Schritt 5 als Katalog-Verweis `{ k, p }` — das Label enthält Zahlen
  * ("Trailing Stop (33%)") und lässt sich deshalb nicht über eine feste Tabelle
  * übersetzen. Ein einfacher String wird unverändert durchgereicht, damit ein
@@ -802,17 +928,8 @@ function rmScenario(label) {
     return label;
 }
 
-/** Score Limit unterschritten – Position wurde geschlossen */
-export async function scoreLimitTriggered(pool, score, minScore) {
-    const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'score-limit', 'notify.liq.score_limit_triggered', {
-        minScore, _action: ACTION.inWallet,
-    }, { pair });
-}
-
 /**
- * Gemeinsame Parameter der drei Exit-Abschlussmeldungen (Score-Limit,
- * Trailing Stop) — der Rumpf steht als EIN Katalogeintrag
+ * Parameter der Exit-Abschlussmeldung (Trailing Stop) — der Rumpf steht als EIN Katalogeintrag
  * (`notify.liq.exit_done`), die Überschrift kommt vom Aufrufer.
  *
  * Die beiden Varianten "an Adresse gesendet" / "bleibt im Wallet" unterscheiden
@@ -823,10 +940,10 @@ function exitDoneParams(pool, headline, { coinsA, coinsB, swappedUsdc, sentTo })
     const [symA, symB] = pool.pair.split('/');
     return {
         headline,
-        coinsA: coinsA.toFixed(6), symA,
-        coinsB: coinsB.toFixed(6), symB,
+        coinsA: { n: coinsA, d: 6 }, symA,
+        coinsB: { n: coinsB, d: 6 }, symB,
         swappedLine: swappedUsdc != null
-            ? { k: 'notify.liq.exit_swapped', p: { usdc: swappedUsdc.toFixed(2) } }
+            ? { k: 'notify.liq.exit_swapped', p: { usdc: { n: swappedUsdc, d: 2 } } }
             : undefined,
         destLine: sentTo
             ? { k: 'notify.liq.exit_sent_to', p: { addr: sentTo.slice(0, 8) } }
@@ -835,33 +952,15 @@ function exitDoneParams(pool, headline, { coinsA, coinsB, swappedUsdc, sentTo })
     };
 }
 
-/** Score Limit vollständig abgeschlossen */
-export async function scoreLimitCompleted(pool, { score, coinsA, coinsB, swappedUsdc, sentTo }) {
-    const pair = pool.displayPair ?? pool.pair;
-    await send('warn', 'score-limit-done', 'notify.liq.exit_done',
-        exitDoneParams(pool, { k: 'notify.liq.exit_head_score_limit', p: { score } },
-            { coinsA, coinsB, swappedUsdc, sentTo }),
-        { pair });
-}
-
-/** Score Limit fehlgeschlagen */
-export async function scoreLimitError(pool, step, err) {
-    const pair = pool.displayPair ?? pool.pair;
-    const { reason, detail, raw } = errorParts(err);
-    await send('error', 'score-limit', 'notify.liq.score_limit_error', {
-        step, reason, detail, _action: ACTION.retrying,
-    }, { pair, errorMessage: raw });
-}
-
 // ─── Trailing Stop ────────────────────────────────────────────────────────────
 
 export async function trailingStopTriggered(pool, hwmUsd, currentUsd, thresholdPct) {
     const pair = pool.displayPair ?? pool.pair;
     const drawdownPct = hwmUsd > 0 ? ((hwmUsd - currentUsd) / hwmUsd) * 100 : 0;
     await send('warn', 'trailing-stop', 'notify.liq.trailing_stop_triggered', {
-        drawdown: drawdownPct.toFixed(1),
-        hwm:      hwmUsd.toFixed(2),
-        current:  currentUsd.toFixed(2),
+        drawdown: { n: drawdownPct, d: 1 },
+        hwm:      { n: hwmUsd, d: 2 },
+        current:  { n: currentUsd, d: 2 },
     }, { pair });
 }
 
@@ -910,8 +1009,8 @@ export async function trailingStopPartial(pool, err, partial) {
     const { reason, detail, raw } = errorParts(err);
     await send('error', 'trailing-stop-partial', 'notify.liq.trailing_stop_partial', {
         pair,
-        coinsA: (partial.coinsA ?? 0).toFixed(6),
-        coinsB: (partial.coinsB ?? 0).toFixed(6),
+        coinsA: { n: partial.coinsA ?? 0, d: 6 },
+        coinsB: { n: partial.coinsB ?? 0, d: 6 },
         symA, symB,
         reason, detail,
         _action: ACTION.inWalletRetrying,
@@ -928,16 +1027,21 @@ export async function trailingStopPartial(pool, err, partial) {
  *   'update_recommended' → error → DB + Telegram (Degradation > 15%)
  *
  * @param {'ok'|'warn'|'update_recommended'} status
- * @param {string} summary  Einzeilige Zusammenfassung (Freitext des Aufrufers)
+ * @param {{k: string, p: object}} summary  Katalog-Verweis (Konvention 2) mit strukturierten
+ *        Werten, kein Freitext (LIQ#000887) — sonst steht deutscher Text auch in der
+ *        englischen Meldung.
  * @param {object} details  Strukturierte Details für DB-Context
  */
 export async function opportunityParamCheck(status, summary, details) {
     if (status === 'ok') return;
     const recommend = status === 'update_recommended';
-    await send(recommend ? 'error' : 'warn', 'opportunity-score', 'notify.liq.param_check', {
+    // Ohne Empfehlung passiert nichts — weder automatisch noch durch den Nutzer. Ein
+    // solcher Text („noch nichts zu tun") gehört auf `info`, nicht `warn` (Regel
+    // „resolved ≠ warn", LIQ#000885); die Handlung folgt erst mit der Empfehlung.
+    await send(recommend ? 'error' : 'info', 'opportunity-score', 'notify.liq.param_check', {
         icon:    recommend ? '⚠️' : 'ℹ️',
         summary,
-        _action: recommend ? 'notify.liq.param_check_action' : ACTION.observe,
+        _action: recommend ? 'notify.liq.param_check_action' : 'notify.liq.param_check_watch',
     }, details);
 }
 
@@ -973,10 +1077,10 @@ export async function premiumPoolExitDone(pool, { reason, swappedUsdc, observedT
         pair,
         reason,
         proceeds: swappedUsdc > 0
-            ? { k: 'notify.liq.premium_proceeds', p: { usdc: swappedUsdc.toFixed(2) } }
+            ? { k: 'notify.liq.premium_proceeds', p: { usdc: { n: swappedUsdc, d: 2 } } }
             : { k: 'notify.liq.premium_no_proceeds' },
         ownTvlLine: observedTvlUsd > 0
-            ? { k: 'notify.liq.premium_own_tvl', p: { tvl: fmtM(observedTvlUsd) } }
+            ? { k: 'notify.liq.premium_own_tvl', p: { tvl: { n: observedTvlUsd, d: 0 } } }
             : undefined,
         _action: ACTION.inWallet,
     }, { pair, reason, swappedUsdc });
@@ -1020,10 +1124,13 @@ export async function premiumPoolsAdopted(pools) {
  */
 export async function poolDepositCheckFailed(pool, errorText) {
     const pair = pool.displayPair ?? pool.pair;
+    // Der Automatismus ist der stündliche Wiederholungslauf samt Entwarnung
+    // (poolDepositCheckRecovered) — genau das sagt der eigene Schluss-Satz, statt des
+    // pauschalen `observe` (LIQ#000885).
     await send('warn', 'premium-offer', 'notify.liq.deposit_check_failed', {
         pair,
         error: errorText,
-        _action: ACTION.observe,
+        _action: 'notify.liq.deposit_check_failed_action',
     }, { pair, error: errorText });
 }
 
@@ -1077,13 +1184,18 @@ export async function premiumPoolIdentityMismatch(pool, changes) {
 
 /** Neue Orca-Pools über Fees24h- und TVL-Schwelle, noch nicht in pools.json */
 export async function newPoolsFound(pools, feesThresholdUsdc, tvlThresholdUsdc) {
+    // Freitext-Liste des Aufrufers (bewusste Ausnahme, siehe Kopf dieser Datei): in der
+    // Sprache der Installation formatiert, weil sie hier fertig zusammengebaut wird,
+    // bevor sie in den Katalog-Parameter `lines` geht (LIQ#000886).
+    const lang  = getLang();
     const lines = pools.map(p =>
-        `${p.pair} – Fees24h ${p.fees24h.toFixed(0)} USDC, TVL ${p.tvlUsd.toFixed(0)} USDC\n\`${p.address}\``
+        `${p.pair} – Fees24h ${formatNumber(p.fees24h, lang, { d: 0 })} USDC, `
+        + `TVL ${formatNumber(p.tvlUsd, lang, { d: 0 })} USDC\n\`${p.address}\``
         + (p.knownPairNote ? `\n${p.knownPairNote}` : '')
     ).join('\n\n');
     await send('warn', 'new-pool-alert', 'notify.liq.new_pools', {
-        fees: feesThresholdUsdc.toLocaleString('de-DE'),
-        tvl:  tvlThresholdUsdc.toLocaleString('de-DE'),
+        fees: { n: feesThresholdUsdc, d: 0 },
+        tvl:  { n: tvlThresholdUsdc, d: 0 },
         lines,
     },
     { pools: pools.map(p => p.address) },

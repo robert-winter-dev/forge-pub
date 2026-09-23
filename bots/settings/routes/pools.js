@@ -1,9 +1,9 @@
 /**
- * /api/pools – Pool-Einstellungen (Score Limit, Trailing Stop, Auto Compounding)
+ * /api/pools – Pool-Einstellungen (Trailing Stop, TVL-Schutz, Auto Compounding)
  *
  * GET /api/pools/liquidity              → alle Pools + gespeicherte Einstellungen
  * GET /api/pools/liquidity/:poolId      → Einstellungen eines Pools
- * PUT /api/pools/liquidity/:poolId      → Einstellungen speichern (Body: { autoCompound?, scoreLimit?, trailingStop? })
+ * PUT /api/pools/liquidity/:poolId      → Einstellungen speichern (Body: { autoCompound?, trailingStop?, tvlProtection?, cleanup?, maxInvestment? })
  *
  * Konfiguration liegt in settings.db (Tabelle: pool_settings).
  * Pool-Liste kommt aus bots/liquidity/config/pools.json.
@@ -137,21 +137,6 @@ function loadActivationTvls() {
     }
 }
 
-/** InvestScore je poolId aus data.json lesen */
-function loadInvestScores() {
-    try {
-        const data  = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
-        const pools = data.pools ?? [];
-        const map   = {};
-        for (const p of pools) {
-            if (p.id && p.investScore != null) map[p.id] = p.investScore;
-        }
-        return map;
-    } catch {
-        return {};
-    }
-}
-
 /**
  * Trendzustand je poolId aus data.json (`pool.trendGate.state`, geschrieben von
  * bots/liquidity/bin/export.js aus lib/trend-indicators.js).
@@ -177,15 +162,18 @@ function loadTrendStates() {
 /**
  * Herkunft der Score-Daten aus data.json (siehe bin/export.js, 2026-07-25):
  * 'compute' = lokal gerechnet, 'delivered' = über Premium geliefert, 'none' = kein
- * Score verfügbar. Grundlage für die Sichtbarkeits-Bedingung im Risk-Management-Modal
- * ("Zustand immer sichtbar", FORGE-public-Entscheidung Commit bf8c723) — ein Nutzer darf
- * nie einen Score-Limit-Schalter aktivieren, ohne zu wissen, dass er wirkungslos ist.
+ * Score verfügbar. Steuert in der Oberfläche die Premium-Anzeige des Scores.
  * Default 'compute': bestehende FORGE-Installationen ohne den neuen Provider-Code
  * (vor Commit dcdb053) haben kein scoreSource-Feld in ihrer data.json.
  */
 function loadScoreState() {
     try {
         const data = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
+        // Seit CORE#000931 liefert Premium die Edge statt des Scores — der Premium-Zustand
+        // kommt deshalb aus edgeSource/edgeStale; scoreSource nur für eine data.json vom
+        // alten Export. Die Feldnamen der API (scoreSource/scoreStale) bleiben, bis
+        // LIQ#000932 den Score-Unterbau entfernt.
+        if (data.edgeSource) return { source: data.edgeSource, stale: !!data.edgeStale };
         return { source: data.scoreSource ?? 'compute', stale: !!data.scoreStale };
     } catch {
         return { source: 'compute', stale: false };
@@ -225,29 +213,6 @@ function loadTsAdvice() {
     } catch {
         return {};
     }
-}
-
-/**
- * Liest die letzten n invest_score_history-Einträge je Pool aus liquiditybot.db (read-only).
- * Gibt { poolId: [{ score, exitScore, recorded_at }, ...] } zurück (neueste zuerst).
- * exitScore fällt auf score zurück, wenn exit_score (Spalte seit 2026-07-03) noch
- * nicht befüllt ist (ältere/rückwirkend gebackfillte Zeilen).
- */
-function loadRecentScores(poolIds, n = 5) {
-    const map = {};
-    if (!poolIds.length) return map;
-    try {
-        const db   = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
-        const stmt = db.prepare(
-            `SELECT score, COALESCE(exit_score, score) AS exitScore, recorded_at FROM invest_score_history
-             WHERE pool_id = ? ORDER BY recorded_at DESC LIMIT ?`
-        );
-        for (const id of poolIds) map[id] = stmt.all(id, n);
-        db.close();
-    } catch {
-        // best-effort – UI zeigt "keine Daten"
-    }
-    return map;
 }
 
 /** Aktuellen Positionswert (myValue) je poolId aus data.json lesen */
@@ -316,9 +281,6 @@ const DEFAULT_POOL_TYPE_SETTINGS = {
     tvlProtection: {
         level1: { enabled: true, withdrawPct: 100 },
         swapToUsdc: true, sendTo: '', cooldownHours: 12,
-    },
-    scoreLimit: {
-        enabled: false, minScore: 30, swapToUsdc: true, sendTo: '', cooldownHours: 1,
     },
     enabled: true,
 };
@@ -422,28 +384,6 @@ function hasOpenPosition(poolId) {
 }
 
 /**
- * Letzter Auslöse-Zeitpunkt je Pool für alle drei Risk-Management-Exits, die einen
- * Cleanup-Cooldown kennen (ts_executions/tvl_executions/score_limit_executions,
- * jeweils triggered_at, MAX) — Grundlage für den Cleanup-Cooldown (analog
- * `_loadCleanupCooldownBlockedPools` im Liquidity Bot, bots/liquidity/bin/cleanup.js).
- * Reiner Lesezugriff auf liquiditybot.db, wie überall sonst in dieser Datei (der Bot
- * bleibt alleinige Schreibinstanz).
- */
-function loadLastExitTriggerTimes() {
-    const tables = { trailingStop: 'ts_executions', tvlProtection: 'tvl_executions', scoreLimit: 'score_limit_executions' };
-    const result = { trailingStop: {}, tvlProtection: {}, scoreLimit: {} };
-    try {
-        const db = new Database(LIQUIDITYBOT_DB, { readonly: true, fileMustExist: true });
-        for (const [key, table] of Object.entries(tables)) {
-            const rows = db.prepare(`SELECT pool_id, MAX(triggered_at) AS last FROM ${table} GROUP BY pool_id`).all();
-            for (const r of rows) result[key][r.pool_id] = r.last;
-        }
-        db.close();
-    } catch { /* Tabelle(n) evtl. noch nicht migriert */ }
-    return result;
-}
-
-/**
  * pools.json ist seit Liquidity Bot v0.4.85 für `active`/`enabled`/`rangeOverride.fixedPct` nur
  * noch der Seed für neue Pools — bei bestehenden Pools ist die liquiditybot.db (Tabelle `pools`)
  * Single Source of Truth (siehe bots/liquidity/lib/config.js `loadPools()` /
@@ -536,11 +476,6 @@ function loadNonDefaults(db, botId, pool) {
                 'tvlProtection.swapToUsdc':            pt.tvlProtection?.swapToUsdc,
                 'tvlProtection.sendTo':                pt.tvlProtection?.sendTo,
                 'tvlProtection.cooldownHours':         pt.tvlProtection?.cooldownHours,
-                'scoreLimit.enabled':                  pt.scoreLimit?.enabled,
-                'scoreLimit.minScore':                 pt.scoreLimit?.minScore,
-                'scoreLimit.swapToUsdc':               pt.scoreLimit?.swapToUsdc,
-                'scoreLimit.sendTo':                   pt.scoreLimit?.sendTo,
-                'scoreLimit.cooldownHours':            pt.scoreLimit?.cooldownHours,
             };
             // Nur übernehmen, wenn der Pool-Typ überhaupt gepflegt ist: ein ungepflegter
             // Typ liefert dieselben lauter-null-Werte wie ein bewusst auf „keine Schwelle"
@@ -574,7 +509,6 @@ export function loadSettings(db, botId, poolId) {
         // Deep merge: DEFAULT_SETTINGS als Basis, gespeicherte Werte überschreiben
         return {
             autoCompound: { ...DEFAULT_SETTINGS.autoCompound, ...(saved.autoCompound ?? {}) },
-            scoreLimit:   { ...DEFAULT_SETTINGS.scoreLimit,   ...(saved.scoreLimit   ?? {}) },
             trailingStop: { ...DEFAULT_SETTINGS.trailingStop, ...(saved.trailingStop ?? {}) },
             cleanup:      { ...DEFAULT_SETTINGS.cleanup,      ...(saved.cleanup      ?? {}) },
             maxInvestment: { ...DEFAULT_SETTINGS.maxInvestment, ...(saved.maxInvestment ?? {}) },
@@ -605,7 +539,6 @@ function loadPoolTypeSettings(db, botId, poolType) {
                 ...(saved.tvlProtection ?? {}),
                 level1: { ...DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.level1, ...(saved.tvlProtection?.level1 ?? {}) },
             },
-            scoreLimit: { ...DEFAULT_POOL_TYPE_SETTINGS.scoreLimit, ...(saved.scoreLimit ?? {}) },
             enabled: saved.enabled ?? DEFAULT_POOL_TYPE_SETTINGS.enabled,
         };
     } catch {
@@ -712,10 +645,12 @@ function validateTrailingStop(merged, poolId = null) {
 }
 
 /**
- * @param {{source: 'user'|'strategy'|'migration'|'bot'}} opts  Herkunft der Änderung,
- *        landet in settings_history. Bewusst ohne Default (LIQ#0366): ein
- *        stillschweigendes `'user'` würde einen Bulk-Write der künftigen
- *        Strategie-Auswahl als Hand-Änderung verbuchen und `userTouched()` verfälschen.
+ * @param {{source: 'user'|'migration'|'bot'}} opts  Herkunft der Änderung, landet in
+ *        settings_history. Bewusst ohne Default (LIQ#0366): ein stillschweigendes
+ *        `'user'` würde einen Bulk-Write als Hand-Änderung verbuchen und
+ *        `userTouched()` verfälschen. `'strategy'` war ein weiterer möglicher Wert,
+ *        bis das Strategie-Feature in LIQ#000921 entfernt wurde — historische Zeilen
+ *        in settings_history bleiben davon unberührt.
  */
 export function saveSettings(db, botId, poolId, partial, opts = {}) {
     const { source } = opts;
@@ -723,7 +658,6 @@ export function saveSettings(db, botId, poolId, partial, opts = {}) {
     const before  = structuredClone(current);
     // Nur bekannte Sektionen übernehmen
     if (partial.autoCompound !== undefined) current.autoCompound = { ...current.autoCompound, ...partial.autoCompound };
-    if (partial.scoreLimit   !== undefined) current.scoreLimit   = { ...current.scoreLimit,   ...partial.scoreLimit   };
     if (partial.trailingStop !== undefined) {
         const merged = { ...current.trailingStop, ...partial.trailingStop };
         validateTrailingStop(merged, poolId);
@@ -785,16 +719,12 @@ router.get('/liquidity', (req, res) => {
 
         const values         = loadCurrentValues();
         const tsStatus       = loadTrailingStopStatus();
-        const lastExitTrigger = loadLastExitTriggerTimes();
-        const investScores   = loadInvestScores();
         const trendStates    = loadTrendStates();
         const scoreState     = loadScoreState();
         const poolTvls       = loadPoolTvls();
         const tsAdviceMap    = loadTsAdvice();
         const activationTvls = loadActivationTvls();
         const capitalUsdc     = loadCapitalUsdc();
-        const recentScores   = loadRecentScores(pools.map(p => p.id), 5);
-        const checkIntervalMs = parseInt(process.env.CHECK_INTERVAL_MS ?? '300000', 10);
 
         const result = pools.map(pool => {
             const settings = loadSettings(db, 'liquidity', pool.id);
@@ -802,49 +732,6 @@ router.get('/liquidity', (req, res) => {
             // solange der Bot ihn noch nicht gesetzt hat (nicht in DB persistiert).
             if (settings.tvlProtection?.tvlAtActivation == null && activationTvls[pool.id] != null) {
                 settings.tvlProtection.tvlAtActivation = activationTvls[pool.id];
-            }
-
-            // Score-Limit-Status: consecutiveBelow aus invest_score_history rekonstruieren.
-            // Muss gegen exitScore (malus-frei) prüfen, nicht score (=value, mit Volumen-
-            // Malus) — lib/score-limit.js triggert selbst ausschließlich auf exitValue,
-            // der Malus darf laut Design nie in die Exit-Entscheidung einfließen (s.
-            // score-architektur.md). Sonst zeigt die UI einen näher wirkenden Exit an,
-            // als der Bot tatsächlich auslösen würde (Befund 2026-07-03, cbBTC/SOL).
-            const history      = recentScores[pool.id] ?? [];
-            const slMinScore   = Number.isFinite(Number(settings.scoreLimit?.minScore)) ? Number(settings.scoreLimit.minScore) : 30;
-            let consecutiveBelow = 0;
-            for (const h of history) {
-                if (h.exitScore < slMinScore) consecutiveBelow++;
-                else break;
-            }
-            const scoreLimitState = {
-                consecutiveBelow,
-                lastCheckedAt: history[0]?.recorded_at ?? null,
-                checkIntervalMs,
-            };
-
-            // Cleanup-Cooldown nach Risk-Management-Exit (Ticket 2026-08-08): solange einer
-            // der drei Exits (Trailing Stop, TVL-Schutz, Score-Limit) noch im Cooldown steht,
-            // ist der Pool für den automatischen "Bester Pool"-Cleanup gesperrt (siehe
-            // _loadCleanupCooldownBlockedPools in bots/liquidity/bin/cleanup.js) — muss hier
-            // gespiegelt werden, sonst zeigt das "Cleanup verwalten"-Modal einen Pool als
-            // Kandidaten, den der Bot tatsächlich übergeht. Bei mehreren gleichzeitig aktiven
-            // Cooldowns gewinnt der spätere (längste Sperre).
-            const cooldownSources = [
-                { reason: 'Trailing Stop', lastAt: lastExitTrigger.trailingStop[pool.id]  ?? null, hours: settings.trailingStop?.cooldownHours },
-                { reason: 'TVL-Schutz',    lastAt: lastExitTrigger.tvlProtection[pool.id] ?? null, hours: settings.tvlProtection?.cooldownHours },
-                { reason: 'Score-Limit',   lastAt: lastExitTrigger.scoreLimit[pool.id]    ?? null, hours: settings.scoreLimit?.cooldownHours },
-            ];
-            let cleanupCooldownUntil = null;
-            let cleanupCooldownReason = null;
-            for (const s of cooldownSources) {
-                if (s.lastAt == null) continue;
-                const hours = Number.isFinite(Number(s.hours)) ? Number(s.hours) : 1;
-                const until = s.lastAt + hours * 3_600_000;
-                if (Date.now() < until && (cleanupCooldownUntil == null || until > cleanupCooldownUntil)) {
-                    cleanupCooldownUntil = until;
-                    cleanupCooldownReason = s.reason;
-                }
             }
 
             return {
@@ -866,7 +753,6 @@ router.get('/liquidity', (req, res) => {
                 uiDepositDisabled:  pool.uiDepositDisabled ?? false,
                 currentValue:       values[pool.id]       ?? null,
                 capitalUsdc:        capitalUsdc[pool.id]  ?? null,
-                investScore:        investScores[pool.id] ?? null,
                 trendState:         trendStates[pool.id]  ?? null,
                 scoreSource:        scoreState.source,
                 scoreStale:         scoreState.stale,
@@ -882,9 +768,6 @@ router.get('/liquidity', (req, res) => {
                 // seit 2026-08-15 jeden Kapitalabzug überleben.
                 nonDefault:         loadNonDefaults(db, 'liquidity', pool),
                 trailingStopStatus: tsStatus[pool.id]    ?? null,
-                cleanupCooldownUntil,
-                cleanupCooldownReason,
-                scoreLimitState,
             };
         });
 
@@ -1018,8 +901,7 @@ router.get('/liquidity/pool-types', (req, res) => {
 // Body: {
 //   trailingStop:  { enabled, thresholdPct, thresholdPct2, auto, autoSwapToUSDC, sendTo, cooldownHours },
 //   tvlProtection: { level1: { enabled, withdrawPct }, swapToUsdc, sendTo, cooldownHours },
-//   scoreLimit:    { enabled, minScore, swapToUsdc, sendTo, cooldownHours },
-//   enabled?: boolean,  // Kapitalannahme des ganzen Typs (unabhängig von den drei Sektionen oben)
+//   enabled?: boolean,  // Kapitalannahme des ganzen Typs (unabhängig von den Sektionen oben)
 // }
 // Schreibt die Werte SOFORT in die individuellen Settings ALLER Pools dieses Typs
 // (echter Bulk-Write, kein Template/Override-Konzept — Bestätigung dazu liegt im UI).
@@ -1079,19 +961,11 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         }
         return v;
     };
-    let tsCooldown, tvlCooldown, tvlPct, slCooldown, slMinScore;
+    let tsCooldown, tvlCooldown, tvlPct;
     try {
         tsCooldown  = validateCooldown(body.trailingStop?.cooldownHours,  'api.pools.cooldown_range');
         tvlCooldown = validateCooldown(body.tvlProtection?.cooldownHours, 'api.pools.cooldown_range');
-        slCooldown  = validateCooldown(body.scoreLimit?.cooldownHours,    'api.pools.cooldown_range');
         tvlPct      = validateStep10(body.tvlProtection?.level1?.withdrawPct, 'api.pools.tvl_pct_step_l1');
-        const rawScore = body.scoreLimit?.minScore;
-        if (rawScore !== undefined) {
-            slMinScore = Number(rawScore);
-            if (!Number.isFinite(slMinScore) || slMinScore < 0 || slMinScore > 100) {
-                throw new Error(t('api.pools.score_limit_range'));
-            }
-        }
     } catch (err) {
         return res.status(400).json({ error: err.message });
     }
@@ -1137,13 +1011,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                 sendTo:        body.tvlProtection?.sendTo ?? '',
                 cooldownHours: tvlCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.cooldownHours,
             },
-            scoreLimit: {
-                enabled:       !!body.scoreLimit?.enabled,
-                minScore:      slMinScore ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.minScore,
-                swapToUsdc:    body.scoreLimit?.swapToUsdc ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.swapToUsdc,
-                sendTo:        body.scoreLimit?.sendTo ?? '',
-                cooldownHours: slCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.scoreLimit.cooldownHours,
-            },
             enabled: body.enabled ?? true,
         };
         db.prepare(`
@@ -1152,7 +1019,7 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         `).run('liquidity', poolType, JSON.stringify(newTypeSettings));
         recordSettingsHistory(db, 'liquidity', 'pool_type', poolType, oldTypeSettings, newTypeSettings, 'user');
 
-        // ── Bulk-Write Trailing-Stop/TVL/Score-Limit in die individuellen Pool-Settings ──
+        // ── Bulk-Write Trailing-Stop/TVL in die individuellen Pool-Settings ──
         const updated = [];
         const failed  = [];
         for (const pool of pools) {
@@ -1194,9 +1061,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                         sendTo:        newTypeSettings.tvlProtection.sendTo,
                         cooldownHours: newTypeSettings.tvlProtection.cooldownHours,
                     };
-                }
-                if (body.scoreLimit !== undefined) {
-                    partial.scoreLimit = { ...newTypeSettings.scoreLimit };
                 }
                 if (Object.keys(partial).length > 0) {
                     saveSettings(db, 'liquidity', pool.id, partial, { source: 'user' });

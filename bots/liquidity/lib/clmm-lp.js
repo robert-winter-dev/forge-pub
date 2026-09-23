@@ -55,6 +55,10 @@ export function clmmLpReturn(P0, Pt, rangePct) {
 // Die Segment-Returns werden multiplikativ kompoundiert. Zusätzlich: time-in-range-Anteil als
 // Diagnose für eine spätere Fee-Verfeinerung (Fees fallen nur in-range an).
 // `path` = aufsteigend sortierte [{price}, …] über das Fenster. Gibt null bei zu wenig Daten.
+// `segments` (LIQ#000871): je Range-Abschnitt Startindex im Pfad, Mittelpreis und LP-Wert-Faktor
+// zu Abschnittsbeginn — damit ein Fee-Leg (bin/fee-price-calculator.js) denselben Rebalance-Pfad
+// nutzt wie dieser Preis-Leg, statt die Segmentierung nachzubauen. Nur Zusatzausgabe, die übrigen
+// Felder sind unverändert.
 export function clmmLpReturnPath(path, rangePct) {
     if (!Array.isArray(path) || path.length < 2 || !(rangePct > 0)) return null;
     const r  = rangePct / 100;
@@ -67,6 +71,7 @@ export function clmmLpReturnPath(path, rangePct) {
 
     let cum = 1;                 // multiplikativ kompoundierter LP-Wert (Start = 1)
     let inRange = 0, total = 0;
+    const segments = [{ startIdx: 0, ref, valueFactor: 1 }];
     for (let i = 1; i < path.length; i++) {
         const P = path[i].price;
         if (!(P > 0)) continue;
@@ -76,6 +81,7 @@ export function clmmLpReturnPath(path, rangePct) {
             // Range verlassen → Segment am Boundary realisieren (clamp), dann rebalancen.
             cum *= clmmLpValue(ref, P, rangePct);
             ref  = P;            // re-zentrieren auf aktuellen Preis (Bot-Verhalten)
+            segments.push({ startIdx: i, ref, valueFactor: cum });
         } else {
             inRange++;
         }
@@ -86,6 +92,7 @@ export function clmmLpReturnPath(path, rangePct) {
     return {
         lpReturnPct: (cum - 1) * 100,
         timeInRange: total > 0 ? inRange / total : 1,
+        segments,
     };
 }
 

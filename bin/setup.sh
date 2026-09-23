@@ -80,7 +80,7 @@ GETTING_STARTED="$BASE_DIR/GETTING-STARTED.txt"
 # abgebrochener Lauf sah beim nächsten 'install' wie eine echte, fertige
 # Installation mit schützenswertem Kapital aus).
 INSTALL_MARKER="$LOCAL_DIR/.install-in-progress"
-BACKUP_RETENTION=10
+BACKUP_RETENTION=3
 VERSIONS_RETENTION=1
 LOG_RETENTION=10
 

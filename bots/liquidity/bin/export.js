@@ -21,7 +21,7 @@ import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
 import dotenv                from 'dotenv';
 import { getSplTokensUsd, getLatestWalletBalance } from '../lib/wallet-monitor-client.js';
-import { config, getCleanupTrendGateFromEnv, isPoolEnabled } from '../lib/config.js';
+import { config, getCleanupTrendGateFromEnv } from '../lib/config.js';
 import { checkInvestEligibility } from '../lib/invest-eligibility.js';
 import { poolInvestCooldowns } from '../lib/invest-cooldown.js';
 import { loadTrendStates, checkTrendGate, parseTrendGate, TREND_TIMEFRAMES } from '../lib/trend-indicators.js';
@@ -30,19 +30,21 @@ import { readMaintenanceFlag, getMaintenanceWindows } from '../../../core/mainte
 import { getActiveProfile }       from '../lib/economic-scorer/config.js';
 // PnL: ausschließlich über die zentrale FORGE-Lib (Single Source of Truth).
 // Kein PnL-Code in diesem Bot — siehe FORGE/lib/pnl.js.
-import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows, pnlPeakForPeriod, feeLegForPeriod }
+import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows, pnlPeakForPeriod, feeLegForPeriod,
+         pnlBreakdownForPeriod }
     from '../../../lib/pnl.js';
 import { loadOpportunityScores, loadInvestScores } from '../lib/invest-score-provider.js';
-import { resolvePnlAnchorMs, resolvePnlAnchorSource } from '../lib/pnl-anchor.js';
+import { resolvePnlAnchorMs, resolvePnlAnchorSource, resolvePnlExtremaAnchorMs, chainStartOpenedAt } from '../lib/pnl-anchor.js';
+import { getShiftBalanceForPosition } from '../lib/rebalance-shift.js';
 import { getPremiumCoverage } from '../../../lib/premium-wallet.js';
 // Neutrale Blend-Formel (kein IP-Bezug) – NICHT aus lib/invest-score.js importieren,
 // das würde über dessen Kopfimport die Score-Gewichte in invest-score-config.js
 // zurück in den Fork ziehen (Befund 2026-07-25, siehe lib/score-blend.js).
 import { blendInvestScore } from '../lib/score-blend.js';
-import { scoreRange, getPoolTypeConfig }  from '../lib/range-advisor.js';
-import { clmmLpValue as _clmmLpValue, clmmLpReturn as _clmmLpReturn,
-         clmmLpReturnPath as _clmmLpReturnPath, clmmIlPct as _clmmIlPct }
-    from '../lib/clmm-lp.js';
+import { getPoolTypeConfig }  from '../lib/range-advisor.js';
+import { FEE_MODEL_V2 } from '../lib/fee-model.js';
+// Edge-Prognose (npWindows) nur über die Naht — Rechnung in lib/edge-compute.js (CORE#000931).
+import { loadEdge, EDGE_CAPITAL_USDC } from '../lib/edge-provider.js';
 // Dust-Schwelle aus der neutralen Einzelquelle – NICHT aus invest-score-config.js:
 // dort liegen die Score-Gewichte, die nicht in den FORGE-public-Fork gelangen dürfen.
 import { VOLUME_DUST_USD as VOLUME_MALUS_DUST_USD } from '../lib/volume-dust.js';
@@ -50,9 +52,12 @@ import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS a
 import { PATHS } from '../../../config/paths.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
 import { displayVersion } from '../../../lib/version.js';
+import { pruneScoreHistories, downsampleScoreHistory } from '../lib/db.js';
 import { loadTsAdvice } from '../lib/ts-advice-provider.js';
 import { loadTsConfig, evaluateTsTrigger } from '../lib/trailing-stop.js';
 import { effectiveFeePct } from '../../../lib/effective-fee.js';
+import { getInvalidPoolIds } from '../lib/invariants.js';
+import { reportInvalidPools } from '../lib/pool-config-alert.js';
 
 // Zentraler Formatter für FORGE_TZ-Day-Keys (YYYY-MM-DD)
 const _dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ });
@@ -151,11 +156,29 @@ function buildTierOverview(poolsOverview) {
 // ORDER BY rowid: SQLite-interne Einfügereihenfolge (syncPools() erhält die rowid
 // bestehender Zeilen bei UPSERT) — einzig verfügbarer Proxy für "zuerst aufgenommen",
 // siehe displayLabelMap unten (LIQ#0470).
-const pools = db.prepare(`SELECT * FROM pools ORDER BY rowid`).all();
+const poolsAll = db.prepare(`SELECT * FROM pools ORDER BY rowid`).all();
 
 // displayPair aus pools.json (Anzeige-Name, kann von pair abweichen, z.B. HYPE/SOL ↔ SOL/HYPE)
 const poolsConfigPath = resolve(__dirname, '..', 'config', 'pools.json');
-const poolsConfigRaw  = JSON.parse(readFileSync(poolsConfigPath, 'utf8'));
+const poolsConfigRawAll = JSON.parse(readFileSync(poolsConfigPath, 'utf8'));
+
+// Config-Invarianten VOR jeder Verarbeitung prüfen (LIQ#000645, Regeln aus LIQ#000644) —
+// ein config-kaputter Pool wird nur selbst übersprungen (kein Eintrag in data.json diese
+// Runde), statt wie am 2026-09-14 den kompletten Export für alle 51 Pools crashen zu
+// lassen (getPoolTypeConfig() schlägt sonst mitten in der Pool-Schleife fehl, siehe
+// c0e0bc89). Für aktive Pools mit echtem Kapital bedeutet das: die Dashboard-Zeile bleibt
+// diese Runde stehen, statt neu berechnet zu werden — die Anomalie fällt trotzdem separat
+// über forge-check.js CODE-INVARIANTS auf (stündlich).
+const invalidPoolIds = getInvalidPoolIds(poolsConfigRawAll);
+for (const [id, violations] of invalidPoolIds) {
+    console.error(`[export] Pool ${id} übersprungen (Config-Fehler): ${violations.join('; ')}`);
+}
+// Deduplizierter Agora-Alarm (Prio hoch, Art befund) — nur bei NEUEM/geändertem Fehler,
+// nicht bei jedem der ~minütlichen export.js-Zyklen erneut (siehe pool-config-alert.js).
+await reportInvalidPools(invalidPoolIds).catch(err =>
+    console.error(`[export] Alarmierung für kaputte Pool-Config fehlgeschlagen: ${err.message}`));
+const pools           = poolsAll.filter(p => !invalidPoolIds.has(p.id));
+const poolsConfigRaw  = poolsConfigRawAll.filter(p => !invalidPoolIds.has(p.id));
 const displayPairMap  = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p.displayPair ?? p.pair]));
 
 // displayLabel: wie displayPair, aber Namensdopplungen (zwei Pools mit demselben
@@ -488,6 +511,16 @@ try {
         }
     });
     txn();
+    // Retention (LIQ#000836): stündlich, gemeinsam mit dem Snapshot-Throttle.
+    try {
+        const del = pruneScoreHistories(dbWrite);
+        const sum = Object.values(del).reduce((a, b) => a + b, 0);
+        if (sum > 0) console.log(`export.js: Score-Historie bereinigt (${JSON.stringify(del)})`);
+        const merged = downsampleScoreHistory(dbWrite);
+        if (merged > 0) console.log(`export.js: invest_score_history verdichtet (${merged} Zeilen > 7 d auf 10-min-Raster)`);
+    } catch (pe) {
+        console.warn(`export.js: Score-Historie-Retention fehlgeschlagen (${pe.message})`);
+    }
     dbWrite.close();
 } catch (e) {
     if (!String(e.message).startsWith('skipped')) {
@@ -1060,8 +1093,14 @@ const npSnapshotRaw = db.prepare(`
 // Alle Fee-Claims (komplett, für korrekte kumulative Summe). position_id geht mit — für
 // npHistory/currentNpUsd bewusst pool-weit über alle Sessions (Netto-Performance des Pools als
 // Ganzes), für die tagesbezogenen Zähler unten (todayClaimCount/-Usd) wird auf die aktuelle
-// Position eingegrenzt: derselbe Fehler wie im Claims-Modal (2026-08-22) — ein Pool mit
-// mehreren Sessions am selben Tag zählte sonst auch hier die Claims aller Vorgänger mit.
+// wirtschaftliche Session eingegrenzt (max(todayStartMs, chainStartOpenedAt) statt reiner
+// position_id-Gleichheit, LIQ#000605): ein Rebalancing eröffnet zwar eine neue position_id,
+// ist aber kein Session-Wechsel (siehe pnl-anchor.js) — die alte Filterung auf `pos.id` schnitt
+// jeden Rebalance mit ab und ließ den Claims-Zähler im Dashboard scheinbar auf 0 zurückspringen,
+// obwohl das Kapital durchgehend im Pool war. Der ursprüngliche Fix vom 2026-08-22 (ein Pool mit
+// mehreren ECHTEN Sessions am selben Tag zählte sonst auch hier die Claims aller Vorgänger mit)
+// bleibt erhalten, weil chainStartOpenedAt() an einem echten Exit+Reopen ohne rebalance_history-
+// Verknüpfung abbricht und dort auf pos.opened_at zurückfällt.
 const allFeeHistory = db.prepare(`
     SELECT pool_id, position_id, claimed_at, usd_value
     FROM fee_history
@@ -1391,22 +1430,34 @@ const _todayPnlByPool = pnlByScopeForPeriod(db, { flavor: config.botId, fromMs: 
 // "Letzte Einzahlung" = letzter ECHTER externer Kapitalzufluss (capital_flows,
 // is_external=1) — schließt den initialen Pool-Open mit ein, aber NICHT
 // interne Reconcile-/Cleanup-Redeploys (is_external=0). Auf die Laufzeit der
-// AKTUELL offenen Position begrenzt (created_at >= opened_at): sonst würde nach
-// einer vollständigen Withdraw+Reopen-Runde noch eine Einzahlung einer längst
-// geschlossenen Vorgänger-Position als "letzte Einzahlung" angezeigt (Kapital
-// war zwischenzeitlich komplett draußen). Ohne echte externe Einzahlung seit
-// dem aktuellen Reopen (z.B. Withdraw+Cleanup-Reopen) fällt der Bezugspunkt auf
-// pos.opened_at zurück — die Kurvenlogik in pnl.js verankert den PnL dann korrekt
-// am Einstand der aktuellen Session. Für jeden Pool dann pnlForPeriod ab diesem
-// Zeitpunkt — identische Lib wie oben, kein eigener PnL-Code.
+// wirtschaftlichen Position begrenzt (created_at >= chainStartOpenedAt): ein
+// Rebalancing schließt die Position technisch und eröffnet eine neue, ist aber
+// ein Umzug in eine neue Range, kein Ausstieg — chainStartOpenedAt() geht daher
+// über rebalance_history so weit zurück, wie die Kette reicht (siehe deren
+// Docblock, Befund 30./31.08.2026 ZEC/USDC — derselbe Fehlerklasse hier für die
+// "Einzahlung"-Anzeige: vor diesem Fix zeigte export.js als "Einzahlung" den
+// Zeitpunkt des letzten Rebalancings, sobald danach kein externer Kapitalfluss
+// mehr kam, siehe LIQ#000559-Recherche 12.09.2026, USELESS/SOL). Bei einer
+// ECHTEN Withdraw+Reopen-Runde bricht die Kette ab (kein rebalance_history-
+// Eintrag verbindet die neue Position mit einer alten) — chainStartOpenedAt()
+// liefert dann unverändert pos.opened_at, das ursprüngliche Verhalten bleibt
+// also für diesen Fall erhalten. Ohne echte externe Einzahlung seit Kettenbeginn
+// fällt der Bezugspunkt auf pos.opened_at zurück (resolvePnlAnchorMs) — die
+// Kurvenlogik in pnl.js verankert den PnL dann korrekt am Einstand der
+// aktuellen Session. Für jeden Pool dann pnlForPeriod ab diesem Zeitpunkt —
+// identische Lib wie oben, kein eigener PnL-Code.
+const _chainStartAtByPool = Object.fromEntries(
+    openPositions.map(pos => [pos.pool_id, chainStartOpenedAt(db, pos.id, pos.opened_at)])
+);
 const _lastDepositAtByPool = Object.fromEntries(
-    db.prepare(`
-        SELECT cf.pool_id AS pool_id, MAX(cf.created_at) AS t
-          FROM capital_flows cf
-          JOIN positions p ON p.pool_id = cf.pool_id AND p.closed_at IS NULL
-         WHERE cf.usdc_amount > 0 AND cf.is_external = 1 AND cf.created_at >= p.opened_at
-         GROUP BY cf.pool_id
-    `).all().map(r => [r.pool_id, r.t])
+    openPositions.map(pos => {
+        const row = db.prepare(`
+            SELECT MAX(created_at) AS t
+              FROM capital_flows
+             WHERE pool_id = ? AND usdc_amount > 0 AND is_external = 1 AND created_at >= ?
+        `).get(pos.pool_id, _chainStartAtByPool[pos.pool_id]);
+        return [pos.pool_id, row?.t ?? null];
+    })
 );
 const _sinceDepositPnlByPool = Object.fromEntries(
     openPositions.map(pos => {
@@ -1434,48 +1485,92 @@ const _depositEventsByPool = Object.fromEntries(
     })
 );
 
-// ─── Nicht reinvestierter Rest seit Anker pro Pool (PnL-Details-Tab, LIQ#000558) ──
-// Bei jedem Rebalance kann ein Teil des freigesetzten Kapitals im Wallet liegen bleiben
-// (siehe bin/bot.js, insertRebalanceHistory: leftoverUsdc). Das ist KEIN Verlust — das
-// Kapital gehört weiterhin dem Nutzer, nur eben nicht in dieser Position. Summe seit
-// demselben PnL-Anker wie depositValueUsd, damit beide Zahlen zueinander passen (ein
-// Reopen/neue Einzahlung setzt beide zurück).
-const _leftoverSinceDepositByPool = Object.fromEntries(
+// ─── Verschiebungs-Bilanz je Pool (LIQ#000841) ────────────────────────────────
+// Was seit Kettenbeginn bei Rebalances nicht reinvestiert wurde und noch nicht nachgezahlt
+// ist (lib/rebalance-shift.js). Kein Verlust: das Kapital liegt im Wallet und wird vom Bot
+// nachgezahlt, sobald es sich lohnt. Der frühere Näherungs-Fallback (LIQ#000559) ist mit
+// dem exakten Zugang entfallen.
+const _shiftBalanceByPool = Object.fromEntries(
+    openPositions.map(pos => [pos.pool_id, getShiftBalanceForPosition(db, pos)])
+);
+
+// ─── Anker des Reiters "PnL-Details" (Maximum · Minimum · Aktuell), LIQ#000612 ──
+// NICHT der Einzahlungs-Anker von oben: Der springt bei jeder externen Einzahlung
+// nach vorn, und direkt nach einem Nachschuss enthält das Fenster dann nur noch den
+// aktuellen Punkt — alle drei Spalten zeigten dieselbe Zahl (Befund 13.09.2026,
+// USELESS/SOL). Gemessen wird ab Pool-Eröffnung (Kettenstart) bzw. ab manuellem
+// "Höchststand zurücksetzen"-Klick, siehe resolvePnlExtremaAnchorMs().
+const _pnlDetailsAnchorByPool = Object.fromEntries(
+    openPositions.map(pos => [pos.pool_id, resolvePnlExtremaAnchorMs(_chainStartAtByPool[pos.pool_id], pos.pnl_anchor_reset_at)])
+);
+// PnL "Aktuell" seit demselben Anker — sonst stünde im Grid ein Wert seit Einzahlung
+// neben Extrempunkten seit Eröffnung, und "Aktuell" könnte über "Maximum" liegen.
+const _sinceOpenPnlByPool = Object.fromEntries(
+    openPositions.map(pos => [pos.pool_id, pnlForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id] })])
+);
+
+// ─── Überleitung Eingezahlt → Wert heute (LIQ#000867, Reiter "Details") ───────
+// Ersetzt die Karten Ein-/Auszahlungen, Reinvestierte Fees und Rebalances (LIQ#000794,
+// LIQ#000865): deren Inhalt steht jetzt in den Unterzeilen der Überleitung.
+// Alle Zahlen aus lib/pnl.js (pnlBreakdownForPeriod), hier nur durchgereicht. Die Token-
+// Kursänderungen kommen dort in Pool-Reihenfolge (A/B) und werden hier auf die displayPair-
+// Reihenfolge gedreht (pairFlipMap), damit das Frontend die Labels direkt nehmen kann.
+// Delta-Zeitreihe je Pool (LIQ#000891): edgeSeries aus lib/pnl.js, wird unten in
+// metricHistory (Chart hinter der Spalte „Δ") gebucketet statt mit nach data.json zu wandern.
+const _edgeSeriesByPool = {};
+const _breakdownByPool = Object.fromEntries(
     openPositions.map(pos => {
-        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
-        const row = db.prepare(`
-            SELECT COALESCE(SUM(leftover_usdc), 0) AS sum, COUNT(*) AS n
-              FROM rebalance_history
-             WHERE pool_id = ? AND rebalanced_at >= ? AND leftover_usdc IS NOT NULL AND leftover_usdc > 0
-        `).get(pos.pool_id, fromMs);
-
-        if (row?.n > 0) return [pos.pool_id, { sumUsd: row.sum, rebalanceCount: row.n, estimated: false }];
-
-        // 🧪 TEMPORÄRER NÄHERUNGS-FALLBACK, siehe LIQ#000559 (Ticket: entfernen sobald
-        // reale leftover_usdc-Daten vorliegen). Für Rebalances VOR diesem Deploy fehlt
-        // leftover_usdc (NULL) — hier nur zur sofortigen visuellen Prüfung des Modal-Designs
-        // grob genähert aus lp_value_before/after. Verzerrt durch TX-Kosten/Slippage/
-        // Preisbewegung während des Rebalance (siehe Ticketrecherche LIQ#000558) — deshalb
-        // klar als "geschätzt" markiert, NIE als belastbare PnL-Zahl verwenden.
-        const approxRow = db.prepare(`
-            SELECT COALESCE(SUM(MAX(lp_value_before_usdc - lp_value_after_usdc, 0)), 0) AS sum, COUNT(*) AS n
-              FROM rebalance_history
-             WHERE pool_id = ? AND rebalanced_at >= ? AND leftover_usdc IS NULL
-               AND lp_value_before_usdc IS NOT NULL AND lp_value_after_usdc IS NOT NULL
-        `).get(pos.pool_id, fromMs);
-        return [pos.pool_id, { sumUsd: approxRow?.sum ?? 0, rebalanceCount: approxRow?.n ?? 0, estimated: (approxRow?.n ?? 0) > 0 }];
+        const b = pnlBreakdownForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id] });
+        if (!b) return [pos.pool_id, null];
+        const [symA, symB] = String(pos.pair ?? '').split('/');
+        const tokens = [
+            { symbol: symA ?? null, changePct: b.tokenAChangePct },
+            { symbol: symB ?? null, changePct: b.tokenBChangePct },
+        ];
+        if (pairFlipMap[pos.pool_id] === true) tokens.reverse();
+        const { tokenAChangePct, tokenBChangePct, fromMs, valueSeries, edgeSeries, ...rest } = b;
+        _edgeSeriesByPool[pos.pool_id] = edgeSeries ?? [];
+        return [pos.pool_id, { ...rest, tokens, valueSeries }];
     })
 );
 
-// ─── Historischer PnL-Höchststand seit Anker pro Pool (Tooltip-Zeile "Hoch") ──
-// Selber Anker (fromMs) wie oben — zeigt, wann/wie hoch der Pool prozentual am
-// weitesten im Plus stand. Hilft abzuschätzen, wo ein aktiver Trailing-Stop
-// (Referenz: positions.hwm_usd, siehe lib/trailing-stop.js) auslösen würde.
+// Wertlinie des Reiters "Pool-Entwicklung" (LIQ#000867): valueSeries aus lib/pnl.js, auf einen
+// Punkt je 15 Minuten ausgedünnt (letzter Punkt je Fenster, der jüngste bleibt immer). Liegt in
+// data-history.json statt data.json, weil sie über die ganze Kette reicht (~100 Punkte/Tag).
+const POOL_VALUE_BUCKET_MS = 15 * 60 * 1000;
+const poolValueHistory = [];
+for (const [poolId, b] of Object.entries(_breakdownByPool)) {
+    const series = b?.valueSeries ?? [];
+    for (let i = 0; i < series.length; i++) {
+        const e = series[i], nxt = series[i + 1];
+        if (nxt && Math.floor(nxt.t / POOL_VALUE_BUCKET_MS) === Math.floor(e.t / POOL_VALUE_BUCKET_MS)) continue;
+        poolValueHistory.push({ t: e.t, poolId, value: e.usd });
+    }
+    if (b) delete b.valueSeries;
+}
+
+// ─── Historischer PnL-Höchststand seit Eröffnung pro Pool ─────────────────────
+// Zeigt, wann/wie hoch der Pool prozentual am weitesten im Plus stand. Seit
+// LIQ#000572 wählt lib/pnl.js diesen Punkt nach der Rendite aus (vorher: höchster
+// USD-Betrag, was jede weitere Einzahlung im Fenster künstlich nach oben zog) — die
+// Kapitalbasis je Kurvenpunkt fängt Nachschüsse innerhalb des Fensters ab, deshalb
+// darf das Fenster hier bis zur Eröffnung zurückreichen. Hilft abzuschätzen, wo ein
+// aktiver Trailing-Stop (Referenz: positions.hwm_usd, siehe lib/trailing-stop.js)
+// auslösen würde — dessen Scharfschaltung nutzt bewusst weiter die USD-Auswahl
+// (by:'usd') und den Einzahlungs-Anker.
 const _peakPnlByPool = Object.fromEntries(
-    openPositions.map(pos => {
-        const fromMs = resolvePnlAnchorMs(_lastDepositAtByPool[pos.pool_id], pos.pnl_anchor_reset_at, pos.opened_at);
-        return [pos.pool_id, pnlPeakForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs })];
-    })
+    openPositions.map(pos =>
+        [pos.pool_id, pnlPeakForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id] })])
+);
+
+// ─── Historischer PnL-Tiefstand seit Eröffnung pro Pool (LIQ#000577) ──────────
+// Spiegelbild des Blocks darüber: derselbe Anker, dieselbe Kurve, dieselbe
+// Rendite-Auswahl — nur dir:'min'. Zeigt im Anteil-Modal, wie weit der Pool seit
+// der Eröffnung maximal zurücklag; nicht zwingend negativ (war der Pool nie im
+// Minus, ist es der niedrigste gemessene Gewinn).
+const _troughPnlByPool = Object.fromEntries(
+    openPositions.map(pos =>
+        [pos.pool_id, pnlPeakForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id], dir: 'min' })])
 );
 
 // ─── Fee-Leg / Preis-Leg pro Pool (LIQ#0360, Tooltip-Zerlegung) ──────────────
@@ -1559,12 +1654,13 @@ function buildPosition(pos, isActive) {
                 // (siehe lpValueAt/currentValue, Definition Modulkopf lib/pnl.js). Eine
                 // Änderung des Positionswerts um Δ verschiebt den PnL exakt um Δ, weil
                 // cumRealized und Einstand vom aktuellen Wert unabhängig sind. Also wird
-                // hier lediglich der bereits über pnlForPeriod() ermittelte
-                // `sinceDepositPnlUsd` um genau die Wertdifferenz zum Auslöse-Niveau
+                // hier lediglich der bereits über pnlForPeriod() ermittelte PnL seit
+                // Pool-Eröffnung (`sinceOpenPnlUsd`, derselbe Anker wie Anteil-Spalte und
+                // PnL-Details, LIQ#000612) um genau die Wertdifferenz zum Auslöse-Niveau
                 // verschoben — dieselbe Kurve, an einem hypothetischen Wert ausgewertet.
-                const sinceDepositPnlUsd = _sinceDepositPnlByPool[pos.pool_id] ?? null;
-                const liquidatePnlUsd = (liquidateAtUsd > 0 && sinceDepositPnlUsd != null)
-                    ? round2(sinceDepositPnlUsd + (liquidateAtUsd - valueUsd))
+                const sinceOpenPnlUsd = _sinceOpenPnlByPool[pos.pool_id] ?? null;
+                const liquidatePnlUsd = (liquidateAtUsd > 0 && sinceOpenPnlUsd != null)
+                    ? round2(sinceOpenPnlUsd + (liquidateAtUsd - valueUsd))
                     : null;
                 const liquidatePnlPct = (liquidatePnlUsd != null && valueUsd > 0)
                     ? round2((liquidatePnlUsd / valueUsd) * 100)
@@ -1587,6 +1683,10 @@ function buildPosition(pos, isActive) {
 
     const myValueUsd = round2(posSnap?.lp_value_usd ?? null);
 
+    // Untergrenze für todayClaimCount/-Usd: heute UND innerhalb der aktuellen
+    // Rebalance-Kette (LIQ#000605) — siehe Kommentar bei allFeeHistory oben.
+    const claimFromMs = Math.max(todayStartMs, _chainStartAtByPool[pos.pool_id] ?? pos.opened_at);
+
     return {
         id:                 pos.id,
         poolId:             pos.pool_id,
@@ -1600,8 +1700,12 @@ function buildPosition(pos, isActive) {
         amountA:            posAmtA != null ? round6(posAmtA) : null,
         amountB:            posAmtB != null ? round6(posAmtB) : null,
         feesPendingUsd:     isActive ? round4(posSnap?.fees_pending_usd ?? null) : null,
-        todayClaimCount:    (feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).length,
-        todayClaimUsd:      round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= todayStartMs && (f.position_id == null || f.position_id === pos.id)).reduce((s, f) => s + (f.usd_value ?? 0), 0)),
+        todayClaimCount:    (feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= claimFromMs).length,
+        todayClaimUsd:      round2((feesByPool[pos.pool_id] ?? []).filter(f => f.claimed_at >= claimFromMs).reduce((s, f) => s + (f.usd_value ?? 0), 0)),
+        // Beginn der aktuellen durchgehenden Rebalance-Kette (LIQ#000605, Fee-Claims-Modal
+        // im Dashboard) — nicht pos.opened_at (das wäre nur der letzte Rebalance) und nicht
+        // sinceDepositAt (das springt bei jeder externen Einzahlung, auch ohne echten Exit).
+        chainOpenedAt:      _chainStartAtByPool[pos.pool_id] ?? pos.opened_at,
         todayPnlUsd:        _todayPnlByPool[pos.pool_id] ?? null,
         todayFeeLegUsd:     _todayFeeLegByPool[pos.pool_id] ?? null,
         todayPriceLegUsd:   (_todayPnlByPool[pos.pool_id] != null && _todayFeeLegByPool[pos.pool_id] != null)
@@ -1614,15 +1718,9 @@ function buildPosition(pos, isActive) {
         // sinceDepositAt abweichen, wenn diese Bewegung intern war).
         depositCount:       _depositEventsByPool[pos.pool_id]?.count ?? null,
         depositLatestAt:    _depositEventsByPool[pos.pool_id]?.latestAt ?? null,
-        // Summe der Rebalance-Reste seit dem Anker, die nicht reinvestiert wurden — liegen
-        // weiterhin im Wallet (siehe insertRebalanceHistory.leftoverUsdc). 0, wenn seit dem
-        // Anker noch kein Rebalance mit Rest stattfand (auch für Altbestände vor LIQ#000558,
-        // deren rebalance_history-Zeilen kein leftover_usdc kennen).
-        walletLeftoverUsd:      round2(_leftoverSinceDepositByPool[pos.pool_id]?.sumUsd ?? 0),
-        walletLeftoverRebalances: _leftoverSinceDepositByPool[pos.pool_id]?.rebalanceCount ?? 0,
-        // 🧪 TEMPORÄR, siehe LIQ#000559 — true, solange der Wert oben aus dem
-        // Näherungs-Fallback stammt (Altbestand ohne echtes leftover_usdc).
-        walletLeftoverEstimated: _leftoverSinceDepositByPool[pos.pool_id]?.estimated ?? false,
+        // Verschiebungs-Bilanz (LIQ#000841): noch nicht nachgezahlter Rest aus Rebalances,
+        // liegt im Wallet. Der Bot zahlt ihn ab 10 USDC täglich nach.
+        shiftBalanceUsd: round2(_shiftBalanceByPool[pos.pool_id] ?? 0),
         sinceDepositPnlUsd: _sinceDepositPnlByPool[pos.pool_id] ?? null,
         sinceDepositFeeLegUsd:   _sinceDepositFeeLegByPool[pos.pool_id] ?? null,
         sinceDepositPriceLegUsd: (_sinceDepositPnlByPool[pos.pool_id] != null && _sinceDepositFeeLegByPool[pos.pool_id] != null)
@@ -1633,12 +1731,51 @@ function buildPosition(pos, isActive) {
         // Anteil-Modal-Tab "PnL-Details" (LIQ, Anteil-Tooltip-Ablösung).
         depositValueUsd:    (myValueUsd != null && _sinceDepositPnlByPool[pos.pool_id] != null)
                                 ? round2(myValueUsd - _sinceDepositPnlByPool[pos.pool_id]) : null,
+        // Reiter "PnL-Details" (LIQ#000612): Maximum, Minimum und Aktuell messen ab
+        // Pool-Eröffnung (Kettenstart) bzw. manuellem Reset — nicht ab der letzten
+        // Einzahlung. Prozent von "Aktuell" auf derselben Basis-Herleitung wie
+        // depositValueUsd (Wert − PnL seit Anker), damit die drei Spalten vergleichbar
+        // bleiben; keine eigene PnL-Mathematik, nur Differenz zweier pnl.js-Werte.
+        //
+        // pnlDetailsCurrentValueUsd = myValueUsd + fees_pending_usd (LIQ#000646): peak-/
+        // troughValueUsd kommen aus lib/pnl.js, dessen Wertbegriff laut Modulkopf
+        // IMMER lp_value_usd + fees_pending_usd ist (unclaimed Fees zählen zum
+        // Positionswert). myValue selbst zeigt bewusst nur lp_value_usd (Fees stehen im
+        // Dashboard separat) — als "Aktuell" neben Maximum/Minimum verglichen ergab das
+        // rechnerisch unmögliche Bilder wie "Minimum > Aktuell", weil zwei verschiedene
+        // Wertbegriffe nebeneinanderstanden, obwohl beide denselben Moment zeigten
+        // (Befund 14.09.2026, USELESS/SOL: 491.99 vs. 491.70 zur exakt selben Sekunde).
+        pnlDetailsCurrentValueUsd: myValueUsd != null
+                                ? round2(myValueUsd + (posSnap?.fees_pending_usd ?? 0)) : null,
+        pnlDetailsAnchorAt:     _pnlDetailsAnchorByPool[pos.pool_id],
+        pnlDetailsAnchorSource: pos.pnl_anchor_reset_at > _chainStartAtByPool[pos.pool_id] ? 'reset' : 'opened',
+        // Überleitung Eingezahlt → Wert heute (LIQ#000867), fertig aus lib/pnl.js.
+        pnlBreakdown:       pos.closed_at == null ? (_breakdownByPool[pos.pool_id] ?? null) : null,
+        sinceOpenPnlUsd:    _sinceOpenPnlByPool[pos.pool_id] ?? null,
+        // Basis Eingezahlt, fertig aus lib/pnl.js. Früher PnL / (Anteil − PnL): Der Anteil
+        // enthält die Fees außerhalb nicht, die Basis war zu klein (LIQ#000867).
+        sinceOpenPnlPct:    pos.closed_at == null ? (_breakdownByPool[pos.pool_id]?.pnlPct ?? null) : null,
         peakPnlUsd:         _peakPnlByPool[pos.pool_id]?.pnlUsd ?? null,
+        // Rendite am Höchststand, bezogen auf die zu DIESEM Zeitpunkt gültige
+        // Kapitalbasis (LIQ#000572) — fertig aus lib/pnl.js, das Dashboard rechnet
+        // sie nicht selbst aus myValue nach (das war vorher die falsche Basis).
+        // null, wenn die Basis dort nicht herleitbar war und lib/pnl.js auf die
+        // USD-Auswahl zurückfallen musste.
+        peakPnlPct:         _peakPnlByPool[pos.pool_id]?.pnlPct ?? null,
         peakPnlAt:          _peakPnlByPool[pos.pool_id]?.atMs ?? null,
-        // peakValueUsd = Gegenwert am Höchststand, wieder nur Summe zweier fertiger
-        // pnl.js-Werte (depositValueUsd + peakPnlUsd), keine eigene PnL-Berechnung.
-        peakValueUsd:       (_peakPnlByPool[pos.pool_id]?.pnlUsd != null && myValueUsd != null && _sinceDepositPnlByPool[pos.pool_id] != null)
-                                ? round2((myValueUsd - _sinceDepositPnlByPool[pos.pool_id]) + _peakPnlByPool[pos.pool_id].pnlUsd) : null,
+        // peakValueUsd = Positionswert am Höchststand. Primär der an dem Kurvenpunkt
+        // beobachtete Wert aus lib/pnl.js; Fallback ist die alte Herleitung
+        // (Basis seit Anker + peakPnlUsd) — beides ohne eigene PnL-Mathematik.
+        peakValueUsd:       _peakPnlByPool[pos.pool_id]?.valueUsd
+                                ?? ((_peakPnlByPool[pos.pool_id]?.pnlUsd != null && myValueUsd != null && _sinceOpenPnlByPool[pos.pool_id] != null)
+                                ? round2((myValueUsd - _sinceOpenPnlByPool[pos.pool_id]) + _peakPnlByPool[pos.pool_id].pnlUsd) : null),
+        // Tiefstand, Felder spiegelbildlich zu den peak*-Feldern (LIQ#000577).
+        troughPnlUsd:       _troughPnlByPool[pos.pool_id]?.pnlUsd ?? null,
+        troughPnlPct:       _troughPnlByPool[pos.pool_id]?.pnlPct ?? null,
+        troughPnlAt:        _troughPnlByPool[pos.pool_id]?.atMs ?? null,
+        troughValueUsd:     _troughPnlByPool[pos.pool_id]?.valueUsd
+                                ?? ((_troughPnlByPool[pos.pool_id]?.pnlUsd != null && myValueUsd != null && _sinceOpenPnlByPool[pos.pool_id] != null)
+                                ? round2((myValueUsd - _sinceOpenPnlByPool[pos.pool_id]) + _troughPnlByPool[pos.pool_id].pnlUsd) : null),
         inRange:            isActive ? (priceNow != null
                                 ? priceNow >= pos.price_lower && priceNow <= pos.price_upper
                                 : null)
@@ -1908,6 +2045,7 @@ for (const p of positionsOut) {
 // dieselbe Berechnung, keine zweite Kopie (siehe lib/trend-indicators.js Kopf-Kommentar).
 const _investScoreNowMs = Date.now();
 const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
+let _applyRankingAdjustments = null;
 {
     const _invRes = await loadInvestScores({
         pools, poolsOverview, volHistRaw, poolTypeMap, openPosByPool,
@@ -1915,6 +2053,7 @@ const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
         trendStates: _trendStatesForExport,
     }, opportunityScores);
     if (_invRes.source !== 'compute') { scoreSource = _invRes.source; scoreStale = _invRes.stale; }
+    _applyRankingAdjustments = _invRes.applyRankingAdjustments ?? null;
 
     for (const po of poolsOverview) {
         po.investScore = _invRes.investScores.get(po.id) ?? null;
@@ -2080,6 +2219,22 @@ const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
 
         const toPoints = rows => rows.map(r => ({ ts: r.ts, v: r.v }));
 
+        // Delta/H bzw. Delta/D im Zeitverlauf (LIQ#000891): Werte kommen fertig aus lib/pnl.js
+        // (edgeSeries), hier nur ausgedünnt — je Bucket der LETZTE Punkt, kein Mittelwert: Jeder
+        // Punkt ist schon ein Durchschnitt seit Eröffnung, und so endet die Kurve exakt auf dem
+        // Spaltenwert (bis auf dessen Cent-Rundung). Nur 1D/1W/1M: eine Rate seit Eröffnung
+        // ändert sich binnen 6–12 h kaum.
+        const _edgePoints = (series, cut, bucket, key) => {
+            const out = [];
+            for (let i = 0; i < series.length; i++) {
+                const e = series[i], nxt = series[i + 1];
+                if (e.t <= cut || e[key] == null) continue;
+                if (nxt && nxt[key] != null && Math.floor(nxt.t / bucket) === Math.floor(e.t / bucket)) continue;
+                out.push({ ts: e.t, v: e[key] });
+            }
+            return out;
+        };
+
         for (const po of poolsOverview) {
             po.metricHistory = {};
             const pnlEntries = _mhPnlIdx[po.id] ?? [];
@@ -2097,6 +2252,11 @@ const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
                     aprSlope:   toPoints(asQ[range] .all(po.id, cut)),
                     tvlSlope:   toPoints(tvlQ[range].all(po.id, cut)),
                 };
+                const edge = _edgeSeriesByPool[po.id];
+                if (edge?.length && ['1d', '1w', '1m'].includes(range)) {
+                    po.metricHistory[range].deltaH = _edgePoints(edge, cut, bucket, 'perHourUsd');
+                    po.metricHistory[range].deltaD = _edgePoints(edge, cut, bucket, 'perDayUsd');
+                }
             }
         }
     } catch (e) {
@@ -2111,274 +2271,25 @@ for (const po of poolsOverview) {
     if (!openPosByPool[po.id]) po.pnlWindows = {};
 }
 
-// ─── NP: gemeinsame Konstanten ────────────────────────────────────────────────
-const NP_CAPITAL    = 1000;
-// NP-Klassenparameter (min/max/sigmaFallback/liqSpreadPct/skipMaeAlert) kommen seit #0228
-// zentral aus POOL_TYPE_CONFIG (lib/range-advisor.js) über getPoolTypeConfig(poolCfg).
-// volaDefault dort = sigmaFallback hier (gleiche Stunden-Sigma-Reserve).
-const NP_CANDIDATES = [0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30];
-const NP_WINDOWS    = [
-    { id: '1h',  h:   1, ms:   1 * 3_600_000 },
-    { id: '6h',  h:   6, ms:   6 * 3_600_000 },
-    { id: '12h', h:  12, ms:  12 * 3_600_000 },
-    { id: '24h', h:  24, ms:  24 * 3_600_000 },
-    { id: '7d',  h: 168, ms: 168 * 3_600_000 },
-];
-
-// ─── NP: echte Fee-APR aus Orca-Liquiditätsdaten ─────────────────────────────
-// Berechnet grossAprPct für einen Pool wenn liquidity_in_range + fees_24h_usd
-// vorhanden sind. Formel: fee_APR = (L_pos / L_pool) × fees_24h / capital × 365 × 100
-//
-// L_pos wird aus dem GESAMTKAPITAL über die exakte CLMM-Mengenformel abgeleitet:
-//   x_raw = L·(1/√P − 1/√Pb),  y_raw = L·(√P − √Pa)   (Whirlpool-Einheiten, raw)
-//   V     = x_raw/10^decA · usdA + y_raw/10^decB · usdB
-// → L_pos = V / (perL_A + perL_B). Keine 50/50-Annahme (die bei breiten Ranges
-//   bis zu ~16 % Fehler erzeugt — Token-A-Wertanteil ist nur bei engen Ranges ≈50 %).
-// usdB folgt aus der Parität usdA = P_human · usdB.
-// Gibt null zurück wenn Eingangsdaten fehlen → Fallback auf scoreRange().
-function _npFeeAprPct(poolCfg, pHuman, rangePct, usdA, liquidityInRangeStr, fees24hUsd) {
-    if (!liquidityInRangeStr || !fees24hUsd || fees24hUsd <= 0) return null;
-    if (!usdA || usdA <= 0 || !pHuman || pHuman <= 0) return null;
-    const L_pool = parseFloat(liquidityInRangeStr);
-    if (!L_pool || L_pool <= 0) return null;
-
-    const decA = poolCfg.decimalsA ?? 9;
-    const decB = poolCfg.decimalsB ?? 6;
-    // Preis in Whirlpool-internen Einheiten: P_raw = P_human × 10^(decB − decA)
-    const P_raw = pHuman * Math.pow(10, decB - decA);
-    if (P_raw <= 0) return null;
-
-    const r = rangePct / 100;
-    if (r <= 0 || r >= 1) return null;
-    const sqrtP  = Math.sqrt(P_raw);
-    const sqrtPa = Math.sqrt(P_raw * (1 - r));
-    const sqrtPb = Math.sqrt(P_raw * (1 + r));
-
-    const usdB = usdA / pHuman;   // Parität: usdA = P_human · usdB
-
-    // USD-Wert je Liquiditätseinheit (beide Token, exakt):
-    const perL_A = (1 / sqrtP - 1 / sqrtPb) / Math.pow(10, decA) * usdA;
-    const perL_B = (sqrtP - sqrtPa)         / Math.pow(10, decB) * usdB;
-    const perL   = perL_A + perL_B;
-    if (perL <= 0) return null;
-    const L_pos = NP_CAPITAL / perL;
-
-    const grossAprPct = (L_pos / L_pool) * fees24hUsd / NP_CAPITAL * 365 * 100;
-
-    // Plausibilitäts-Guard: kein negatives/NaN oder unrealistisch hohes Ergebnis
-    if (!Number.isFinite(grossAprPct) || grossAprPct <= 0 || grossAprPct > 100_000) return null;
-    return grossAprPct;
-}
-
-// ─── NP: sigma + optimale Range für alle Pools vorausberechnen ────────────────
-// Ergebnis wird in np_price_history-Schreiblogik UND im NP-Block verwendet.
-const _npParamsByPool = {};
-// USDC-Mint (für usdA-Lookup bei USDC-Pairs)
-const _NP_USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-
+// ─── Edge-Prognose (npWindows) über die Provider-Naht (CORE#000931) ──────────
+// Master rechnet in lib/edge-compute.js, der Fork bekommt die Werte über Premium
+// (lib/edge-provider.js). `edgeSource` wird bis ins Dashboard durchgereicht und
+// steuert dort den Premium-Zugang ('none' → Platzhalter).
+const NP_CAPITAL = EDGE_CAPITAL_USDC;
+const _edgeRes = await loadEdge({
+    db, dbPath: DB_PATH, nowMs: _oppNowMs, poolsOverview, poolsConfigRaw,
+    statsByPool: _oppStatsByPool, quoteUsdAt: _quoteUsdAt, openPosByPool,
+});
+const edgeSource         = _edgeRes.source;
+const edgeStale          = _edgeRes.stale;
+const _npParamsByPool    = _edgeRes.paramsByPool;
+const _feeModelCompare   = _edgeRes.feeModelCompare;
+const _FEE_MODEL_COMPARE = process.env.FORGE_FEE_MODEL_COMPARE || null;
 for (const po of poolsOverview) {
-    const poolCfg = poolsConfigRaw.find(p => p.id === po.id);
-    if (!poolCfg) continue;
-    const stats  = _oppStatsByPool[po.id] ?? [];
-    const latest = stats[stats.length - 1];
-    if (!latest?.price || latest.price <= 0 || !latest.tvl_usd || !latest.volume_24h_usd) continue;
-
-    const prices = stats.map(s => s.price).filter(p => p > 0);
-    let sigmaHourlyPct = null;
-    if (prices.length >= 2) {
-        const lr = [];
-        for (let i = 1; i < prices.length; i++) lr.push(Math.log(prices[i] / prices[i - 1]));
-        if (lr.length > 1) {
-            const mean = lr.reduce((s, v) => s + v, 0) / lr.length;
-            const variance = lr.reduce((s, v) => s + (v - mean) ** 2, 0) / lr.length;
-            sigmaHourlyPct = Math.sqrt(variance) * 100;
-        }
-    }
-    const classCfg  = getPoolTypeConfig(poolCfg);
-    if (!sigmaHourlyPct || sigmaHourlyPct <= 0) sigmaHourlyPct = classCfg.volaDefault;
-
-    // Effektiver Fee-Satz aus demselben pool_stats-Eintrag statt der Konstante —
-    // bei Adaptive-Fee-Pools liegt der Ist-Satz darüber (LIQ#0394).
-    const npFeeTierPct = effectiveFeePct(poolCfg.feeTier, {
-        fees24hUsd:   latest.fees_24h_usd   ?? null,
-        volume24hUsd: latest.volume_24h_usd ?? null,
-    }).pct;
-
-    const scanParams = { vol24h: latest.volume_24h_usd, tvl: latest.tvl_usd,
-                         feeTierPct: npFeeTierPct, sigmaHourlyPct, capitalUsdc: NP_CAPITAL,
-                         liqSpreadPct: classCfg.liqSpreadPct };
-    const candidates = NP_CANDIDATES
-        .filter(r => r >= classCfg.min && r <= classCfg.max)
-        .map(r => scoreRange(r, scanParams));
-    let optimal = candidates.reduce((best, c) => c.netAprPct > best.netAprPct ? c : best);
-
-    // USD-Preis von Token A (für _npFeeAprPct).
-    let usdA = null;
-    if (poolCfg.tokenA === _NP_USDC_MINT) {
-        usdA = 1.0;                       // Token A ist USDC
-    } else if (poolCfg.tokenB === _NP_USDC_MINT) {
-        usdA = latest.price;              // price = USD-Preis von Token A
-    } else if (poolCfg.quotePricePoolId) {
-        // _quoteUsdAt löst derivedQuote-Ketten korrekt auf (z.B. JitoSOL: baseUSD/rawPrice).
-        // qLatest.price wäre für derived-Pools nur das rohe Pool-Ratio, nicht der USD-Preis.
-        const quoteUsd = _quoteUsdAt(poolCfg.quotePricePoolId, latest.recorded_at);
-        if (quoteUsd > 0) {
-            usdA = poolCfg.quoteTokenMint === poolCfg.tokenA
-                ? quoteUsd
-                : latest.price * quoteUsd;
-        }
-    }
-
-    // Echte Fee-APR aus Orca-Liquiditätsdaten. Die exakte Zwei-Token-Formel in
-    // _npFeeAprPct wurde 2026-06-12 gegen frische On-Chain-Liquidität validiert:
-    // ORE/SOL 0,01 %, SOL/ZEC 2,5 % Abweichung — L_pos stimmt mit der Kette überein.
-    // (Der zwischenzeitlich vermutete „L-Konventions-Bug" war ein Messartefakt: er
-    //  beruhte auf der veralteten positions.liquidity + rebalance-kontaminierten 24h-Fees,
-    //  nicht auf der Formel. Siehe CHANGELOG 2026-06-12.)
-    // Fallback auf scoreRange() solange liquidity_in_range/fees_24h_usd NULL sind.
-    const NP_USE_REAL_FEES = true;
-    if (NP_USE_REAL_FEES) {
-        const realGrossAprPct = _npFeeAprPct(
-            poolCfg, latest.price, optimal.rangePct, usdA,
-            latest.liquidity_in_range, latest.fees_24h_usd
-        );
-        if (realGrossAprPct !== null) {
-            optimal = { ...optimal, grossAprPct: realGrossAprPct,
-                        netAprPct: realGrossAprPct - optimal.rebalCostAprPct };
-        }
-    }
-
-    _npParamsByPool[po.id] = { poolCfg, latest, optimal, usdA, scanParams };
-}
-
-// ─── np_price_history schreiben (alle Pools, max. alle 10 min) ───────────────
-{
-    const NP_WRITE_INTERVAL_MS = 10 * 60_000;
-    const NP_RETENTION_MS      = 25 * 3_600_000;
-    try {
-        const npDb    = new Database(DB_PATH);
-        npDb.pragma('journal_mode = WAL');
-        // Tabelle bei Bedarf anlegen (export.js nutzt keine zentrale migrateSchema)
-        npDb.exec(`
-            CREATE TABLE IF NOT EXISTS np_price_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pool_id TEXT NOT NULL, recorded_at INTEGER NOT NULL,
-                price REAL NOT NULL, range_pct REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_np_price_pool_time
-                ON np_price_history (pool_id, recorded_at);
-        `);
-        const lastTs  = npDb.prepare(`SELECT MAX(recorded_at) AS ts FROM np_price_history`).get()?.ts ?? 0;
-        if (_oppNowMs - lastTs >= NP_WRITE_INTERVAL_MS) {
-            const ins = npDb.prepare(
-                `INSERT INTO np_price_history (pool_id, recorded_at, price, range_pct) VALUES (?,?,?,?)`);
-            const del = npDb.prepare(`DELETE FROM np_price_history WHERE recorded_at < ?`);
-            npDb.transaction(() => {
-                del.run(_oppNowMs - NP_RETENTION_MS);
-                for (const [poolId, p] of Object.entries(_npParamsByPool)) {
-                    ins.run(poolId, _oppNowMs, p.latest.price, p.optimal.rangePct);
-                }
-            })();
-            npDb.close();
-        } else {
-            npDb.close();
-        }
-    } catch (e) {
-        console.warn(`export.js: np_price_history nicht geschrieben (${e.message})`);
-    }
-}
-
-// ─── CLMM-Formeln (echte Preisbewegung, symmetrische Range) ──────────────────
-// _clmmLpValue / _clmmLpReturn / _clmmLpReturnPath / _clmmIlPct sind nach
-// ../lib/clmm-lp.js ausgelagert (oben importiert), damit der NP-Backtest
-// (bin/backtest-np-path.js) exakt denselben Code testet — kein Nachbau.
-
-// ─── NP: np_price_history lesen (NP-Block + Qualitäts-Protokoll) ─────────────
-const _npHistory = {};
-try {
-    const rows = db.prepare(`
-        SELECT pool_id, recorded_at, price, range_pct
-          FROM np_price_history
-         WHERE recorded_at >= ?
-         ORDER BY pool_id, recorded_at ASC
-    `).all(_oppNowMs - 25 * 3_600_000);
-    for (const r of rows) (_npHistory[r.pool_id] ??= []).push(r);
-} catch (_) { /* Erste Ausführung: Tabelle existiert noch nicht */ }
-
-// ─── Notional Profit (NP) für alle Pools ─────────────────────────────────────
-// 6h/12h/24h: echte CLMM-IL aus np_price_history + Fee-Schätzung
-// 7d: CLMM-IL aus pool_stats (stündlich ausreichend) + Fee-Schätzung
-// Aktive Pools: NP dient als Fallback wenn pnlWindows für ein Zeitfenster fehlt.
-{
-    // Evidenzbasiert: welche (Pool, Fenster) haben GEMESSEN Richtungstreffer < 50 % (n ≥ MIN)?
-    // Treibt das Frontend-Flag „unzuverlässig". Selbstkorrigierend — bessert sich das Modell,
-    // verschwindet das Flag automatisch. Ehrlicher als eine statische Klassen-Heuristik
-    // (`volatilePair` meint mechanisch Nicht-USDC-Quote, nicht ökonomisch hohen IL).
-    //
-    const _NP_UNRELIABLE_MIN_N = 30;
-    const _npUnreliableByPool = {};
-    try {
-        const _wlabel = { 1: '1h', 6: '6h', 12: '12h', 24: '24h' };
-        for (const r of db.prepare(`
-            SELECT pool_id, window_h,
-                   COUNT(*) AS n,
-                   AVG(CASE WHEN (predicted_usd > 0) = (actual_usd > 0) THEN 1.0 ELSE 0.0 END) AS dir_acc
-            FROM np_quality_log
-            GROUP BY pool_id, window_h
-        `).all()) {
-            if (r.n < _NP_UNRELIABLE_MIN_N || r.dir_acc >= 0.5) continue;
-            const lbl = _wlabel[r.window_h];
-            if (lbl) (_npUnreliableByPool[r.pool_id] ??= []).push(lbl);
-        }
-    } catch { /* np_quality_log evtl. noch leer */ }
-
-    for (const po of poolsOverview) {
-        po.npWindows = {};
-        po.npUnreliableWindows = _npUnreliableByPool[po.id] ?? [];
-
-        const params = _npParamsByPool[po.id];
-        if (!params) continue;
-        const { poolCfg, latest, optimal } = params;
-        const Pt = latest.price;
-
-        for (const w of NP_WINDOWS) {
-            // Fee-Anteil: (grossAPR − Rebalance-Kosten) aus Range-Advisor, statistisch
-            const feeUsdc = (optimal.grossAprPct - optimal.rebalCostAprPct)
-                            / 100 / 365 / 24 * w.h * NP_CAPITAL;
-
-            // LP-Rendite vs. Einstiegskapital (echte Preisbewegung oder 0 als Fallback).
-            // _clmmLpReturn statt _clmmIlPct: misst dieselbe Größe wie pnlWindows
-            // (Δ LP-Wert vs. Kapital), nicht Opportunity Cost vs. HODL.
-            let lpReturnUsdc;
-            if (w.h <= 24) {
-                // Einstiegs-Snapshot aus np_price_history suchen
-                const hist   = _npHistory[po.id] ?? [];
-                const target = _oppNowMs - w.ms;
-                let entry = null;
-                for (let i = hist.length - 1; i >= 0; i--) {
-                    if (hist[i].recorded_at <= target) { entry = hist[i]; break; }
-                }
-                if (!entry && hist.length > 0) entry = hist[0]; // ältester als Notfall-Fallback
-
-                lpReturnUsdc = entry
-                    ? _clmmLpReturn(entry.price, Pt, entry.range_pct) / 100 * NP_CAPITAL
-                    : 0; // Noch keine History: Preis als stabil angenommen
-            } else {
-                // 7d: pool_stats-Preisreihe als P0-Quelle (stündlich, 168h vorhanden)
-                const pStats = _oppStatsByPool[po.id] ?? [];
-                const target = _oppNowMs - w.ms;
-                let p0Entry  = null;
-                for (let i = 0; i < pStats.length; i++) {
-                    if (pStats[i].recorded_at >= target) { p0Entry = pStats[i]; break; }
-                }
-                lpReturnUsdc = (p0Entry?.price > 0)
-                    ? _clmmLpReturn(p0Entry.price, Pt, optimal.rangePct) / 100 * NP_CAPITAL
-                    : 0; // Kein Preisverlauf: Preis als stabil angenommen
-            }
-
-            po.npWindows[w.id] = round2(feeUsdc + lpReturnUsdc);
-        }
-    }
+    const e = _edgeRes.byPool[po.id];
+    po.npWindows           = e?.npWindows ?? {};
+    po.npUnreliableWindows = e?.npUnreliableWindows ?? [];
+    if (e?.npFeeSource) po.npFeeSource = e.npFeeSource;
 }
 
 // ─── InvestScore: npWindows-Fallback für stable/major Pools ──────────────────
@@ -2390,26 +2301,24 @@ try {
     const _clampSim = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, Math.round(v)));
     const WIN_LABEL  = { 'PnL 6h': '6h', 'PnL 12h': '12h', 'PnL 24h': '24h' };
 
-    for (const po of poolsOverview) {
-        if (!po.investScore) continue;
-        const params = _npParamsByPool[po.id];
-        if (!params) continue;
-        if (getPoolTypeConfig(params.poolCfg).skipMaeAlert) continue; // volatil_2/3 + rwa → MAE by design
-
-        const metrics = po.investScore.metrics;
+    // Wendet den npWindows-Fallback auf `investScore` an (mutiert es) → true wenn geändert.
+    // Als Funktion, damit der Vergleichslauf (LIQ#000884) ihn auf einer Kopie mit der anderen
+    // Fee-Variante rechnen kann.
+    const applyNpFallback = (po, investScore, npWindows) => {
+        const metrics = investScore.metrics;
         let changed = false;
         for (const m of metrics) {
             const win = WIN_LABEL[m.label];
             if (!win) continue;            // kein PnL-Metrik
             if (m.score !== null) continue; // echte Daten vorhanden → nicht überschreiben
-            const raw = po.npWindows?.[win];
+            const raw = npWindows?.[win];
             if (raw == null) continue;
             m.pct       = raw / NP_CAPITAL * 100;
             m.score     = _clampSim(50 + m.pct * 10);
             m.simulated = true;
             changed = true;
         }
-        if (!changed) continue;
+        if (!changed) return false;
 
         // InvestScore-Wert neu normalisieren – über die zentrale Blend-Funktion
         // (lib/score-blend.js), nicht mehr von Hand nachgerechnet (Befund 2026-07-25:
@@ -2417,13 +2326,41 @@ try {
         const blended = blendInvestScore(
             metrics.map(m => ({ score: m.score, weight: m.weight, pnl: m.label.startsWith('PnL') })),
         );
-        let value = blended ?? po.investScore.value;
+        let value = blended ?? investScore.value;
         if (!openPosByPool[po.id] && value != null) value = Math.max(10, Math.min(90, value));
-        if (po.investScore.hopiumVeto && value != null) value = Math.min(value, 40);
+        if (investScore.hopiumVeto && value != null) value = Math.min(value, 40);
 
-        po.investScore.value     = value;
-        po.investScore.simulated = true;
-        po.investScore.arrow     = value == null ? 'flat' : value >= 60 ? 'up' : value <= 34 ? 'down' : 'flat';
+        // Volumen-Malus + Trend-Feinsignal wie in der Hauptberechnung — sonst umgeht ein
+        // Pool mit simulierter PnL den Malus im Ranking (LIQ#000774). Nur im Master.
+        if (_applyRankingAdjustments) {
+            const tf = investScore.trendFineSignal;
+            value = _applyRankingAdjustments(value, {
+                volumeMalus:     investScore.volumeMalus ?? 0,
+                trendWeight:     tf?.weight ?? 0,
+                trendComposite:  tf?.composite ?? null,
+                hopiumVeto:      !!investScore.hopiumVeto,
+                hasOpenPosition: !!openPosByPool[po.id],
+            }).value;
+        }
+
+        investScore.value     = value;
+        investScore.simulated = true;
+        investScore.arrow     = value == null ? 'flat' : value >= 60 ? 'up' : value <= 34 ? 'down' : 'flat';
+        return true;
+    };
+
+    for (const po of poolsOverview) {
+        if (!po.investScore) continue;
+        const params = _npParamsByPool[po.id];
+        if (!params) continue;
+        if (getPoolTypeConfig(params.poolCfg).skipMaeAlert) continue; // volatil_2/3 + rwa → MAE by design
+        const cmp = _feeModelCompare[po.id];
+        if (cmp) {
+            const alt = JSON.parse(JSON.stringify(po.investScore));
+            applyNpFallback(po, alt, cmp.npWindowsAlt);
+            cmp.investScoreAlt = alt.value;
+        }
+        applyNpFallback(po, po.investScore, po.npWindows);
     }
 
     // Korrigierte Scores in invest_score_history nachschreiben (gleicher Timestamp →
@@ -2450,210 +2387,27 @@ try {
     }
 }
 
-// ─── NP-Qualitäts-Protokoll (stündlich, nur aktive Pools) ────────────────────
-// Vergleicht Modell-NP (wie bei inaktiven Pools berechnet) mit realem PnL
-// aus pnlWindows (kapitalfluss-korrigiert). Schreibt Fehlermetriken in
-// np_quality_log. Warnt per console.warn wenn MAE > 40% über 24h.
-{
-    const NP_QUALITY_INTERVAL_MS  = 60 * 60_000; // stündlich
-    const NP_QUALITY_MAE_WARN_PCT = 40;           // Warnschwelle MAE in %
-    const NP_QUALITY_WARN_MIN_N   = 6;            // Mindest-Einträge für Alert
-
-    try {
-        const qDb = new Database(DB_PATH);
-        qDb.pragma('journal_mode = WAL');
-        qDb.exec(`
-            CREATE TABLE IF NOT EXISTS np_quality_log (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                pool_id       TEXT    NOT NULL,
-                recorded_at   INTEGER NOT NULL,
-                window_h      INTEGER NOT NULL,
-                predicted_usd REAL    NOT NULL,
-                actual_usd    REAL    NOT NULL,
-                error_usd     REAL    NOT NULL,
-                error_pct     REAL,
-                np_range_pct         REAL,
-                actual_range_pct     REAL,
-                predicted_actual_usd REAL,
-                error_actual_usd     REAL,
-                fee_pred_actual_usd  REAL,
-                il_pred_actual_usd   REAL,
-                lp_path_actual_usd       REAL,
-                predicted_path_actual_usd REAL,
-                error_path_actual_usd    REAL,
-                time_in_range_pct        REAL
-            );
-            CREATE INDEX IF NOT EXISTS idx_np_quality_time
-                ON np_quality_log (recorded_at DESC);
-        `);
-        // Idempotente Migration für bestehende DBs: fehlende Diagnose-Spalten ergänzen.
-        // predicted_usd/error_usd bleiben NP@optimal-range (Ranking inaktiver Pools);
-        // die *_actual_*-Spalten sind NP@actual-range (validierbar gegen aktive Position) +
-        // Fee/IL-Zerlegung. Trennt Modellfehler vom Range-Mismatch.
-        {
-            const _cols = new Set(qDb.prepare(`PRAGMA table_info(np_quality_log)`).all().map(c => c.name));
-            for (const [col, type] of [
-                ['np_range_pct', 'REAL'], ['actual_range_pct', 'REAL'],
-                ['predicted_actual_usd', 'REAL'], ['error_actual_usd', 'REAL'],
-                ['fee_pred_actual_usd', 'REAL'], ['il_pred_actual_usd', 'REAL'],
-                // #0198 Shadow: pfad-/rebalance-bewusster LP-Return (A/B gegen il_pred_actual_usd)
-                ['lp_path_actual_usd', 'REAL'], ['predicted_path_actual_usd', 'REAL'],
-                ['error_path_actual_usd', 'REAL'], ['time_in_range_pct', 'REAL'],
-            ]) {
-                if (!_cols.has(col)) qDb.exec(`ALTER TABLE np_quality_log ADD COLUMN ${col} ${type}`);
-            }
-        }
-
-        const lastTs = qDb.prepare(
-            `SELECT MAX(recorded_at) AS ts FROM np_quality_log`
-        ).get()?.ts ?? 0;
-
-        if (_oppNowMs - lastTs >= NP_QUALITY_INTERVAL_MS) {
-            const ins = qDb.prepare(`
-                INSERT INTO np_quality_log
-                    (pool_id, recorded_at, window_h, predicted_usd, actual_usd, error_usd, error_pct,
-                     np_range_pct, actual_range_pct, predicted_actual_usd, error_actual_usd,
-                     fee_pred_actual_usd, il_pred_actual_usd,
-                     lp_path_actual_usd, predicted_path_actual_usd, error_path_actual_usd, time_in_range_pct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-
-            // Kurzfrist-Fenster (6h/12h/24h) — np_price_history deckt genau das ab
-            const qualityWindows = NP_WINDOWS.filter(w => w.h <= 24);
-            const rows = [];
-
-            for (const po of poolsOverview) {
-                if (!openPosByPool[po.id]) continue; // nur aktive Pools
-
-                const params  = _npParamsByPool[po.id];
-                if (!params) continue;
-
-                const capital = openPosByPool[po.id].capital_usdc;
-                if (!capital || capital <= 0) continue;
-
-                const { optimal, latest, poolCfg, usdA, scanParams } = params;
-                const Pt = latest.price;
-
-                // ── NP@actual-range: gegen die reale Position validierbar ──────────────
-                // Die aktive Position läuft auf ihrer konfigurierten Range (z.B. ORE/SOL ±5 %),
-                // nicht auf der optimalen Range, die NP fürs Ranking annimmt. Reale Range exakt
-                // aus den Position-Ticks (symmetrische Halbbreite in %). Trennt Modellfehler
-                // vom Range-Mismatch.
-                const _pos = openPosByPool[po.id];
-                let actualRangePct = optimal.rangePct;
-                if (_pos && Number.isFinite(_pos.tick_lower) && Number.isFinite(_pos.tick_upper)
-                        && _pos.tick_upper > _pos.tick_lower) {
-                    actualRangePct = (Math.pow(1.0001, (_pos.tick_upper - _pos.tick_lower) / 2) - 1) * 100;
-                }
-                const _sAct = scoreRange(actualRangePct, scanParams);
-                let _grossAct = _sAct.grossAprPct;
-                const _realGrossAct = _npFeeAprPct(poolCfg, latest.price, actualRangePct, usdA,
-                                                   latest.liquidity_in_range, latest.fees_24h_usd);
-                if (_realGrossAct !== null) _grossAct = _realGrossAct;
-                const _netFeeAprAct = _grossAct - _sAct.rebalCostAprPct;
-
-                for (const w of qualityWindows) {
-                    // Realer PnL aus pnlWindows (kapitalfluss-korrigiert), auf 1.000 USDC normiert
-                    const rawPnl = po.pnlWindows?.[w.id];
-                    if (rawPnl == null) continue;
-                    const actualUsd = rawPnl / capital * NP_CAPITAL;
-
-                    // Modell-NP: gleiche Logik wie bei inaktiven Pools
-                    const feeUsdc = (optimal.grossAprPct - optimal.rebalCostAprPct)
-                                    / 100 / 365 / 24 * w.h * NP_CAPITAL;
-
-                    const hist   = _npHistory[po.id] ?? [];
-                    const target = _oppNowMs - w.ms;
-                    let entry    = null;
-                    for (let i = hist.length - 1; i >= 0; i--) {
-                        if (hist[i].recorded_at <= target) { entry = hist[i]; break; }
-                    }
-                    if (!entry && hist.length > 0) entry = hist[0];
-
-                    const lpReturnUsdc = entry
-                        ? _clmmLpReturn(entry.price, Pt, entry.range_pct) / 100 * NP_CAPITAL
-                        : 0; // Kein Preisverlauf: Preis als stabil angenommen
-
-                    const predictedUsd = feeUsdc + lpReturnUsdc;
-                    const errorUsd     = predictedUsd - actualUsd;
-                    const errorPct     = Math.abs(actualUsd) >= 0.01
-                        ? errorUsd / Math.abs(actualUsd) * 100 : null;
-
-                    // NP@actual-range: Fee-Teil + IL-Teil getrennt (Diagnose Fee- vs. IL-Fehler)
-                    const feeUsdcAct = _netFeeAprAct / 100 / 365 / 24 * w.h * NP_CAPITAL;
-                    const ilUsdcAct  = entry
-                        ? _clmmLpReturn(entry.price, Pt, actualRangePct) / 100 * NP_CAPITAL
-                        : 0;
-                    const predictedActualUsd = feeUsdcAct + ilUsdcAct;
-                    const errorActualUsd     = predictedActualUsd - actualUsd;
-
-                    // ── #0198 SHADOW: pfad-/rebalance-bewusster LP-Return @actual-range ──
-                    // Gleicher Fee-Term wie oben, nur der LP-/IL-Term wird durch das
-                    // Pfad-Modell ersetzt → isoliert den Effekt des LP-Terms im A/B.
-                    // Voller Fensterpfad (alle Stützstellen >= target), nicht nur entry→Pt.
-                    let lpPathActualUsd       = null;
-                    let predictedPathActualUsd = null;
-                    let errorPathActualUsd     = null;
-                    let timeInRangePct         = null;
-                    const winPath = hist.filter(h => h.recorded_at >= target && h.price > 0);
-                    const pathRes = _clmmLpReturnPath(winPath, actualRangePct);
-                    if (pathRes) {
-                        lpPathActualUsd        = pathRes.lpReturnPct / 100 * NP_CAPITAL;
-                        predictedPathActualUsd = feeUsdcAct + lpPathActualUsd;
-                        errorPathActualUsd     = predictedPathActualUsd - actualUsd;
-                        timeInRangePct         = pathRes.timeInRange * 100;
-                    }
-
-                    rows.push({ poolId: po.id, wh: w.h, predictedUsd, actualUsd, errorUsd, errorPct,
-                                npRangePct: optimal.rangePct, actualRangePct,
-                                predictedActualUsd, errorActualUsd,
-                                feePredActualUsd: feeUsdcAct, ilPredActualUsd: ilUsdcAct,
-                                lpPathActualUsd, predictedPathActualUsd, errorPathActualUsd, timeInRangePct });
-                }
-            }
-
-            if (rows.length > 0) {
-                qDb.transaction(() => {
-                    for (const r of rows) {
-                        ins.run(r.poolId, _oppNowMs, r.wh,
-                                r.predictedUsd, r.actualUsd, r.errorUsd, r.errorPct ?? null,
-                                r.npRangePct ?? null, r.actualRangePct ?? null,
-                                r.predictedActualUsd ?? null, r.errorActualUsd ?? null,
-                                r.feePredActualUsd ?? null, r.ilPredActualUsd ?? null,
-                                r.lpPathActualUsd ?? null, r.predictedPathActualUsd ?? null,
-                                r.errorPathActualUsd ?? null, r.timeInRangePct ?? null);
-                    }
-                })();
-
-                // MAE-Alert: volatile Pools by design ungenau → nur stable/major prüfen
-                const recentAll = qDb.prepare(`
-                    SELECT pool_id, ABS(error_pct) AS ae FROM np_quality_log
-                    WHERE recorded_at >= ? AND error_pct IS NOT NULL
-                `).all(_oppNowMs - 24 * 3_600_000);
-
-                const recent = recentAll.filter(r => {
-                    const cfg = _npParamsByPool[r.pool_id]?.poolCfg;
-                    if (!cfg) return true; // unbekannt → konservativ einschließen
-                    return !getPoolTypeConfig(cfg).skipMaeAlert;
-                });
-
-                if (recent.length >= NP_QUALITY_WARN_MIN_N) {
-                    const mae = recent.reduce((s, r) => s + r.ae, 0) / recent.length;
-                    if (mae > NP_QUALITY_MAE_WARN_PCT) {
-                        console.warn(
-                            `export.js: NP-Modell-Qualität degradiert — ` +
-                            `MAE ${mae.toFixed(1)}% > Schwelle ${NP_QUALITY_MAE_WARN_PCT}% ` +
-                            `(n=${recent.length}, letzte 24h, nur stable/major)`
-                        );
-                    }
-                }
-            }
-        }
-        qDb.close();
-    } catch (e) {
-        console.warn(`export.js: np_quality_log nicht geschrieben (${e.message})`);
+// ─── Vergleichslauf LIQ#000884: beide Fee-Varianten je Pool in eine Datei ─────
+if (_FEE_MODEL_COMPARE) {
+    const out = { generatedAt: _oppNowMs, feeModelV2Active: FEE_MODEL_V2, pools: {} };
+    for (const po of poolsOverview) {
+        const p = _npParamsByPool[po.id];
+        if (!p) continue;
+        const pick = (o) => o && { rangePct: o.rangePct, grossAprPct: o.grossAprPct, netAprPct: o.netAprPct,
+                                   rebalCostAprPct: o.rebalCostAprPct, feeSource: o.feeSource ?? 'fallback' };
+        const active = { optimal: pick(p.optimal), npWindows: po.npWindows, investScore: po.investScore?.value ?? null,
+                         simulated: !!po.investScore?.simulated };
+        const alt    = { optimal: pick(p.optimalAlt), npWindows: _feeModelCompare[po.id]?.npWindowsAlt ?? null,
+                         investScore: _feeModelCompare[po.id]?.investScoreAlt ?? po.investScore?.value ?? null };
+        out.pools[po.id] = { pair: po.pair ?? p.poolCfg.pair, active: !!openPosByPool[po.id],
+                             v1: FEE_MODEL_V2 ? alt : active, v2: FEE_MODEL_V2 ? active : alt };
     }
+    try { writeFileSync(_FEE_MODEL_COMPARE, JSON.stringify(out, null, 2)); }
+    catch (e) { console.warn(`export.js: Fee-Modell-Vergleich nicht geschrieben (${e.message})`); }
 }
+
+// NP-Qualitäts-Protokoll (np_quality_log): läuft seit CORE#000931 in lib/edge-compute.js mit,
+// weil es dieselben Range-Parameter braucht wie die Edge-Prognose (nur Master).
 
 // ─── Portfolio-Metriken ────────────────────────────────────────────────────────
 
@@ -2831,8 +2585,7 @@ for (const po of poolsOverview) {
         const poolCfg = _allPoolsConfig.find(p => p.id === po.id);
         if (!poolCfg) continue;
         const elig = checkInvestEligibility(poolCfg, db, {
-            exitScore: po.investScore?.exitValue ?? po.investScore?.value ?? null,
-            settings:  poolSettings[po.id] ?? {},
+            settings: poolSettings[po.id] ?? {},
         });
         po.investBlocked = elig.ok ? null : { rule: elig.rule, ...elig.detail };
     } catch { po.investBlocked = null; }
@@ -2883,56 +2636,6 @@ try {
 } catch (err) {
     console.warn(`[export] Trend-Zustand nicht ermittelbar: ${err.message}`);
     for (const po of poolsOverview) po.trendGate ??= null;
-}
-
-// ─── "Bester Pool" jetzt: Vorschau fürs Dashboard (Hammer-Icon) ──────────────
-// Zeigt, welchen Pool der nächste stündliche Cleanup-Lauf (Modus 'ranking') mit dem
-// aktuellen Datenstand wählen würde. Nutzt bewusst dieselben, oben bereits berechneten
-// Tore (investBlocked, trendGate, investCooldowns) statt sie ein weiteres Mal zu
-// berechnen — zwei Kopien derselben Regel liefen in der Vergangenheit auseinander
-// (siehe checkInvestEligibility-Kommentar oben). Deckt nur den Modus 'ranking' ab;
-// bei 'pool:<id>' (fest gewählter Pool) oder 'disabled' gibt es keine „Wahl" zu zeigen.
-{
-    const cleanupModeNow     = process.env.CLEANUP_MODE
-        ?? (process.env.CLEANUP_ENABLED === 'false' ? 'disabled' : 'ranking');
-    const cleanupMinScoreNow = Math.max(0, parseInt(process.env.CLEANUP_MIN_SCORE ?? '65', 10));
-    const cleanupTrendRequired = parseTrendGate(getCleanupTrendGateFromEnv());
-
-    let cleanupWinnerPoolId = null;
-    if (cleanupModeNow === 'ranking') {
-        const candidates = poolsOverview.filter(po => {
-            // Bewusst über config.pools.all (DB-überlagert), nicht _allPoolsConfig (rohe
-            // pools.json): Bei jedem forge-pub-Fork setzt tools/pub-export/sanitize-pools-config.js
-            // enabled/active in der JSON hart auf false, autoritativ ist aber die DB. Mit der
-            // rohen JSON blieb das Hammer-Icon auf dem Fork immer aus, selbst wenn der Betreiber
-            // den Pool über die Settings-UI freigeschaltet hatte (2026-08-24).
-            const poolCfg = config.pools.all.find(p => p.id === po.id);
-            if (!poolCfg || !isPoolEnabled(poolCfg)) return false;
-            if (poolSettings[po.id]?.cleanup?.rankingEligible === false) return false;
-            if (po.investScore?.value == null) return false;
-            if (po.investScore.value < cleanupMinScoreNow) return false;
-
-            // Ab hier hat der Pool den Score erreicht — ein Ausschluss ab jetzt ist für den
-            // Betreiber sonst nicht von einem schlicht schwächeren Pool zu unterscheiden.
-            // Grund merken (dieselbe Prüfreihenfolge wie die eigentliche Sperre unten), Basis
-            // für das graue Info-Icon in der Opportunity-Tabelle (2026-08-31, LIQ#0351-Folge —
-            // ersetzt das separate Cooldown-Icon, siehe app.js _cleanupBlockedIcon).
-            if (po.investCooldowns?.length) { po._cleanupBlockedRule = 'cooldown'; return false; }
-            if (cleanupTrendRequired.length && !po.trendGate?.ok) { po._cleanupBlockedRule = 'trend_gate'; return false; }
-            if (po.investBlocked) { po._cleanupBlockedRule = po.investBlocked.rule ?? 'invest_blocked'; return false; }
-            return true;
-        }).sort((a, b) => b.investScore.value - a.investScore.value);
-        cleanupWinnerPoolId = candidates[0]?.id ?? null;
-    }
-    for (const po of poolsOverview) {
-        po.cleanupWinner = (po.id === cleanupWinnerPoolId)
-            ? { score: po.investScore.value, minScore: cleanupMinScoreNow }
-            : null;
-        po.cleanupBlocked = (po.id !== cleanupWinnerPoolId && po._cleanupBlockedRule)
-            ? po._cleanupBlockedRule
-            : null;
-        delete po._cleanupBlockedRule;
-    }
 }
 
 // ─── Zusammenführen ───────────────────────────────────────────────────────────
@@ -3026,6 +2729,11 @@ const data = {
     // einer unerklärten Lücke. `scoreStale` = gelieferte Daten älter als 2h.
     scoreSource,
     scoreStale,
+    // Herkunft der Edge-Prognose (CORE#000931), gleiche Zustände wie scoreSource. Seit
+    // Premium die Edge statt des Scores liefert, entscheidet DIESES Feld über den
+    // Premium-Zugang im Dashboard und in den Settings (hasPremiumAccess()).
+    edgeSource,
+    edgeStale,
     // Premium-Deckung fürs Dashboard (2026-07-29): auf dem Master immer
     // { autoPayEnabled:false, coveredUntilMs:null } (getPremiumCoverage() liefert
     // das sauber, kein Sonderfall hier nötig). Auf dem Fork die exakte, bereits
@@ -3078,6 +2786,7 @@ const dataHistory = {
     priceHistory,
     myAprHistory,
     posValueHistory,
+    poolValueHistory,
     npHistory,
     scoreHistory,
     pnlHistory,

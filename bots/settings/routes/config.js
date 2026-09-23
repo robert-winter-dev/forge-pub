@@ -32,7 +32,6 @@ const BOT_SERVICES = {
 const NO_RESTART_KEYS = new Set([
     // Liquidity – nur von cleanup.js / Subprozessen gelesen
     'CLEANUP_MODE',
-    'CLEANUP_MIN_SCORE',
     'CLEANUP_MAX_DEPOSIT',
     'CLEANUP_MIN_DEPOSIT',
     'CLEANUP_ENABLED',

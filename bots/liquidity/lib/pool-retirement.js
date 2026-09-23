@@ -144,6 +144,7 @@ async function stepSwap(pool, db, execId, coinsA, coinsB) {
         forceCoins: true,      // nur die Coins aus DIESEM Pool, siehe Dateikopf
         logPrefix:  LOG(pool.id),
         slippageBps: config.rm.swapSlippageBps,
+        db,
         onSwapped:  (swappedUsdc) => {
             updateRetireExecution(db, execId, { step: 'swapped', swapped_usdc: swappedUsdc });
             console.log(`${LOG(pool.id)} In USDC getauscht: ${swappedUsdc.toFixed(2)}`);

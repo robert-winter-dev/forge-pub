@@ -1,0 +1,57 @@
+{
+  "_comment": "EINE Stelle für Retention und Größengrenzen je SQLite-DB (CORE#000837, Warum: KB Core/db-wachstum-retention.md). Konsument: lib/db-growth.js (forge-check, bin/db-growth.js). 'column' + 'unit' (ms = Unix-Millisekunden, iso = Text YYYY-MM-DD…) + 'retentionDays' müssen dem Prune im Code entsprechen; ändert sich der Prune, HIER mitziehen. 'unbounded': bewusst ohne Retention (mit 'reason'); 'boundedBy': Zeilen hängen per Fremdschlüssel an einer anderen Tabelle. Tabellen ohne Eintrag werden erst ab 'unboundedRowWarn' Zeilen gemeldet ('keine Retention hinterlegt').",
+  "warnBufferDays": 7,
+  "unboundedRowWarn": 500000,
+  "defaultMaxMb": 500,
+  "vacuum": { "minFreeRatio": 0.3, "minDbMb": 20 },
+  "databases": {
+    "liquiditybot.db": {
+      "maxMb": 400,
+      "tables": {
+        "invest_score_history": { "column": "recorded_at",  "unit": "ms", "retentionDays": 35,  "prune": "pruneScoreHistories + downsampleScoreHistory (export.js, stündlich; > 7 d auf 10-min-Raster verdichtet)" },
+        "opportunity_scores":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js, stündlich)" },
+        "pool_score_history":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js) + pool-explorer.js" },
+        "advisor_log":          { "column": "recorded_at",  "unit": "ms", "retentionDays": 14,  "prune": "pruneAdvisorLog, nur pool-explorer.js (im Fork nicht vorhanden)" },
+        "portfolio_history":    { "column": "recorded_at",  "unit": "ms", "retentionDays": 90,  "prune": "bot.js täglich" },
+        "position_snapshots":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 90,  "prune": "bot.js täglich" },
+        "ts_fast_checks":       { "column": "checked_at",   "unit": "ms", "retentionDays": 14,  "prune": "bot.js täglich" },
+        "rebalance_history":    { "column": "rebalanced_at","unit": "ms", "retentionDays": 730, "prune": "bot.js täglich" },
+        "advisor_decisions":    { "column": "created_at",   "unit": "ms", "retentionDays": 730, "prune": "bot.js täglich" },
+        "pool_stats":           { "unbounded": true, "reason": "viele Leser (economic-scorer first_at, dataDays); Kürzen ändert Verhalten, eigenes Ticket nötig (KB db-wachstum-retention)" },
+        "volume_hourly":        { "unbounded": true, "reason": "ca. 5 MB/Jahr, Stundenwerte je Pool" }
+      }
+    },
+    "lendingbot.db": {
+      "maxMb": 100,
+      "tables": {
+        "portfolio_history": { "column": "recorded_at", "unit": "ms", "retentionDays": 90, "prune": "prunePortfolioHistory" },
+        "protocol_stats":    { "unbounded": true, "reason": "ca. 6.000 Zeilen/Monat, klein" }
+      }
+    },
+    "wallet-monitor.db": {
+      "maxMb": 150,
+      "tables": {
+        "snapshots":      { "column": "recorded_at", "unit": "ms", "retentionDays": 30, "prune": "monitor.js, config.json retainDays" },
+        "token_balances": { "boundedBy": "snapshots" }
+      }
+    },
+    "health.db": {
+      "maxMb": 50,
+      "tables": {
+        "health_checks": { "column": "timestamp_ms", "unit": "ms", "retentionDays": 7, "prune": "health-check.js, RETENTION_DAYS" }
+      }
+    },
+    "prices.db": {
+      "maxMb": 200,
+      "tables": {
+        "price_history": { "unbounded": true, "reason": "ca. 2,7 MB/Monat, Grundlage für Backtests" }
+      }
+    },
+    "rpc-stats.db": {
+      "maxMb": 50,
+      "tables": {
+        "rpc_stats": { "unbounded": true, "reason": "einzige Quelle für den Helius-Verbrauch (Helius liefert keinen Kontostand, CORE#000808); ca. 10 MB/Jahr. Begrenzt über maxMb, NICHT über die Zeit — ein Zeit-Prune löschte am 21.09.2026 versehentlich 9.266 Zeilen (CORE#000846)" }
+      }
+    }
+  }
+}
