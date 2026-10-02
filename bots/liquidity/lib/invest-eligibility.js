@@ -16,9 +16,9 @@
  *    (lib/tvl-thresholds.js), damit „darf hinein" und „muss heraus" nicht
  *    auseinanderlaufen können.
  *
- * Aufrufer: bin/cleanup.js — im Ranking (Filter VOR dem Sortieren, dadurch rückt
- * automatisch der nächstbeste zulässige Pool nach) und als harte Sperre im
- * Invest-Pfad selbst (Modus 'pool:<id>' läuft am Ranking vorbei).
+ * Aufrufer: bin/export.js (Anzeige) und bin/deposit.js (remainingInvestCapacity). Der
+ * Cleanup-Invest, für den die Prüfung entstand (Ranking, später fester Pool), ist seit
+ * LIQ#000937 entfallen.
  *
  * Reine DB-/Datei-Lookups, kein API-Call, kein Rate-Limit-Risiko.
  */

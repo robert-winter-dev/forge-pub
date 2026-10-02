@@ -11,7 +11,9 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
-import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml, scamManageBadgeHtml } from '/forge/js/scam-tab.js?v=20260921b';
+import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml, scamManageBadgeHtml } from '/forge/js/scam-tab.js?v=20260925a';
+import { showFallbackSendHint } from '/forge/js/rpc-fallback-hint.js?v=20260925a';
+import { runFinanceAction } from '/forge/js/finance-job.js?v=20260925a';
 
 // 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
 // Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
@@ -1044,6 +1046,7 @@ async function _openWalletManageModal(el, info, balance, addrs) {
     });
 
     _wireSendPanel(modalEl, tokens, addrs);
+    showFallbackSendHint(modalEl.querySelector('#wm-send'));   // CORE#000992
     _wireReceivePanel(modalEl, info);
     _wireKeyPanel(modalEl, mid, el, info);
     // Nach einem Löschvorgang Modal schließen und die Karte neu aufbauen — sonst
@@ -1805,13 +1808,11 @@ async function _execDeposit(modalId, proto, card) {
     if (fb) { fb.textContent = tr('sb.tx_running', 'Transaktion läuft… (kann bis zu 2 Min. dauern)'); fb.className = 'modal-feedback'; }
 
     try {
-        const res  = await fetch('/api/lending/deposit', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ protocol: proto.id, amount }),
+        // Serverseitig ein losgelöster Job (CORE#000993), siehe /forge/js/finance-job.js.
+        const data = await runFinanceAction('/api/lending/deposit', { protocol: proto.id, amount }, {
+            key: 'lending', onStatus: (_state, text) => { if (fb) fb.textContent = text; },
         });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        if (!data.ok) throw new Error(data.error ?? tr('set.unknown_error', 'Unbekannter Fehler'));
 
         if (fb) { fb.textContent = tr('slen.deposit_ok', '✓ {amount} USDC in {pool} eingezahlt.', { amount, pool: data.result?.protoLabel ?? proto.label }); fb.className = 'modal-feedback success'; }
         _ctx.showToast?.(`Deposit ${_fmt(amount)} USDC → ${data.result?.protoLabel ?? proto.label}`, 'success');
@@ -1884,13 +1885,11 @@ async function _execWithdraw(modalId, proto, card) {
     if (fb) { fb.textContent = tr('sb.tx_running', 'Transaktion läuft… (kann bis zu 2 Min. dauern)'); fb.className = 'modal-feedback'; }
 
     try {
-        const res  = await fetch('/api/lending/withdraw', {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ protocol: proto.id, amount }),
+        // Serverseitig ein losgelöster Job (CORE#000993), siehe /forge/js/finance-job.js.
+        const data = await runFinanceAction('/api/lending/withdraw', { protocol: proto.id, amount }, {
+            key: 'lending', onStatus: (_state, text) => { if (fb) fb.textContent = text; },
         });
-        const data = await res.json();
-        if (!res.ok || !data.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+        if (!data.ok) throw new Error(data.error ?? tr('set.unknown_error', 'Unbekannter Fehler'));
 
         const r = data.result;
         if (r?.withdrawType === 'cooldown') {

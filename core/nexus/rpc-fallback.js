@@ -5,7 +5,7 @@
  * Warum, Grenzen und Betrieb: KB Core/helius-credit-budget.md, Abschnitt „Fallback-RPC".
  *
  * Grundsätze:
- *   • Nur LESENDE Methoden aus FALLBACK_ALLOWED. Alles andere (getAsset, sendTransaction,
+ *   • Nur LESENDE Methoden aus FALLBACK_ALLOWED (einzige Ausnahme: FALLBACK_SEND_CALLERS). Alles andere (getAsset, sendTransaction,
  *     unbekannte Methoden) scheitert im Fallback-Betrieb laut mit einem JSON-RPC-Fehler,
  *     nie mit leerer oder erfundener Antwort. Allowlist statt Denylist: eine neue Methode
  *     ist im Fallback erst dann erlaubt, wenn jemand sie bewusst einträgt.
@@ -43,8 +43,21 @@ export const FALLBACK_ALLOWED = new Set([
     'getHealth',
 ]);
 
-export function isAllowedInFallback(method) {
-    return typeof method === 'string' && FALLBACK_ALLOWED.has(method);
+/**
+ * Ausnahme CORE#000992: Senden im Fallback nur für Aufrufer aus FALLBACK_SEND_CALLERS.
+ * Das sind manuell ausgelöste Wallet-Sendungen der Settings-Oberfläche: selten, vom
+ * Nutzer beobachtet, ein Fehlschlag kostet nichts außer einem erneuten Versuch. Bots
+ * bleiben gesperrt, ein halb durchgelaufener Rebalance über den öffentlichen RPC wäre
+ * ein anderes Risiko. Die Kennung ist der Header x-forge-caller (lib/rpc-caller.js); er
+ * kommt nur von localhost und schützt vor versehentlicher Nutzung, nicht vor Absicht.
+ */
+export const FALLBACK_SEND_METHODS = new Set(['sendTransaction']);
+export const FALLBACK_SEND_CALLERS = new Set(['settings']);
+
+export function isAllowedInFallback(method, caller = null) {
+    if (typeof method !== 'string') return false;
+    if (FALLBACK_ALLOWED.has(method)) return true;
+    return FALLBACK_SEND_METHODS.has(method) && FALLBACK_SEND_CALLERS.has(caller);
 }
 
 /** JSON-RPC-Fehlerobjekt für eine im Fallback nicht verfügbare Methode. */
@@ -62,13 +75,14 @@ export function unavailableError(id, method) {
 
 /**
  * Zerlegt einen RPC-Body in erlaubte und nicht erlaubte Aufrufe.
+ * @param {string|null} [caller]  Kennung aus x-forge-caller, siehe FALLBACK_SEND_CALLERS
  * @returns {{ isBatch: boolean, items: object[], allowed: object[], denied: object[] }}
  */
-export function splitRequest(body) {
+export function splitRequest(body, caller = null) {
     const isBatch = Array.isArray(body);
     const items   = isBatch ? body : [body];
-    const allowed = items.filter(i => isAllowedInFallback(i?.method));
-    const denied  = items.filter(i => !isAllowedInFallback(i?.method));
+    const allowed = items.filter(i => isAllowedInFallback(i?.method, caller));
+    const denied  = items.filter(i => !isAllowedInFallback(i?.method, caller));
     return { isBatch, items, allowed, denied };
 }
 
@@ -77,10 +91,11 @@ export function splitRequest(body) {
  * Fehlerobjekte der abgelehnten, in der Reihenfolge der Anfrage.
  * @param {object[]} items          ursprüngliche Aufrufe
  * @param {object[]} upstreamItems  Antwortobjekte des Fallback-RPC (Batch-Antwort oder [Einzelantwort])
+ * @param {string|null} [caller]    Kennung aus x-forge-caller, siehe FALLBACK_SEND_CALLERS
  */
-export function mergeResponses(items, upstreamItems) {
+export function mergeResponses(items, upstreamItems, caller = null) {
     const byId = new Map(upstreamItems.map(r => [r?.id, r]));
-    return items.map(i => isAllowedInFallback(i?.method)
+    return items.map(i => isAllowedInFallback(i?.method, caller)
         ? (byId.get(i.id) ?? unavailableError(i.id, i.method))   // Antwort fehlt → Fehler statt Lücke
         : unavailableError(i?.id, i?.method));
 }

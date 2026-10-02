@@ -10,14 +10,17 @@ import { initNav, initFooter, setLastUpdate, isLanAccess } from '../../js/nav.js
 // durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
 import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
-import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260609a';
+import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260925a';
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
+import { wireMaximize, fitHeight }             from '../../js/modal.js?v=20261002b';
+// Zeitraum-Filter (1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LIQ#000934)
+import { DEFAULT_RANGES, buildRanges, createRangeBar, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20260923a';
 import { formatPrice }                         from '../../js/format-price.js?v=20260820a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
 import { initMessageBell }                     from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
-import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20260727a';
+import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20261002a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
 
 'use strict';
@@ -88,7 +91,7 @@ function fmtPct(v, dec = 2) {
 // stehen und würde fälschlich "kommt gleich" suggerieren. `remainingText` (Nachbesserung
 // LIQ#000912) kommt vorgerechnet von _edgeRemainingText() und steht im Tooltip-Titel,
 // damit sofort klar ist, wie lange es noch dauert statt nur dass es dauert.
-function fmtEdgePerHour(v, dec = 2, hodlUsd = undefined, remainingText = null) {
+function fmtEdgePerHour(v, dec = 2, hodlUsd = undefined, remainingText = null, unit = 'USDC') {
     if (v == null) {
         if (hodlUsd != null) {
             const title = remainingText ?? tr('liq.edge_pending_title', 'Wird noch ermittelt');
@@ -97,7 +100,7 @@ function fmtEdgePerHour(v, dec = 2, hodlUsd = undefined, remainingText = null) {
         return '—';
     }
     const sign = v >= 0 ? '+' : '';
-    return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + ' USDC';
+    return sign + Number(v).toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + (unit === '%' ? '\u202f%' : ' ' + unit);
 }
 
 // Restzeit bis Delta/H bzw. Delta/D genug Laufzeit hat (LIQ#000912, Nachbesserung) —
@@ -109,7 +112,7 @@ function fmtEdgePerHour(v, dec = 2, hodlUsd = undefined, remainingText = null) {
 function _edgeRemainingText(pos, nowMs) {
     const anchor = pos?.pnlDetailsAnchorAt;
     if (!(anchor > 0)) return null;
-    const thresholdMs = (_edgeUnit === 'd' ? 24 : 1) * 3_600_000;
+    const thresholdMs = 24 * 3_600_000;
     const remainMs = thresholdMs - (nowMs - anchor);
     if (remainMs <= 0) return null;
     const totalMin = Math.ceil(remainMs / 60_000);
@@ -133,23 +136,26 @@ function _edgeRemainingText(pos, nowMs) {
 // Tabellenspalte passen, anders als Tooltip-Titel/Summenzeile (siehe _edgeUnitFullLabel):
 // deren Box hat ohnehin die Breite der übrigen Tooltips, Kürzen brachte dort nichts mehr.
 function _edgeUnitLabel(unit) {
-    return unit === 'd' ? tr('liq.edge_unit_d', 'Edge/D') : tr('liq.edge_unit_h', 'Edge/H');
+    return unit === 'pnl' ? tr('liq.metric_pnl_24h', 'PnL 24H') : tr('liq.metric_edge_24h', 'Edge 24H');
 }
 
 // Ausgeschriebene Fassung für Tooltip-Titel und Summenzeile — dort ist Platz, „Delta/H“ las
 // sich dort unnötig kryptisch.
 function _edgeUnitFullLabel(unit) {
-    return unit === 'd' ? tr('liq.edge_unit_d_full', 'Edge pro Tag') : tr('liq.edge_unit_h_full', 'Edge pro Stunde');
+    return unit === 'pnl' ? tr('liq.metric_pnl_24h_full', 'PnL der letzten 24 Stunden') : tr('liq.metric_edge_24h_full', 'Edge der letzten 24 Stunden');
 }
 
 function _edgeFormulaTooltipHtml(unit) {
-    const row = (sign, label, strong = false) => `<tr><td style="width:1em;text-align:right;padding-right:2px${strong ? ';border-top:1px solid var(--border)' : ''}">${sign}</td><td style="text-align:right;white-space:nowrap${strong ? ';font-weight:600;border-top:1px solid var(--border)' : ''}">${label}</td></tr>`;
-    return `<div style="margin-bottom:6px;white-space:normal">${escHtml(tr('liq.edge_explain', 'Edge (Trading-Begriff): Vorsprung des Pools gegenüber bloßem Halten der beiden Token, in USDC pro Stunde bzw. Tag. Positiv heißt: Der Pool schlägt das Halten.'))}</div>`
-        + '<table><tbody>'
-        + row('', tr('liq.pnl_fee_income', 'Fee-Einnahmen') + ' (USDC)')
-        + row('−', tr('liq.bd_il_only', 'Impermanent Loss') + ' (USDC)')
-        + row('−', tr('liq.edge_rebalance_cost', 'Rebalance-Kosten') + ' (USDC)')
+    const row = (sign, label, strong = false) => `<tr><td style="width:1em;text-align:right;padding:0.1rem 2px 0.1rem 0.875rem;line-height:1.3${strong ? ';border-top:1px solid var(--border)' : ''}">${sign}</td><td style="text-align:right;white-space:nowrap;padding-top:0.1rem;padding-bottom:0.1rem;line-height:1.3${strong ? ';font-weight:600;border-top:1px solid var(--border)' : ''}">${label}</td></tr>`;
+    return '<table><tbody>'
+        + (unit === 'pnl'
+            ? row('', tr('liq.metric_pnl_now', 'PnL Mein Anteil jetzt') + ' (USDC)')
+              + row('−', tr('liq.metric_pnl_24h_ago', 'PnL Mein Anteil vor 24 Std.') + ' (USDC)')
+            : row('', tr('liq.metric_edge_now', 'Edge jetzt') + ' (USDC)')
+              + row('−', tr('liq.metric_edge_24h_ago', 'Edge vor 24 Std.') + ' (USDC)'))
         + row('=', _edgeUnitFullLabel(unit) + ' (USDC)', true)
+        + row('÷', tr('liq.edge_pct_basis', 'Eingezahlt') + ' (USDC)')
+        + row('=', _edgeUnitFullLabel(unit) + ' (%)', true)
         + '</tbody></table>';
 }
 
@@ -158,10 +164,7 @@ function _edgeFormulaTooltipHtml(unit) {
 // auf dem Wrapper-Span, nicht dem <select> selbst — Select-Hover ist browserübergreifend
 // unzuverlässig.
 function _edgeUnitSelectHtml() {
-    return `<span class="has-tooltip" data-tooltip-title="${_edgeUnitFullLabel(_edgeUnit)}" data-tooltip-content="${escHtml(_edgeFormulaTooltipHtml(_edgeUnit))}" data-tooltip-type="text" style="display:inline-flex"><select class="edge-unit-select" style="background:#0f172a;border:none;color:#94a3b8;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.06em;text-transform:uppercase;text-align:right">
-        <option value="h"${_edgeUnit==='h'?' selected':''}>${tr('liq.edge_unit_h', 'Edge/H')}</option>
-        <option value="d"${_edgeUnit==='d'?' selected':''}>${tr('liq.edge_unit_d', 'Edge/D')}</option>
-    </select></span>`;
+    return `<span class="has-tooltip" data-tooltip-title="${_edgeUnitFullLabel(_edgeUnit)}" data-tooltip-content="${escHtml(_edgeFormulaTooltipHtml(_edgeUnit))}" data-tooltip-type="text" style="display:inline-flex;font-size:0.7rem;letter-spacing:0.06em;text-transform:uppercase">${_edgeUnitLabel(_edgeUnit)}</span>`;
 }
 
 // Spaltenkopf Range/Reb. als Select (LIQ#000890, Nachbesserung „Tabelle zu voll"): beide
@@ -344,9 +347,9 @@ function renderMetrics(data) {
     const gesEl = $('gesamtValue');
     if (gesEl) gesEl.textContent = fmtUsdc(gesamt);
 
-    // PnL (24h): server-seitig berechnet (calcPnl, kapitalfluss-korrigiert).
-    // Fallback auf client-seitige Methode wenn Wert noch fehlt (alte JSON-Version).
-    const pnl24h    = data.portfolio?.pnl24h ?? calcPortfolioPnl24h(data);
+    // PnL (24h): ausschließlich lib/pnl.js (pnlForPeriod im Export, kapitalfluss-korrigiert).
+    // Kein Frontend-Ersatz: ein Portfolio-Delta zählte Ein-/Auszahlungen als PnL (LIQ#000947).
+    const pnl24h    = data.portfolio?.pnl24h ?? null;
     const pnl24hEl  = $('pnl24hValue');
     const pnl24hUnit = $('pnl24hUnit');
     if (pnl24hEl) {
@@ -370,23 +373,6 @@ function renderMetrics(data) {
 
     // Rendite: Summe geclaimter Fees (immer positiv) – Selector: Heute / Gestern / Monat
     renderRendite(p);
-}
-
-// ── PnL-24h-Modal ─────────────────────────────────────────────────────────────
-
-function calcPortfolioPnl24h(data) {
-    const history = data?.portfolioHistory ?? [];
-    if (history.length < 2) return null;
-    const WINDOW_MS = 24 * 3600 * 1000;
-    const last = history[history.length - 1];
-    const target = last.t - WINDOW_MS;
-    let baseIdx = -1;
-    for (let i = 0; i < history.length - 1; i++) {
-        if (history[i].t <= target) baseIdx = i;
-        else break;
-    }
-    if (baseIdx < 0) return null;
-    return last.v - history[baseIdx].v;
 }
 
 // ── Gemeinsamer Pool-Sortierschlüssel ─────────────────────────────────────────
@@ -442,6 +428,7 @@ const POOL_TYPE_LABELS = {
 };
 
 const LS_OPP_SEARCH = 'liquiditybot_opp_search';
+const LS_OPP_SHOWN_NO_PREMIUM = 'liquiditybot_opp_shown_no_premium';
 let _oppSearchQuery = localStorage.getItem(LS_OPP_SEARCH) ?? '';
 
 // Pool Metriken: Wahl der APR-Spalte (24h / 1h) — persistent in localStorage
@@ -460,9 +447,9 @@ let _poolsSearchQuery = localStorage.getItem(LS_POOLS_SEARCH) ?? '';
 const LS_ACTIVE_SEARCH = 'liquiditybot_active_search';
 let _activeSearchQuery = localStorage.getItem(LS_ACTIVE_SEARCH) ?? '';
 
-// Operative Metriken: Einheit der Delta-Spalte (Stunde/Tag) — persistent in localStorage
-const LS_EDGE_UNIT = 'liquiditybot_edge_unit';
-let _edgeUnit = localStorage.getItem(LS_EDGE_UNIT) === 'd' ? 'd' : 'h';
+// Operative Metriken: Metrik-Spalte PnL 24H (LIQ#001023).
+// Seit LIQ#001114 nur noch PnL 24H (die Edge-Variante ist entfallen, Edge steht in der Opportunity-Tabelle).
+const _edgeUnit = 'pnl';
 
 // Operative Metriken: Range- und Reb.-Spalte zusammengelegt (zu viele Spalten, unschöne
 // Zeilenumbrüche bei größeren Zahlen) — Auswahl per Select, persistent in localStorage.
@@ -505,13 +492,13 @@ let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '6h';
 // könnten Krone und Tabelle auseinanderlaufen (Krone sagt "aktiv", Tabelle ist
 // schon leer, oder umgekehrt).
 //
-// scoreSource==='compute' (Master rechnet selbst) hat kein Deckungskonzept, ist
-// immer "Zugriff vorhanden". scoreSource==='delivered' (Fork mit Premium-Historie)
-// prüft die Frische der gelieferten Daten (scoreStale). scoreSource==='none' hat
+// edgeSource==='compute' (Master rechnet selbst) hat kein Deckungskonzept, ist
+// immer "Zugriff vorhanden". edgeSource==='delivered' (Fork mit Premium-Historie)
+// prüft die Frische der gelieferten Daten (edgeStale). edgeSource==='none' hat
 // nie Zugriff.
 //
 // GEÄNDERT 2026-07-30: Vorher wurde hier gegen premiumCoveredUntilMs geprüft (die
-// UTC-Stundengrenze der letzten Zahlung), mit der Begründung, scoreStale sei ein
+// UTC-Stundengrenze der letzten Zahlung), mit der Begründung, die Frische sei ein
 // Sicherheitsnetz für die Exit-Logik und kein "ist noch bezahlt"-Signal. Das war
 // als Trennung sauber gedacht, in der Praxis aber falsch herum:
 //   • Die Deckung endet auf die volle Stunde, der Zahlungs-Cron läuft erst um :05
@@ -539,13 +526,11 @@ let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '6h';
  * Die ursprüngliche Absicht der harten Grenze („die Tabelle darf nicht ewig auf dem
  * letzten Stand eingefroren stehen bleiben") bleibt trotzdem erfüllt: hört die
  * Belieferung auf — sei es durch abgeschaltete Auto-Zahlung oder einen Ausfall des
- * Masters —, altern die Daten und `scoreStale` (2 h, siehe DELIVERED_MAX_AGE_MS in
- * lib/invest-score-provider.js) blendet die Tabelle aus. Der Übergang ist dann nur
+ * Masters —, altern die Daten und `edgeStale` (2 h, siehe DELIVERED_MAX_AGE_MS in
+ * lib/edge-provider.js) blendet die Tabelle aus. Der Übergang ist dann nur
  * kein Fallbeil mehr, sondern folgt dem tatsächlichen Nutzwert der Daten.
  *
- * Kein Kapitalbezug: Diese Funktion steuert ausschließlich die Anzeige. Score-Limit-
- * laufen im Bot und hängt an derselben 2-h-Frische, nie an der
- * Zahlungsgrenze.
+ * Kein Kapitalbezug: Diese Funktion steuert ausschließlich die Anzeige.
  */
 function hasPremiumAccess(data) {
     const feed = premiumFeedState(data);
@@ -555,14 +540,11 @@ function hasPremiumAccess(data) {
 }
 
 /**
- * Zustand des Premium-Datenstroms: seit CORE#000931 liefert Premium die Edge-Prognose
- * statt des Scores, maßgeblich ist deshalb `edgeSource`/`edgeStale` aus data.json.
- * Fallback auf `scoreSource`/`scoreStale` nur für eine data.json, die noch vom alten
- * Export stammt (kurzes Fenster nach einem Update, bevor der nächste Export lief).
+ * Zustand des Premium-Datenstroms: seit CORE#000931 liefert Premium die Edge-Prognose,
+ * maßgeblich ist `edgeSource`/`edgeStale` aus data.json.
  */
 function premiumFeedState(data) {
-    if (data?.edgeSource) return { source: data.edgeSource, stale: !!data.edgeStale };
-    return { source: data?.scoreSource, stale: !!data?.scoreStale };
+    return { source: data?.edgeSource, stale: !!data?.edgeStale };
 }
 
 /** "(noch aktiviert bis 19:00 Uhr)" – Text neben der Krone im Header. */
@@ -633,10 +615,38 @@ const _EDIT_ICON_SVG = `<svg width="12" height="12" viewBox="0 0 14 14" fill="no
 function _poolEditCell(poolId) {
     if (!isLanAccess()) return '<span class="pool-edit-col"></span>';
     const href = `https://${escHtml(window.location.hostname)}:3200/#liquidity/${encodeURIComponent(poolId ?? '')}`;
-    return `<span class="pool-edit-col"><a class="pool-edit-link has-tooltip" href="${href}" data-tooltip-title="${tr('liq.tip.pool_settings', 'Pool-Einstellungen')}" data-tooltip-content="${tr('liq.tip.pool_settings_desc', 'Öffnet die Settings für diesen Pool.')}" data-tooltip-type="text">${_EDIT_ICON_SVG}</a></span>`;
+    return `<span class="pool-edit-col"><a class="pool-edit-link" href="${href}" aria-label="${escHtml(tr('liq.tip.pool_settings', 'Pool-Einstellungen'))}">${_EDIT_ICON_SVG}</a></span>`;
+}
+
+// Opportunity-Karte (LIQ#001022): Mit Premium-Daten immer sichtbar. Ohne Premium-Daten
+// ausgeblendet; der Hammer im Header (premiumStatusIcon) blendet die leere Tabelle ein
+// und aus, der letzte Zustand liegt in localStorage.
+function _oppShownWithoutPremium() {
+    try { return localStorage.getItem(LS_OPP_SHOWN_NO_PREMIUM) === '1'; } catch { return false; }
+}
+
+function _applyOppVisibility(data) {
+    const card = $('opportunityCard'), icon = $('premiumStatusIcon');
+    if (!card) return;
+    const access = hasPremiumAccess(data);
+    card.classList.toggle('opp-hidden', !access && !_oppShownWithoutPremium());
+    if (icon) {
+        icon.classList.toggle('opp-toggle', !access);
+        if (access) icon.removeAttribute('aria-pressed');
+        else icon.setAttribute('aria-pressed', _oppShownWithoutPremium() ? 'true' : 'false');
+        if (!icon.dataset.oppToggleBound) {
+            icon.dataset.oppToggleBound = '1';
+            icon.addEventListener('click', () => {
+                if (!_lastData || hasPremiumAccess(_lastData)) return;
+                try { localStorage.setItem(LS_OPP_SHOWN_NO_PREMIUM, _oppShownWithoutPremium() ? '0' : '1'); } catch { /* ignore */ }
+                _applyOppVisibility(_lastData);
+            });
+        }
+    }
 }
 
 function renderOpportunityTable(data) {
+    _applyOppVisibility(data);
     const container = $('opportunityContainer');
     const emptyMsg  = $('opportunityEmpty');
     const tfBtns    = $('opportunityTimeframeBtns');
@@ -659,7 +669,7 @@ function renderOpportunityTable(data) {
             if (infoEl) {
                 const pool = (_lastData?.pools ?? []).find(p => p.id === infoEl.dataset.poolId);
                 if (!pool) return;
-                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20260823b');
+                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20261002b');
                 await openTokenInfoModal(pool);
                 return;
             }
@@ -667,7 +677,7 @@ function renderOpportunityTable(data) {
             if (!el) return;
             const pool = (_lastData?.pools ?? []).find(p => p.id === el.dataset.poolId);
             if (!pool) return;
-            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20260909b');
+            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261001b');
             openPoolChartModal(pool);
         });
     }
@@ -696,7 +706,7 @@ function renderOpportunityTable(data) {
             b.classList.toggle('active', b.dataset.range === _oppDisplayTf));
     }
 
-    const scores   = data?.opportunityScores ?? {};
+    const scores   = data?.poolSlopes ?? {};
     const allPools = data?.pools ?? [];
 
     // Header-Kontrollen (Suche/Typfilter/Zeitfenster) – nur relevant, wenn wirklich
@@ -706,10 +716,10 @@ function renderOpportunityTable(data) {
     const typeFilterEl  = document.getElementById('oppTypeFilterSelect');
 
     // Ohne Premium-Zugang zeigt die Tabelle GAR NICHTS an (Entscheidung 2026-07-29) –
-    // kein Score, keine PnL-Spalte, keine Charts/Token-Infos (beide hängen aus-
+    // keine Edge, keine PnL-Spalte, keine Charts/Token-Infos (beide hängen aus-
     // schließlich an dieser Tabelle). Statt einzelner Schloss-Zellen pro Spalte/Zeile
     // (bisheriger Zustand) EIN zentrierter Block im leeren Rahmen. Greift bei
-    // scoreSource==='none' (nie Premium gehabt) und sobald die gelieferten Daten
+    // edgeSource==='none' (nie Premium gehabt) und sobald die gelieferten Daten
     // veraltet sind (hasPremiumAccess(), s.o.) — so bleibt die Tabelle nicht ewig auf
     // dem letzten Stand eingefroren stehen. Seit 2026-07-30 ist dafür die Datenfrische
     // maßgeblich statt der Grenze der bezahlten Stunde: bezahlte Daten bleiben nutzbar,
@@ -722,14 +732,14 @@ function renderOpportunityTable(data) {
         container.querySelectorAll('.opp-score-table').forEach(el => el.remove());
 
         // Zusatzhinweis unter Krone+Link (2026-08-03): unterscheidet zwei
-        // Unterfälle von "keine Score-Daten", die für den Nutzer sonst identisch aussehen
+        // Unterfälle von "keine Premium-Daten", die für den Nutzer sonst identisch aussehen
         // und leicht mit "nie Premium gehabt" verwechselt werden:
         //   - War schon aktiv und geliefert, aber die Daten sind jetzt veraltet (>2h,
-        //     scoreSource==='delivered') – Ausfall bzw. bewusst abgeschaltet.
+        //     edgeSource==='delivered') – Ausfall bzw. bewusst abgeschaltet.
         //   - Gerade erst aktiviert (Auto-Pay an oder schon eine Stunde bezahlt), aber
-        //     noch nie ein Blob integriert (scoreSource==='none') – normale Anlaufzeit
+        //     noch nie ein Blob integriert (edgeSource==='none') – normale Anlaufzeit
         //     von wenigen Sekunden/Minuten bis zum ersten 10-Min-Publish-Zyklus.
-        // "Nie Premium gehabt" (scoreSource==='none', kein Auto-Pay, keine Zahlung) bleibt
+        // "Nie Premium gehabt" (edgeSource==='none', kein Auto-Pay, keine Zahlung) bleibt
         // bewusst ohne Zusatztext – da ist der Krone+Link-Hinweis allein zutreffend.
         // "Nicht erreichbar" nur bei einem ECHTEN Ausfall (premiumOutagePaused,
         // core/premium/blob-health-check.js) anzeigen. Veraltete Daten haben eine
@@ -838,7 +848,7 @@ function renderOpportunityTable(data) {
     // Pool-Reihen: generische Spaltensortierung, Fallback alphabetisch (LIQ#000928)
     // Preis-Trend: bei volatilePair-Pools (z.B. PUMP/SOL) ist pool_stats.price die
     // Token/Token-Ratio, kein USD-Preis — usdTrendSlopePct (USD-Korb-Trend) zeigt dort
-    // stattdessen die reale Richtung. Gleiche Weiche wie invest-score-compute.js.
+    // stattdessen die reale Richtung. Gleiche Weiche wie die Slope-Historie in bin/export.js.
     const rows = pools.map(p => {
         const s = scores[p.id]?.[_oppDisplayTf] ?? null;
         const trendPct = s == null ? null : (p.volatilePair ? (s.usdTrendSlopePct ?? null) : (s.priceSlopePct ?? null));
@@ -851,8 +861,7 @@ function renderOpportunityTable(data) {
                 if (_oppSortCol === 'delta') {
                     const _npRaw = item.pool.npWindows?.[_oppDisplayTf] ?? null;
                     if (_npRaw == null) return null;
-                    const _npCap = item.pool.capitalUSDC > 0 ? item.pool.capitalUSDC : null;
-                    return _npCap != null ? _npRaw * _npCap / 1000 : _npRaw;
+                    return _npRaw;   // % ist kapitalunabhängig, Reihenfolge = Reihenfolge der Rohwerte
                 }
                 if (_oppSortCol === 'priceSlope') return item.trendPct;
                 if (_oppSortCol === 'aprSlope')   return item.s?.yieldSlopePct ?? null;
@@ -873,7 +882,7 @@ function renderOpportunityTable(data) {
 
     // ── Helpers ────────────────────────────────────────────────────────
     // Schätzt, ab wann ein neuer Pool genug Messpunkte hat (Backend: MIN_SAMPLES=3
-    // in lib/opportunity-score/config.js, stündliche pool_stats-Erfassung in bot.js).
+    // in lib/pool-slopes/config.js, stündliche pool_stats-Erfassung in bot.js).
     // Nur eine Näherung ("ca."), kein Daten-Lookup gegen das Live-Backend.
     const OPP_MIN_SAMPLES      = 3;
     const OPP_STATS_INTERVAL_MS = 3600_000;
@@ -906,8 +915,8 @@ function renderOpportunityTable(data) {
             ? `<span class="has-tooltip text-muted" data-tooltip-title="${tr('liq.no_data_yet', 'Noch keine Daten')}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">no data</span>`
             : '<span class="text-muted" style="font-size:0.78em">no data</span>';
     };
-    // Ab hier ist scoreSource garantiert nicht 'none' (früher Return oben) — ein
-    // fehlender Score/Slope-Wert bedeutet also immer "noch nicht erhoben", nie
+    // Ab hier ist edgeSource garantiert nicht 'none' (früher Return oben) — ein
+    // fehlender Slope-Wert bedeutet also immer "noch nicht erhoben", nie
     // "Premium fehlt". Der bis 2026-07-29 hier nötige Fall-Unterschied (Premium-
     // Schloss pro Zelle vs. "no data") entfällt: ohne Premium wird die ganze
     // Tabelle gar nicht erst gerendert (siehe oben, premium-locked-panel).
@@ -925,14 +934,16 @@ function renderOpportunityTable(data) {
         const sign = v > 0 ? '+' : '−';
         return `<span class="${cls}">${sign}${fmtUsdc(Math.abs(v))} USDC</span>`;
     };
-    // Simulierter NP: weiß + kursiv als visueller Hinweis "geschätzt, kein realer PnL"
-    const fmtNp = v => {
+    // Edge-Prognose in % des eingesetzten Kapitals (LIQ#000968): npWindows liegt je 1.000 USDC
+    // Basis vor (lib/edge-compute.js), % = Wert / 1000 * 100. Reine Einheitenumrechnung, kein
+    // Kapital der Pool-Zeile nötig — dadurch ist die Spalte zwischen Pools direkt vergleichbar.
+    const fmtNpPct = v => {
         if (v == null) return '<span class="text-muted" style="font-size:0.78em">no data</span>';
-        if (v === 0)   return '<em style="color:#fff;font-size:0.9em;opacity:0.7">0.00 USDC</em>';
-        const sign = v > 0 ? '+' : '−';
-        return `<em style="color:#fff;font-size:0.9em;opacity:0.85">${sign}${fmtUsdc(Math.abs(v))} USDC</em>`;
+        const pct = v / 10;
+        const txt = Math.abs(pct).toLocaleString(NUM_LOCALE, { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + '\u202f%';
+        if (Math.round(pct * 1000) === 0) return `<em style="color:#fff;font-size:0.9em;opacity:0.7">${txt}</em>`;
+        return `<em style="color:#fff;font-size:0.9em;opacity:0.85">${pct > 0 ? '+' : '−'}${txt}</em>`;
     };
-    const tfLabel = OPP_TF_OPTIONS.find(o => o.id === _oppDisplayTf)?.label ?? _oppDisplayTf;
 
     // Pool-Filter Select (inline im Header, idempotent)
     const poolFilterSel = `<select id="oppPoolFilterSelect" style="background:#0f172a;border:none;color:#f1f5f9;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.05em;text-transform:uppercase">
@@ -945,8 +956,8 @@ function renderOpportunityTable(data) {
     // reale historische PnL steht bereits per Klick in "Operative Metriken", eine zweite
     // Anzeige hier war für inaktive Pools ohnehin nur eine Dopplung von "Delta" (identischer
     // NP-Fallback-Wert, siehe Ticket-Diskussion).
-    const _deltaTip = tr('liq.edge_explain_forecast', 'Edge (Trading-Begriff): prognostizierter Vorsprung des Pools gegenüber bloßem Halten der beiden Token. Positiv heißt: Der Pool schlägt das Halten voraussichtlich.') + '\n\n' + tr('liq.np_forecast', 'Modell-Prognose des Netto-Ertrags für alle Pools im gewählten Zeitfenster. Berechnet aus aktuellem Fee-APR, Volatilität und geschätztem Impermanent Loss nach Range-Advisor-Modell. Basis: 1.000 USDC.');
-    const deltaHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.simulation_future', 'Simulation – Zukunft')}" data-tooltip-content="${escHtml(_deltaTip)}" data-tooltip-type="text" style="cursor:default">${tr('liq.delta', 'Edge')}</span>`;
+    const _deltaTip = tr('liq.np_forecast', 'Fee-Einnahmen − Impermanent Loss,\nin % des Kapitals.');
+    const deltaHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.simulation_future', 'Edge (geschätzt)')}" data-tooltip-content="${escHtml(_deltaTip)}" data-tooltip-type="text" style="cursor:default">${tr('liq.delta', 'Edge')}</span>`;
 
     // Chart-Icon spiegelt den Preis-Trend des aktuell gewählten Zeitfensters (_oppDisplayTf)
     // wider (trendPct aus rows-Mapping oben — bei volatilePair-Pools usdTrendSlopePct statt
@@ -1009,7 +1020,6 @@ function renderOpportunityTable(data) {
         ${rows.map(({pool, s, trendPct}) => {
             const rowCls  = pool.active ? '' : ' inactive';
             const pair    = escHtml(pool.displayLabel ?? pool.displayPair ?? pool.pair ?? '—');
-            const capital  = pool.capitalUSDC > 0 ? pool.capitalUSDC : null;
             const pid     = escHtml(pool.id);
             const mc      = `opp-metric-clickable`;
             // NP auf kurzen Fenstern für volatile Pools unzuverlässig (Richtungstreffer < 50%).
@@ -1022,15 +1032,14 @@ function renderOpportunityTable(data) {
             let deltaCell;
             {
                 const npRaw    = pool.npWindows?.[_oppDisplayTf] ?? null;
-                const npScaled = npRaw != null ? (capital != null ? npRaw * capital / 1000 : npRaw) : null;
-                const simBasis = capital != null
-                    ? `Basis: ${capital.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDC (aktuelles Poolkapital).`
-                    : `Basis: 1.000 USDC (kein aktives Kapital).`;
-                const simTip = `Simulierter Netto-Ertrag aus Fee-APR und geschätztem Impermanent Loss nach Range-Advisor-Modell. ${simBasis}${_npUnreliable ? _unreliableNote : ''}`;
-                const simTitle = `Simulierter Ertrag ${tfLabel}${_npUnreliable ? tr('liq.unreliable_short', ' (unzuverlässig)') : ''}`;
-                const _simIcon = `<span style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;${_npUnreliable ? '' : 'visibility:hidden'}">⚠</span>`;
+                const npScaled = npRaw;
+                // Tooltip nur am Spaltenkopf; in der Zelle nur die Warnung bei unzuverlässigen Fenstern.
+                const _warnTitle = tr('liq.unreliable_short', ' (unzuverlässig)').trim().replace(/^\(|\)$/g, '');
+                const _simIcon = _npUnreliable
+                    ? `<span class="has-tooltip" data-tooltip-title="${escHtml(_warnTitle)}" data-tooltip-content="${escHtml(_unreliableNote.trim())}" data-tooltip-type="text" style="display:inline-block;min-width:1.2em;text-align:center;color:#f59e0b;cursor:default">⚠</span>`
+                    : `<span style="display:inline-block;min-width:1.2em;text-align:center;visibility:hidden">⚠</span>`;
                 deltaCell = npScaled != null
-                    ? `<span>${_simIcon}<span class="has-tooltip" data-tooltip-title="${simTitle}" data-tooltip-content="${escHtml(simTip)}" data-tooltip-type="text" style="cursor:default">${fmtNp(npScaled)}</span></span>`
+                    ? `<span class="opp-metric-clickable" data-pool-id="${pid}" data-metric="edgeModel" style="cursor:pointer">${_simIcon}<span style="text-decoration:underline dotted;text-underline-offset:3px">${fmtNpPct(npScaled)}</span></span>`
                     : _noDataSpan(pool.id, _oppDisplayTf);
             }
 
@@ -1356,8 +1365,8 @@ function renderActivePositions(data) {
             <div class="active-pools-header">
                 <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
                 <span>${_rangeRebSelectHtml()}</span>
-                <span class="col-r">${tr('liq.fees', 'Fees')}</span>
                 <span class="col-r">${_edgeUnitSelectHtml()}</span>
+                <span class="col-r">${tr('liq.fees', 'Fees')}</span>
                 <span class="col-r">${tr('liq.share', 'Anteil')}</span>
             </div>
             <div class="pools-overview-empty-row">${positions.length === 0 ? tr('liq.no_active_positions_plain', 'Keine aktiven Positionen') : tr('liq.no_matches', 'Keine Treffer')}</div>`;
@@ -1389,8 +1398,8 @@ function renderActivePositions(data) {
         <div class="active-pools-header">
             <span>${tr('liq.active_pools', 'Aktive Pools')}</span>
             <span>${_rangeRebSelectHtml()}</span>
-            <span class="col-r">${tr('liq.fees', 'Fees')}</span>
             <span class="col-r">${_edgeUnitSelectHtml()}</span>
+            <span class="col-r">${tr('liq.fees', 'Fees')}</span>
             <span class="col-r">${tr('liq.share', 'Anteil')}</span>
             <span class="pool-edit-col"></span>
         </div>
@@ -1424,7 +1433,13 @@ function renderActivePositions(data) {
             // Delta-Spalte (LIQ#000890): Vorsprung/Std. bzw. /Tag gegenüber Halten aus
             // lib/pnl.js (pnlBreakdown.shareEdgePerHourUsd/-DayUsd), keine eigene Rechnung
             // hier (PnL-Regel). Einheit folgt dem Select im Spaltenkopf (_edgeUnit).
-            const _edgeH    = _edgeUnit === 'd' ? pos.pnlBreakdown?.shareEdgePerDayUsd : pos.pnlBreakdown?.shareEdgePerHourUsd;
+            // Anzeige in % auf Eingezahlt (LIQ#000968, Vergleichbarkeit der Pools), der USDC-Wert
+            // steht im Tooltip. Beides kommt fertig aus lib/pnl.js.
+            // Seit LIQ#001023: Edge 24H (echtes Fenster, kein Durchschnitt seit Eröffnung) bzw.
+            // PnL 24H von „Mein Anteil" (ohne aufs Wallet ausgezahlte Fees), beide in % auf
+            // Eingezahlt, USDC im Tooltip.
+            const _edgeH    = _edgeUnit === 'pnl' ? pos.pnlBreakdown?.sharePnl24hPct : pos.pnlBreakdown?.shareEdge24hPct;
+            const _edgeUsd  = _edgeUnit === 'pnl' ? pos.pnlBreakdown?.sharePnl24hUsd : pos.pnlBreakdown?.shareEdge24hUsd;
             const _edgeHCls = _edgeH != null ? (_edgeH > 0 ? 'value-good' : _edgeH < 0 ? 'value-danger' : '') : '';
             // Range/Reb.-Spalte zusammengelegt (LIQ#000890): nur eine der beiden Zellen wird
             // gerendert, je nach _rangeRebMode. Beide Elemente behalten ihre bestehenden Klassen
@@ -1437,8 +1452,8 @@ function renderActivePositions(data) {
         <div class="active-pools-row">
             <span>${pair}${_tsIcon}</span>
             ${_rangeRebCell}
+            <span class="col-r${_edgeHCls ? ' ' + _edgeHCls : ''}">${_edgeH != null ? `<span class="edge-clickable has-tooltip" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${escHtml(_edgeUnitFullLabel(_edgeUnit))}" data-tooltip-content="${escHtml(fmtEdgePerHour(_edgeUsd))}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${fmtEdgePerHour(_edgeH, 3, undefined, null, '%')}</span>` : fmtEdgePerHour(_edgeH, 3, pos.pnlBreakdown?.hodlUsd, _edgeRemainingText(pos, Date.parse(data?.timestamp) || Date.now()))}</span>
             <span class="col-r"><span class="fees-clickable has-tooltip" data-pool-id="${escHtml(pos.poolId ?? '')}" data-tooltip-title="${escHtml(_feeTtTitle)}" data-tooltip-content="${escHtml(_feeTtContent)}" data-tooltip-type="text" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${pos.feesPendingUsd != null ? fmtUsdc(pos.feesPendingUsd) + ' USDC' : '—'}</span></span>
-            <span class="col-r${_edgeHCls ? ' ' + _edgeHCls : ''}">${_edgeH != null ? `<span class="edge-clickable" data-pool-id="${escHtml(pos.poolId ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${fmtEdgePerHour(_edgeH)}</span>` : fmtEdgePerHour(_edgeH, 2, pos.pnlBreakdown?.hodlUsd, _edgeRemainingText(pos, Date.parse(data?.timestamp) || Date.now()))}</span>
             <span class="col-r"><span class="composition-clickable${partValCls ? ' ' + partValCls : ''}" data-pool-id="${escHtml(pos.poolId ?? '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px">${partVal}</span></span>
             ${_poolEditCell(pos.poolId)}
         </div>`;
@@ -1468,12 +1483,6 @@ function _bindActiveSearch() {
     // erzeugt (anders als das Suchfeld unten, das außerhalb der Tabelle im statischen
     // Markup steht) — deshalb vor dem dataset.bound-Wächter, sonst bindet dieser Teil
     // nur beim allerersten Aufruf und verliert den Listener bei jedem weiteren Render.
-    document.querySelector('.edge-unit-select')?.addEventListener('change', e => {
-        _edgeUnit = e.target.value === 'd' ? 'd' : 'h';
-        localStorage.setItem(LS_EDGE_UNIT, _edgeUnit);
-        if (_lastData) renderActivePositions(_lastData);
-    });
-
     // Range/Reb.-Select: gleiches Muster wie oben (bei jedem Render neu im DOM).
     document.querySelector('.range-reb-select')?.addEventListener('change', e => {
         _rangeRebMode = e.target.value === 'reb' ? 'reb' : 'range';
@@ -1516,6 +1525,9 @@ const TX_LABELS = {
 };
 
 function txLabel(tx) {
+    // Cleanup-Reinvest (LIQ#000988): Aufstocken einer bestehenden Position aus dem Cleanup. Vor dem
+    // allgemeinen 'cleanup'-Präfix prüfen, sonst käme nur „Cleanup“ heraus.
+    if (tx.type === 'deposit' && tx.note?.startsWith('cleanup-reinvest')) return tr('liq.cleanup_reinvest', 'Cleanup > Reinvest');
     if (tx.type === 'deposit' && (tx.note?.startsWith('cleanup') || tx.note?.startsWith('Auto-Top-Up'))) return 'Cleanup';
     if (tx.type === 'swap' && tx.note?.startsWith('stuck-dust swap')) return tr('liq.dust_swap_24h', 'Dust Swap 24h');
     if (tx.type === 'swap' && tx.note?.startsWith('dust swap')) return tr('liq.dust_swap', 'Dust Swap');
@@ -2000,8 +2012,8 @@ function renderNotifs(data) {
         // Dritter Zustand (2026-07-29): Auto-Pay ist aus, aber die zuletzt bezahlte
         // Stunde läuft noch – der Nutzer hat aktiv abgeschaltet und soll wissen,
         // wann die Tabelle tatsächlich leer wird, statt es einfach zu erleben.
-        // Nur relevant bei scoreSource==='delivered' (Fork); auf dem Master
-        // (scoreSource==='compute') gibt es kein Auto-Pay, autoPayEnabled ist
+        // Nur relevant bei edgeSource==='delivered' (Fork); auf dem Master
+        // (edgeSource==='compute') gibt es kein Auto-Pay, autoPayEnabled ist
         // dort immer false und coveredUntilMs immer null → showCountdown bleibt aus.
         // Bis 2026-07-31 pulsierte hierfür die Krone – zu unruhig, ersetzt durch
         // den Restlaufzeit-Text rechts daneben (siehe premiumCountdownText).
@@ -2048,17 +2060,19 @@ function renderNotifs(data) {
 
 // ── Chart-Hilfsfunktionen ─────────────────────────────────────────────────────
 
-const RANGE_DEFS = [
-    { key: '1D',  label: '1D' },
-    { key: '1W',  label: '1W' },
-    { key: '1M',  label: '1M' },
-];
+// ── Zeitraum-Filter: zentrale Lib html/js/chart-range.js (LIQ#000934) ─────────
+// Der Wunsch (gespeicherte Nutzerwahl) steckt in den _xxxRange-Variablen unten. Angezeigt wird
+// activeRange(): der Wunsch, sofern die Reihe weit genug zurückreicht, sonst der größte
+// wählbare Zeitraum. Alle Render-Funktionen filtern und beschriften mit dem aktiven Zeitraum.
 
-function filterByRange(arr, range, getTs) {
-    const cutoff = { '1D': 86_400_000, '1W': 7 * 86_400_000, '1M': 30 * 86_400_000 }[range];
-    if (!cutoff) return arr;
-    const since = Date.now() - cutoff;
-    return arr.filter(r => getTs(r) >= since);
+/** Tatsächlich angezeigter Zeitraum einer Reihe (Rückfall bei zu wenig Historie). */
+function activeRange(wish, series, getTs, ranges = DEFAULT_RANGES) {
+    return resolveRange(wish, historyStartOf(series, getTs), { ranges });
+}
+
+/** Reihe auf den aktiven Zeitraum filtern. */
+function filterByRange(arr, range, getTs, ranges = DEFAULT_RANGES) {
+    return filterToRange(arr, activeRange(range, arr, getTs, ranges), { ranges, getTs });
 }
 
 function xLabel(ts, range) {
@@ -2069,33 +2083,46 @@ function xLabel(ts, range) {
     return `${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}.`;
 }
 
-function updateChartRangeBtns(containerId, history, getTs, getRange, setRange, rerender, defs = RANGE_DEFS) {
-    const container = document.getElementById(containerId);
-    if (!container) return;
-    if (container.childElementCount === 0) {
-        defs.forEach(def => {
-            const btn = document.createElement('button');
-            btn.className   = 'chart-range-btn';
-            btn.dataset.range = def.key;
-            btn.textContent = def.label;
-            btn.addEventListener('click', () => { setRange(def.key); syncRangeBtns(containerId, def.key); rerender(); });
-            container.appendChild(btn);
-        });
-    }
-    syncRangeBtns(containerId, getRange());
+// containerId → { bar, container, getRange, historyStart }: eine Leiste je Container, mehrere
+// Container dürfen denselben Wunsch teilen (z.B. Inline-Chart und Modal).
+const _rangeBars = new Map();
+
+function _syncRangeBar(entry) {
+    const wish = normalizeRangeKey(entry.getRange(), entry.bar.ranges);
+    if (wish != null) entry.bar.setActive(wish);   // 'set'/'history' lösen kein onChange-Rendern aus (siehe onChange unten)
+    entry.bar.setHistoryStart(entry.historyStart);
 }
 
-function syncRangeBtns(containerId, active) {
-    document.querySelectorAll(`#${containerId} .chart-range-btn`).forEach(b => {
-        b.classList.toggle('active', b.dataset.range === active);
-    });
+function updateChartRangeBtns(containerId, history, getTs, getRange, setRange, rerender, ranges = DEFAULT_RANGES) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const historyStart = historyStartOf(history, getTs);
+    let entry = _rangeBars.get(containerId);
+    if (!entry || entry.container !== container) {
+        entry?.bar.destroy();
+        entry = { container, getRange, historyStart };
+        entry.bar = createRangeBar(container, {
+            ranges,
+            active: getRange(),
+            historyStart,
+            onChange: (key, { reason }) => {
+                if (reason !== 'user') return;   // Rückfall/Programmwahl: der Aufrufer rendert selbst
+                setRange(key);
+                _rangeBars.forEach(_syncRangeBar);   // andere Leisten mit demselben Wunsch nachziehen
+                rerender();
+            },
+        });
+        _rangeBars.set(containerId, entry);
+    }
+    entry.getRange     = getRange;
+    entry.historyStart = historyStart;
+    _syncRangeBar(entry);
 }
 
 // ── Chart-Range localStorage-Keys ────────────────────────────────────────────
 
 const LS_RANGE = {
     portfolio:   'liquiditybot_chart_portfolio',
-    volume:      'liquiditybot_chart_volume',
     myApr:       'liquiditybot_chart_myApr',
     composition: 'liquiditybot_chart_composition',
     posValue:    'liquiditybot_chart_posValue',
@@ -2110,12 +2137,14 @@ const LS_RANGE = {
     tvl:         'liquiditybot_chart_tvl',
     volModal:    'liquiditybot_chart_volModal',
     metricChart: 'liquiditybot_chart_metricChart',
+    edgeAxisZero: 'liquiditybot_chart_edgeAxisZero',
 };
 
 // ── Portfolio-Wert Chart ──────────────────────────────────────────────────────
 
 let _portfolioRange    = localStorage.getItem(LS_RANGE.portfolio) ?? '1D';
-let _portfolioResizeOb = null;
+// Edge-Chart: Achse immer ab 0 (Schalter im Chart-Fenster, LIQ#001114), nur eine Anzeigevorliebe je Browser.
+let _edgeAxisFromZero  = localStorage.getItem(LS_RANGE.edgeAxisZero) === '1';
 
 /**
  * Zeichnet den Portfolio-Wert-Chart in ein SVG-Element.
@@ -2129,9 +2158,10 @@ let _portfolioResizeOb = null;
  * @param {number}     PAD_B      – Unteres Padding (X-Labels)
  * @param {object[]}   history    – Bereits range-gefiltertes [{t, v}]-Array
  * @param {boolean}    filterOl   – Ausreißer filtern (filterSpikes + filterOutliers)
+ * @param {string}     rangeKey   – aktiver Zeitraum (für die X-Beschriftung)
 * @returns {object|false}        – geo-Objekt für attachHoverOverlay, oder false
  */
-function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filterOl) {
+function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filterOl, rangeKey) {
     const W  = svgEl.getBoundingClientRect().width || svgEl.parentElement?.clientWidth || 800;
     const cW = W - PAD_L - PAD_R;
     const cH = H - PAD_T - PAD_B;
@@ -2172,16 +2202,18 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filte
     let xLabels = '';
     for (let i = 0; i <= 4; i++) {
         const t = tMin + spanMs * i / 4;
-        xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T+cH+16).toFixed(1)}">${xLabel(t, _portfolioRange)}</text>`;
+        xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T+cH+16).toFixed(1)}">${xLabel(t, rangeKey)}</text>`;
     }
+    const xTitle = rangeKey === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    xLabels += `<text class="chart-label" x="${(PAD_L + cW / 2).toFixed(1)}" y="${H - 2}" text-anchor="middle" font-size="10">${xTitle}</text>`;
 
-    // Pfad-Segmente (Lücken bei null durch filterOutliers)
+    // Pfad: herausgefilterte Ausreißer (null) werden übersprungen, die Linie läuft durchgehend
+    // weiter — ein Abbruch je Ausreißer hinterließ Löcher im Chart (LIQ#000986).
     const bottomY = (PAD_T + cH).toFixed(1);
     const segs = [];
     let seg = [];
     for (let i = 0; i < history.length; i++) {
-        if (vs[i] === null) { if (seg.length >= 2) segs.push(seg); seg = []; }
-        else seg.push({ t: history[i].t, v: vs[i] });
+        if (vs[i] !== null) seg.push({ t: history[i].t, v: vs[i] });
     }
     if (seg.length >= 2) segs.push(seg);
 
@@ -2223,23 +2255,33 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filte
     };
 }
 
+// ── Gesamtguthaben-Chart (Inline + Modal) ────────────────────────────────────
+// Quelle: balanceHistory (Export) — dieselbe Basis wie die Gesamt-Karte (ohne SOL-Reserve).
+
+const _balanceHistory = data => data?.balanceHistory ?? [];
+let _portfolioResizeOb = null;
+
+/** Zeitraum-Leisten (Inline + Modal) auf die Gesamtguthaben-Reihe setzen. */
+function _refreshPortfolioRangeBars(data) {
+    const rerender = () => { if (_lastData) { renderPortfolioChart(_lastData); renderDetailPortfolioChart(); } };
+    for (const id of ['portfolioRangeBtns', 'portfolioChartModalRangeBtns']) {
+        updateChartRangeBtns(id, _balanceHistory(data), r => r.t,
+            () => _portfolioRange, v => { _portfolioRange = v; localStorage.setItem(LS_RANGE.portfolio, v); }, rerender);
+    }
+}
+
 function renderPortfolioChart(data) {
     const svg      = document.getElementById('portfolioChartSvg');
     const emptyMsg = document.getElementById('portfolioChartEmptyMsg');
     if (!svg) return;
 
-    const history = filterByRange(data?.portfolioHistory ?? [], _portfolioRange, r => r.t);
-
-    if (history.length < 2) {
-        svg.style.display      = 'none';
-        emptyMsg.style.display = 'block';
-        return;
-    }
-    svg.style.display      = 'block';
-    emptyMsg.style.display = 'none';
-
-    svg.setAttribute('height', '160');
-    _buildPortfolioSvg(svg, 160, 55, 40, 20, 30, history, true);
+    _refreshPortfolioRangeBars(data);
+    const rangeKey = activeRange(_portfolioRange, _balanceHistory(data), r => r.t);
+    const history  = filterByRange(_balanceHistory(data), rangeKey, r => r.t);
+    const geo = history.length >= 2 && _buildPortfolioSvg(svg, 160, 62, 16, 12, 34, history, true, rangeKey);
+    svg.style.display = geo ? 'block' : 'none';
+    if (geo) attachHoverOverlay(svg, geo);
+    if (emptyMsg) emptyMsg.style.display = geo ? 'none' : 'block';
 
     if (!_portfolioResizeOb && typeof ResizeObserver !== 'undefined') {
         _portfolioResizeOb = new ResizeObserver(() => { if (_lastData) renderPortfolioChart(_lastData); });
@@ -2247,21 +2289,21 @@ function renderPortfolioChart(data) {
     }
 }
 
-// ── Portfolio-Chart-Modal (Gesamt-Karte) ──────────────────────────────────────
-
 function renderDetailPortfolioChart() {
     const svg = document.getElementById('portfolioChartModalSvg');
     if (!svg || !_lastData) return;
+    if (document.getElementById('portfolioChartModal')?.style.display === 'none') return;
 
     const H       = svg.getBoundingClientRect().height || 380;
-    const history = filterByRange(_lastData?.portfolioHistory ?? [], _portfolioRange, r => r.t);
+    const rangeKey = activeRange(_portfolioRange, _balanceHistory(_lastData), r => r.t);
+    const history  = filterByRange(_balanceHistory(_lastData), rangeKey, r => r.t);
     if (history.length < 2) {
         svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
     }
 
     svg.setAttribute('height', H);
-    const geo = _buildPortfolioSvg(svg, H, 72, 16, 16, 32, history, true);
+    const geo = _buildPortfolioSvg(svg, H, 72, 16, 16, 34, history, true, rangeKey);
     if (geo) attachHoverOverlay(svg, geo);
 }
 
@@ -2273,17 +2315,10 @@ function initPortfolioChartModal() {
     const openModal = () => {
         if (!_lastData) return;
         modal.style.display = 'flex';
-        updateChartRangeBtns(
-            'portfolioChartModalRangeBtns',
-            _lastData?.portfolioHistory ?? [], r => r.t,
-            () => _portfolioRange,
-            v  => { _portfolioRange = v; localStorage.setItem(LS_RANGE.portfolio, v); },
-            () => { renderDetailPortfolioChart(); if (_lastData) renderPortfolioChart(_lastData); }
-        );
+        _refreshPortfolioRangeBars(_lastData);
         requestAnimationFrame(() => requestAnimationFrame(() => renderDetailPortfolioChart()));
     };
 
-    document.getElementById('gesamtValue')?.addEventListener('click', openModal);
     document.getElementById('portfolioChartSvg')?.addEventListener('click', openModal);
 
     closeBtn?.addEventListener('click', () => { modal.style.display = 'none'; });
@@ -2362,10 +2397,13 @@ function _drawFeeBars(svgEl, fees, H = 160) {
     svgEl.innerHTML = `${gridLines}${bars}`;
 }
 
-function _getFeeData(data, range) {
+const _feeTs = r => new Date(r.date + 'T00:00:00').getTime();
+
+function _getFeeData(data, wishRange) {
+    const range = activeRange(wishRange, data?.dailyFees ?? [], _feeTs);
     if (range === '1D') {
         const now    = Date.now();
-        const cutoff = now - 86_400_000;
+        const cutoff = rangeCutoff(range, { now });
         // claimHistory enthaelt ALLE Claims des Monats (transactions ist auf 25 Eintraege limitiert
         // und enthaelt daher bei viel Aktivitaet nur einen Bruchteil der Claims).
         const claims = (data?.claimHistory ?? [])
@@ -2390,7 +2428,8 @@ function _getFeeData(data, range) {
             .sort((a, b) => a.ts - b.ts)
             .map(b => ({ label: b.label, fees: parseFloat(b.fees.toFixed(4)) }));
     }
-    const days = range === '1W' ? 7 : 30;
+    // Anzahl Tage des Zeitraums aus der Lib-Definition (1D-Länge = Tagesmaß)
+    const days = DEFAULT_RANGES.find(r => r.key === range).ms / DEFAULT_RANGES[0].ms;
     return (data?.dailyFees ?? []).slice(-days);
 }
 
@@ -2458,7 +2497,7 @@ function initFeeChartModal() {
         modal.style.display = 'flex';
         updateChartRangeBtns(
             'feeChartModalRangeBtns',
-            _lastData?.dailyFees ?? [], r => new Date(r.date + 'T00:00:00').getTime(),
+            _lastData?.dailyFees ?? [], _feeTs,
             () => _feeRange,
             v  => { _feeRange = v; localStorage.setItem(LS_FEE_RANGE, v); },
             () => { renderDetailFeeChart(); if (_lastData) renderFeeChart(_lastData); }
@@ -2495,185 +2534,30 @@ function aggregateDailyVolume(hourlyRows) {
         .map(([t, volume]) => ({ t, volume: Math.round(volume) }));
 }
 
-let _volRange        = localStorage.getItem(LS_RANGE.volume) ?? '1D';
-let _volSelectedPool = null;   // null = ersten verfügbaren Pool wählen
-let _volResizeOb     = null;
-
-/**
- * Zeichnet Volumen-Balken in ein SVG-Element.
- * Gemeinsame Render-Funktion für Inline-Chart und Modal.
- *
- * @param {SVGElement} svgEl
- * @param {number}     H        – Höhe in Pixel
- * @param {object[]}   filtered – Bereits gefilterte [{t, volume}]-Datenpunkte
- * @param {string}     range    – Aktiver Range-Key (für X-Labels)
- * @param {string}     clipId   – Eindeutige ClipPath-ID (kein Namenskonflikt)
- * @returns {boolean}           – false wenn keine Daten
- */
-function _buildVolSvg(svgEl, H, filtered, range, clipId) {
-    if (filtered.length < 1) return false;
-
-    const W   = svgEl.getBoundingClientRect().width || svgEl.parentElement?.clientWidth || 800;
-    const pad = { top: 20, right: 50, bottom: 30, left: 58 };
-    const iW  = W - pad.left - pad.right;
-    const iH  = H - pad.top  - pad.bottom;
-
-    const allTs  = filtered.map(r => r.t);
-    const allVol = filtered.map(r => r.volume);
-    const minT   = Math.min(...allTs), maxT = Math.max(...allTs);
-    let   maxV   = Math.max(...allVol);
-    if (maxV <= 0) maxV = 1;
-    maxV *= 1.1;
-
-    const color = 'var(--primary)';
-    const barW  = Math.max(2, (iW / filtered.length) * 0.7);
-    const halfB = barW / 2;
-
-    // X-Mapping um halbe Balkenbreite eingerückt, damit erster und letzter Balken
-    // vollständig innerhalb des clipPath liegen statt halb angeschnitten zu sein.
-    const xOf = t => pad.left + halfB + ((t - minT) / (maxT - minT || 1)) * (iW - barW);
-    const yOf = v => pad.top  + (1 - v / maxV) * iH;
-
-    let html = `<defs><clipPath id="${clipId}"><rect x="${pad.left}" y="${pad.top}" width="${iW}" height="${iH}"/></clipPath></defs>`;
-    html += `<g clip-path="url(#${clipId})">`;
-    for (const r of filtered) {
-        const bx = xOf(r.t) - barW / 2;
-        const by = yOf(r.volume);
-        const bh = Math.max(1, iH - (by - pad.top));
-        html += `<rect class="vol-bar" data-vol="${r.volume}" data-t="${r.t}" x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" fill="${color}" opacity="0.75"/>`;
-    }
-    html += `</g>`;
-
-    for (let i = 0; i <= 4; i++) {
-        const v = (maxV / 4) * i;
-        const y = yOf(v).toFixed(1);
-        html += `<line class="chart-grid" x1="${pad.left}" x2="${W - pad.right}" y1="${y}" y2="${y}"/>`;
-        html += `<text class="chart-label chart-label-y" x="${(pad.left - 5).toFixed(1)}" y="${(+y + 4).toFixed(1)}">${fmtVol(v)}</text>`;
-    }
-    for (let i = 0; i <= 4; i++) {
-        const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${(H - 5).toFixed(1)}">${xLabel(t, range)}</text>`;
-    }
-
-    const last = filtered[filtered.length - 1];
-    html += `<text class="chart-label" x="${(xOf(last.t) + 5).toFixed(1)}" y="${(yOf(last.volume) - 4).toFixed(1)}"
-              fill="${color}" font-size="10" font-weight="600">${fmtVol(last.volume)}</text>`;
-
-    svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svgEl.setAttribute('height', H);
-    svgEl.innerHTML = html;
-    return true;
-}
-
-function _volBarTooltipText(bar) {
-    const vol = parseInt(bar.dataset.vol, 10);
-    const t   = parseInt(bar.dataset.t, 10);
-    const d   = new Date(t);
-    const lbl = _volRange === '1D'
-        ? `${String(d.getHours()).padStart(2, '0')}:00 Uhr`
-        : d.toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
-    return `${lbl}: ${fmtVol(vol)}`;
-}
-
-function _getVolFiltered(data, poolId, range) {
-    const history = data?.volumeHistory ?? [];
-    const hourly  = filterByRange(
-        history.filter(r => r.poolId === poolId && r.volume != null),
-        range, r => r.t
-    );
-    if (range !== '1D') return aggregateDailyVolume(hourly);
-
-    // Lookup: Stunden-Start (ms) → Volumen-Summe aus vorhandenen Daten
-    const lookup = new Map();
-    for (const r of hourly) {
-        const d = new Date(r.t);
-        d.setMinutes(0, 0, 0);
-        const key = d.getTime();
-        lookup.set(key, (lookup.get(key) ?? 0) + r.volume);
-    }
-    // Immer exakt 24 Stunden-Slots, fehlende Stunden → 0
-    const nowHour = new Date();
-    nowHour.setMinutes(0, 0, 0);
-    return Array.from({ length: 24 }, (_, i) => {
-        const t = nowHour.getTime() - (23 - i) * 3_600_000;
-        return { t, poolId, volume: lookup.get(t) ?? 0 };
-    });
-}
-
-function renderVolumeChart(data) {
-    const svg      = document.getElementById('volChartSvg');
-    const emptyMsg = document.getElementById('volChartEmptyMsg');
-    const select   = document.getElementById('volPoolSelect');
-    if (!svg) return;
-
-    const pools = (data?.pools ?? [])
-        .filter(p => p.active)
-        .sort((a, b) => (a.rankPos ?? 999) - (b.rankPos ?? 999));
-
-    // Dropdown befüllen / aktualisieren
-    if (select) {
-        const currentIds = [...select.options].map(o => o.value);
-        const newIds     = pools.map(p => p.id);
-        if (JSON.stringify(currentIds) !== JSON.stringify(newIds)) {
-            select.innerHTML = pools.map(p =>
-                `<option value="${escHtml(p.id)}">${escHtml(p.displayLabel ?? p.displayPair ?? p.pair ?? p.id)}</option>`
-            ).join('');
-            if (!select.dataset.listenerAdded) {
-                select.addEventListener('change', () => {
-                    _volSelectedPool = select.value;
-                    if (_lastData) { renderVolumeChart(_lastData); renderDetailVolChart(); }
-                });
-                select.dataset.listenerAdded = 'true';
-            }
-        }
-        if (_volSelectedPool && [...select.options].some(o => o.value === _volSelectedPool)) {
-            select.value = _volSelectedPool;
-        } else if (select.options.length > 0) {
-            _volSelectedPool = select.options[0].value;
-            select.value     = _volSelectedPool;
-        } else {
-            _volSelectedPool = null;
-        }
-    }
-
-    const poolId = _volSelectedPool ?? pools[0]?.id;
-    if (!poolId) {
-        svg.style.display = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('liq.no_active_pool', 'Kein aktiver Pool');
-        emptyMsg.style.display = 'block';
-        return;
-    }
-
-    const filtered = _getVolFiltered(data, poolId, _volRange);
-    const ok       = _buildVolSvg(svg, 160, filtered, _volRange, 'volMainClip');
-    svg.style.display      = ok ? 'block' : 'none';
-    if (emptyMsg) emptyMsg.textContent = tr('liq.volume_building', 'Volumen-Verlauf wird aufgebaut…');
-    emptyMsg.style.display = ok ? 'none'  : 'block';
-
-    if (ok) {
-        const wrapper = svg.closest('.chart-wrapper');
-        if (wrapper) attachBarTooltip(svg, wrapper, '.vol-bar', _volBarTooltipText);
-    }
-
-    if (!_volResizeOb && typeof ResizeObserver !== 'undefined') {
-        _volResizeOb = new ResizeObserver(() => { if (_lastData) renderVolumeChart(_lastData); });
-        _volResizeOb.observe(svg.parentElement);
-    }
-}
-
-// ── Composition Chart + Modal ─────────────────────────────────────────────────
+// ── Composition Chart (Tab im Range-Modal) ─────────────────────────────────────────────────
 
 let _compositionRange    = localStorage.getItem(LS_RANGE.composition) ?? '1W';
-let _compositionPool     = null;
-let _compositionResizeOb = null;
 
-function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emptyId = 'compositionChartEmptyMsg') {
+/**
+ * Achsentitel für die Modal-Charts (LIQ#001024): Y = Einheit (gedreht am linken Rand),
+ * X = Uhrzeit bzw. Datum je nach Zeitraum. Erwartet pad.bottom >= 44 (Ticks bei H - 19).
+ */
+function _axisTitlesHtml(pad, W, H, yTitle, rangeKey) {
+    const xTitle = rangeKey === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    const cx = (pad.left + (W - pad.left - pad.right) / 2).toFixed(1);
+    const cy = (pad.top + (H - pad.top - pad.bottom) / 2).toFixed(1);
+    return `<text class="chart-label" transform="translate(12,${cy}) rotate(-90)" text-anchor="middle" font-size="10">${escHtml(yTitle)}</text>`
+         + `<text class="chart-label" x="${cx}" y="${H - 3}" text-anchor="middle" font-size="10">${escHtml(xTitle)}</text>`;
+}
+
+function renderCompositionChart(data, poolId, svgId, emptyId) {
     const svg      = document.getElementById(svgId);
     const emptyMsg = document.getElementById(emptyId);
     if (!svg) return;
 
     const history = (data?.compositionHistory ?? []).filter(r => r.poolId === poolId);
-    const filtered = filterByRange(history, _compositionRange, r => r.t)
+    const compRange = activeRange(_compositionRange, history, r => r.t);
+    const filtered  = filterByRange(history, compRange, r => r.t)
         .sort((a, b) => a.t - b.t);
 
     if (filtered.length < 2) {
@@ -2687,8 +2571,8 @@ function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emp
     const [symA, symB] = (displayPairOf(data, poolId) ?? poolId ?? 'A/B').split('/');
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 220;
-    const pad = { top: 24, right: 20, bottom: 30, left: 48 };
+    const H   = fitHeight(svg, 220);
+    const pad = { top: 24, right: 20, bottom: 44, left: 60 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -2741,7 +2625,7 @@ function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emp
     // X-Achse
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, _compositionRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 19}">${xLabel(t, compRange)}</text>`;
     }
 
     // Legende
@@ -2753,6 +2637,7 @@ function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emp
 
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     svg.setAttribute('height', H);
+    html += _axisTitlesHtml(pad, W, H, tr('liq.axis_share_pct', 'Anteil (%)'), compRange);
     svg.innerHTML = html;
 
     // ── Hover ─────────────────────────────────────────────────────────────────
@@ -2810,43 +2695,10 @@ function renderCompositionChart(data, poolId, svgId = 'compositionChartSvg', emp
         _compTip.style.display = 'block';
     };
     svg.onmouseleave = () => { _compTip.style.display = 'none'; };
-
-    if (!_compositionResizeOb && typeof ResizeObserver !== 'undefined') {
-        _compositionResizeOb = new ResizeObserver(() => {
-            if (_lastData && _compositionPool) renderCompositionChart(_lastData, _compositionPool);
-        });
-        _compositionResizeOb.observe(svg.parentElement);
-    }
 }
 
-function openCompositionModal(poolId, data) {
-    _compositionPool = poolId;
-    const modal = $('compositionModal');
-    if (!modal) return;
-    // Modal-Titel zeigt Orca-Schreibweise (displayPair), nicht das interne pair.
-    $('compositionModalTitle').textContent = tr('liq.coin_distribution_prefix', 'Coin-Verteilung: ') + displayPairOf(data, poolId);
-    modal.classList.remove('hidden');
-    document.body.classList.add('modal-open');
-    updateChartRangeBtns('compositionRangeBtns', data?.compositionHistory ?? [], r => r.t,
-        () => _compositionRange,
-        v  => { _compositionRange = v; localStorage.setItem(LS_RANGE.composition, v); },
-        () => { if (_lastData && _compositionPool) renderCompositionChart(_lastData, _compositionPool); });
-    renderCompositionChart(data, poolId);
-}
-
-function closeCompositionModal() {
-    $('compositionModal')?.classList.add('hidden');
-    document.body.classList.remove('modal-open');
-}
-
-function initCompositionModal() {
-    $('compositionModalClose')?.addEventListener('click', closeCompositionModal);
-    $('compositionModal')?.addEventListener('click', e => {
-        if (e.target === $('compositionModal')) closeCompositionModal();
-    });
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && !$('compositionModal')?.classList.contains('hidden')) closeCompositionModal();
-    });
+// .composition-clickable (Karten-Zeilen) öffnet das Positionswert-Modal.
+function initCompositionClickHandler() {
     document.addEventListener('click', e => {
         const link = e.target.closest('.composition-clickable');
         if (link) {
@@ -2890,7 +2742,8 @@ function renderPosValueChart(data, poolId) {
         while (history.length && history[history.length - 1].t >= liveAt) history.pop();
         history.push({ t: liveAt, poolId, value: livePos.myValue });
     }
-    const filtered = filterByRange(history, _posValueRange, r => r.t);
+    const posRange = activeRange(_posValueRange, history, r => r.t);
+    const filtered = filterByRange(history, posRange, r => r.t);
 
     if (filtered.length < 2) {
         svg.style.display      = 'none';
@@ -2901,8 +2754,8 @@ function renderPosValueChart(data, poolId) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 316;   // LIQ#000867: bestimmt die Höhe beider Reiter (Details ohne Scrollbalken)
-    const pad = { top: 20, right: 20, bottom: 30, left: 72 };
+    const H   = fitHeight(svg, 316);   // LIQ#000867: bestimmt die Höhe beider Reiter (Details ohne Scrollbalken)
+    const pad = { top: 20, right: 20, bottom: 44, left: 82 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -2946,7 +2799,7 @@ function renderPosValueChart(data, poolId) {
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
         const x = xOf(t).toFixed(1);
-        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 5}" text-anchor="middle">${xLabel(t, _posValueRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 19}" text-anchor="middle">${xLabel(t, posRange)}</text>`;
     }
 
     let line = `M ${xOf(ts[0]).toFixed(1)} ${yOf(vals[0]).toFixed(1)}`;
@@ -2990,6 +2843,7 @@ function renderPosValueChart(data, poolId) {
         </g>`;
     }
 
+    html += _axisTitlesHtml(pad, W, H, 'USDC', posRange);
     svg.innerHTML = html;
     svg.setAttribute('height', H);
 
@@ -3038,7 +2892,8 @@ function renderPnLChart(data, poolId) {
         rolling.push({ t: fullHist[i].t, pnl1d: fullHist[i].pnlUsd - fullHist[baselineIdx].pnlUsd });
     }
 
-    const filtered = filterByRange(rolling, _posValueRangePnl, r => r.t);
+    const pnlRange = activeRange(_posValueRangePnl, rolling, r => r.t);
+    const filtered = filterByRange(rolling, pnlRange, r => r.t);
 
     if (filtered.length < 2) {
         svg.style.display      = 'none';
@@ -3050,8 +2905,8 @@ function renderPnLChart(data, poolId) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 72 };
+    const H   = fitHeight(svg, 200);
+    const pad = { top: 20, right: 20, bottom: 44, left: 82 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -3087,7 +2942,7 @@ function renderPnLChart(data, poolId) {
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
         const x = xOf(t).toFixed(1);
-        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 5}" text-anchor="middle">${xLabel(t, _posValueRangePnl)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 19}" text-anchor="middle">${xLabel(t, pnlRange)}</text>`;
     }
     html += `<line x1="${pad.left}" x2="${W - pad.right}" y1="${zeroY}" y2="${zeroY}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4 3" opacity="0.6"/>`;
 
@@ -3107,6 +2962,7 @@ function renderPnLChart(data, poolId) {
     html += `<path d="${line}" fill="none" stroke="${strokeColor}" stroke-width="1.5"/>`;
     html += `</g>`;
 
+    html += _axisTitlesHtml(pad, W, H, 'USDC', pnlRange);
     svg.innerHTML = html;
     svg.setAttribute('height', H);
 
@@ -3135,7 +2991,8 @@ function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     const history = poolId
         ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId)
         : [];
-    const filtered = filterByRange(history, range, r => r.t);
+    const tokRange = activeRange(range, history, r => r.t);
+    const filtered = filterByRange(history, tokRange, r => r.t);
 
     if (filtered.length < 2) {
         svg.style.display      = 'none';
@@ -3146,8 +3003,8 @@ function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 72 };
+    const H   = fitHeight(svg, 200);
+    const pad = { top: 20, right: 20, bottom: 44, left: 82 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -3199,7 +3056,7 @@ function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
         const x = xOf(t).toFixed(1);
-        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 5}" text-anchor="middle">${xLabel(t, range)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 19}" text-anchor="middle">${xLabel(t, tokRange)}</text>`;
     }
 
     let line = `M ${xOf(ts[0]).toFixed(1)} ${yOf(vals[0]).toFixed(1)}`;
@@ -3215,6 +3072,7 @@ function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     html += `<path d="${line}" fill="none" stroke="var(--primary)" stroke-width="1.5"/>`;
     html += `</g>`;
 
+    html += _axisTitlesHtml(pad, W, H, (displayPairOf(data, poolId) ?? poolId ?? 'A/B').split('/')[tokenKey === 'amountA' ? 0 : 1], tokRange);
     svg.innerHTML = html;
     svg.setAttribute('height', H);
 
@@ -3239,7 +3097,8 @@ function renderILChart(data, poolId) {
     const history = poolId
         ? (data?.posValueHistory ?? []).filter(r => r.poolId === poolId && r.ilUsd != null)
         : [];
-    const filtered = filterByRange(history, _myAprRangeIL, r => r.t);
+    const ilRange  = activeRange(_myAprRangeIL, history, r => r.t);
+    const filtered = filterByRange(history, ilRange, r => r.t);
 
     if (filtered.length < 2) {
         svg.style.display      = 'none';
@@ -3250,8 +3109,8 @@ function renderILChart(data, poolId) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 72 };
+    const H   = fitHeight(svg, 200);
+    const pad = { top: 20, right: 20, bottom: 44, left: 82 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -3298,7 +3157,7 @@ function renderILChart(data, poolId) {
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
         const x = xOf(t).toFixed(1);
-        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 5}" text-anchor="middle">${xLabel(t, _myAprRangeIL)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 19}" text-anchor="middle">${xLabel(t, ilRange)}</text>`;
     }
 
     // Nulllinie hervorheben
@@ -3314,6 +3173,7 @@ function renderILChart(data, poolId) {
     html += `<path d="${line}" fill="none" stroke="#94a3b8" stroke-width="1.5"/>`;
     html += `</g>`;
 
+    html += _axisTitlesHtml(pad, W, H, 'USDC', ilRange);
     svg.innerHTML = html;
     svg.setAttribute('height', H);
 
@@ -3338,7 +3198,8 @@ function renderNPChart(data, poolId) {
     // Sprünge (z.B. nach Volatilitäts-Spike oder TVL-Drop) sind echte Signale,
     // keine Mess-Artefakte. Der alte Filter aus dem kumulativen NP-Chart
     // hat legitime Vorzeichen-Wechsel als "Ausreißer" weggeschnitten.
-    const filtered = filterByRange(history, _myAprRangeNP, r => r.t);
+    const npRange  = activeRange(_myAprRangeNP, history, r => r.t);
+    const filtered = filterByRange(history, npRange, r => r.t);
 
     if (filtered.length < 2) {
         svg.style.display      = 'none';
@@ -3349,8 +3210,8 @@ function renderNPChart(data, poolId) {
     emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 200;
-    const pad = { top: 20, right: 20, bottom: 30, left: 72 };
+    const H   = fitHeight(svg, 200);
+    const pad = { top: 20, right: 20, bottom: 44, left: 82 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
 
@@ -3379,7 +3240,7 @@ function renderNPChart(data, poolId) {
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
         const x = xOf(t).toFixed(1);
-        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 5}" text-anchor="middle">${xLabel(t, _myAprRangeNP)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${x}" y="${H - 19}" text-anchor="middle">${xLabel(t, npRange)}</text>`;
     }
 
     html += `<line x1="${pad.left}" x2="${W - pad.right}" y1="${zeroY}" y2="${zeroY}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4 3" opacity="0.6"/>`;
@@ -3401,6 +3262,7 @@ function renderNPChart(data, poolId) {
     html += `<path d="${line}" fill="none" stroke="#94a3b8" stroke-width="1.5"/>`;
     html += `</g>`;
 
+    html += _axisTitlesHtml(pad, W, H, '%', npRange);
     svg.innerHTML = html;
     svg.setAttribute('height', H);
 
@@ -3454,7 +3316,7 @@ function openPosValueModal(poolId, data) {
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
 
-    const posHistory = data?.poolValueHistory ?? data?.posValueHistory ?? [];
+    const posHistory = (data?.poolValueHistory ?? data?.posValueHistory ?? []).filter(r => r.poolId === poolId);
     updateChartRangeBtns('posValueRangeBtns', posHistory, r => r.t,
         () => _posValueRange,
         v  => { _posValueRange = v; localStorage.setItem(LS_RANGE.posValue, v); },
@@ -3760,83 +3622,6 @@ function initPosValueModal() {
     });
 }
 
-// ── Volumen-Chart-Modal ───────────────────────────────────────────────────────
-
-function renderDetailVolChart() {
-    const svg = document.getElementById('volChartModalSvg');
-    if (!svg || !_lastData) return;
-
-    const H        = svg.getBoundingClientRect().height || 380;
-    const poolId   = _volSelectedPool;
-    if (!poolId) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_pool_selected', 'Kein Pool ausgewählt')}</text>`;
-        return;
-    }
-    const filtered = _getVolFiltered(_lastData, poolId, _volRange);
-    if (!_buildVolSvg(svg, H, filtered, _volRange, 'volModalMainClip')) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
-    } else {
-        const body = svg.closest('.chart-modal-body');
-        if (body) attachBarTooltip(svg, body, '.vol-bar', _volBarTooltipText);
-    }
-}
-
-function initVolChartModal() {
-    const modal    = document.getElementById('volChartModal');
-    const closeBtn = document.getElementById('volChartModalClose');
-    if (!modal) return;
-
-    const openModal = () => {
-        if (!_lastData) return;
-
-        // Modal-Pool-Select mit Inline-Select synchronisieren
-        const modalSelect = document.getElementById('volChartModalPoolSelect');
-        const pools = (_lastData?.pools ?? []).filter(p => p.active);
-        if (modalSelect) {
-            modalSelect.innerHTML = pools.map(p =>
-                `<option value="${escHtml(p.id)}"${p.id === _volSelectedPool ? ' selected' : ''}>${escHtml(p.displayLabel ?? p.displayPair ?? p.pair ?? p.id)}</option>`
-            ).join('');
-            if (!modalSelect.dataset.listenerAdded) {
-                modalSelect.addEventListener('change', () => {
-                    _volSelectedPool = modalSelect.value;
-                    // Inline-Select ebenfalls synchronisieren
-                    const inlineSelect = document.getElementById('volPoolSelect');
-                    if (inlineSelect) inlineSelect.value = _volSelectedPool;
-                    renderDetailVolChart();
-                    if (_lastData) renderVolumeChart(_lastData);
-                });
-                modalSelect.dataset.listenerAdded = 'true';
-            } else {
-                modalSelect.value = _volSelectedPool ?? '';
-            }
-        }
-
-        updateChartRangeBtns(
-            'volChartModalRangeBtns',
-            _lastData?.volumeHistory ?? [], r => r.t,
-            () => _volRange,
-            v  => { _volRange = v; localStorage.setItem(LS_RANGE.volume, v); },
-            () => { renderDetailVolChart(); if (_lastData) renderVolumeChart(_lastData); }
-        );
-        modal.style.display = 'flex';
-        requestAnimationFrame(() => requestAnimationFrame(() => renderDetailVolChart()));
-    };
-
-    document.getElementById('volChartSvg')?.addEventListener('click', openModal);
-    closeBtn?.addEventListener('click', () => { modal.style.display = 'none'; });
-    modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && modal.style.display !== 'none') modal.style.display = 'none';
-    });
-
-    if (typeof ResizeObserver !== 'undefined') {
-        const body = modal.querySelector('.chart-modal-body');
-        if (body) new ResizeObserver(() => {
-            if (_lastData && modal.style.display !== 'none') renderDetailVolChart();
-        }).observe(body);
-    }
-}
-
 // ── Meine APR Chart + Modal ───────────────────────────────────────────────────
 
 let _myAprRange    = localStorage.getItem(LS_RANGE.myApr)   ?? '1D';
@@ -3857,10 +3642,11 @@ function renderMyAprChart(data, poolId) {
     const history   = useMyApr
         ? myHistory
         : (poolId ? (data?.aprHistory ?? []).filter(r => r.poolId === poolId) : []);
-    const filtered  = filterByRange(history, _myAprRange, r => r.t);
+    const aprRange  = activeRange(_myAprRange, history, r => r.t);
+    const filtered  = filterByRange(history, aprRange, r => r.t);
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement.clientWidth || 700;
-    const H   = 200;
+    const H   = fitHeight(svg, 200);
 
     svg.style.display = 'block';
 
@@ -3898,7 +3684,7 @@ function renderMyAprChart(data, poolId) {
     }
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, _myAprRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, aprRange)}</text>`;
     }
 
     const meanV  = vals.reduce((s, v) => s + v, 0) / vals.length;
@@ -4006,9 +3792,7 @@ function initMyAprModal() {
 
 // ── TVL Chart + Modal ─────────────────────────────────────────────────────────
 
-const _TVL_VALID_RANGES = new Set(['1D', '1W', '1M']);
-
-let _tvlRange    = _TVL_VALID_RANGES.has(localStorage.getItem(LS_RANGE.tvl) ?? '') ? localStorage.getItem(LS_RANGE.tvl) : '1W';
+let _tvlRange    = normalizeRangeKey(localStorage.getItem(LS_RANGE.tvl)) ?? '1W';
 let _tvlPool     = null;
 let _tvlData     = null;   // data bei Modal-Öffnung – hat tvlHistory garantiert
 let _tvlResizeOb = null;
@@ -4022,7 +3806,8 @@ function renderTvlChart(data, poolId) {
         ? (data?.tvlHistory ?? []).filter(r => r.poolId === poolId)
         : [];
 
-    const filtered = filterByRange(history, _tvlRange, r => r.t).sort((a, b) => a.t - b.t);
+    const tvlRange = activeRange(_tvlRange, history, r => r.t);
+    const filtered = filterByRange(history, tvlRange, r => r.t).sort((a, b) => a.t - b.t);
 
     if (filtered.length < 2) {
         svg.style.display = 'none';
@@ -4031,7 +3816,7 @@ function renderTvlChart(data, poolId) {
     svg.style.display = 'block';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement?.clientWidth || 700;
-    const H   = 220;
+    const H   = fitHeight(svg, 220);
     const pad = { top: 20, right: 60, bottom: 30, left: 60 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
@@ -4075,7 +3860,7 @@ function renderTvlChart(data, poolId) {
     // X-Achse
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, _tvlRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, tvlRange)}</text>`;
     }
 
     // Fläche + Linie
@@ -4128,26 +3913,13 @@ function renderTvlChart(data, poolId) {
 }
 
 function _updateTvlRangeBtns() {
-    const container = document.getElementById('tvlRangeBtns');
-    if (!container) return;
-    if (container.childElementCount === 0) {
-        RANGE_DEFS.forEach(def => {
-            const btn = document.createElement('button');
-            btn.className     = 'chart-range-btn';
-            btn.dataset.range = def.key;
-            btn.textContent   = def.label;
-            btn.addEventListener('click', () => {
-                _tvlRange = def.key;
-                localStorage.setItem(LS_RANGE.tvl, def.key);
-                syncRangeBtns('tvlRangeBtns', def.key);
-                // _tvlData bevorzugen: hat tvlHistory garantiert; _lastData nur Fallback
-                const d = (_tvlData?.tvlHistory?.length > 0 ? _tvlData : _lastData);
-                if (d && _tvlPool) renderTvlChart(d, _tvlPool);
-            });
-            container.appendChild(btn);
-        });
-    }
-    syncRangeBtns('tvlRangeBtns', _tvlRange);
+    // _tvlData bevorzugen: hat tvlHistory garantiert; _lastData nur Fallback
+    const src = () => (_tvlData?.tvlHistory?.length > 0 ? _tvlData : _lastData);
+    const series = (src()?.tvlHistory ?? []).filter(r => r.poolId === _tvlPool);
+    updateChartRangeBtns('tvlRangeBtns', series, r => r.t,
+        () => _tvlRange,
+        v  => { _tvlRange = v; localStorage.setItem(LS_RANGE.tvl, v); },
+        () => { const d = src(); if (d && _tvlPool) renderTvlChart(d, _tvlPool); });
 }
 
 function openTvlModal(poolId, data) {
@@ -4187,12 +3959,10 @@ function initTvlModal() {
 
 // ── VOL-Chart-Modal ───────────────────────────────────────────────────────────
 
-const VOL_MODAL_RANGE_DEFS = [
-    { key: '1W', label: '1W' },
-    { key: '1M', label: '1M' },
-];
+// Tages-Balken: 1D wäre ein einzelner Balken, deshalb nur 1W/1M (Lib-Definitionen ohne 1D)
+const VOL_MODAL_RANGES = DEFAULT_RANGES.filter(r => r.key !== '1D');
 
-let _volModalRange    = localStorage.getItem(LS_RANGE.volModal) ?? '1W';
+let _volModalRange    = normalizeRangeKey(localStorage.getItem(LS_RANGE.volModal), VOL_MODAL_RANGES) ?? '1W';
 let _volModalPool     = null;
 let _volModalResizeOb = null;
 
@@ -4203,8 +3973,9 @@ function renderVolModalChart(data, poolId) {
     const history = (data?.volumeHistory ?? [])
         .filter(r => r.poolId === poolId && r.volume != null);
 
+    const volModalRange = activeRange(_volModalRange, history, r => r.t, VOL_MODAL_RANGES);
     const filtered = aggregateDailyVolume(
-        filterByRange(history, _volModalRange, r => r.t)
+        filterByRange(history, volModalRange, r => r.t, VOL_MODAL_RANGES)
     );
 
     if (filtered.length < 1) {
@@ -4214,7 +3985,7 @@ function renderVolModalChart(data, poolId) {
     svg.style.display = 'block';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement.clientWidth || 800;
-    const H   = 180;
+    const H   = fitHeight(svg, 180);
     const pad = { top: 20, right: 55, bottom: 30, left: 60 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
@@ -4259,7 +4030,7 @@ function renderVolModalChart(data, poolId) {
     // X-Labels
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, _volModalRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, volModalRange)}</text>`;
     }
 
     // Letzter Wert-Label
@@ -4289,26 +4060,12 @@ function renderVolModalChart(data, poolId) {
 }
 
 function _updateVolModalRangeBtns(data) {
-    const container = document.getElementById('volModalRangeBtns');
-    if (!container) return;
-    if (container.childElementCount === 0) {
-        VOL_MODAL_RANGE_DEFS.forEach(def => {
-            const btn = document.createElement('button');
-            btn.className     = 'chart-range-btn';
-            btn.dataset.range = def.key;
-            btn.textContent   = def.label;
-            btn.addEventListener('click', () => {
-                _volModalRange = def.key;
-                localStorage.setItem(LS_RANGE.volModal, def.key);
-                document.querySelectorAll('#volModalRangeBtns .chart-range-btn').forEach(b =>
-                    b.classList.toggle('active', b.dataset.range === def.key));
-                if (_lastData && _volModalPool) renderVolModalChart(_lastData, _volModalPool);
-            });
-            container.appendChild(btn);
-        });
-    }
-    document.querySelectorAll('#volModalRangeBtns .chart-range-btn').forEach(b =>
-        b.classList.toggle('active', b.dataset.range === _volModalRange));
+    const series = (data?.volumeHistory ?? []).filter(r => r.poolId === _volModalPool && r.volume != null);
+    updateChartRangeBtns('volModalRangeBtns', series, r => r.t,
+        () => _volModalRange,
+        v  => { _volModalRange = v; localStorage.setItem(LS_RANGE.volModal, v); },
+        () => { if (_lastData && _volModalPool) renderVolModalChart(_lastData, _volModalPool); },
+        VOL_MODAL_RANGES);
 }
 
 function openVolModal(poolId, data) {
@@ -4347,7 +4104,7 @@ function initVolModal() {
 
 // ── Range-Chart-Modal ─────────────────────────────────────────────────────────
 
-let _rangeChartRange = localStorage.getItem(LS_RANGE.rangeChart) ?? '1D';
+let _rangeChartRange = normalizeRangeKey(localStorage.getItem(LS_RANGE.rangeChart)) ?? '1D';
 let _rangeChartPool  = null;
 let _rangeResizeOb   = null;
 
@@ -4369,7 +4126,8 @@ function renderRangeChart(data, poolId) {
     // Label-Feld und bei einzelnen Pools invertiert, das darf das Frontend nicht raten.
     const priceUnit = pos.priceUnit ?? null;
     const history  = (data?.priceHistory ?? []).filter(r => r.poolId === poolId);
-    let   filtered = filterByRange(history, _rangeChartRange, r => r.t);
+    const rangeKey = activeRange(_rangeChartRange, history, r => r.t);
+    let   filtered = filterByRange(history, rangeKey, r => r.t);
 
     // Aktuellen Preis immer als neuesten Punkt anhängen – verhindert veraltete
     // Endpunkte nach Bot-Pausen (z.B. Score-Limit-Exit). Bei 0/1 Punkten zwei
@@ -4390,7 +4148,7 @@ function renderRangeChart(data, poolId) {
     if (emptyMsg) emptyMsg.style.display = 'none';
 
     const W   = svg.getBoundingClientRect().width || svg.parentElement.clientWidth || 700;
-    const H   = 220;
+    const H   = fitHeight(svg, 220);
     const pad = { top: 24, right: 100, bottom: 30, left: 70 };
     const iW  = W - pad.left - pad.right;
     const iH  = H - pad.top  - pad.bottom;
@@ -4423,7 +4181,7 @@ function renderRangeChart(data, poolId) {
     // X-Achse
     for (let i = 0; i <= 4; i++) {
         const t = minT + (maxT - minT) * i / 4;
-        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, _rangeChartRange)}</text>`;
+        html += `<text class="chart-label chart-label-x" x="${xOf(t).toFixed(1)}" y="${H - 5}">${xLabel(t, rangeKey)}</text>`;
     }
 
     // Preislinie + Fläche
@@ -4512,7 +4270,7 @@ function openRangeModal(poolId, data) {
     // Composition-Range-Buttons für den Coin-Verteilung-Tab
     updateChartRangeBtns(
         'rangeCompRangeBtns',
-        data?.compositionHistory ?? [], r => r.t,
+        (data?.compositionHistory ?? []).filter(r => r.poolId === poolId), r => r.t,
         () => _compositionRange,
         v  => { _compositionRange = v; localStorage.setItem(LS_RANGE.composition, v); },
         () => { if (_lastData && _rangeChartPool) renderCompositionChart(_lastData, _rangeChartPool, 'rangeCompChartSvg', 'rangeCompEmptyMsg'); }
@@ -5021,7 +4779,7 @@ function initPoolTxModal() {
         const edgeLink = e.target.closest('.edge-clickable');
         if (edgeLink) {
             const poolId = edgeLink.dataset.poolId;
-            if (poolId && _lastData) openMetricChartModal(poolId, _edgeUnit === 'd' ? 'deltaD' : 'deltaH', _lastData);
+            if (poolId && _lastData) openMetricChartModal(poolId, 'pnl24h', _lastData);
             return;
         }
         const rebalLink = e.target.closest('.rebalance-clickable');
@@ -5073,36 +4831,42 @@ async function refresh() {
     }
     // earningsToast pollt selbstständig via startPolling()
 
-    updateChartRangeBtns('portfolioRangeBtns', d?.portfolioHistory ?? [], r => r.t,
-        () => _portfolioRange, v => { _portfolioRange = v; localStorage.setItem(LS_RANGE.portfolio, v); }, () => { if (_lastData) renderPortfolioChart(_lastData); });
-    updateChartRangeBtns('volRangeBtns', d?.volumeHistory ?? [], r => r.t,
-        () => _volRange, v => { _volRange = v; localStorage.setItem(LS_RANGE.volume, v); }, () => { if (_lastData) renderVolumeChart(_lastData); });
-    updateChartRangeBtns('feeRangeBtns', d?.dailyFees ?? [], r => new Date(r.date + 'T00:00:00').getTime(),
+    updateChartRangeBtns('feeRangeBtns', d?.dailyFees ?? [], _feeTs,
         () => _feeRange, v => { _feeRange = v; localStorage.setItem(LS_FEE_RANGE, v); }, () => { if (_lastData) renderFeeChart(_lastData); });
 
     renderPortfolioChart(d);
-    renderVolumeChart(d);
     renderFeeChart(d);
 }
 
 // ── Metric Chart Modal (PnL / Slopes) ────────────────────────────────────────
 
-let _metricChartRange = localStorage.getItem(LS_RANGE.metricChart) ?? '1d';
+// Metrik-Fenster: Lib-Zeiträume plus 6H/12H (nur Kurzfrist-Metriken). Die vom Export
+// gelieferten Fenster-Schlüssel (pool.metricHistory) sind kleingeschrieben, siehe _metricWindowKey().
+const _HOUR_MS = DEFAULT_RANGES[0].ms / 24;
+const _METRIC_RANGES = buildRanges([
+    { key: '6H',  label: '6H',  ms: 6 * _HOUR_MS },
+    { key: '12H', label: '12H', ms: 12 * _HOUR_MS },
+]);
+const _metricWindowKey = key => key.toLowerCase();
+let _metricChartRange = normalizeRangeKey(localStorage.getItem(LS_RANGE.metricChart), _METRIC_RANGES) ?? '1D';
+let _metricRangeBar   = null;
 
 // axis = Beschriftung der Y-Achse (Einheit der Werte), X-Achse beschriftet _drawMetricChart selbst.
 const _METRIC_META = {
     priceSlope: { label: 'Preis-Slope', unit: ' %/h',  axis: '%/h',  zeroline: true  },
     aprSlope:   { label: 'APR-Slope',   unit: ' pp/h', axis: 'pp/h', zeroline: true  },
     tvlSlope:   { label: 'TVL-Slope',   unit: ' %/h',  axis: '%/h',  zeroline: true  },
-    // Delta-Spalte (LIQ#000891): Rate seit Eröffnung, ändert sich binnen 6–12 h kaum —
-    // export.js liefert sie nur für 1D/1W/1M. Label per Getter, tr() erst zur Anzeige.
-    deltaH:     { get label() { return _edgeUnitFullLabel('h'); }, unit: ' USDC', get axis() { return tr('liq.axis_usdc_per_hour', 'USDC pro Stunde'); }, zeroline: true, ranges: ['1d', '1w', '1m'] },
-    deltaD:     { get label() { return _edgeUnitFullLabel('d'); }, unit: ' USDC', get axis() { return tr('liq.axis_usdc_per_day', 'USDC pro Tag'); },    zeroline: true, ranges: ['1d', '1w', '1m'] },
+    // Spalte Edge 24H / PnL 24H (LIQ#001023): jeder Punkt ist der 24h-Wert zu diesem
+    // Zeitpunkt, export.js liefert ihn für 1D/1W/1M. Label per Getter, tr() erst zur Anzeige.
+    pnl24h:     { get label() { return _edgeUnitFullLabel('pnl'); },  unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: true, ranges: ['1D', '1W', '1M'] },
+    // Edge-Wert der Opportunity-Tabelle (LIQ#001114): Verlauf des 24h-Modellwerts, stündliche
+    // Snapshots aus opportunity_scores.edge_pct, sammelt sich ab dem Start dieser Funktion.
+    edgeModel:  { get label() { return tr('liq.edge_chart_title', 'Edge (24 Std.)'); }, unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: 'auto', zeroDash: true, zeroToggle: true },
 };
 
-function _drawMetricChart(svgEl, points, meta) {
+function _drawMetricChart(svgEl, points, meta, { forceZero = false } = {}) {
     const W  = svgEl.getBoundingClientRect().width || 560;
-    const H  = 220;
+    const H  = fitHeight(svgEl, 220);
     // PL/PB mit Platz für die Achsentitel (Y gedreht links, X unter den Zeitmarken).
     const PL = 66, PR = 12, PT = 12, PB = 40;
     const cW = W - PL - PR;
@@ -5119,8 +4883,15 @@ function _drawMetricChart(svgEl, points, meta) {
     let yMin = Math.min(...vals);
     let yMax = Math.max(...vals);
     if (yMin === yMax) { yMin -= 1; yMax += 1; }
-    // Include zero for zero-line metrics
-    if (meta.zeroline) { yMin = Math.min(yMin, 0); yMax = Math.max(yMax, 0); }
+    // Nulllinie: 'auto' (Edge-Verlauf) bezieht die Null in die Achse ein, wenn die Kurve sie kreuzt oder
+    // nah liegt (Abstand höchstens das Doppelte der Schwankung). Liegt sie weit weg, würde eine Kurve um
+    // 1,55 % mit Schwankungen im Hundertstel-Bereich auf einer 0…1,6-Achse als Strich erscheinen.
+    // Die Linie selbst wird immer gezeichnet, sobald die Null im sichtbaren Bereich liegt.
+    const _vMin = Math.min(...vals), _vMax = Math.max(...vals), _span = _vMax - _vMin;
+    const zeroOn = forceZero || (meta.zeroline === 'auto'
+        ? (_vMin <= 0 && _vMax >= 0) || (_vMin > 0 && _vMin <= 2 * _span) || (_vMax < 0 && -_vMax <= 2 * _span)
+        : !!meta.zeroline);
+    if (zeroOn) { yMin = Math.min(yMin, 0); yMax = Math.max(yMax, 0); }
     const yPad = (yMax - yMin) * 0.08;
     yMin -= yPad; yMax += yPad;
     const yRange = yMax - yMin;
@@ -5138,14 +4909,14 @@ function _drawMetricChart(svgEl, points, meta) {
 
     // Y-axis grid lines + labels (4 ticks). Tick-Beschriftungen, die mit der „0" der Nulllinie
     // kollidieren würden (< 10 px Abstand), entfallen — die Nulllinie hat ihre eigene.
-    const zyNum = meta.zeroline ? yPx(0) : null;
+    const zyNum = (meta.zeroline && 0 >= yMin && 0 <= yMax) ? yPx(0) : null;
     const yTicks = 4;
     for (let i = 0; i <= yTicks; i++) {
         const v  = yMin + (i / yTicks) * yRange;
         const py = yPx(v).toFixed(1);
         svg += `<line x1="${PL}" y1="${py}" x2="${PL+cW}" y2="${py}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`;
         if (zyNum != null && Math.abs(parseFloat(py) - zyNum) < 10) continue;
-        const lbl = Math.abs(v) < 0.001 ? '0' : v >= 10 || v <= -10 ? v.toFixed(1) : v.toFixed(2);
+        const lbl = Math.abs(v) < 0.001 ? '0' : v >= 10 || v <= -10 ? v.toFixed(1) : v.toFixed(meta.dec ?? 2);
         svg += `<text x="${(PL-4).toFixed(1)}" y="${(parseFloat(py)+3.5).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="end">${lbl}</text>`;
     }
 
@@ -5160,7 +4931,9 @@ function _drawMetricChart(svgEl, points, meta) {
     for (let i = 0; i <= tickCount; i++) {
         const t = tMin + (i / tickCount) * tSpan;
         const d = new Date(t);
-        const label = (tMax - tMin) <= 86_400_000
+        const label = (tMax - tMin) <= 3 * 3_600_000
+            ? `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+            : (tMax - tMin) <= 86_400_000
             ? `${String(d.getHours()).padStart(2,'0')}h`
             : `${d.getDate()}.${d.getMonth()+1}.`;
         svg += `<text x="${(PL + (i/tickCount)*cW).toFixed(1)}" y="${(PT + cH + 14).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="middle">${label}</text>`;
@@ -5183,7 +4956,7 @@ function _drawMetricChart(svgEl, points, meta) {
     // erkennbar ist, ob die Kurve darüber oder darunter liegt (nicht nur über Farbe/Fläche).
     if (zyNum != null) {
         const zy = zyNum.toFixed(1);
-        svg += `<line x1="${PL}" y1="${zy}" x2="${PL+cW}" y2="${zy}" stroke="rgba(226,232,240,0.55)" stroke-width="1.2"/>`;
+        svg += `<line x1="${PL}" y1="${zy}" x2="${PL+cW}" y2="${zy}" stroke="${meta.zeroDash ? 'rgba(255,255,255,0.85)' : 'rgba(226,232,240,0.55)'}" stroke-width="1.2"${meta.zeroDash ? ' stroke-dasharray="5 4"' : ''}/>`;
         svg += `<text x="${(PL-4).toFixed(1)}" y="${(zyNum+3.5).toFixed(1)}" font-size="9" font-weight="600" fill="#e2e8f0" text-anchor="end">0</text>`;
     }
 
@@ -5199,7 +4972,17 @@ function _drawMetricChart(svgEl, points, meta) {
     }
 
     svgEl.innerHTML = svg;
+
+    // Fadenkreuz mit Zeit- und Wertlabel (Maus-Position), wie in allen übrigen Modal-Charts
+    attachHoverOverlay(svgEl, {
+        tMin, tMax, spanMs: tSpan,
+        PAD_L: PL, cW, PAD_T: PT, cH,
+        yMin, yMax,
+        formatY: v => v.toFixed(meta.dec ?? 2) + (meta.unit ?? ''),
+    });
 }
+
+let _metricRerender = null;   // zeichnet den offenen Metrik-Chart neu (Maximieren)
 
 function openMetricChartModal(poolId, metric, data) {
     const modal  = $('metricChartModal');
@@ -5212,37 +4995,62 @@ function openMetricChartModal(poolId, metric, data) {
     if (!pool) return;
 
     const meta = _METRIC_META[metric] ?? { label: metric, unit: '', zeroline: true };
-    const ranges = meta.ranges ?? ['6h', '12h', '1d', '1w', '1m'];
+    // Fenster dieser Metrik (Delta: kein 6H/12H)
+    const ranges = meta.ranges
+        ? _METRIC_RANGES.filter(r => meta.ranges.includes(r.key))
+        : _METRIC_RANGES;
     // Gespeicherte Auswahl nur übernehmen, wenn die Metrik das Fenster kennt (Delta: kein 6H/12H);
     // sonst lokal auf das erste Fenster, ohne die gespeicherte Auswahl der übrigen Charts zu ändern.
-    let range = ranges.includes(_metricChartRange) ? _metricChartRange : ranges[0];
+    const wish = normalizeRangeKey(_metricChartRange, ranges) ?? ranges[0].key;
     const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
     if (titleEl) titleEl.textContent = `${pair} – ${meta.label}`;
 
+    // Historie-Beginn = frühester Punkt aller Fenster dieser Metrik (die langen Fenster sind
+    // gröber gebucketet, ihr erster Punkt liegt bei jungen Pools später als der des kurzen)
+    const windowPoints = r => pool.metricHistory?.[_metricWindowKey(r.key)]?.[metric] ?? [];
+    const starts = ranges.map(r => historyStartOf(windowPoints(r), p => p.ts)).filter(ms => ms != null);
+    const historyStart = starts.length ? Math.min(...starts) : null;
+
+    let range = null;
     const renderChart = () => {
         const svgEl = bodyEl.querySelector('svg.metric-chart-svg');
         if (!svgEl) return;
-        const pts = pool.metricHistory?.[range]?.[metric] ?? [];
-        _drawMetricChart(svgEl, pts, meta);
+        _drawMetricChart(svgEl, pool.metricHistory?.[_metricWindowKey(range)]?.[metric] ?? [], meta, { forceZero: meta.zeroToggle && _edgeAxisFromZero });
     };
 
-    bodyEl.innerHTML = `<svg class="metric-chart-svg" width="100%" style="display:block;overflow:visible"></svg>`;
+    // Schalter „Achse ab 0" (nur Edge-Chart): bezieht die Null immer in die Achse ein, die Kurve wirkt dann
+    // flacher, die Nulllinie bleibt sichtbar.
+    const _zeroToggleHtml = meta.zeroToggle
+        ? `<label class="has-tooltip" data-tooltip-title="${escHtml(tr('liq.axis_from_zero', 'Achse ab 0'))}" data-tooltip-content="${escHtml(tr('liq.axis_from_zero_tip', 'Bezieht die Null immer in die Achse ein.\nDie Kurve wirkt dann flacher, die Nulllinie bleibt sichtbar.'))}" data-tooltip-type="text" style="display:inline-flex;align-items:center;gap:6px;font-size:0.78rem;color:var(--text-secondary);cursor:pointer;margin-bottom:6px"><input type="checkbox" id="metricChartAxisZero"${_edgeAxisFromZero ? ' checked' : ''} style="cursor:pointer"> ${escHtml(tr('liq.axis_from_zero', 'Achse ab 0'))}</label>`
+        : '';
+    bodyEl.innerHTML = `${_zeroToggleHtml}<svg class="metric-chart-svg" width="100%" style="display:block;overflow:visible"></svg>`;
+    bodyEl.querySelector('#metricChartAxisZero')?.addEventListener('change', e => {
+        _edgeAxisFromZero = e.target.checked;
+        try { localStorage.setItem(LS_RANGE.edgeAxisZero, _edgeAxisFromZero ? '1' : '0'); } catch { /* Anzeigevorliebe, ohne Speicher trotzdem nutzbar */ }
+        renderChart();
+    });
 
     if (rangEl) {
-        rangEl.innerHTML = ranges.map(r =>
-            `<button class="chart-range-btn${range === r ? ' active' : ''}" data-range="${r}">${r.toUpperCase()}</button>`
-        ).join('');
-        rangEl.querySelectorAll('.chart-range-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                range = _metricChartRange = btn.dataset.range;
-                localStorage.setItem(LS_RANGE.metricChart, _metricChartRange);
-                rangEl.querySelectorAll('.chart-range-btn').forEach(b =>
-                    b.classList.toggle('active', b.dataset.range === range));
+        _metricRangeBar?.destroy();
+        _metricRangeBar = createRangeBar(rangEl, {
+            ranges,
+            active: wish,
+            historyStart,
+            onChange: (key, { reason }) => {
+                range = key;
+                if (reason === 'user') {
+                    _metricChartRange = key;
+                    localStorage.setItem(LS_RANGE.metricChart, key);
+                }
                 renderChart();
-            });
+            },
         });
+        range = _metricRangeBar.active;
+    } else {
+        range = resolveRange(wish, historyStart, { ranges });
     }
 
+    _metricRerender = renderChart;
     requestAnimationFrame(renderChart);
     modal.classList.remove('hidden');
     document.body.classList.add('modal-open');
@@ -5324,7 +5132,7 @@ initPoolTxModal();
 initMyAprModal();
 initTvlModal();
 initVolModal();
-initCompositionModal();
+initCompositionClickHandler();
 initPosValueModal();
 initRangeModal();
 initWalletDetailModal(() => _lastData);
@@ -5334,7 +5142,23 @@ initClaimedFeesModal();
 initPortfolioChartModal();
 initFeeBarTooltip();
 initFeeChartModal();
-initVolChartModal();
+
+// Maximieren-Schalter für alle Dialoge; der Callback zeichnet Charts mit der neuen Fläche neu.
+// tvl/vol/range/myApr/fee haben bereits einen ResizeObserver auf ihrem Chart-Container.
+wireMaximize({
+    portfolioChartModal: () => { if (_lastData) renderDetailPortfolioChart(); },
+    feeChartModal:       null,
+    myAprModal:          null,
+    posValueModal:       () => { if (_lastData && _posValuePool) _switchPosValueTab(_posValueTab); },
+    tvlModal:            null,
+    volModal:            null,
+    rangeModal:          () => { if (_lastData && _rangeChartPool) { renderRangeChart(_lastData, _rangeChartPool); renderCompositionChart(_lastData, _rangeChartPool, 'rangeCompChartSvg', 'rangeCompEmptyMsg'); } },
+    poolTxModal:         null,
+    metricChartModal:    () => _metricRerender?.(),
+    payedFeesModal:      null,
+    claimedFeesModal:    null,
+    walletDetailModal:   null,
+});
 
 refresh();
 setInterval(refresh, REFRESH_MS);

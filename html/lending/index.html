@@ -7,9 +7,9 @@
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260323t">
     <link rel="stylesheet" href="css/layout.css?v=20260818b">
-    <link rel="stylesheet" href="../css/shared.css?v=20260822a">
+    <link rel="stylesheet" href="../css/shared.css?v=20261002c">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/components.css?v=20260602a">
+    <link rel="stylesheet" href="css/components.css?v=20261002a">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
@@ -81,7 +81,7 @@
                 <div class="metric">
                     <span class="label" data-i18n="overview.total">Gesamt</span>
                     <div class="value-group">
-                        <span class="value clickable-value" id="gesamtValue" title="Entwicklung anzeigen" data-i18n-attr="title:len.show_trend">—</span>
+                        <span class="value" id="gesamtValue">—</span>
                         <span class="unit">USDC</span>
                     </div>
                 </div>
@@ -117,14 +117,14 @@
         <!-- Row 2: Charts nebeneinander -->
         <div class="charts-row">
 
-            <section class="card" id="apyChartCard">
+            <section class="card" id="portfolioChartCard">
                 <div class="card-chart-head">
-                    <h2>APY <div class="apy-chart-legend" id="apyChartLegend"></div></h2>
-                    <div class="chart-range-btns" id="apyRangeBtns"></div>
+                    <h2 data-i18n="overview.total_balance">Gesamtguthaben</h2>
+                    <div class="chart-range-btns" id="portfolioRangeBtns"></div>
                 </div>
-                <div class="chart-wrapper">
-                    <svg id="apyChartSvg" class="portfolio-chart" height="160" style="cursor:pointer" title="Vergrößern" data-i18n-attr="title:len.enlarge"></svg>
-                    <p class="chart-empty-msg" id="apyChartEmptyMsg" data-i18n="len.apy_building">APY-Verlauf wird aufgebaut…</p>
+                <div class="chart-wrapper" style="position:relative">
+                    <svg id="portfolioChartSvg" class="portfolio-chart" height="160" style="cursor:pointer" title="Vergrößern" data-i18n-attr="title:len.enlarge"></svg>
+                    <p class="chart-empty-msg" id="portfolioChartEmptyMsg" data-i18n="liq.no_data_range_plain">Keine Daten für diesen Zeitraum</p>
                 </div>
             </section>
 
@@ -339,39 +339,24 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="gebundenModalTitle" data-i18n="len.capital_locked">Gebundenes Kapital</span>
-                <button class="chart-modal-close" id="gebundenModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="gebundenModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="gebundenModalBody"></div>
         </div>
     </div>
 
-    <!-- Portfolio-Chart-Modal (Gesamt-Karte) -->
+    <!-- Portfolio-Chart-Modal (Klick auf den Gesamtguthaben-Chart) -->
     <div class="chart-modal-overlay" id="portfolioChartModal" style="display:none"
          role="dialog" aria-modal="true" aria-labelledby="portfolioChartModalTitle">
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="portfolioChartModalTitle" data-i18n="len.total_balance_trend">Entwicklung Gesamtguthaben</span>
                 <button class="chart-toggle" id="portfolioChartOutlierToggle" title="Ausreißer ausblenden" data-i18n-attr="title:len.hide_outliers">&#8856;</button>
-                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="portfolioChartModalRangeBtns"></div>
             <div class="chart-modal-body">
                 <svg id="portfolioChartModalSvg" class="chart-modal-svg"></svg>
-            </div>
-        </div>
-    </div>
-
-    <!-- APY-Chart-Modal -->
-    <div class="chart-modal-overlay" id="apyChartModal" style="display:none"
-         role="dialog" aria-modal="true" aria-labelledby="apyChartModalTitle">
-        <div class="chart-modal-dialog">
-            <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="apyChartModalTitle" data-i18n="len.apy_history">APY-Verlauf</span>
-                <button class="chart-modal-close" id="apyChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
-            </div>
-            <div class="chart-range-btns" id="apyChartModalRangeBtns"></div>
-            <div class="chart-modal-body">
-                <svg id="apyChartModalSvg" class="chart-modal-svg"></svg>
             </div>
         </div>
     </div>
@@ -382,7 +367,7 @@
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="yieldChartModalTitle" data-i18n="len.yield">Yield</span>
-                <button class="chart-modal-close" id="yieldChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="yieldChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="yieldChartModalRangeBtns"></div>
             <div class="chart-modal-body" id="yieldChartModalBody" style="position:relative">
@@ -397,7 +382,7 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="walletDetailModalTitle" data-i18n="liq.wallet_modal_title">Wallet (Wert &gt; 0,00 USDC)</span>
-                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="walletDetailModalBody"></div>
         </div>
@@ -409,7 +394,7 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="statPayedFeesModalTitle" data-i18n="liq.tab.tx_fees">TX-Fees</span>
-                <button class="chart-modal-close" id="statPayedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="statPayedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="statPayedFeesModalBody"></div>
         </div>
@@ -421,13 +406,13 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="statYieldModalTitle" data-i18n="len.yield">Yield</span>
-                <button class="chart-modal-close" id="statYieldModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="statYieldModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="statYieldModalBody"></div>
         </div>
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260826a"></script>
+    <script type="module" src="js/app.js?v=20261002a"></script>
 </body>
 </html>

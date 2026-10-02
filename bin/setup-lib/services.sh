@@ -18,7 +18,11 @@ do_services() {
 #!/bin/bash
 # FORGE public – alle Dienste starten (vom Setup erzeugt)
 set -e
-systemctl start ${SERVICES[*]}
+systemctl start forge-nexus forge-premium forge-settings forge-settings-daemon
+# Bots nur, wenn sie im Backend eingeschaltet sind (Autostart gesetzt, CORE#001179)
+for s in ${BOT_SERVICES[*]}; do
+    if systemctl is-enabled --quiet "\$s"; then systemctl start "\$s"; fi
+done
 systemctl --no-pager --plain status ${SERVICES[*]} | grep -E 'Loaded|Active|●' || true
 EOF
     cat > "$BASE_DIR/stop.sh" <<EOF
@@ -46,6 +50,49 @@ EOF
     cp -r "$ARTIFACT_DIR/bin/setup-lib" "$BASE_DIR/setup-lib"
     chmod 755 "$BASE_DIR/setup.sh"
     c_ok "$(t SERVICES_SETUP_COPIED "$BASE_DIR")"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Autostart der Bots folgt dem Backend-Schalter (CORE#001179)
+# ─────────────────────────────────────────────────────────────────────────────
+# Seit CORE#001179 setzt der Backend-Schalter den systemd-Autostart mit (start →
+# enable, stop → disable). Installationen von davor haben einen Autostart, der
+# nur von Hand gesetzt wurde und oft nicht zum Backend-Zustand passt (pub2,
+# 02.10.2026: Lending Bot enabled, aber nie gestartet → lief nach Reboot mit
+# leerem Wallet los). Einmalig angleichen: lief der Bot vor dem Update, wird er
+# enabled, sonst disabled. Danach hält der Backend-Schalter beides synchron —
+# deshalb nur einmal (Marker), damit ein Bot, der zufällig gerade im Update
+# abgestürzt war, nicht bei jedem Update erneut abgeschaltet wird.
+sync_bot_autostart_once() {
+    local liq_active="$1" lend_active="$2"
+    local marker="$DATA_DIR/.bot-autostart-synced"
+    [[ -f "$marker" ]] && return 0
+    local svc active
+    for svc in "${BOT_SERVICES[@]}"; do
+        case "$svc" in
+            forge-liquiditybot) active="$liq_active" ;;
+            forge-lendingbot)   active="$lend_active" ;;
+            *) continue ;;
+        esac
+        if [[ "$active" -eq 1 ]]; then
+            systemctl enable "$svc" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$svc" >/dev/null 2>&1 || true
+        fi
+        c_ok "$(t SERVICES_AUTOSTART_SYNCED "$svc" "$(systemctl is-enabled "$svc" 2>/dev/null || true)")"
+    done
+    touch "$marker"
+    chown "$INSTALL_USER:$INSTALL_USER" "$marker" 2>/dev/null || true
+}
+
+# Startet einen Bot nur, wenn sein Autostart gesetzt ist — d.h. wenn er im
+# Backend eingeschaltet ist (CORE#001179). Für rollback-code und restore, die
+# vorher beide Bots blind gestartet haben.
+start_enabled_bots() {
+    local svc
+    for svc in "${BOT_SERVICES[@]}"; do
+        systemctl is-enabled --quiet "$svc" 2>/dev/null && systemctl start "$svc" 2>/dev/null || true
+    done
 }
 
 do_cron() {

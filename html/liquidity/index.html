@@ -6,10 +6,10 @@
     <title data-i18n="liq.page_title">FORGE - public: Liquidity Bot</title>
 
     <link rel="icon" type="image/png" href="img/forge-logo.png?v=20260329a">
-    <link rel="stylesheet" href="css/layout.css?v=20260923b">
-    <link rel="stylesheet" href="../css/shared.css?v=20260822a">
+    <link rel="stylesheet" href="css/layout.css?v=20260926b">
+    <link rel="stylesheet" href="../css/shared.css?v=20261002c">
     <link rel="stylesheet" href="../css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/components.css?v=20260921p">
+    <link rel="stylesheet" href="css/components.css?v=20261002b">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
@@ -91,7 +91,7 @@
                           data-tooltip-title="Gesamt"
                           data-tooltip-content="Wallet-Guthaben abzüglich der SOL-Reserve für Transaktionsgebühren (Standard 0,10 SOL), plus LP-Wert und offene Fees. Die Reserve steht nicht als Handelskapital zur Verfügung, bleibt aber weiterhin in deinem Wallet – deshalb ist Gesamt niedriger als Wallet." data-i18n-attr="data-tooltip-title:liq.tip.total.title,data-tooltip-content:liq.tip.total" data-i18n="overview.total">Gesamt</span>
                     <div class="value-group">
-                        <span class="value clickable-value" id="gesamtValue" title="Details anzeigen" data-i18n-attr="title:liq.details_show">—</span>
+                        <span class="value" id="gesamtValue">—</span>
                         <span class="unit">USDC</span>
                     </div>
                 </div>
@@ -126,15 +126,14 @@
         <!-- Row 2: Charts nebeneinander -->
         <div class="charts-row">
 
-            <section class="card" id="volChartCard">
+            <section class="card" id="portfolioChartCard">
                 <h2>
-                    Volumen
-                    <select class="vol-pool-select" id="volPoolSelect"></select>
-                    <div class="chart-range-btns" id="volRangeBtns"></div>
+                    <span data-i18n="overview.total_balance">Gesamtguthaben</span>
+                    <div class="chart-range-btns" id="portfolioRangeBtns"></div>
                 </h2>
                 <div class="chart-wrapper" style="position:relative">
-                    <svg id="volChartSvg" class="portfolio-chart" height="160" style="cursor:pointer"></svg>
-                    <p class="chart-empty-msg" id="volChartEmptyMsg" data-i18n="liq.volume_building">Volumen-Verlauf wird aufgebaut…</p>
+                    <svg id="portfolioChartSvg" class="portfolio-chart" height="160" style="cursor:pointer"></svg>
+                    <p class="chart-empty-msg" id="portfolioChartEmptyMsg" data-i18n="liq.no_data_range_plain">Keine Daten für diesen Zeitraum</p>
                 </div>
             </section>
 
@@ -321,21 +320,6 @@
         </div>
     </div>
 
-    <!-- Coin-Verteilung Modal -->
-    <div id="compositionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="compositionModalTitle">
-        <div class="modal-box">
-            <div class="modal-header">
-                <h3 id="compositionModalTitle" data-i18n="liq.coin_distribution">Coin-Verteilung</h3>
-                <button class="modal-close" id="compositionModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
-            </div>
-            <div class="chart-range-btns" id="compositionRangeBtns"></div>
-            <div style="position:relative;margin-top:0.5rem">
-                <svg id="compositionChartSvg" width="100%" style="display:none"></svg>
-                <p class="chart-empty" id="compositionChartEmptyMsg" style="display:none" data-i18n="liq.no_data_range">— Keine Daten für diesen Zeitraum</p>
-            </div>
-        </div>
-    </div>
-
     <!-- Positionswert-Modal (Mein Anteil historisch) -->
     <div id="posValueModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="posValueModalTitle">
         <div class="modal-box">
@@ -462,7 +446,7 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="payedFeesModalTitle" data-i18n="liq.tab.tx_fees">TX-Fees</span>
-                <button class="chart-modal-close" id="payedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="payedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="payedFeesModalBody"></div>
         </div>
@@ -474,7 +458,7 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="claimedFeesModalTitle" data-i18n="liq.claimed_fees">Claimed Fees</span>
-                <button class="chart-modal-close" id="claimedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="claimedFeesModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="claimedFeesModalBody"></div>
         </div>
@@ -486,40 +470,23 @@
         <div class="wallet-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="walletDetailModalTitle" data-i18n="liq.wallet_modal_title">Wallet (Wert &gt; 0,00 USDC)</span>
-                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="walletDetailModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="wallet-modal-body" id="walletDetailModalBody"></div>
         </div>
     </div>
 
-    <!-- PnL-24h-Modal -->
-    <!-- Portfolio-Chart-Modal (Gesamt-Karte) -->
+    <!-- Portfolio-Chart-Modal (Klick auf den Gesamtguthaben-Chart) -->
     <div class="chart-modal-overlay" id="portfolioChartModal" style="display:none"
          role="dialog" aria-modal="true" aria-labelledby="portfolioChartModalTitle">
         <div class="chart-modal-dialog">
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="portfolioChartModalTitle" data-i18n="overview.total_balance">Gesamtguthaben</span>
-                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="portfolioChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-range-btns" id="portfolioChartModalRangeBtns"></div>
             <div class="chart-modal-body">
                 <svg id="portfolioChartModalSvg" class="chart-modal-svg"></svg>
-            </div>
-        </div>
-    </div>
-
-    <!-- Volumen-Chart-Modal -->
-    <div class="chart-modal-overlay" id="volChartModal" style="display:none"
-         role="dialog" aria-modal="true" aria-labelledby="volChartModalTitle">
-        <div class="chart-modal-dialog">
-            <div class="chart-modal-header">
-                <span class="chart-modal-pair" id="volChartModalTitle" data-i18n="liq.volume">Volumen</span>
-                <select class="vol-pool-select" id="volChartModalPoolSelect"></select>
-                <div class="chart-range-btns" id="volChartModalRangeBtns"></div>
-                <button class="chart-modal-close" id="volChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
-            </div>
-            <div class="chart-modal-body" style="position:relative">
-                <svg id="volChartModalSvg" class="chart-modal-svg"></svg>
             </div>
         </div>
     </div>
@@ -531,7 +498,7 @@
             <div class="chart-modal-header">
                 <span class="chart-modal-pair" id="feeChartModalTitle" data-i18n="liq.fees_claimed">Fees (claimed)</span>
                 <div class="chart-range-btns" id="feeChartModalRangeBtns"></div>
-                <button class="chart-modal-close" id="feeChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">&times;</button>
+                <button class="chart-modal-close" id="feeChartModalClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close">✕</button>
             </div>
             <div class="chart-modal-body" style="position:relative">
                 <svg id="feeChartModalSvg" class="chart-modal-svg"></svg>
@@ -540,6 +507,6 @@
     </div>
 
     <!-- Scripts -->
-    <script type="module" src="js/app.js?v=20260923k"></script>
+    <script type="module" src="js/app.js?v=20261002b"></script>
 </body>
 </html>

@@ -46,6 +46,7 @@ import { t, getLang } from '../../../lib/i18n.js';
 import { notificationText, formatNumber } from '../../../lib/notify-render.js';
 import { pnlForPeriod } from '../../../lib/pnl.js';
 import Database from 'better-sqlite3';
+import fs from 'node:fs';
 import { PATHS } from '../../../config/paths.js';
 import { getBotConfig } from '../../../lib/bot-registry.js';
 
@@ -75,6 +76,37 @@ const RISK_CATEGORIES = [
     'tvl', 'tvl-done',
     'score-limit', 'score-limit-done',
 ];
+
+/**
+ * Externe Überwachung der System-Meldungen (CORE#001135, KB Core/message-center.md
+ * Abschnitt 5 "Extern verwaltete System-Meldungen").
+ *
+ * Liest ein externer Monitor die System-Meldungen nur lesend aus nexus.db und führt sie in
+ * einem Ticketsystem, braucht das Message Center sie nicht ein zweites Mal. Eingeschaltet
+ * wird das je Installation über MC_SYSTEM_EXTERNAL_HEARTBEAT (settings.env bzw.
+ * bots/settings/.env): Pfad einer Datei, die der Monitor bei jedem Lauf schreibt. Nur
+ * solange deren mtime jünger als EXTERNAL_HEARTBEAT_MAX_AGE_MS ist, blendet die Rubrik
+ * System Warnungen/Fehler und den RPC-Fallback aus. Steht der Monitor, fehlt die Datei
+ * oder ist sie nicht lesbar, erscheint alles wieder hier — eine Meldung darf nie an
+ * beiden Orten fehlen. Ohne Variable (Normalfall auf jedem Fork) ändert sich nichts.
+ *
+ * Ausgeblendet wird nur in der Anzeige; nexus.db bleibt unverändert, denn genau dort liest
+ * der Monitor. Die Menge muss zu dessen Abfragen passen: alle warn/error der Rubrik System
+ * plus Kategorie rpc-fallback (auch die info-Entwarnung).
+ */
+const EXTERNAL_HEARTBEAT_MAX_AGE_MS = 15 * 60_000;
+
+export function externalMonitorActive(heartbeatPath = process.env.MC_SYSTEM_EXTERNAL_HEARTBEAT?.trim(), now = Date.now()) {
+    if (!heartbeatPath) return false;
+    try {
+        const age = now - fs.statSync(heartbeatPath).mtimeMs;
+        return age >= -60_000 && age <= EXTERNAL_HEARTBEAT_MAX_AGE_MS;
+    } catch {
+        return false;
+    }
+}
+
+export const EXTERNAL_SYSTEM_EXCL_SQL = "NOT (level IN ('warn','error') OR COALESCE(category,'') = 'rpc-fallback')";
 
 /**
  * Anzeigename des betroffenen Bots für die Kopfzeile im Message Center.
@@ -533,7 +565,7 @@ router.get('/support/stream', async (req, res) => {
 // unsichtbar trotz korrekt geburnter Zombies (Fund 2026-08-27: seit dem
 // Umstellen keine Nachricht mehr gesehen, obwohl 26.08. zwei Zombies geburnt
 // wurden — Meldungen standen korrekt in der DB).
-function handleNotificationWindow(req, res, scope) {
+export function handleNotificationWindow(req, res, scope) {
     // Reine Lese-Queries auf die Nexus-DB sind laut Konvention erlaubt (exklusiver
     // Schreibzugriff bleibt beim Nexus selbst, siehe notify-db.js). Kein Nostr-Bezug,
     // bleibt deshalb hier statt im Premium-Dienst.
@@ -608,7 +640,8 @@ function handleNotificationWindow(req, res, scope) {
         const restartParams = hasI18n ? [...restartKeys, ...restartTexts] : [...restartTexts];
 
         const baseFilter = `(level != 'info' OR category IN ('health-share-report', 'daily-report', 'rm-executed', 'scam_token', 'zombie-check'))`
-            + ` AND message NOT LIKE '%APR-Alert%' AND ${scopeSql} AND ${restartSql}`;
+            + ` AND message NOT LIKE '%APR-Alert%' AND ${scopeSql} AND ${restartSql}`
+            + (scope === 'system' && externalMonitorActive() ? ` AND ${EXTERNAL_SYSTEM_EXCL_SQL}` : '');
         const baseParams = [...scopeParams, ...restartParams];
         // Suche schließt Anzeigename UND context mit ein: die UI zeigt "Liquidity Bot"
         // sowie (seit 2026-08-08) den Pool aus dem context-JSON-Blob in der Thema-Spalte

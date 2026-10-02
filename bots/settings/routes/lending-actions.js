@@ -45,6 +45,7 @@ import { spawn }         from 'node:child_process';
 import Database          from 'better-sqlite3';
 import { PATHS, envFile } from '../../../config/paths.js';
 import { t } from '../../../lib/i18n.js';
+import { registerKind, startJob, waitForJob, jobResponse } from '../lib/finance-jobs.js';
 
 const __dirname      = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT     = PATHS.root;
@@ -217,34 +218,6 @@ function readEnv() {
                 .map(l => { const idx = l.indexOf('='); return [l.slice(0, idx).trim(), l.slice(idx + 1).trim()]; })
         );
     } catch { return {}; }
-}
-
-/** Spawnt ein CLI-Script, sammelt stdout, liefert das letzte JSON-Objekt. */
-function runCli(scriptRelPath, cliArgs, { timeoutMs = 120_000 } = {}) {
-    return new Promise((resolve) => {
-        const proc = spawn('node', [path.join(LB_ROOT, scriptRelPath), ...cliArgs], { cwd: LB_ROOT });
-        let stdout = '';
-        const timer = setTimeout(() => {
-            try { proc.kill('SIGTERM'); } catch {}
-            resolve({ ok: false, error: t('api.common.timeout_s', { seconds: timeoutMs / 1000 }) });
-        }, timeoutMs);
-        // Ohne Handler crasht ein ENOENT (z.B. LB_ROOT fehlt im Fork) den ganzen
-        // forge-settings-Prozess über ein unhandled 'error'-Event statt hier
-        // sauber als Fehler aufzulösen (siehe triggerExportAndSync() oben).
-        proc.on('error', err => { clearTimeout(timer); resolve({ ok: false, error: err.message }); });
-        proc.stdout.on('data', c => { stdout += c.toString(); });
-        proc.on('close', () => {
-            clearTimeout(timer);
-            const lines    = stdout.split('\n').map(l => l.trim()).filter(Boolean);
-            const jsonLine = [...lines].reverse().find(l => l.startsWith('{') && l.endsWith('}'));
-            if (!jsonLine) {
-                resolve({ ok: false, error: t('api.common.no_json_output') });
-                return;
-            }
-            try { resolve(JSON.parse(jsonLine)); }
-            catch (err) { resolve({ ok: false, error: t('api.common.json_parse_failed', { error: err.message }) }); }
-        });
-    });
 }
 
 /**
@@ -440,6 +413,46 @@ router.put('/pool-enabled/:protocolId', (req, res) => {
     }
 });
 
+// ── Deposit/Withdraw als losgelöster Job (CORE#000993) ──────────────────────
+// Überlebt einen Neustart von forge-settings, kein Timeout beendet den Prozess
+// (lib/finance-jobs.js). move.lock bleibt bis zum tatsächlichen Prozessende stehen und
+// wird in der Nacharbeit gelöst — auch wenn die erst nach einem Neustart läuft.
+const LENDING_JOB_WAIT_MS = 120_000;
+
+for (const action of ['deposit', 'withdraw']) {
+    registerKind(`lend-${action}`, {
+        onDone(result) {
+            try { fs.unlinkSync(MOVE_LOCK); } catch { /* bereits gelöscht */ }
+            if (result.ok) triggerExportAndSync();
+            console.log(`[lending-actions] ${action} ${result.ok ? 'ausgeführt' : 'fehlgeschlagen'}${result.ok ? '' : ` – ${result.error ?? 'ohne Fehlertext'}`}`);
+            return result;
+        },
+    });
+}
+
+async function runLendingJob(res, action, protocol, amount, clientRef) {
+    const { job, conflict } = startJob({
+        kind:   `lend-${action}`,
+        ref:    clientRef,
+        key:    'lending',     // ein Wallet, ein move.lock → nie zwei Lending-Aktionen parallel
+        script: path.join(LB_ROOT, 'bin', `${action}.js`),
+        args:   ['--protocol', protocol, '--amount', String(amount), '--yes', '--json'],
+        cwd:    LB_ROOT,
+        meta:   { protocol, amount },
+    });
+    if (conflict) {
+        return res.status(409).json({ ok: false, error: t('api.jobs.already_running'), busy: true, jobId: conflict.id });
+    }
+    // move.lock setzen → Bot deployed während der TX nicht automatisch. PID des Jobs,
+    // nicht von server.js: der Job überlebt einen Neustart, server.js nicht.
+    const lockInfo = JSON.stringify({ pid: job.pid, startedAt: Date.now(), reason: `manual-${action}`, jobId: job.id });
+    try { fs.writeFileSync(MOVE_LOCK, lockInfo, 'utf8'); } catch { /* ignorieren */ }
+
+    const current = await waitForJob(job.id, LENDING_JOB_WAIT_MS);
+    const { status, body } = jobResponse(current, t('api.jobs.still_running'));
+    res.status(status).json(body);
+}
+
 /** Manuelles Deposit in ein Protokoll. */
 router.post('/deposit', async (req, res) => {
     const { protocol, amount } = req.body ?? {};
@@ -456,21 +469,7 @@ router.post('/deposit', async (req, res) => {
         }
     }
 
-    // move.lock setzen → Bot deployed während der TX nicht automatisch
-    const lockInfo = JSON.stringify({ pid: process.pid, startedAt: Date.now(), reason: 'manual-deposit' });
-    try { fs.writeFileSync(MOVE_LOCK, lockInfo, 'utf8'); } catch { /* ignorieren */ }
-
-    try {
-        const result = await runCli('bin/deposit.js', [
-            '--protocol', protocol,
-            '--amount',   String(amount),
-            '--yes', '--json',
-        ]);
-        if (result.ok) triggerExportAndSync();
-        res.status(result.ok ? 200 : 409).json(result);
-    } finally {
-        try { fs.unlinkSync(MOVE_LOCK); } catch { /* bereits gelöscht */ }
-    }
+    return runLendingJob(res, 'deposit', protocol, amount, req.body?.clientRef);
 });
 
 /** Manueller Withdraw aus einem Protokoll. */
@@ -479,21 +478,7 @@ router.post('/withdraw', async (req, res) => {
     if (!protocol) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'protocol' }) });
     if (amount == null) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'amount' }) });
 
-    // move.lock setzen → Bot deployed während der TX nicht automatisch
-    const lockInfo = JSON.stringify({ pid: process.pid, startedAt: Date.now(), reason: 'manual-withdraw' });
-    try { fs.writeFileSync(MOVE_LOCK, lockInfo, 'utf8'); } catch { /* ignorieren */ }
-
-    try {
-        const result = await runCli('bin/withdraw.js', [
-            '--protocol', protocol,
-            '--amount',   String(amount),
-            '--yes', '--json',
-        ]);
-        if (result.ok) triggerExportAndSync();
-        res.status(result.ok ? 200 : 409).json(result);
-    } finally {
-        try { fs.unlinkSync(MOVE_LOCK); } catch { /* bereits gelöscht */ }
-    }
+    return runLendingJob(res, 'withdraw', protocol, amount, req.body?.clientRef);
 });
 
 

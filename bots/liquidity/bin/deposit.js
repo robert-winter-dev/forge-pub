@@ -21,6 +21,8 @@
  *   Genau eines von --usdc / --tokenb / (--token + --amount) ist Pflicht.
  *   --new             Neue Position erlauben wenn keine existiert
  *   --dry-run         Simulation: alle Checks + Berechnungen, keine On-Chain-TX
+ *   --simulate-wallet Nur mit --dry-run: fiktiver Wallet-Stand (viel USDC/SOL, sonst 0),
+ *                     unabhängig vom echten Guthaben (LIQ#000964)
  *   --json            Maschinenlesbarer Output (für UI-Integration)
  *   --no-trailing-stop-default  Trailing Stop bei Erst-Einzahlung deaktiviert anlegen (LIQ#0362)
  *   --no-tvl-protection-default TVL-Schutz Stufe 1 bei Erst-Einzahlung deaktiviert anlegen (LIQ#0362)
@@ -56,8 +58,12 @@ import {
 import { getAdapter }        from '../lib/pool-adapter/index.js';
 import { calculateRange }    from '../lib/range.js';
 import {
-    getKeypair, getUsdcBalance, getUsableSolBalance, getTokenBalance,
-    getTokenBalanceFresh, getUsableSolBalanceFresh, getSolBalanceFresh,
+    getKeypair, getUsdcBalance as realGetUsdcBalance,
+    getUsableSolBalance as realGetUsableSolBalance,
+    getTokenBalance as realGetTokenBalance,
+    getTokenBalanceFresh as realGetTokenBalanceFresh,
+    getUsableSolBalanceFresh as realGetUsableSolBalanceFresh,
+    getSolBalanceFresh as realGetSolBalanceFresh,
     getConnection, getTxFee, USDC_MINT,
 } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
@@ -71,8 +77,8 @@ import { quoteSymbol } from '../../../html/js/format-price.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import { PublicKey }           from '@solana/web3.js';
 import {
-    clmmTokenAForDeposit, calcDepositedUsdc, getTokenUsdPrice,
-    sweepResidualIntoPosition,
+    clmmTokenAForDeposit, calcDepositedUsdc, getTokenUsdPrice, autoSwapNoetig,
+    depositSolBedarf, sweepResidualIntoPosition,
     DEPOSIT_SLIPPAGE, SLIPPAGE_FACTOR,
 } from '../lib/deposit-lib.js';
 import {
@@ -83,6 +89,7 @@ import {
 import Decimal                 from 'decimal.js';
 import BN                      from 'bn.js';
 import { remainingInvestCapacity } from '../lib/invest-eligibility.js';
+import { REINVEST_NOTE_PREFIX } from '../../../lib/reinvest-rules.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -109,7 +116,11 @@ const { values: args } = parseArgs({
         'max-a':   { type: 'string' },   // Modus C: beide Seiten als Obergrenze (Engpass-Logik)
         'max-b':   { type: 'string' },
         new:       { type: 'boolean', default: false },
+        // Cleanup-Reinvest (LIQ#000988): Buchungs-Note und Position, an die der Aufruf gebunden ist.
+        note:      { type: 'string' },
+        'expect-position': { type: 'string' },
         'dry-run': { type: 'boolean', default: false },
+        'simulate-wallet': { type: 'boolean', default: false },
         json:      { type: 'boolean', default: false },
         'no-trailing-stop-default':  { type: 'boolean', default: false },
         'no-tvl-protection-default': { type: 'boolean', default: false },
@@ -176,11 +187,45 @@ if (!args.pool || modeCount !== 1) {
     process.exit(1);
 }
 
+// 🔒 Cleanup-Reinvest (LIQ#000988) darf NIE eine Position eröffnen. `--expect-position` und `--note`
+// gehören nur zu diesem Aufstock-Aufruf: mit `--new` sind sie verboten, `--note` nur mit dem
+// Reinvest-Präfix erlaubt (die Note steuert Anzeige „Cleanup > Reinvest" und is_external=0).
+const reinvestCall = args['expect-position'] != null || args.note != null;
+if (reinvestCall) {
+    const bad = args.new ? '--new ist zusammen mit --expect-position/--note verboten (Reinvest eröffnet nie eine Position).'
+        : (args.note != null && !String(args.note).startsWith(REINVEST_NOTE_PREFIX)) ? `--note muss mit '${REINVEST_NOTE_PREFIX}' beginnen.`
+        : (args.note != null) !== (args['expect-position'] != null) ? '--note und --expect-position gehören zusammen.'
+        : null;
+    if (bad) {
+        if (jsonMode) { emitJson(false, bad); process.exit(1); }
+        console.error(`[deposit] ${bad}`);
+        process.exit(1);
+    }
+}
 const useTokenB     = hasTokenB;
 const useModeB      = hasModeB;
 const useMaxPair    = hasMaxPair;
 const useModeBOrC   = useModeB || useMaxPair;  // gemeinsamer Branch: Modus B + Modus C
 const dryRun        = args['dry-run'];
+const simulateWallet = args['simulate-wallet'];
+
+// --simulate-wallet (nur mit --dry-run): Wallet-Stände sind fiktiv — reichlich USDC und SOL,
+// alle anderen Token 0. Der Dry-Run prüft damit Pool, Preis, Range, Token-2022 und Swap-Quotes
+// unabhängig vom echten Kontostand (LIQ#000964: Pool-Import-Verifikation darf kein Guthaben
+// voraussetzen). Ohne --dry-run bricht das Skript ab, es kann so nie Kapital bewegen.
+if (simulateWallet && !dryRun) {
+    console.error('[deposit] --simulate-wallet ist nur zusammen mit --dry-run erlaubt.');
+    process.exit(1);
+}
+const SIM_USDC = 1_000_000;
+const SIM_SOL  = 10;
+const isUsdcMint = (mint) => String(mint) === USDC_MINT;
+const getUsdcBalance   = (...a) => simulateWallet ? Promise.resolve(SIM_USDC) : realGetUsdcBalance(...a);
+const getUsableSolBalance      = (...a) => simulateWallet ? Promise.resolve(SIM_SOL) : realGetUsableSolBalance(...a);
+const getUsableSolBalanceFresh = (...a) => simulateWallet ? Promise.resolve(SIM_SOL) : realGetUsableSolBalanceFresh(...a);
+const getSolBalanceFresh       = (...a) => simulateWallet ? Promise.resolve(SIM_SOL) : realGetSolBalanceFresh(...a);
+const getTokenBalance      = (w, mint, ...r) => simulateWallet ? Promise.resolve(isUsdcMint(mint) ? SIM_USDC : 0) : realGetTokenBalance(w, mint, ...r);
+const getTokenBalanceFresh = (w, mint, ...r) => simulateWallet ? Promise.resolve(isUsdcMint(mint) ? SIM_USDC : 0) : realGetTokenBalanceFresh(w, mint, ...r);
 const armTrailingStop    = !args['no-trailing-stop-default'];
 const armTvlProtection   = !args['no-tvl-protection-default'];
 const modeBToken    = useModeB ? args.token : null;
@@ -273,13 +318,22 @@ async function _describeInsufficientFunds(pool, amountA, amountB, tokenALabel, t
     return lines.join('\n');
 }
 
+// Selbstheilung nach assertSufficientSol(): err.solBalance ist der GESAMTE Wallet-Stand,
+// _autoTopUpSol() rechnet und antwortet in NUTZBAREM SOL. Bis LIQ#000971 wurde der
+// nutzbare Rückgabewert gegen die volle Reserve geprüft — ein erfolgreiches Topup auf
+// Reserve+0,02 galt damit als gescheitert.
+const SELFHEAL_USABLE_SOL = 0.01;
+const _usableFromTotal = (totalSol) => Math.max(0, totalSol - config.solReserve);
+
 /**
  * Selbstheilung SOL-Engpass: tauscht USDC → SOL, bis mindestens minNeeded erreicht ist.
  * Wiederverwendet vom Upfront-Check (vor allen TXs) UND vom Retry nach einem
  * assertSufficientSol()-Fehlschlag mitten in increaseLiquidity/openPosition — letzteres
  * kann passieren, wenn SOL zwischen Upfront-Check und der eigentlichen TX-Ausführung durch
  * einen Pre-Swap/andere Fees unter die Reserve fällt.
- * @returns {number} tatsächlicher SOL-Stand nach dem Versuch (unverändert falls kein Top-Up möglich/nötig)
+ * @param {number} currentBalance  NUTZBARES SOL (Reserve abgezogen)
+ * @param {number} minNeeded       NUTZBARES SOL
+ * @returns {number} nutzbarer SOL-Stand nach dem Versuch (unverändert falls kein Top-Up möglich/nötig)
  */
 async function _autoTopUpSol(currentBalance, minNeeded) {
     if (currentBalance >= minNeeded) return currentBalance;
@@ -487,6 +541,13 @@ function volatilePairTargets(depositUsd, currentPrice, priceLower, priceUpper, u
 
 const position = getOpenPosition(db, pool.id);
 
+// 🔒 Reinvest ist an genau die Position gebunden, die der Cleanup gesehen hat. Ist sie inzwischen
+// weg (Rebalance, Exit) oder eine andere: Abbruch, BEVOR irgendein Swap läuft.
+if (args['expect-position'] != null && position?.nft_mint !== args['expect-position']) {
+    abort(`Reinvest abgebrochen: ${pool.pair} hat nicht mehr die erwartete offene Position `
+        + `(erwartet ${args['expect-position']}, gefunden ${position?.nft_mint ?? 'keine'}).`);
+}
+
 if (!position && !args.new) {
     abort(t('cli.ld.no_position_hint', { pool: pool.pair }));
 }
@@ -516,7 +577,7 @@ if (stats.tvlUsd != null) {
         volume24hUsd: stats.volume24hUsd,
         apr24h:       stats.apr24h,
         // Ohne diese Felder rechnet export.js' NP-Schätzung mit der neuesten (dieser) Zeile
-        // auf Schätz-APR zurück → InvestScore-Einbruch bis zur nächsten Bot-Zeile (LIQ#000774).
+        // bis zur nächsten Bot-Zeile auf Schätz-APR zurück (LIQ#000774).
         liquidityInRange: stats.liquidityInRange ?? null,
         fees24hUsd:       stats.fees24hUsd       ?? null,
     });
@@ -653,14 +714,10 @@ try {
 // Sicherstellen, dass nach geschätzten TX-Fees noch config.solReserve übrig bleibt.
 // Wird vor Pre-Swaps geprüft, damit SOL nicht sinnlos verbraucht wird.
 // Falls SOL zu niedrig: automatisch USDC → SOL swappen (analog zu cleanup.js).
-//
-// Schätzung: volatile pair = 3 TXs (2 Auto-Swaps + Position),
-//            Modus B/C     = 1 TX  (kein Swap),
-//            Standard      = 2 TXs (1 Pre-Swap + Position).
+// Alles hier in NUTZBAREM SOL (Reserve bereits abgezogen), siehe depositSolBedarf().
 if (!dryRun) {
-    const _solFeePerTx  = 0.01;  // Konservativ: Jupiter-Swaps kosten 0.005–0.015 SOL
-    const _txCount      = useModeBOrC ? 1 : pool.volatilePair ? 3 : 2;
-    const _solMinNeeded = config.solReserve + _txCount * _solFeePerTx;
+    const { txCount: _txCount, feePerTx: _solFeePerTx, usableNeeded: _solMinNeeded } =
+        depositSolBedarf({ modeBOrC: useModeBOrC, volatilePair: !!pool.volatilePair });
     let   _solBalance   = await getUsableSolBalanceFresh(keypair.publicKey);
 
     if (_solBalance < _solMinNeeded) {
@@ -749,7 +806,7 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
     }
     modeATarget = { a: tokenANeeded, b: tokenBNeeded };
 
-    if (usdcForA >= 1.0) {
+    if (autoSwapNoetig(usdcForA)) {
         console.log(`[deposit] Auto-Swap A: ${usdcForA.toFixed(2)} USDC → ${tokenALabel}`);
         if (dryRun) {
             const estOut = (usdcForA / usdValueA) * 0.99;
@@ -795,7 +852,7 @@ if (pool.volatilePair && hasUsdc && !useModeBOrC) {
         }
     }
 
-    if (usdcForB >= 1.0) {
+    if (autoSwapNoetig(usdcForB)) {
         console.log(`[deposit] Auto-Swap B: ${usdcForB.toFixed(2)} USDC → ${tokenBLabel}`);
         if (dryRun) {
             const estOut = (usdcForB / usdValueB) * 0.99;
@@ -1230,20 +1287,20 @@ if (position) {
 
     let result;
     try {
-        result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
+        result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
     } catch (err) {
         if (err.solBalance !== undefined) {
             // Selbstheilung: SOL ist zwischen Upfront-Check und dieser TX unter die Reserve
             // gefallen (z.B. durch einen Pre-Swap) — erst automatisch USDC→SOL nachtanken,
             // dann EINMAL retryen, bevor abgebrochen wird.
             console.warn(`[deposit] ${t('cli.liq.low_sol_selfheal', { step: 'increaseLiquidity', sol: err.solBalance.toFixed(4) })}`);
-            const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
-            if (healedSol >= config.solReserve) {
+            const healedSol = await _autoTopUpSol(_usableFromTotal(err.solBalance), SELFHEAL_USABLE_SOL);
+            if (healedSol >= SELFHEAL_USABLE_SOL) {
                 console.log(`[deposit] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'increaseLiquidity' })}`);
                 try {
-                    result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
+                    result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
                 } catch (err2) {
-                    await notify.solLow(db, err2.solBalance ?? healedSol);
+                    await notify.solLow(db, err2.solBalance ?? healedSol + config.solReserve);
                     db.close();
                     abort(err2.message);
                 }
@@ -1317,12 +1374,18 @@ if (position) {
 
     // Echter Kapital-Zufluss → capital_flows-Eintrag (Quelle für netDeposited).
     // balance_snapshot bleibt für Audit, wird aber nicht mehr als Baseline gelesen.
+    // Reinvest (LIQ#000988): eigenes Kapital aus dem Wallet, kein neuer externer Zufluss →
+    // is_external=0 verschiebt den PnL-Anker nicht (siehe lib/pnl-anchor.js).
+    const mainNote     = args.note ?? 'Manueller Deposit (increaseLiquidity)';
+    const restNote     = args.note ? `${REINVEST_NOTE_PREFIX}: Rest-Einzahlung` : 'Rest-Einzahlung (automatisch)';
+    const flowExternal = args.note ? 0 : 1;
     insertCapitalFlow(db, {
         poolId:          pool.id,
         usdcAmount:      depositedUsdcMain,
         balanceSnapshot: null,
         txHash:          result.txHash,
-        note:            'Manueller Deposit (increaseLiquidity)',
+        note:            mainNote,
+        isExternal:      flowExternal,
     });
 
     const depositFee = await getTxFee(result.txHash);
@@ -1334,7 +1397,7 @@ if (position) {
         usdValue: depositedUsdcMain,
         txHash:   result.txHash,
         txFeeSol: depositFee,
-        note:     'Manueller Deposit (increaseLiquidity)',
+        note:     mainNote,
     });
 
     // Die Rest-Einzahlung ist eine eigene Transaktion — eigener Kapitalfluss, eigene
@@ -1345,7 +1408,8 @@ if (position) {
             usdcAmount:      sweep.usdc,
             balanceSnapshot: null,
             txHash:          sweep.txHash,
-            note:            'Rest-Einzahlung (automatisch)',
+            note:            restNote,
+            isExternal:      flowExternal,
         });
         insertTransaction(db, {
             poolId:   pool.id,
@@ -1355,7 +1419,7 @@ if (position) {
             usdValue: sweep.usdc,
             txHash:   sweep.txHash,
             txFeeSol: await getTxFee(sweep.txHash),
-            note:     'Rest-Einzahlung (automatisch)',
+            note:     restNote,
         });
     }
 
@@ -1464,15 +1528,15 @@ try {
     if (err.solBalance !== undefined) {
         // Selbstheilung wie bei increaseLiquidity: erst USDC→SOL nachtanken, dann 1× retryen.
         console.warn(`[deposit] ${t('cli.liq.low_sol_selfheal', { step: 'openPosition', sol: err.solBalance.toFixed(4) })}`);
-        const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
-        if (healedSol >= config.solReserve) {
+        const healedSol = await _autoTopUpSol(_usableFromTotal(err.solBalance), SELFHEAL_USABLE_SOL);
+        if (healedSol >= SELFHEAL_USABLE_SOL) {
             console.log(`[deposit] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'openPosition' })}`);
             try {
                 resultNew = await adapter.openPosition(
                     pool, range.tickLower, range.tickUpper, amountANew, amountBNew, DEPOSIT_SLIPPAGE
                 );
             } catch (err2) {
-                await notify.solLow(db, err2.solBalance ?? healedSol);
+                await notify.solLow(db, err2.solBalance ?? healedSol + config.solReserve);
                 db.close();
                 abort(err2.message);
             }

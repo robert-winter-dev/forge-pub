@@ -11,10 +11,8 @@
  * Pool wird deaktiviert). Default seit 2026-08-15: 100 % raus.
  *
  * Die Stufe feuert pro Position maximal einmal (tvl_executions.position_id+level) —
- * das ist der einzige Schutz gegen Mehrfach-Auslösung. Der konfigurierte
- * `cooldownHours` wirkt bewusst NICHT hier, sondern ausschließlich im Cleanup
- * (bin/cleanup.js): er verhindert das sofortige Wiederbefüllen eines gerade
- * verlassenen Pools, darf aber nie den Kapitalschutz selbst aussperren.
+ * das ist der einzige Schutz gegen Mehrfach-Auslösung. (Ein früherer `cooldownHours`
+ * sperrte nur den Cleanup-Invest und entfiel mit LIQ#000942.)
  *
  * TVL-Quelle: letzter pool_stats.tvl_usd (stündlich aktualisiert) — kein API-Call
  * im Trigger-Check. Schwelle === null → Fallback auf pools.json (tvlWarn/Exit).
@@ -59,8 +57,7 @@ const PARTIAL_SLIPPAGE = Percentage.fromFraction(1, 200); // 0,5 % für decrease
 /**
  * Melde-Cooldown der Stufe-1-Warnung: höchstens EINE Warnung pro Pool und Tag.
  *
- * Bewusst getrennt vom Ausführungs-Cooldown (`cooldownHours`, Default 12 h): ein
- * anhaltend niedriger TVL ist ein Dauerzustand, den der Nutzer aussitzen können soll,
+ * Ein anhaltend niedriger TVL ist ein Dauerzustand, den der Nutzer aussitzen können soll,
  * ohne mehrfach täglich dieselbe Meldung zu bekommen. Die Aktion selbst (Teil-Abzug)
  * läuft unabhängig davon weiter — gedrosselt wird nur die Benachrichtigung.
  *
@@ -112,14 +109,8 @@ function resolveTrigger(pool, db) {
     const tvl = latestTvl(db, pool.id);
     if (!(tvl > 0)) return null; // kein verlässlicher TVL → nichts tun
 
-    // Kein Cooldown-Check an dieser Stelle — bewusst.
-    //
-    // `cooldownHours` ist der *Cleanup*-Cooldown: er hält den Ranking-/Invest-Cleanup
-    // davon ab, einen gerade verlassenen Pool sofort wieder zu befüllen (bin/cleanup.js,
-    // _loadCleanupCooldownBlockedPools). Der Schutz selbst muss davon unberührt bleiben,
-    // sonst wäre bis zu `cooldownHours` lang kein Notfall-Exit möglich, obwohl der TVL
-    // weiter fällt — der Cooldown würde also ausgerechnet den Kapitalschutz aussperren,
-    // den er nie gemeint hat (Klarstellung 2026-08-13).
+    // Kein Cooldown-Check an dieser Stelle — bewusst (der frühere Cleanup-Cooldown
+    // entfiel mit LIQ#000942).
     //
     // Gegen Mehrfach-Auslösung schützt stattdessen isTvlLevelExecutedForPosition():
     // jede Stufe feuert pro Position genau einmal. Die Drosselung der *Meldung* sitzt
@@ -319,6 +310,7 @@ async function stepTransfer(pool, db, execId, levelCfg, coinsA, coinsB, swappedU
         sendTo:        levelCfg.sendTo,
         swapToUsdc:    levelCfg.swapToUsdc,
         logPrefix:     `[tvl-protection:${pool.id}]`,
+        db,
         onTransferred: () => updateTvlExecution(db, execId, { step: 'transferred' }),
     });
 }

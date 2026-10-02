@@ -1,7 +1,7 @@
 {
   "relays": [
     "wss://nostr.mom",
-    "wss://nos.lol",
+    "wss://offchain.pub",
     "wss://relay.primal.net",
     "wss://nostr.oxtr.dev"
   ]

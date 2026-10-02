@@ -8,7 +8,7 @@
 //   Fork    → Rechenmodul fehlt, Premium-Daten liegen an → 'delivered' (liest)
 //   Fork    → Rechenmodul fehlt, keine Premium-Daten     → 'none'      (Platzhalter)
 //
-// Gleiches Muster wie lib/invest-score-provider.js: dynamischer Import, damit
+// Gleiches Muster wie lib/slopes-provider.js: dynamischer Import, damit
 // derselbe Code läuft, wenn das Rechenmodul fehlt; der Fork schließt es über
 // config/pub-allowlist.json (closureExclude) aus. 'none' ist ein regulärer Zustand,
 // kein Fehler, und bleibt sichtbar (Entscheidung 2026-07-25: „Zustand immer
@@ -27,12 +27,12 @@ export const EDGE_CAPITAL_USDC = 1000;
 
 /** Ablage der über den Premium-Kanal gelieferten Edge (Blob-Sektion `edge`). */
 export const DELIVERED_EDGE_PATH = path.join(PATHS.liquidityData, 'premium', 'edge.json');
-const DELIVERED_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2h – wie invest-score-provider.js
+const DELIVERED_MAX_AGE_MS = 2 * 60 * 60 * 1000; // 2h – wie slopes-provider.js
 
 // Nur die Modulpräsenz wird gecacht (ändert sich nie zur Laufzeit). Der Fork-Zustand
 // wird bei jedem Aufruf frisch gelesen — bin/bot.js wiederholt export.js-Zyklen in
 // derselben Node-Instanz, ein gecachtes `stale` bliebe sonst ewig stehen
-// (Vorfall 2026-08-01, siehe invest-score-provider.js).
+// (Vorfall 2026-08-01, siehe slopes-provider.js).
 let _computeModule; // undefined = noch nicht ermittelt, null = kein Compute-Modul (Fork)
 
 async function resolveComputeModule() {
@@ -45,6 +45,14 @@ async function resolveComputeModule() {
         _computeModule = null;
     }
     return _computeModule;
+}
+
+/**
+ * true auf dem Master (Rechenmodul vorhanden), false im Fork. Für Entscheidungen, die nur dort
+ * sinnvoll sind, wo die Edge selbst berechnet wird (z. B. dichterer Stats-Takt, LIQ#001114).
+ */
+export async function isEdgeMaster() {
+    return (await resolveComputeModule()) != null;
 }
 
 /**
@@ -84,8 +92,8 @@ export function readDeliveredEdge(filePath = DELIVERED_EDGE_PATH, nowMs = Date.n
  * @param {object} ctx – siehe computeEdge() in lib/edge-compute.js
  * @returns {Promise<{source:'compute'|'delivered'|'none', stale:boolean, byPool:object,
  *          paramsByPool:object, feeModelCompare:object}>}  paramsByPool/feeModelCompare
- *          sind nur im Master befüllt (Range-Parameter für den InvestScore-Fallback und
- *          den Fee-Modell-Vergleich); im Fork leer.
+ *          sind nur im Master befüllt (Range-Parameter für den Fee-Modell-Vergleich);
+ *          im Fork leer.
  */
 export async function loadEdge(ctx) {
     const compute = await resolveComputeModule();

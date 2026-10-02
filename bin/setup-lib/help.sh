@@ -59,14 +59,10 @@ write_getting_started() {
         echo "── $(t GETTING_STARTED_BOTS_HEADER) ──"
         echo "  $(t GETTING_STARTED_BOTS_INTRO_1)"
         echo "  $(t GETTING_STARTED_BOTS_INTRO_2)"
-        echo "  $(t GETTING_STARTED_BOTS_INTRO_3)"
-        echo
-        echo "    sudo systemctl enable --now forge-liquiditybot"
-        echo "    sudo systemctl enable --now forge-lendingbot"
-        echo
-        echo "  $(t GETTING_STARTED_BOTS_ALT_1 "$ip")"
-        echo "  $(t GETTING_STARTED_BOTS_ALT_2)"
-        echo "  $(t GETTING_STARTED_BOTS_ALT_3)"
+        echo "  $(t GETTING_STARTED_BOTS_INTRO_3 "$ip")"
+        # Kein 'systemctl enable' von Hand mehr: der Backend-Schalter setzt den
+        # Autostart selbst mit (CORE#001179).
+        echo "  $(t GETTING_STARTED_BOTS_ALT_1)"
         echo
         echo "── $(t GETTING_STARTED_CONTROL_HEADER) ──────────────────────────"
         echo "  $(t GETTING_STARTED_CONTROL_START):  $BASE_DIR/start.sh"

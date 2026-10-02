@@ -72,29 +72,47 @@ do_user() {
     if id -u "$INSTALL_USER" &>/dev/null; then c_ok "$(t USER_EXISTS)"
     else useradd --system --create-home --shell /bin/bash "$INSTALL_USER"; c_ok "$(t USER_CREATED)"; fi
 
-    local tmp; tmp="$(mktemp)"
-    {
-        echo -n "Cmnd_Alias FORGE_SYSTEMCTL = "
-        local first=1
-        for s in "${SERVICES[@]}"; do
-            for a in start stop restart; do
-                [[ $first -eq 1 ]] || echo -n ", "
-                echo -n "/usr/bin/systemctl $a $s"
-                first=0
-            done
+    do_sudoers
+}
+
+# sudoers-Regel als eigener Schritt: do_user() (install/repair) UND do_update()
+# rufen ihn auf — sonst bekäme eine bestehende Installation eine neu
+# eingeführte Regel (hier: enable/disable der Bots, CORE#001179) nur über ein
+# manuelles 'repair' und der Backend-Schalter scheiterte dort an sudo.
+sudoers_content() {
+    echo -n "Cmnd_Alias FORGE_SYSTEMCTL = "
+    local first=1 s a
+    for s in "${SERVICES[@]}"; do
+        for a in start stop restart; do
+            [[ $first -eq 1 ]] || echo -n ", "
+            echo -n "/usr/bin/systemctl $a $s"
+            first=0
         done
-        echo
-        # Für den manuellen "Updates"-Menüpunkt im Webinterface (System > Updates):
-        # feste, vollständige Kommandozeilen ohne Wildcard-Argument — rollback-code
-        # bekommt bewusst kein --to-version übergeben (VERSIONS_RETENTION=1, es
-        # existiert also ohnehin höchstens ein archiviertes Vorgängerpaket, das
-        # rollback-code ohne Angabe automatisch selbst findet). bot-control-daemon.js
-        # ruft exakt diese drei Zeilen unverändert per execFile auf.
-        echo "Cmnd_Alias FORGE_UPDATE_CHECK = /usr/bin/node $APP_DIR/bin/update-check.js"
-        echo "Cmnd_Alias FORGE_UPDATE_APPLY = /usr/bin/node $APP_DIR/bin/update-check.js --confirm"
-        echo "Cmnd_Alias FORGE_UPDATE_ROLLBACK = /bin/bash $APP_DIR/bin/setup.sh rollback-code --non-interactive --yes"
-        echo "$INSTALL_USER ALL=(root) NOPASSWD: FORGE_SYSTEMCTL, FORGE_UPDATE_CHECK, FORGE_UPDATE_APPLY, FORGE_UPDATE_ROLLBACK"
-    } > "$tmp"
+    done
+    # Backend-Schalter zieht für die Bots den Autostart mit (start → enable,
+    # stop → disable, bots/settings/lib/bot-autostart.js) — damit überlebt der
+    # im Backend gewählte Zustand einen Reboot (CORE#001179).
+    for s in "${BOT_SERVICES[@]}"; do
+        for a in enable disable; do
+            echo -n ", /usr/bin/systemctl $a $s"
+        done
+    done
+    echo
+    # Für den manuellen "Updates"-Menüpunkt im Webinterface (System > Updates):
+    # feste, vollständige Kommandozeilen ohne Wildcard-Argument — rollback-code
+    # bekommt bewusst kein --to-version übergeben (VERSIONS_RETENTION=1, es
+    # existiert also ohnehin höchstens ein archiviertes Vorgängerpaket, das
+    # rollback-code ohne Angabe automatisch selbst findet). bot-control-daemon.js
+    # ruft exakt diese drei Zeilen unverändert per execFile auf.
+    echo "Cmnd_Alias FORGE_UPDATE_CHECK = /usr/bin/node $APP_DIR/bin/update-check.js"
+    echo "Cmnd_Alias FORGE_UPDATE_APPLY = /usr/bin/node $APP_DIR/bin/update-check.js --confirm"
+    echo "Cmnd_Alias FORGE_UPDATE_ROLLBACK = /bin/bash $APP_DIR/bin/setup.sh rollback-code --non-interactive --yes"
+    echo "$INSTALL_USER ALL=(root) NOPASSWD: FORGE_SYSTEMCTL, FORGE_UPDATE_CHECK, FORGE_UPDATE_APPLY, FORGE_UPDATE_ROLLBACK"
+}
+
+do_sudoers() {
+    local tmp; tmp="$(mktemp)"
+    sudoers_content > "$tmp"
     if visudo -c -f "$tmp" >/dev/null 2>&1; then
         install -m 0440 -o root -g root "$tmp" "$SUDOERS_FILE"
         c_ok "$(t USER_SUDOERS_SET)"

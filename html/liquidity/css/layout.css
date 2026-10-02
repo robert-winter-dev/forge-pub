@@ -1005,7 +1005,7 @@ body {
 }
 .active-pools-header {
     display: grid;
-    grid-template-columns: 1fr 44px 1fr minmax(0, 0.8fr) 1fr 20px;
+    grid-template-columns: 1fr 44px minmax(0, 0.8fr) 1fr 1fr 20px;
     gap: 0 12px;
     padding: 8px 14px;
     font-size: 0.7rem;
@@ -1016,7 +1016,7 @@ body {
 }
 .active-pools-row {
     display: grid;
-    grid-template-columns: 1fr 44px 1fr minmax(0, 0.8fr) 1fr 20px;
+    grid-template-columns: 1fr 44px minmax(0, 0.8fr) 1fr 1fr 20px;
     gap: 0 12px;
     align-items: center;
     padding: 10px 14px;
@@ -1058,9 +1058,11 @@ body {
     .active-pools-header, .active-pools-row {
         grid-template-columns: 1fr 44px 1fr;
     }
-    /* Δ (LIQ#000890), Anteil und Edit-Spalte ausblenden — nur Kernwerte auf schmalem Screen */
-    .active-pools-header > :nth-last-child(-n+3),
-    .active-pools-row > :nth-last-child(-n+3) { display: none; }
+    /* Δ (LIQ#000890, Spalte 3), Anteil und Edit-Spalte ausblenden — nur Kernwerte (Pool, Range/Reb., Fees) auf schmalem Screen (LIQ#000945) */
+    .active-pools-header > :nth-child(3),
+    .active-pools-header > :nth-child(n+5),
+    .active-pools-row > :nth-child(3),
+    .active-pools-row > :nth-child(n+5) { display: none; }
 }
 
 /* ── Pools-Row: stapelt früher als Charts-Row ───────────────────── */
@@ -1138,3 +1140,7 @@ body {
 @media (max-width: 640px) {
     .stats-cards { grid-template-columns: 1fr; }
 }
+
+/* ── Opportunity: ohne Premium-Daten ausgeblendet (LIQ#001022) ───────────── */
+#opportunityCard.opp-hidden { display: none; }
+.premium-status-icon.opp-toggle { cursor: pointer; }

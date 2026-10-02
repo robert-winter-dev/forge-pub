@@ -57,6 +57,8 @@ import { rpcLimiter, geckoLimiter } from '../rate-limiter.js';
 import { settle } from '../settle-promise.js';
 import { readPricesBulk } from '../pool-price-bulk.js';
 import { emitChainTxLeg } from '../chain-tx-log.js';
+import { sendWithRebroadcast } from '../tx-rebroadcast.js';
+import { BACKGROUND_LANE_HEADERS, BACKGROUND_TIMEOUT_MS } from '../../../../lib/nexus-lane.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -76,6 +78,9 @@ const DEFAULT_SLIPPAGE = Percentage.fromFraction(1, 100);
  * in der Gebühren-Erfassung und im Dashboard ausgewiesen.
  */
 const ORCA_PRIORITY_FEE_LAMPORTS = 10_000; // 0.00001 SOL ≈ 0.002 USDC pro TX
+
+/** Anläufe für increaseLiquidity bei abgelaufenem Blockhash (nur mit retryOnExpiry). */
+const INCREASE_EXPIRY_ATTEMPTS = 3;
 
 /**
  * Baut den WhirlpoolContext mit dem echten Keypair (gecacht pro Adapter-Instanz).
@@ -136,13 +141,37 @@ async function resolveExpiredTxSignature(err, connection) {
 }
 
 /**
+ * Ersatz für `txBuilder.buildAndExecute()`: baut und signiert wie das SDK, sendet aber mit
+ * Rebroadcast (lib/tx-rebroadcast.js) statt genau einmal — Begründung dort.
+ */
+async function buildSignAndSend(txBuilder, label) {
+    const btx    = await txBuilder.build();
+    const signed = await txBuilder.wallet.signTransaction(btx.transaction);
+    if ('version' in signed) {
+        signed.sign(btx.signers);
+    } else {
+        btx.signers.filter(Boolean).forEach(kp => signed.partialSign(kp));
+    }
+    const { signature, resends } = await sendWithRebroadcast({
+        connection:   txBuilder.connection,
+        rawTx:        signed.serialize(),
+        blockhash:    btx.recentBlockhash,
+        sendOptions:  txBuilder.opts.defaultSendOption,
+        commitment:   txBuilder.opts.defaultConfirmationCommitment,
+        beforeResend: () => rpcLimiter.wait(),
+    });
+    if (resends > 0) console.log(`[orca] ${label}: bestätigt nach ${resends} Rebroadcast(s)`);
+    return signature;
+}
+
+/**
  * Führt einen Orca-TransactionBuilder aus und fängt den Confirm-Timeout-Fall aus
  * resolveExpiredTxSignature() ab — landet die TX trotz Timeout nachweislich on-chain, wird sie
  * als Erfolg gewertet (Signatur zurückgegeben) statt einen echten Fehlschlag vorzutäuschen.
  */
 async function execTx(txBuilder, connection, label) {
     try {
-        return await txBuilder.buildAndExecute();
+        return await buildSignAndSend(txBuilder, label);
     } catch (err) {
         const landedSig = await resolveExpiredTxSignature(err, connection);
         if (!landedSig) throw err;
@@ -393,7 +422,7 @@ export class OrcaAdapter {
     // getPricesOnChainBulk(). Ist sie gesetzt, kommt der Preis ausschließlich daraus; fehlt der
     // Pool darin, schlägt der Aufruf fehl wie ein gescheiterter Einzelread (kein Ersatzwert,
     // kein stiller Einzel-Fallback, der bei einem RPC-Ausfall 54× die teure Abfrage liefe).
-    async getPoolStats(pool, { includeVolumeCandles = true, onChainPrices = null } = {}) {
+    async getPoolStats(pool, { includeVolumeCandles = true, onChainPrices = null, background = false } = {}) {
         const priceLeg = onChainPrices
             ? (onChainPrices.has(pool.address)
                 ? Promise.resolve(onChainPrices.get(pool.address))
@@ -401,7 +430,7 @@ export class OrcaAdapter {
             : this._getPriceOnChain(pool);
         const [onChain, orcaStats, volumeCandles] = await Promise.all([
             settle(priceLeg),
-            settle(this._getOrcaV2Stats(pool.address)),
+            settle(this._getOrcaV2Stats(pool.address, { background })),
             includeVolumeCandles ? settle(this._getVolumeCandles(pool.address)) : Promise.resolve(null),
         ]);
 
@@ -454,10 +483,13 @@ export class OrcaAdapter {
      * APR aus yieldOverTvl (24h) × 365 × 100 — identisches Ergebnis zur alten
      * Gecko-Formel (vol × feeTier × 365 / tvl), aber direkt von Orca geliefert.
      */
-    async _getOrcaV2Stats(poolAddress) {
+    async _getOrcaV2Stats(poolAddress, { background = false } = {}) {
         try {
             const url = `${ORCA_V2_PROXY}/solana/pools/${poolAddress}`;
-            const res = await fetch(url, { signal: AbortSignal.timeout(25_000) });
+            // background: Hintergrund-Spur des Nexus (LIQ#001114), Wartezeit im Limiter zählt zur Antwortzeit
+            const res = await fetch(url, background
+                ? { headers: BACKGROUND_LANE_HEADERS, signal: AbortSignal.timeout(BACKGROUND_TIMEOUT_MS) }
+                : { signal: AbortSignal.timeout(25_000) });
             if (!res.ok) {
                 console.warn(`[orcav2] Pool-Stats ${res.status} für ${poolAddress.slice(0, 8)}...`);
                 return null;
@@ -1330,7 +1362,27 @@ export class OrcaAdapter {
      * @param {number} amountB    Verfügbare Token-B-Menge (human-readable, z.B. 40 USDC)
      * @returns {Promise<{addedLiquidity: string, txHash: string}>}
      */
-    async increaseLiquidity(pool, positionNftMint, amountA, amountB, slippage = DEFAULT_SLIPPAGE) {
+    async increaseLiquidity(pool, positionNftMint, amountA, amountB, slippage = DEFAULT_SLIPPAGE, { retryOnExpiry = false } = {}) {
+        // Ein abgelaufener Blockhash ist endgültig: die TX kann danach nie mehr landen (ein
+        // Landen trotz Timeout fängt execTx() schon ab). Ein neuer Anlauf mit frischer Quote und
+        // frischem Blockhash ist deshalb sicher. Nur für Einzahlungen (Nutzer wartet, der
+        // Pre-Swap ist bereits ausgeführt); der Reinvest im Bot hat seine eigene Vormerkung.
+        const maxAttempts = retryOnExpiry ? INCREASE_EXPIRY_ATTEMPTS : 1;
+        for (let attempt = 1; ; attempt++) {
+            try {
+                return await this._increaseLiquidityOnce(pool, positionNftMint, amountA, amountB, slippage);
+            } catch (err) {
+                const msg = typeof err?.message === 'string' ? err.message : '';
+                const expired =
+                    err?.name === 'TransactionExpiredBlockheightExceededError' ||
+                    /has expired: block height exceeded/i.test(msg);
+                if (!expired || attempt >= maxAttempts) throw err;
+                console.warn(`[orca] ${pool.pair} increaseLiquidity: Blockhash abgelaufen (Versuch ${attempt}/${maxAttempts}) – neuer Anlauf mit frischer Quote.`);
+            }
+        }
+    }
+
+    async _increaseLiquidityOnce(pool, positionNftMint, amountA, amountB, slippage) {
         await assertSufficientSol(getKeypair().publicKey);
 
         const client     = this._getClient();

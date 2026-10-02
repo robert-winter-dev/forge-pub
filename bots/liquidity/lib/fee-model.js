@@ -41,8 +41,8 @@ export const ORCA_LP_SHARE          = 1 - ORCA_PROTOCOL_FEE_RATE / 10_000;   // 
 
 // ── Schalter für die Umstellung (LIQ#000884), getrennt nach Wirkung ────────
 // Umschalten erst nach Freigabe der Vorher/Nachher-Tabelle (bin/fee-model-compare.js).
-//   FEE_MODEL_V2          Anzeige: npWindows (kursive PnL-Schätzung), NP-Range, NP-Qualitätslog und
-//                         darüber der InvestScore-NP-Fallback (bin/export.js).
+//   FEE_MODEL_V2          Anzeige: npWindows (Edge-Prognose), NP-Range und NP-Qualitätslog
+//                         (lib/edge-compute.js).
 //   FEE_MODEL_V2_ADVISOR  Range Advisor: analyzePool() → Range, die der Bot beim Öffnen/Rebalance
 //                         AUTOMATISCH anwendet, dazu pool-scores.json (Settings, Premium-Tabelle).
 // false = Rechnung wie vor LIQ#000884. Env FORGE_FEE_MODEL_V2 / FORGE_FEE_MODEL_V2_ADVISOR = 1|0

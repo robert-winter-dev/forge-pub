@@ -12,6 +12,10 @@ ExecStart=/usr/bin/node server.js
 Restart=on-failure
 RestartSec=5
 
+# Stop/Restart beendet nur server.js, nicht dessen losgelöste Finanzaktionen
+# (Einzahlung, Entnahme, Burn) — die laufen zu Ende, siehe lib/finance-jobs.js, CORE#000993.
+KillMode=process
+
 # Weiche Speicherbremse (Reclaim/Throttling, kein Kill) – kein MemoryMax, siehe CORE#000463.
 MemoryHigh=384M
 

@@ -171,6 +171,12 @@ export function setForceRebalanceFlag(poolId) {
     writeFileSync(join(DATA_DIR, `force-rebalance-${poolId}.flag`), '', 'utf8');
 }
 
+// Nur nachsehen, nicht löschen — für die Wartephasen-Prüfung in bot.js: das Flag wird
+// erst verbraucht, wenn der Bot die Aktion wirklich startet.
+export function hasForceRebalanceFlag(poolId) {
+    return existsSync(join(DATA_DIR, `force-rebalance-${poolId}.flag`));
+}
+
 export function checkAndClearForceRebalanceFlag(poolId) {
     const file = join(DATA_DIR, `force-rebalance-${poolId}.flag`);
     if (!existsSync(file)) return false;

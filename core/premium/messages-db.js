@@ -203,26 +203,35 @@ const MAX_MESSAGES_PER_CATEGORY = 100;
  * dort zählt die Grenze pro Zeile.
  */
 export function pruneMessagesToLimit(db, category) {
-    if (category === 'support') {
-        db.prepare(`
-            DELETE FROM nostr_support_messages
-            WHERE category = 'support'
+    // Gekappte Zeilen bekommen einen Tombstone (nostr_deleted_events), sonst liefert der
+    // Relay-Backlog-Replay nach Neustart/Update sie erneut aus: sie kämen als UNGELESEN
+    // zurück und verdrängten beim nächsten Prune andere Zeilen (pub1, 23.09.2026: nach
+    // jedem Update wieder "6" ungelesen, obwohl alle sichtbaren gelesen waren).
+    // Tie-Break `id ASC`: bei gleichem Zeitstempel (Relay-Sekunden) behält die ältere
+    // Zeile ihren Platz – die per Replay neu eingefügte wird gekappt statt eine
+    // bereits gelesene zu verdrängen.
+    const stale = category === 'support'
+        ? `category = 'support'
               AND (peer_pubkey, COALESCE(thread_id, '')) NOT IN (
                   SELECT peer_pubkey, COALESCE(thread_id, '')
                   FROM nostr_support_messages
                   WHERE category = 'support'
                   GROUP BY peer_pubkey, COALESCE(thread_id, '')
-                  ORDER BY MAX(timestamp) DESC
+                  ORDER BY MAX(timestamp) DESC, MIN(id) ASC
                   LIMIT ?
-              )
-        `).run(MAX_MESSAGES_PER_CATEGORY);
-    } else {
-        db.prepare(`
-            DELETE FROM nostr_support_messages
-            WHERE category = ?
+              )`
+        : `category = ?
               AND id NOT IN (
-                  SELECT id FROM nostr_support_messages WHERE category = ? ORDER BY timestamp DESC LIMIT ?
-              )
-        `).run(category, category, MAX_MESSAGES_PER_CATEGORY);
-    }
+                  SELECT id FROM nostr_support_messages WHERE category = ? ORDER BY timestamp DESC, id ASC LIMIT ?
+              )`;
+    const args = category === 'support'
+        ? [MAX_MESSAGES_PER_CATEGORY]
+        : [category, category, MAX_MESSAGES_PER_CATEGORY];
+    db.transaction(() => {
+        db.prepare(`
+            INSERT OR IGNORE INTO nostr_deleted_events (event_id, deleted_at)
+            SELECT event_id, ? FROM nostr_support_messages WHERE event_id IS NOT NULL AND ${stale}
+        `).run(Date.now(), ...args);
+        db.prepare(`DELETE FROM nostr_support_messages WHERE ${stale}`).run(...args);
+    })();
 }

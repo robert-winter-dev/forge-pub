@@ -57,6 +57,49 @@ async function apiPost(url, body, extraHeaders = {}) {
 // ─── Kamino Finance ───────────────────────────────────────────────────────────
 
 /**
+ * klend-Reserve on-chain lesen (1× getAccountInfo über den Nexus-RPC) und den
+ * Austauschkurs cToken → Liquidity-Token (in Token-Einheiten, ohne Oracle-Preis) bilden.
+ *
+ * Byte-Offsets aus dem klend-Reserve-Layout (8 Byte Anchor-Discriminator vorweg):
+ *   32 lendingMarket · 128 liquidity.mintPubkey · 224 availableAmount (u64)
+ *   232 borrowedAmountSf (u128) · 272 mintDecimals (u64)
+ *   344/360/376 accumulatedProtocol-/accumulatedReferrer-/pendingReferrerFeesSf (u128)
+ *   2592 collateral.mintTotalSupply (u64)
+ * Kurs = (available + borrowed − Fees) / cToken-Umlauf — dieselbe Formel wie klend.
+ * Ein Layoutwechsel fiele über die Prüfungen von Markt, Mint und Dezimalstellen laut
+ * auf, statt still einen falschen Wert zu liefern.
+ *
+ * @returns {Promise<{rate: number, decimals: number}>}
+ */
+async function readKlendReserve(reserveAddress, marketAddress) {
+    const { PublicKey } = await import('@solana/web3.js');
+    const acc = await getConnection().getAccountInfo(new PublicKey(reserveAddress));
+    const b = acc?.data;
+    if (!b || b.length < 2600) throw new Error(`Kamino: Reserve ${reserveAddress} nicht lesbar`);
+
+    const SF   = 2n ** 60n;
+    const u64  = (o) => b.readBigUInt64LE(o);
+    const u128 = (o) => b.readBigUInt64LE(o) + (b.readBigUInt64LE(o + 8) << 64n);
+
+    const market   = new PublicKey(b.subarray(32, 64)).toBase58();
+    const mint     = new PublicKey(b.subarray(128, 160)).toBase58();
+    const decimals = Number(u64(272));
+    if (market !== marketAddress || mint !== config.jupiter.usdcMint || decimals !== 6) {
+        throw new Error(`Kamino: Reserve-Layout unerwartet (market ${market}, mint ${mint}, decimals ${decimals})`);
+    }
+
+    // Beträge in kleinster Einheit; Sf-Werte sind Festkomma mit 60 Nachkommabits.
+    const liquiditySf = (u64(224) * SF) + u128(232) - u128(344) - u128(360) - u128(376);
+    const cSupply     = u64(2592);
+    if (cSupply <= 0n || liquiditySf <= 0n) throw new Error(`Kamino: Reserve ${reserveAddress} leer`);
+
+    // Kurs mit 1e12 Nachkommastellen aus BigInt, erst dann nach Number
+    const rate = Number((liquiditySf * 10n ** 12n) / (cSupply * SF)) / 1e12;
+    if (!(rate >= 1 && rate < 10)) throw new Error(`Kamino: Austauschkurs unplausibel (${rate})`);
+    return { rate, decimals };
+}
+
+/**
  * Kamino USDC Lending Pool.
  *
  * Yield akkumuliert automatisch (kein expliziter Claim).
@@ -139,9 +182,20 @@ export class KaminoProtocol {
         // Erste Vanilla Obligation (keine Leveraged Position)
         const obligation = data[0];
 
-        // Aktueller USDC-Wert aus refreshedStats (bereits in USDC, nicht in kTokens)
-        // obligation.deposits ist ein leeres Objekt {} – nicht nutzbar für Wertabfrage
-        const currentAmount = parseFloat(obligation.refreshedStats?.userTotalDeposit ?? 0);
+        // Wert in USDC-Einheiten = cToken-Menge × Austauschkurs der Reserve (on-chain).
+        // NICHT refreshedStats.userTotalDeposit: das ist ein USD-Wert, den die API mit
+        // einem schwankenden USDC-Preis multipliziert (gemessen 0,99986–0,99991 binnen
+        // Minuten ≙ ±0,02 USDC bei 505 USDC — mehr als der Zinszuwachs einer Stunde).
+        // Ursache und Messreihe: KB Lending Bot/yield-apr-fenster.md (LEN#000975).
+        const deposit = (obligation.state?.deposits ?? [])
+            .find(d => d.depositReserve === this.usdcReserve);
+        const cTokens = deposit ? Number(deposit.depositedAmount ?? 0) : 0;
+        if (!cTokens) return null;
+
+        const { rate, decimals } = await readKlendReserve(this.usdcReserve, this.market);
+        // Abrunden auf die kleinste Einheit: der Kurs steigt nur, der Betrag ist damit
+        // zum Withdraw-Zeitpunkt höchstens so groß wie das tatsächlich Einlösbare.
+        const currentAmount = Math.floor(cTokens * rate) / 10 ** decimals;
 
         if (!currentAmount) return null;
 

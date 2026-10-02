@@ -489,7 +489,7 @@ export async function errorRaw(context, message) {
  *                          Kein Funktionsname – der gehört ggf. in err.message.
  */
 export async function error(context, err) {
-    // Manche Callsites (z.B. score-advisor.js) übergeben einen fertig formulierten String
+    // Manche Callsites übergeben einen fertig formulierten String
     // statt eines Error-Objekts — kein Fehler zum Klassifizieren, direkt durchreichen.
     if (typeof err === 'string') return errorRaw(context, err);
     const { reason, detail, raw } = errorParts(err);
@@ -705,29 +705,6 @@ export async function capitalFlowNeedsReview(pool, { txHash, whenMs, kind, param
         ...(spec.reason ? { reason: { k: spec.reason, p: params } } : {}),
         _action: spec.action,
     }, { context: pool.id, txHash, kind, ...params });
-}
-
-/**
- * Ein Pending-Fee-Messwert war unplausibel und wurde verworfen (Guard in
- * `refresh-state.js`, Regel in `FORGE/lib/fee-plausibility.js`).
- *
- * Level `warn`, nicht `info`: Der Bot hat sich zwar selbst geholfen, aber ein
- * verworfener Messwert heißt, dass eine Kette-Abfrage Unsinn geliefert hat — das
- * gehört sichtbar gemacht. Vor allem aber: Wer die Zahl im Dashboard kurz gesehen
- * hat, soll erfahren, dass sie nicht stimmte und warum. Ein Schutz, der stumm
- * greift, ist vom Nutzer nicht von einem zu unterscheiden, den es nicht gibt.
- */
-export async function feeMeasurementRejected(pool, { measuredUsd, lpValueUsd, previousUsd, impliedAprPct }) {
-    await send('warn', 'system', 'notify.liq.fee_measurement_rejected', {
-        pair:     pool.displayPair ?? pool.pair,
-        measured: { n: measuredUsd, d: 2 },
-        lp:       { n: lpValueUsd, d: 2 },
-        // Tausendertrennung übernimmt formatNumber() in der Sprache der Installation —
-        // eine siebenstellige Zahl ohne Gruppierung liest niemand.
-        apr:      { n: Math.round(impliedAprPct), d: 0 },
-        previous: { n: previousUsd, d: 4 },
-        _action:  ACTION.fyi,
-    }, { context: pool.id, measuredUsd, lpValueUsd, previousUsd, impliedAprPct });
 }
 
 /** Manueller Deposit in eine bestehende oder neue Position */
@@ -1016,33 +993,6 @@ export async function trailingStopPartial(pool, err, partial) {
         _action: ACTION.inWalletRetrying,
     }, { pair, errorMessage: raw, decreaseTxHash: partial.decreaseTxHash ?? null,
          coinsA: partial.coinsA ?? 0, coinsB: partial.coinsB ?? 0 });
-}
-
-/**
- * Opportunity-Score Paramter-Check (wöchentlich via Cron).
- *
- * status:
- *   'ok'                 → kein Versand (nur Log)
- *   'warn'               → warn → nur DB (Degradation 5–15%)
- *   'update_recommended' → error → DB + Telegram (Degradation > 15%)
- *
- * @param {'ok'|'warn'|'update_recommended'} status
- * @param {{k: string, p: object}} summary  Katalog-Verweis (Konvention 2) mit strukturierten
- *        Werten, kein Freitext (LIQ#000887) — sonst steht deutscher Text auch in der
- *        englischen Meldung.
- * @param {object} details  Strukturierte Details für DB-Context
- */
-export async function opportunityParamCheck(status, summary, details) {
-    if (status === 'ok') return;
-    const recommend = status === 'update_recommended';
-    // Ohne Empfehlung passiert nichts — weder automatisch noch durch den Nutzer. Ein
-    // solcher Text („noch nichts zu tun") gehört auf `info`, nicht `warn` (Regel
-    // „resolved ≠ warn", LIQ#000885); die Handlung folgt erst mit der Empfehlung.
-    await send(recommend ? 'error' : 'info', 'opportunity-score', 'notify.liq.param_check', {
-        icon:    recommend ? '⚠️' : 'ℹ️',
-        summary,
-        _action: recommend ? 'notify.liq.param_check_action' : 'notify.liq.param_check_watch',
-    }, details);
 }
 
 // ─── FORGE public Premium: Pool-Offer-Lebenszyklus ──────────────────────────────

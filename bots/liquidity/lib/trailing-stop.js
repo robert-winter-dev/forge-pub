@@ -119,10 +119,6 @@ const MAX_THRESHOLD_PCT     = 90;
  * 2026-08-01 bei PUMP/SOL (forge-pub1): Pool lief nach Reaktivierung ohne Stop.
  * Ein fehlender Eintrag darf nie „keine Absicherung" bedeuten.
  */
-// 6 h seit 2026-09-03 (LIQ#0359, vorher 1 h) — muss POOL_SETTINGS_DEFAULTS.trailingStop
-// .cooldownHours in lib/pool-settings-defaults.js entsprechen; Begründung dort.
-const DEFAULT_COOLDOWN_HOURS = 6;
-
 const FALLBACK_TS_CONFIG = {
     enabled:         true,
     thresholdPct:    DEFAULT_THRESHOLD_PCT,
@@ -134,7 +130,6 @@ const FALLBACK_TS_CONFIG = {
     minimumValueUsd: null,
     autoSwapToUSDC:  true,
     sendTo:          '',
-    cooldownHours:   DEFAULT_COOLDOWN_HOURS,
 };
 
 // Nur einmal pro Pool und Prozesslaufzeit loggen – der Check läuft in jedem Zyklus.
@@ -233,12 +228,7 @@ export function loadTsConfig(poolId, ctx = null) {
         sdb.close();
 
         const ts = row ? (JSON.parse(row.settings)?.trailingStop ?? null) : null;
-        // cooldownHours kam erst nachträglich dazu (2026-08-08) – Alt-Einträge ohne
-        // dieses Feld sollen trotzdem den Default-Cooldown bekommen, nicht 0/ungeschützt.
-        if (ts) return applyAutoAdvice({
-            ...ts,
-            cooldownHours: Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : DEFAULT_COOLDOWN_HOURS,
-        }, poolId, ctx);
+        if (ts) return applyAutoAdvice({ ...ts }, poolId, ctx);
 
         if (!_fallbackLogged.has(poolId)) {
             _fallbackLogged.add(poolId);
@@ -744,6 +734,7 @@ async function stepTransfer(pool, db, execId, cfg, tsCoinsA, tsCoinsB, swappedUs
         sendTo:        cfg.sendTo,
         swapToUsdc:    cfg.autoSwapToUSDC,
         logPrefix:     `[trailing-stop:${pool.id}]`,
+        db,
         onTransferred: () => updateTsExecution(db, execId, { step: 'transferred' }),
     });
 }

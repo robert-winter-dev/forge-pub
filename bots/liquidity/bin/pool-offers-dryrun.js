@@ -7,37 +7,34 @@
  * hält im Dry-Run-Modus keinen Lock und führt keine On-Chain-TX aus). Läuft automatisch
  * als Cron (config/cron-jobs.json), kein manueller Button.
  *
- * ── Zwei Rollen, je nach Herkunft des Pools ──────────────────────────────────
+ * ── Diagnose, keine Sperre ──────────────────────────────────────────────────
  *
- *   SPERRE (Altbestand). Pools, die vor 2026-08-21 über den damaligen Klickpfad
- *   übernommen wurden, tragen `cleanup.rankingEligible:false` und sind gesperrt. Für sie
- *   ist der Probelauf weiterhin ein echtes Gate: erst ein `passed` lässt
- *   `POST .../mode` (pools-actions.js, vormals toggle-enabled, LIQ#0365) die
- *   Kapitalfreigabe zu. Verhalten unverändert.
- *
- *   DIAGNOSE (Automatik-Bestand). Seit 2026-08-21 importierte Pools sind sofort
- *   freigegeben; über Kapital entscheidet allein das Score-Ranking (Begründung in
- *   lib/pool-offer-adopt.js). Hier sperrt der Probelauf nichts – er meldet nur, wenn
- *   eine Einzahlung technisch scheitern würde. Ohne diese Meldung bliebe ein kaputter
+ *   Seit 2026-08-21 importierte Pools sind sofort freigegeben (Begründung in
+ *   lib/pool-offer-adopt.js). Der Probelauf sperrt nichts – er meldet nur, wenn eine
+ *   Einzahlung technisch scheitern würde. Ohne diese Meldung bliebe ein kaputter
  *   Deposit-Pfad (der Klassiker: fehlendes `volatilePair`, IL-Check blockt mit ~99 %,
- *   Bug-Fund 2026-06-02) unsichtbar, bis der Cleanup den Pool erstmals wählt und
- *   scheitert – also womöglich wochenlang.
+ *   Bug-Fund 2026-06-02) unsichtbar, bis jemand erstmals einzahlt und scheitert.
  *
- * Beide Rollen teilen sich denselben Lauf, dieselbe `dryRunGate`-Zeile in settings.db
- * ({status, checkedAt, error}) und dieselbe Retry-Regel. Sie unterscheiden sich nur
- * darin, WER auf das Ergebnis reagiert: dort die Freigabe-Route, hier der Nutzer.
+ *   Bis LIQ#000937 gab es eine zweite Rolle, SPERRE: Pools aus dem früheren Klickpfad
+ *   trugen `cleanup.rankingEligible:false`, und erst ein `passed` gab sie über
+ *   `POST .../mode` frei. Das Feld wertet seit LIQ#000929 niemand mehr aus; mit der
+ *   Drei-Stufen-Auswahl entfielen Route und Sperre, Migration 0015 entfernt das Feld.
  *
- * Voraussetzung in beiden Fällen: pool_stats existiert bereits – der laufende Bot
+ * Ergebnis in der `dryRunGate`-Zeile in settings.db ({status, checkedAt, error}).
+ *
+ * Voraussetzung: pool_stats existiert bereits – der laufende Bot
  * schreibt sie auch für inaktive Pools mit jedem Stats-Intervall (siehe bot.js),
  * typischerweise ~1 Zyklus nach der Übernahme.
+ *
+ * Fiktives Wallet (--simulate-wallet, LIQ#001136): geprüft wird der Pool-Pfad, nicht der
+ * Kontostand. Ohne das schlug der Probelauf auf jeder Installation mit < PROBE_USDC
+ * USDC fehl und meldete einen Fehlalarm (pub1, SPCXx/USDC, 30.09.2026).
  *
  * Testbetrag: fester Nominalbetrag PROBE_USDC – deckt sowohl die --new-Mindestsumme
  * (5 USDC) als auch volatilePair-Pools (10 USDC) ab.
  *
  * Ein fehlgeschlagener Probelauf wird nach RETRY_COOLDOWN_MS automatisch erneut versucht
- * (z.B. transiente RPC-Fehler, noch fehlendes SOL). Ein bestandener ist für Altpools
- * final; für Automatik-Pools wird er weiter beobachtet, damit ein später auftretender
- * Fehler nicht unbemerkt bleibt.
+ * (z.B. transiente RPC-Fehler). Ein bestandener ist final.
  *
  *   node bin/pool-offers-dryrun.js [--json]
  */
@@ -79,7 +76,7 @@ function writePoolSettings(sdb, poolId, settings) {
 /** Läuft `deposit.js --dry-run --json` als Kindprozess, parst die letzte JSON-Zeile. */
 function runDryRun(pool) {
     return new Promise((resolve) => {
-        const args = [DEPOSIT_SCRIPT, '--pool', pool.pair, '--usdc', String(PROBE_USDC), '--new', '--dry-run', '--json'];
+        const args = [DEPOSIT_SCRIPT, '--pool', pool.id, '--usdc', String(PROBE_USDC), '--new', '--dry-run', '--simulate-wallet', '--json'];
         const proc = spawn('node', args, { cwd: LIQUIDITY_ROOT });
         let stdout = '';
         let stderr = '';
@@ -134,12 +131,8 @@ try {
         // Referenzpool soll nie Kapital, für ihn gibt es nichts freizugeben.
         if (!pool.premiumOffer) continue;
 
-        // Welche der beiden Rollen greift? (siehe Kopfkommentar) Gesperrt = Altbestand,
-        // das Ergebnis schaltet eine Freigabe. Sonst = Automatik, reine Diagnose.
-        const locked = settings.cleanup?.rankingEligible === false;
-
         const prevGate = settings.dryRunGate;
-        // Bestanden bleibt bestanden – auch für Automatik-Pools. Ein stündlicher
+        // Bestanden bleibt bestanden. Ein stündlicher
         // Wiederholungslauf über alle laufenden Pools wäre dauerhafte RPC-Grundlast
         // ohne Erkenntnisgewinn; ein später auftretender Fehler zeigt sich ohnehin
         // beim echten Deposit-Versuch.
@@ -157,22 +150,12 @@ try {
         };
         settings.dryRunGate = gate;
         writePoolSettings(sdb, pool.id, settings);
-        results.push({ poolId: pool.id, pair: pool.pair, role: locked ? 'gate' : 'diagnose', ...gate });
+        results.push({ poolId: pool.id, pair: pool.pair, ...gate });
 
         // Nur bei tatsächlichem Statuswechsel benachrichtigen (kein Spam bei jedem Retry).
         if (prevGate?.status === gate.status) continue;
 
-        if (locked) {
-            // Altbestand: das Ergebnis schaltet eine Sperre – der Nutzer muss danach
-            // selbst handeln, deshalb die Meldung in beide Richtungen.
-            if (gate.status === 'passed') {
-                await notify.info(pool.displayPair ?? pool.pair,
-                    'Dry-Run-Gate bestanden – der Pool kann jetzt über „Pool aktivieren" mit Kapital freigegeben werden.');
-            } else {
-                await notify.errorRaw(pool.displayPair ?? pool.pair,
-                    `Dry-Run-Gate fehlgeschlagen – Kapitalfreigabe noch nicht möglich: ${gate.error}`);
-            }
-        } else if (gate.status === 'failed') {
+        if (gate.status === 'failed') {
             await notify.poolDepositCheckFailed(pool, gate.error);
         } else if (prevGate) {
             // Entwarnung nur, wenn vorher wirklich gewarnt wurde. Der Normalfall –
@@ -191,7 +174,7 @@ if (jsonOutput) {
     console.log(JSON.stringify({ checked: results.length, results }, null, 2));
 } else if (results.length > 0) {
     for (const r of results) {
-        console.log(`${r.status === 'passed' ? '✅' : '❌'} ${r.pair} [${r.role}]: ${r.status}${r.error ? ` (${r.error})` : ''}`);
+        console.log(`${r.status === 'passed' ? '✅' : '❌'} ${r.pair}: ${r.status}${r.error ? ` (${r.error})` : ''}`);
     }
 } else {
     console.log('[pool-offers-dryrun] nichts zu prüfen.');

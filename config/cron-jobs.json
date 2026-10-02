@@ -47,8 +47,16 @@
       "enabled": true
     },
     {
+      "id": "health-share-retry",
+      "description": "FORGE public Systemdaten-Freigabe – Nachholversuch nach fehlgeschlagenem Stundenreport (LIQ#001108, nur bei Fehler aktiv)",
+      "schedule": "23,43 * * * *",
+      "command": "node bin/health-share-send.js --retry-only",
+      "cwd": ".",
+      "enabled": true
+    },
+    {
       "id": "lmb3-cleanup",
-      "description": "LMB3 Cleanup-Job (inkl. SOL-Topup)",
+      "description": "Liquidity Cleanup-Job (inkl. SOL-Topup)",
       "schedule": "5 * * * *",
       "command": "node bin/cleanup.js",
       "enabled": true,
@@ -66,6 +74,14 @@
       "description": "Liquidity Tagesbericht: alle am Vortag geschlossenen Positionen mit Ergebnis und Exit-Grund. Nur an Tagen mit mindestens einem Ausstieg.",
       "schedule": "1 0 * * *",
       "command": "node bin/daily-report.js --notify",
+      "cwd": "bots/liquidity",
+      "enabled": true
+    },
+    {
+      "id": "wallet-flow-scan",
+      "description": "Geldflüsse Bot-Wallet ↔ außen in wallet_flows buchen (LIQ#001063, Grundlage Portfolio-PnL).",
+      "schedule": "*/30 * * * *",
+      "command": "node bin/wallet-flow-scan.js",
       "cwd": "bots/liquidity",
       "enabled": true
     }

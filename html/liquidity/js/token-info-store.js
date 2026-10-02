@@ -12,16 +12,24 @@
 // <a href> einschleusen (die bestehende HTML-Escaping in den Konsumenten schützt nur
 // vor Markup-Injection, nicht vor einem bösartigen URL-Schema).
 
+import { LANG } from '../../js/i18n.js?v=20260811a';
+
 let _cache   = null;
 let _loading = null;
 
 function sanitizeEntry(raw) {
     if (!raw || typeof raw !== 'object') return null;
     const url = typeof raw.url === 'string' && raw.url.startsWith('https://') ? raw.url : null;
+    // Zweisprachig (LIQ#001176): category/description sind Deutsch, categoryEn/descriptionEn
+    // Englisch. Hier wird einmal nach LANG aufgelöst, damit die Konsumenten unverändert
+    // category/description lesen. Fehlt die englische Fassung (z.B. ein älteres Premium-Overlay),
+    // fällt es auf Deutsch zurück statt auf eine leere Anzeige.
+    const en = LANG === 'en';
+    const pick = (de, enVal) => (en && typeof enVal === 'string' && enVal ? enVal : (typeof de === 'string' ? de : null));
     return {
         symbol:      typeof raw.symbol === 'string' ? raw.symbol : null,
-        category:    typeof raw.category === 'string' ? raw.category : null,
-        description: typeof raw.description === 'string' ? raw.description : null,
+        category:    pick(raw.category, raw.categoryEn),
+        description: pick(raw.description, raw.descriptionEn),
         url,
         checkedAt:   typeof raw.checkedAt === 'string' ? raw.checkedAt : null,
     };

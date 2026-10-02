@@ -335,6 +335,20 @@
     background: var(--primary);
     color: #fff;
 }
+/* Gesperrt: zu wenig Historie (html/js/chart-range.js, CORE#000933). Nicht nur
+   über Farbe unterschieden (Farbschwäche): deutlich geringere Deckkraft,
+   durchgestrichen, Sperr-Cursor, dazu der Tooltip. Kein Hover-Effekt. */
+.chart-range-btn:disabled,
+.chart-range-btn[aria-disabled="true"] {
+    opacity: 0.35;
+    cursor: not-allowed;
+    text-decoration: line-through;
+}
+.chart-range-btn:disabled:hover,
+.chart-range-btn[aria-disabled="true"]:hover {
+    background: transparent;
+    color: var(--text-secondary);
+}
 
 /* ── Scrollbar Styling ────────────────────────────────────────────────────── */
 
@@ -428,3 +442,118 @@
     font-size: 0.8rem;
     color: var(--text-secondary, #94a3b8);
 }
+
+/* ══ Dialog-Standard (alle Dashboard-Dialoge) ═══════════════════════════════════
+   Vier Bauarten teilen sich EINE Optik: .modal-box (Pool-Dialoge), .chart-modal-dialog und
+   .wallet-modal-dialog (Charts, Listen) sowie .ov-modal-dialog (Overview). Die Familien-CSS
+   (components.css, forge.css) enthalten nur noch Größe und Inhalt, nie Optik.
+   Aufbau: [Titel (flex)] [Zusatzelemente] … [Maximieren] [Schließen], darunter eine Trennlinie. */
+:root { --dlg-bg: #0f172a; }
+
+.modal-overlay, .chart-modal-overlay, .ov-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    animation: forge-dlg-fade 0.15s ease;
+}
+.modal-overlay.hidden { display: none; }
+
+.modal-box, .chart-modal-dialog, .wallet-modal-dialog, .ov-modal-dialog {
+    background: var(--dlg-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+    animation: forge-dlg-in 0.15s ease;
+}
+@keyframes forge-dlg-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes forge-dlg-in   { from { transform: translateY(-12px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+.modal-header, .chart-modal-header, .ov-modal-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.8rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+/* .modal-box trägt 1.5rem Innenabstand: die Kopfzeile reicht bündig bis an den Rand. */
+.modal-box > .modal-header { margin: -1.5rem -1.5rem 1.25rem; }
+
+.modal-header h3, .chart-modal-pair, .ov-modal-title {
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Schließen-Kreuz und Maximieren-Schalter: gleiche Größe, gleiche Optik */
+.modal-close, .chart-modal-close, .ov-modal-close, .forge-modal-max {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 1.05rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+.modal-close:hover, .chart-modal-close:hover, .ov-modal-close:hover, .forge-modal-max:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+/* ── Maximierbare Dialoge (html/js/modal.js: makeMaximizable) ─────────────────
+   Gilt für alle Dialog-Bauarten und .forge-modal. */
+/* Einheitliche Kopfzeile: [Titel][Zusatzelemente] … [Maximieren][Schließen] — beide Schalter
+   stets ganz rechts. Die Lücke nimmt das Maximieren-Icon (margin-left:auto), das Schließen-Kreuz
+   klebt daran; nur nach den Zeitraum-Knöpfen (die selbst schon rechts stehen) entfällt sie. */
+.modal-header > .forge-modal-max,
+.chart-modal-header > .forge-modal-max,
+.forge-modal-header > .forge-modal-max,
+.ov-modal-header > .forge-modal-max { margin-left: auto; }
+.chart-range-btns ~ .forge-modal-max { margin-left: 0 !important; }
+.forge-modal-max + .modal-close,
+.forge-modal-max + .chart-modal-close,
+.forge-modal-max + .forge-modal-close,
+.forge-modal-max + .ov-modal-close { margin-left: 0; }
+
+.modal-box.forge-maximized,
+.chart-modal-dialog.forge-maximized,
+.wallet-modal-dialog.forge-maximized,
+.ov-modal-dialog.forge-maximized,
+.forge-modal.forge-maximized {
+    /* !important: einzelne Dialoge setzen ihre Breite über ID-Selektoren (#payedFeesModal ...). */
+    width: 96vw !important; max-width: 96vw !important;
+    height: 92vh !important; max-height: 92vh !important;
+    display: flex; flex-direction: column;
+    overflow: auto;
+}
+/* Kopf und Tabs behalten ihre Höhe, der Rest scrollt bei Bedarf. */
+.forge-maximized > .modal-header,
+.forge-maximized > .chart-modal-header,
+.forge-maximized > .forge-modal-header,
+.forge-maximized > .ov-modal-header,
+.forge-maximized > .modal-tabs { flex-shrink: 0; }
+.forge-maximized > .forge-modal-body { flex: 1; min-height: 0; overflow: auto; }
+.forge-maximized > .chart-modal-body { flex: 1; min-height: 0; }
+.forge-maximized > .wallet-modal-body { flex: 1; min-height: 0; }

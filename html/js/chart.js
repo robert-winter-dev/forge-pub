@@ -3,7 +3,7 @@
  * Wiederverwendbar für alle FORGE-Bot-Dashboards.
  *
  * Exports:
- *   filterOutliers(values, factor)   – IQR-basierte Ausreißer-Erkennung
+ *   filterOutliers(values, factor)   – trendfeste Ausreißer-Erkennung (gleitender Median + IQR)
  *   attachHoverOverlay(svg, geo)     – Fadenkreuz (X + Y) mit Achsen-Labels
  *   attachBarTooltip(svg, wrap, sel, fmt) – Hover-Tooltip für Balkendiagramme
  */
@@ -40,25 +40,62 @@ export function filterSpikes(values, threshold = 0.20) {
 }
 
 /**
- * Filtert kurzzeitige Ausreißer aus einem Zahlenarray via IQR-Methode.
+ * Filtert kurzzeitige Ausreißer aus einem Zahlenarray — trendfest.
  * Gibt ein Array gleicher Länge zurück; Ausreißer werden als `null` markiert.
  *
- * Algorithmus: IQR × factor als Schwellwert.
- *   Untere Grenze = Q1 - factor × IQR
- *   Obere Grenze  = Q3 + factor × IQR
+ * Algorithmus: Jeder Wert wird mit dem gleitenden Median seiner Nachbarn (Fenster
+ * ±w Punkte, ohne den Wert selbst — sonst wären die Residuen fast überall 0) verglichen. Auf den Abweichungen (Residuen) gilt die IQR-Regel:
+ *   Untere Grenze = Q1 - factor × IQR,  Obere Grenze = Q3 + factor × IQR
+ * Ein stetiger Anstieg/Abfall oder eine Stufe (Einzahlung, Rebalance) erzeugt
+ * dadurch keine Residuen und wird nicht abgeschnitten; die frühere globale
+ * IQR-Regel schnitt den Rand eines Trends weg (Gesamtguthaben-Chart 24.09.2026).
  *
  * @param {(number|null)[]} values
  * @param {number}          [factor=3]  Höher = konservativer (weniger Filterung)
  * @returns {(number|null)[]}
  */
 export function filterOutliers(values, factor = 3) {
-    const valid = values.filter(v => v !== null && v !== undefined && isFinite(v));
-    if (valid.length < 4) return [...values];
+    const ok = v => v !== null && v !== undefined && isFinite(v);
+    const n = values.length;
+    if (values.filter(ok).length < 4) return [...values];
 
-    const sorted = [...valid].sort((a, b) => a - b);
-    const n   = sorted.length;
-    const q1  = sorted[Math.floor(n * 0.25)];
-    const q3  = sorted[Math.floor(n * 0.75)];
+    const w = Math.max(3, Math.round(n * 0.05));
+    const median = arr => {
+        const s = [...arr].sort((a, b) => a - b);
+        const m = s.length >> 1;
+        return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    };
+    // Fenster symmetrisch halten (halbe Breite = Abstand zum nächsten Rand, max. w): ein
+    // einseitiges Fenster am Rand eines Anstiegs ergäbe sonst eine Schieflage = Residuum
+    // ≠ 0 und schnitte genau dort Punkte weg (LIQ#000986). Die Randpunkte
+    // (Abstand < 2 zum Rand) haben keinen symmetrischen Nachbarn und werden gegen
+    // Nachbar + Median-Schritt der Innenseite geprüft.
+    const resid = values.map((v, i) => {
+        if (!ok(v)) return null;
+        const half = Math.min(w, i, n - 1 - i);
+        if (half >= 2) {
+            const win = [];
+            for (let j = i - half; j <= i + half; j++) if (j !== i && ok(values[j])) win.push(values[j]);
+            return win.length ? v - median(win) : 0;
+        }
+        // Randnähe (i ≤ 1 oder i ≥ n-2): erwartet wird Nachbar zum Innern ± Median-Schritt
+        const first = i < n - 1 - i;
+        const d  = first ? 1 : -1;
+        const nb = i + d;
+        if (nb < 0 || nb > n - 1 || !ok(values[nb])) return 0;
+        const steps = [];   // Schritte in Zeitrichtung, ab dem Nachbarn nach innen
+        for (let k = 0; k < w; k++) {
+            const a = first ? nb + k : nb - k - 1;
+            if (a < 0 || a + 1 > n - 1) break;
+            if (ok(values[a]) && ok(values[a + 1])) steps.push(values[a + 1] - values[a]);
+        }
+        if (!steps.length) return 0;
+        return v - (values[nb] - d * median(steps));
+    });
+
+    const sorted = resid.filter(r => r !== null).sort((a, b) => a - b);
+    const q1  = sorted[Math.floor(sorted.length * 0.25)];
+    const q3  = sorted[Math.floor(sorted.length * 0.75)];
     const iqr = q3 - q1;
 
     // IQR ≈ 0 → alle Werte sehr eng beieinander, keine sinnvolle Filterung
@@ -66,10 +103,7 @@ export function filterOutliers(values, factor = 3) {
 
     const lo = q1 - factor * iqr;
     const hi = q3 + factor * iqr;
-
-    return values.map(v =>
-        (v === null || v === undefined || !isFinite(v) || v < lo || v > hi) ? null : v
-    );
+    return values.map((v, i) => (resid[i] === null || resid[i] < lo || resid[i] > hi) ? null : v);
 }
 
 /**
@@ -99,6 +133,12 @@ export function attachHoverOverlay(svg, {
     tMin, tMax, PAD_L, cW, PAD_T, cH, spanMs,
     yMin = null, yMax = null, formatY = null,
 }) {
+    // Beim Neuzeichnen (innerHTML-Ersatz) die Listener des vorigen Aufrufs lösen,
+    // sonst sammeln sich bei jedem Refresh weitere mousemove-Handler an.
+    svg._hoverOverlayAbort?.abort();
+    const ac = new AbortController();
+    svg._hoverOverlayAbort = ac;
+
     const ns = 'http://www.w3.org/2000/svg';
     const g  = document.createElementNS(ns, 'g');
     g.setAttribute('pointer-events', 'none');
@@ -195,11 +235,11 @@ export function attachHoverOverlay(svg, {
             yLabel.textContent  = fmt(v);
             yLabel.style.display = '';
         }
-    });
+    }, { signal: ac.signal });
 
     svg.addEventListener('mouseleave', () => {
         for (const el of all) el.style.display = 'none';
-    });
+    }, { signal: ac.signal });
 }
 
 /**

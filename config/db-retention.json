@@ -8,8 +8,7 @@
     "liquiditybot.db": {
       "maxMb": 400,
       "tables": {
-        "invest_score_history": { "column": "recorded_at",  "unit": "ms", "retentionDays": 35,  "prune": "pruneScoreHistories + downsampleScoreHistory (export.js, stündlich; > 7 d auf 10-min-Raster verdichtet)" },
-        "opportunity_scores":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js, stündlich)" },
+        "opportunity_scores":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js, stündlich; Slope-Historie)" },
         "pool_score_history":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js) + pool-explorer.js" },
         "advisor_log":          { "column": "recorded_at",  "unit": "ms", "retentionDays": 14,  "prune": "pruneAdvisorLog, nur pool-explorer.js (im Fork nicht vorhanden)" },
         "portfolio_history":    { "column": "recorded_at",  "unit": "ms", "retentionDays": 90,  "prune": "bot.js täglich" },
@@ -39,6 +38,11 @@
       "maxMb": 50,
       "tables": {
         "health_checks": { "column": "timestamp_ms", "unit": "ms", "retentionDays": 7, "prune": "health-check.js, RETENTION_DAYS" }
+      }
+    },
+    "nexus.db": {
+      "tables": {
+        "notifications": { "unbounded": true, "reason": "nicht nach Zeit, sondern je Rubrik (System/Bots) auf 100 Zeilen begrenzt: notify-db.js MAX_NOTIFICATIONS_PER_CATEGORY. Ein 48h-Zeit-Prune in run-daily.sh leerte das Message Center (CORE#000976)" }
       }
     },
     "prices.db": {

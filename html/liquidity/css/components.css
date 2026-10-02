@@ -304,6 +304,8 @@ body.modal-open {
     max-height: min(60vh, 280px);
     padding: 0 0 0.5rem;
 }
+/* Maximiert (modal.js makeMaximizable): die Liste nimmt die ganze Restfläche, scrollt bei Bedarf. */
+.forge-maximized > .tx-modal-list { flex: 1; min-height: 0; max-height: none !important; }
 
 /* Sticky Thead im TX-Modal */
 .tx-modal-list .tip-orders thead th {
@@ -427,36 +429,14 @@ body.modal-open {
 
 /* ── Pool-APY-Modal ──────────────────────────────────────────────────────── */
 
-.modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.65);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    backdrop-filter: blur(3px);
-    -webkit-backdrop-filter: blur(3px);
-    animation: modal-fade-in 0.15s ease;
-}
-.modal-overlay.hidden {
-    display: none;
-}
 
-@keyframes modal-fade-in {
-    from { opacity: 0; }
-    to   { opacity: 1; }
-}
 
+/* Optik (Hintergrund, Rahmen, Schatten, Kopfzeile, Schließen-Kreuz) liegt zentral in shared.css
+   („Dialog-Standard"); hier nur das, was dieser Dialog-Familie eigen ist. */
 .modal-box {
     position: relative;  /* Anker für chart-tooltip-box (attachBarTooltip) */
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     padding: 1.5rem;
     width: min(660px, 92vw);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-    animation: modal-slide-in 0.15s ease;
 }
 
 /* Range-Buttons (1D/1W/1M) in Modal-Body und Tab-Panels rechtsbündig.
@@ -481,41 +461,9 @@ body.modal-open {
     flex-shrink:  0;
 }
 
-@keyframes modal-slide-in {
-    from { transform: translateY(-12px); opacity: 0; }
-    to   { transform: translateY(0);     opacity: 1; }
-}
 
-.modal-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1.25rem;
-}
 
-.modal-header h3 {
-    margin: 0;
-    flex: 1;
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
 
-.modal-close {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 1rem;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    line-height: 1;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-.modal-close:hover {
-    background: var(--border);
-    color: var(--text-primary);
-}
 
 /* ── Forge Tooltip (JS-gesteuert) ────────────────────────────────────────── */
 
@@ -826,53 +774,15 @@ body.modal-open {
 
 /* ── Chart-Modal-Overlay (Wallet-Modal) ──────────────────────────────────── */
 
-.chart-modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.78);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-}
-.chart-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.8rem 1.25rem;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-}
-.chart-modal-pair {
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-.chart-modal-close {
-    background: transparent;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 1.6rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 0.2rem;
-    margin-left: auto;
-    transition: color 0.15s;
-}
-.chart-modal-close:hover { color: var(--text-primary); }
 
 /* ── Chart-Modal: Dialog + Body + SVG ───────────────────────────────────── */
 
 .chart-modal-dialog {
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     width: min(92vw, 720px);
     height: min(70vh, 460px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
 }
 
 .chart-modal-body {
@@ -911,21 +821,14 @@ body.modal-open {
     color: #fff;
 }
 
-/* Klick-Hinweis auf dem Portfolio-Inline-Chart */
-#portfolioChartSvg { cursor: pointer; }
-
 /* ── Wallet-Detail-Modal ─────────────────────────────────────────────────── */
 
 .wallet-modal-dialog {
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     width: min(460px, 94vw);
     max-height: 80vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
 }
 #payedFeesModal .wallet-modal-dialog,
 #claimedFeesModal .wallet-modal-dialog {
@@ -1100,13 +1003,6 @@ body.modal-open {
     /* Keine feste Höhe – Modal wächst mit dem Inhalt, analog zu TVL/Range-Modal */
 }
 
-.pool-chart-modal-box .modal-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding-bottom: 0.75rem;
-}
-
 .pool-chart-modal-box .modal-tabs {
     margin: 0 0 0.5rem;
 }
@@ -1129,6 +1025,41 @@ body.modal-open {
     height: 100% !important;
 }
 
+/* LIQ#001115: Maximieren + Indikator-Panels */
+.pool-chart-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.pool-chart-max-btn { font-size: 1.05rem; }
+.pool-chart-ind-bar {
+    display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0.35rem;
+}
+.pool-chart-ind-label { color: var(--text-secondary); font-size: 0.7rem; }
+.pool-chart-ind-btn {
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    border: 1px solid rgba(255,255,255,0.25); border-radius: 5px;
+    padding: 0.1rem 0.45rem; font: inherit; font-size: 0.7rem;
+}
+.pool-chart-tip-toggle {
+    display: inline-flex; align-items: center; gap: 0.3rem; margin-right: 0.6rem;
+    color: var(--text-secondary); font-size: 0.7rem; cursor: pointer;
+}
+.pool-chart-tip-toggle input { margin: 0; cursor: pointer; }
+.pool-chart-ind-btn:hover { border-color: rgba(255,255,255,0.5); }
+.pool-chart-ind-btn.active {
+    color: var(--text-primary, #fff); border-color: #4f9eff; border-width: 2px;
+    padding: calc(0.1rem - 1px) calc(0.45rem - 1px); font-weight: 600;
+}
+.pool-chart-modal-box.maximized {
+    width: 96vw; max-width: 96vw; height: 92vh; max-height: 92vh;
+    display: flex; flex-direction: column;
+}
+.pool-chart-modal-box.maximized .pool-chart-panels { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pool-chart-modal-box.maximized .pool-chart-panel.active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pool-chart-modal-box.maximized .pool-chart-stack { flex: 1; min-height: 0; }
+/* Preis-Chart min. 50 %; RSI und MACD zusammen bis 50 % (je Panel mind. 150px) */
+.pool-chart-modal-box.maximized .pool-chart-canvas-wrap { height: auto; flex: 1 1 0; min-height: 0; }
+.pool-chart-modal-box.maximized .pool-chart-canvas-wrap.pool-chart-sub { flex: 0.5 1 0; min-height: 150px; }
+/* Drei Unterpanels (RSI, MACD, Volatilitaet): zusammen ebenfalls hoechstens 50 %, je mind. 120px */
+.pool-chart-modal-box.maximized .pool-chart-stack[data-subs="3"] .pool-chart-canvas-wrap.pool-chart-sub { flex: 0.334 1 0; min-height: 120px; }
+
 .pool-chart-overlay {
     position: absolute;
     inset: 0;
@@ -1141,9 +1072,11 @@ body.modal-open {
 }
 
 .pool-chart-gecko-link-row {
-    text-align: right;
+    display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
     margin-top: 0.3rem;
+    min-height: 1.4rem;
 }
+.pool-chart-gecko-link-row .pool-chart-gecko-link { margin-left: auto; }
 .pool-chart-gecko-link {
     font-size: 0.75rem;
     color: #4f9eff;

@@ -46,6 +46,7 @@ import { t, getLang } from '../../lib/i18n.js';
 import { issueActivationToken, getLastIssuedAt } from './activation.js';
 import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
 import { loadMinVersionConfig, signMinVersion, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
+import { cleanVersion } from '../../lib/version.js';
 import { startConnectionMonitor, getConnectionStats } from '../../lib/nostr-stats.js';
 // npub-Lock der Systemdaten-Freigabe: siehe resetLockReason() weiter unten.
 import { isShareApproved } from '../../lib/health-share-state.js';
@@ -267,7 +268,11 @@ function humanizePremiumMessage(direction, cmd) {
                 : sd('health_share_revoked_out');
         // Sendet nur der Master (broadcast-message.js), 'out' fällt hier daher nie an.
         case 'premium-system-message':
-            return { summary: cmd.summary ?? 'Premium-Info', detail: cmd.detail ?? '' };
+            // Zweisprachig (LIQ#001176): englische Installation bevorzugt summaryEn/detailEn,
+            // sonst (und bei älteren Absendern) die deutschen Felder.
+            return getLang() === 'en' && cmd.summaryEn && cmd.detailEn
+                ? { summary: cmd.summaryEn, detail: cmd.detailEn }
+                : { summary: cmd.summary ?? 'Premium-Info', detail: cmd.detail ?? '' };
         case 'health-share-report':
             return sd(direction === 'in' ? 'health_share_report_in' : 'health_share_report_out');
         case 'health-share-lapsed':
@@ -545,6 +550,17 @@ function startNostrService() {
                 console.error(`[premium] Versions-Meldung fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
             });
             return;
+        }
+
+        // Fork-Seite: eine Versions-Absage, deren Mindestversion die installierte Version
+        // bereits erfüllt, ist erledigt und darf weder gespeichert noch als Nachricht
+        // gemeldet werden (CORE#000963: nach dem Update auf 0.9.13 lieferte der Relay
+        // ~200 alte Absagen als „neu" aus → ~100 identische Benachrichtigungen um 03:02).
+        // Der Kill-Switch bleibt in handleVersionTooOld() (verifiziert, unverändert);
+        // hier wird nur die Anzeige unterdrückt.
+        if (cmd?.cmd === 'premium-version-too-old' && !IS_MASTER_IDENTITY) {
+            const minReq = cmd.minVersion?.params?.minRequiredVersion ?? cmd.minRequiredVersion;
+            if (isValidVersion(minReq) && isVersionSupported(cleanVersion(), minReq)) return;
         }
 
         const db = openMessagesDb();
@@ -898,6 +914,9 @@ function startNostrService() {
         console.log(`🔑  Aktivierungs-Token ausgestellt an ${rumor.pubkey.slice(0, 12)}…`);
     }
 
+    const VERSION_TOO_OLD_MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+    const versionTooOldSentAt = new Map();
+
     /**
      * MASTER-SEITE: verarbeitet {cmd:'premium-version-check', version}, das der Fork bei
      * jedem premium-pay.js-Lauf (stündlich) unaufgefordert schickt. Fork-Version wird
@@ -934,6 +953,13 @@ function startNostrService() {
         // siehe handleVersionTooOld unten) – ein vom Relay erneut ausgelieferter Backlog-
         // Eintrag aus einem alten Test kann den Autopay-Kill-Switch damit nicht mehr
         // beliebig oft erneut auslösen.
+        // Pro Fork höchstens eine Absage je 6h: der Fork meldet stündlich seine Version,
+        // jede Antwort bleibt als eigenes Event im Relay-Backlog liegen und wird nach
+        // einem Update erneut ausgeliefert (CORE#000963: ~200 Absagen für einen Fork).
+        const lastSent = versionTooOldSentAt.get(rumor.pubkey) ?? 0;
+        if (Date.now() - lastSent < VERSION_TOO_OLD_MIN_INTERVAL_MS) return;
+        versionTooOldSentAt.set(rumor.pubkey, Date.now());
+
         const minVersion = signMinVersion(params, identity.privkeyHex);
         const replyText = JSON.stringify({ cmd: 'premium-version-too-old', minVersion, yourVersion: cmd.version });
         await Promise.any(sendDirectMessage(pool, relays, identity, rumor.pubkey, replyText));
@@ -1148,6 +1174,16 @@ function startNostrService() {
             return;
         }
         storeMinVersion(result.params);
+
+        // Veralteter Backlog-Eintrag: der Relay liefert die Absage nach jedem Neustart/Update
+        // erneut aus (signedAt bleibt bis MAX_MIN_VERSION_AGE_MS gültig, gleiche `version`
+        // gilt nicht als Replay). Erfüllt die HEUTE installierte Version die Mindestversion
+        // bereits, darf sie den Autopay-Kill-Switch nicht mehr auslösen (pub1, 23.09.2026:
+        // nach dem Update auf 0.9.13 schaltete der Replay der 0.9.12-Absage Autopay erneut ab).
+        if (isVersionSupported(cleanVersion(), result.params.minRequiredVersion)) {
+            console.log(`[premium] premium-version-too-old ignoriert – installierte Version ${cleanVersion()} erfüllt Mindestversion ${result.params.minRequiredVersion} (Backlog-Replay).`);
+            return;
+        }
 
         const { setAutoPayEnabled } = await import('../../lib/premium-auto-pay-store.js');
         setAutoPayEnabled(false);

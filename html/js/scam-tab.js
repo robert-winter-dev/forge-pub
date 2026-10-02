@@ -41,6 +41,7 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { t as tr } from '/forge/js/i18n.js?v=20260811a';
+import { runFinanceAction } from '/forge/js/finance-job.js?v=20260925a';
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -458,14 +459,13 @@ function confirmAndBurn(flavor, tk, onChanged) {
                     if (deleteBtn) deleteBtn.disabled = true;
                     if (status) status.textContent = tr('scam.deleting', 'Wird gelöscht…');
                     try {
-                        const res  = await fetch(`/api/wallet/${flavor}/scam/burn`, {
-                            method:  'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body:    JSON.stringify(payload),
+                        // Serverseitig ein losgelöster Job (CORE#000993): läuft nach einem
+                        // Neustart von forge-settings weiter, das Ergebnis wird nachgefragt.
+                        const json = await runFinanceAction(`/api/wallet/${flavor}/scam/burn`, payload, {
+                            key: `burn:${flavor}`, onStatus: (_state, text) => { if (status) status.textContent = text; },
                         });
-                        const json = await res.json();
 
-                        if (res.status === 409 || json.busy) {
+                        if (json.busy) {
                             if (status) status.textContent = tr('scam.busy', 'Gerade läuft schon eine Prüfung. Versuch es in einer Minute noch einmal.');
                             if (deleteBtn) deleteBtn.disabled = false;
                             return;

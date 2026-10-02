@@ -163,8 +163,10 @@ do_update() {
         run_migrations
         vacuum_bloated_dbs
         do_services
+        do_sudoers
         do_cron
         do_logrotate
+        sync_bot_autostart_once "$liq_was_active" "$lend_was_active"
         systemctl start forge-nexus forge-premium forge-settings forge-settings-daemon 2>/dev/null || true
         sleep 3
         local restarted_services=()
@@ -341,10 +343,9 @@ do_repair() {
     do_services
     do_cron
     do_logrotate
-    # Regeneriert auch die sudoers-Regel (Cmnd_Alias FORGE_SYSTEMCTL/FORGE_UPDATE_*) —
-    # do_update() ruft do_user() bewusst nicht auf, ein Repair ist damit der einzige
-    # Weg, mit dem eine bereits laufende Installation eine NEU eingeführte
-    # sudoers-Regel nachträglich bekommt (z.B. System > Updates im Webinterface).
+    # Regeneriert auch die sudoers-Regel (Cmnd_Alias FORGE_SYSTEMCTL/FORGE_UPDATE_*).
+    # Seit CORE#001179 schreibt auch do_update() sie neu (do_sudoers) — Repair
+    # bleibt der Weg für Installationen, die gerade kein Update bekommen.
     do_user
     fix_ownership
     c_ok "$(t LIFECYCLE_REPAIR_DONE)"

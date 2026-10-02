@@ -42,6 +42,8 @@ import { siteAuthGate } from './lib/site-auth.js';
 import healthShareRouter from './routes/health-share.js';
 import i18nRouter     from './routes/i18n.js';
 import timezoneRouter from './routes/timezone.js';
+import financeJobsRouter from './routes/finance-jobs.js';
+import { resumeJobs } from './lib/finance-jobs.js';
 import { displayVersion } from '../../lib/version.js';
 import { phpToHtml } from './bin/generate-html.js';
 
@@ -95,6 +97,7 @@ app.use('/api/wallet',    walletRouter);
 app.use('/api/pools',     poolsRouter);
 app.use('/api/pools',     poolsActionsRouter);
 app.use('/api/lending',   lendingActionsRouter);
+app.use('/api/jobs',      financeJobsRouter);
 app.use('/api/addresses', addressesRouter);
 app.use('/api/messages',  messagesRouter);
 app.use('/api/premium',   premiumRouter);
@@ -199,6 +202,8 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅  forge-settings (HTTPS) läuft auf Port ${PORT}`);
     console.log(`    Settings:   https://<LAN-IP>:${PORT}/`);
     console.log(`    Dashboards: https://<LAN-IP>:${PORT}/forge/`);
+    // Finanzaktionen, die einen Neustart überlebt haben, wieder überwachen (CORE#000993).
+    resumeJobs();
 });
 
 server.on('error', (err) => {

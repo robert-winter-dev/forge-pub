@@ -11,6 +11,8 @@
     --text-muted:    #94a3b8;
     --accent:        #00d4ff;
     --accent-glow:   rgba(0, 212, 255, 0.15);
+    --text-primary:  #f1f5f9;   /* shared.css (.chart-range-btn) */
+    --text-secondary:#94a3b8;   /* shared.css (.chart-range-btn) */
     --primary:       #00d4ff;   /* chart.js hover-Label Farbe */
     --bg-dark:       #020617;   /* chart.js hover-Label Halo  */
     --success:       #10b981;
@@ -165,27 +167,7 @@ main {
     gap: 8px;
 }
 
-.ov-range-btns {
-    display: inline-flex;
-    gap: 2px;
-    background: rgba(255,255,255,0.04);
-    border-radius: 6px;
-    padding: 2px;
-}
-
-.ov-range-btn {
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    font-size: 0.68rem;
-    font-weight: 600;
-    padding: 3px 8px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-}
-.ov-range-btn:hover { background: rgba(255,255,255,0.08); color: var(--text); }
-.ov-range-btn.active { background: var(--accent); color: #000; }
+/* Zeitraum-Leisten: .chart-range-btns/.chart-range-btn aus shared.css, gerendert von js/chart-range.js (CORE#000936) */
 
 .ov-chart-wrap { position: relative; width: 100%; min-height: 50px; }
 
@@ -533,53 +515,13 @@ footer a:hover { color: var(--accent); }
 .chart-label-x { text-anchor: middle; }
 
 /* ── Chart-Modal (Vollbild-Ansicht) ──────────────────────────────── */
-.ov-modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.75);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 500;
-}
 .ov-modal-dialog {
-    background: var(--bg-2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
     width: min(92vw, 860px);
     height: min(72vh, 500px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
 }
-.ov-modal-header {
-    display: flex;
-    align-items: center;
-    padding: 0.8rem 1.25rem;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-    gap: 1rem;
-}
-.ov-modal-title {
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    flex: 1;
-}
-.ov-modal-close {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    font-size: 1.5rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 0.25rem;
-    transition: color 0.15s;
-}
-.ov-modal-close:hover { color: var(--text); }
 .ov-modal-body {
     position: relative;
     flex: 1;

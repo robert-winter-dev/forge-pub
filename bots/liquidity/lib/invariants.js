@@ -83,7 +83,7 @@ export function checkTypeInvariants() {
  * verhindert — getPoolTypeConfig() (range-advisor.js) ist zwar bewusst fail-fast (#0228),
  * schlägt aber erst zur Laufzeit in bin/export.js zu, nicht beim Anlegen des Pools.
  * export.js crashte dadurch 4h lang bei jedem Zyklus, data.json blieb veraltet,
- * Premium-Kunden bekamen keine InvestScores mehr (Fix-Commit c0e0bc89).
+ * Premium-Kunden bekamen keine Score-Daten mehr (Fix-Commit c0e0bc89).
  *
  * Wirft Error wenn eine Invariante verletzt ist.
  * @param {Array|null} poolsOverride  Nur für Tests: Pool-Array statt Disk-Read verwenden.
@@ -157,6 +157,27 @@ function computePoolViolations(pools) {
             }
         }
 
+        // USDC-Seite: Das Flag usdcIsTokenA muss zum Mint passen, und ein Pool ohne volatilePair
+        // braucht USDC auf genau einer Seite. Fünf Rechenstellen (Chart, Slopes, Edge, Trend,
+        // Advisor) drehen den Preis nach dem Mint, drei weitere (Fee-Einnahmen, SOL-Topup,
+        // Settings-Labels) nach dem Flag — laufen beide auseinander, zeigt das Dashboard bei
+        // steigendem Kurs "fallend" (NATIX/USDC, 30.09.2026, LIQ#001142). Ein USDT-/EURC-quotierter
+        // Pool ohne volatilePair wäre genauso gespiegelt, weil der Helfer nur USDC kennt.
+        // Regel: KB Liquidity Bot/pool-seiten-und-exit-sichtbarkeit.md §5.
+        if (typeof pool.tokenA === 'string' && typeof pool.tokenB === 'string') {
+            const aUsdc = pool.tokenA === USDC_MINT;
+            const bUsdc = pool.tokenB === USDC_MINT;
+            if (!!pool.usdcIsTokenA !== aUsdc) {
+                violations.push(`${label}: usdcIsTokenA=${!!pool.usdcIsTokenA}, aber tokenA ${aUsdc ? 'ist' : 'ist nicht'} USDC — Flag muss zum Mint passen`);
+            }
+            if (pool.volatilePair === true && (aUsdc || bUsdc)) {
+                violations.push(`${label}: volatilePair=true, aber eine Seite ist USDC`);
+            }
+            if (pool.volatilePair !== true && aUsdc === bUsdc) {
+                violations.push(`${label}: ohne volatilePair muss USDC auf genau einer Seite stehen (tokenA/tokenB)`);
+            }
+        }
+
         return { id: pool.id, label, violations };
     });
 }
@@ -194,10 +215,36 @@ export function checkPoolsConfigViolations() {
     }
 }
 
+// Token-Infos sind zweisprachig (LIQ#001176): category/description Deutsch, categoryEn/
+// descriptionEn Englisch. Ohne diese Prüfung zeigt eine englische Installation für jeden
+// neuen Pool-Token wieder deutschen Text, sobald der Eintrag nur auf Deutsch angelegt wird.
+const TOKEN_INFO_PATH = path.join(__dirname, '..', '..', '..', 'html', 'liquidity', 'js', 'token-info-data.json');
+
+export function checkTokenInfoTranslations(dataOverride = null) {
+    let tokens;
+    try {
+        tokens = (dataOverride ?? JSON.parse(readFileSync(TOKEN_INFO_PATH, 'utf8'))).tokens ?? {};
+    } catch (err) {
+        return [`token-info-data.json nicht lesbar: ${err.message}`];
+    }
+    const violations = [];
+    for (const [mint, e] of Object.entries(tokens)) {
+        const name = `Token-Info ${e.symbol ?? mint.slice(0, 8)}`;
+        for (const field of ['categoryEn', 'descriptionEn']) {
+            if (typeof e[field] !== 'string' || !e[field].trim()) {
+                violations.push(`${name}: ${field} fehlt (englische Fassung Pflicht)`);
+            } else if (/[äöüß]/i.test(e[field])) {
+                violations.push(`${name}: ${field} enthält deutsche Umlaute, nicht übersetzt?`);
+            }
+        }
+    }
+    return violations;
+}
+
 // Pflichtfelder jedes pool_stats-Schreibers (LIQ#000774). insertPoolStats() (lib/db.js)
 // setzt fehlende Felder still auf null; export.js nimmt für die NP-Schätzung aber die
-// NEUESTE Zeile — ohne diese Felder fällt sie auf den Schätz-APR zurück und der
-// InvestScore bricht bis zur nächsten vollständigen Zeile ein. Explizites `?? null`
+// NEUESTE Zeile — ohne diese Felder fällt sie bis zur nächsten vollständigen Zeile auf
+// den Schätz-APR zurück. Explizites `?? null`
 // (API liefert nichts) ist erlaubt; vergessen nicht.
 const POOL_STATS_REQUIRED_KEYS = ['liquidityInRange', 'fees24hUsd'];
 const SOURCE_DIRS = ['bin', 'lib'];
@@ -236,7 +283,7 @@ export function checkPoolStatsWriters(sourcesOverride = null) {
             }
             const missing = POOL_STATS_REQUIRED_KEYS.filter(k => !new RegExp(`\\b${k}\\b`).test(args));
             if (missing.length) {
-                violations.push(`${file}:${line}: insertPoolStats ohne ${missing.join(', ')} (NP-Schätzung/InvestScore bricht ein, LIQ#000774)`);
+                violations.push(`${file}:${line}: insertPoolStats ohne ${missing.join(', ')} (NP-Schätzung fällt auf Schätz-APR zurück, LIQ#000774)`);
             }
         }
 

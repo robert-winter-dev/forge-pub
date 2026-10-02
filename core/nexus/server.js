@@ -42,13 +42,15 @@ import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
 import { sanitizeCaller }      from '../../lib/rpc-caller.js';
+import { LANE_HEADER, isBackgroundLane } from '../../lib/nexus-lane.js';
+import { backgroundLimit }    from './lane-limit.js';
 import { getDb, insertNotification, updateRepeatCount, markNotificationsRead, deleteNotifications, getNotifySettings, setNotifySetting, getFeatureFlag, setFeatureFlag } from './notify-db.js';
 import { checkDedup, setDedupRowId, checkRateLimit, fmtTime } from './dedup.js';
 import { visibility, checkLogOnlyKeys } from './notify-visibility.js';
 import { readMaintenanceFlag } from '../maintenance.js';
 import { decideBudgetAlert, prevFromRow } from './helius-budget-alert.js';
 import {
-    FallbackState, FALLBACK_URL_DEFAULT, FALLBACK_LIMIT, splitRequest, mergeResponses, unavailableError,
+    FallbackState, FALLBACK_URL_DEFAULT, FALLBACK_LIMIT, FALLBACK_SEND_METHODS, splitRequest, mergeResponses, unavailableError,
 } from './rpc-fallback.js';
 import { renderNotification } from '../../lib/notify-render.js';
 import { getLang } from '../../lib/i18n.js';
@@ -211,7 +213,13 @@ const kaminoLimiter    = new RateLimiter('kamino',    40);
 const geckoLimiter     = new RateLimiter('gecko',     1, 20_000);
 
 // Orca v2 REST API: kein dokumentiertes Limit → 30 req/10s konservativ (Orca eigene API)
-const orcaV2Limiter    = new RateLimiter('orcav2',   30, 10_000);
+const ORCA_V2_LIMIT    = { maxRequests: 30, windowMs: 10_000 };
+const orcaV2Limiter    = new RateLimiter('orcav2', ORCA_V2_LIMIT.maxRequests, ORCA_V2_LIMIT.windowMs);
+// Hintergrund-Spur (LIQ#001114): Stats-Sweep der Pools ohne Kapital, Premium-Daten und Pool-Scanner
+// (Header x-forge-lane: background, lib/nexus-lane.js) bekommen 15 % des Limits und zählen zusätzlich
+// gegen das Gesamtlimit — so verstopft ein langer Sweep den Handel nie. Warten ist dort unkritisch.
+const orcaV2BackgroundLimiter = new RateLimiter('orcav2-background',
+    backgroundLimit(ORCA_V2_LIMIT).maxRequests, backgroundLimit(ORCA_V2_LIMIT).windowMs);
 
 // Loopscale: kein dokumentiertes Limit → 40 req/min (konservativ, 20% Puffer)
 const loopscaleLimiter = new RateLimiter('loopscale', 40);
@@ -721,6 +729,7 @@ app.get('/health', (_req, res) => {
             solanaPublic: fallbackLimiter.getStats(),
             gecko:        geckoLimiter.getStats(),
             orcav2:       orcaV2Limiter.getStats(),
+            orcav2Background: orcaV2BackgroundLimiter.getStats(),
             blobFetch:    blobFetchLimiter.getStats(),
         },
         rpcFallback: { enabled: FALLBACK_ENABLED, ...fallbackState.snapshot() },
@@ -1133,6 +1142,8 @@ app.all('/orcav2/*', async (req, res) => {
             return;
         }
 
+        // Hintergrund-Spur zuerst (eigene, kleinere Rate), dann das gemeinsame Gesamtlimit.
+        if (isBackgroundLane(req.get(LANE_HEADER))) await orcaV2BackgroundLimiter.wait();
         await orcaV2Limiter.wait();
 
         const qs  = new URLSearchParams(req.query).toString();
@@ -1196,14 +1207,14 @@ function notifyFallback(kind, params) {
     }
 }
 
-async function serveFromFallback(res, body, useCache) {
-    const { isBatch, items, allowed } = splitRequest(body);
+async function serveFromFallback(res, body, useCache, caller = null) {
+    const { isBatch, items, allowed } = splitRequest(body, caller);
     let upstreamItems = [];
 
     if (allowed.length > 0) {
         const waitedMs = await fallbackLimiter.wait();
         if (waitedMs > 0) console.warn(`[nexus:fallback] Limiter ${waitedMs} ms gewartet (öffentlicher RPC: ${FALLBACK_LIMIT.maxRequests}/${FALLBACK_LIMIT.windowMs / 1000}s)`);
-        console.log(`[nexus:fallback] UPSTREAM   ${isBatch ? `batch(${allowed.length})` : allowed[0].method}`);
+        console.log(`[nexus:fallback] UPSTREAM   ${isBatch ? `batch(${allowed.length})` : allowed[0].method}${allowed.some(i => FALLBACK_SEND_METHODS.has(i?.method)) ? ` (Senden, Aufrufer ${caller})` : ''}`);
 
         const up = await fetch(FALLBACK_RPC_URL, {
             method: 'POST',
@@ -1227,7 +1238,7 @@ async function serveFromFallback(res, body, useCache) {
     fallbackState.served  += allowed.length;
     fallbackState.refused += items.length - allowed.length;
 
-    const merged = mergeResponses(items, upstreamItems);
+    const merged = mergeResponses(items, upstreamItems, caller);
     if (isBatch) {
         return res.status(200).header('X-Forge-Upstream', 'fallback').header('X-Forge-Cache', 'MISS').json(merged);
     }
@@ -1309,7 +1320,7 @@ async function handleRpc(req, res, useCache) {
         }
     }
 
-    if (inFallback) return serveFromFallback(res, body, useCache);
+    if (inFallback) return serveFromFallback(res, body, useCache, caller);
 
     // ── Upstream-Call ─────────────────────────────────────────────────────────
     rpcCache.recordUpstream();
@@ -1342,7 +1353,7 @@ async function handleRpc(req, res, useCache) {
                     if (fallbackState.activate(Date.now())) {
                         notifyFallback('on', { fallback: new URL(FALLBACK_RPC_URL).host });
                     }
-                    return serveFromFallback(res, body, useCache);
+                    return serveFromFallback(res, body, useCache, caller);
                 }
             }
         }

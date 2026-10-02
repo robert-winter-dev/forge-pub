@@ -226,21 +226,6 @@ export function setPoolActive(poolId, active) {
         resetPoolSessionState(poolId, '[config]');
     }
 
-    // Liquidierter Pool darf nicht weiter als fester Cleanup-Pin ("invest in") dienen.
-    // Egal warum der Pool deaktiviert wird (Score-Limit, TVL-Schutz,
-    // Trailing-Stop, manueller Withdraw): ist genau dieser Pool als
-    // CLEANUP_MODE=pool:<id> konfiguriert, auf 'disabled' schalten – sonst reinvestiert
-    // der nächste Cleanup-Lauf blind wieder in den gerade liquidierten Pool.
-    // Bis LIQ#000929 ging es hier auf 'ranking' („Bester Pool"), den es nicht mehr gibt.
-    if (active === false && getCleanupModeFromEnv() === `pool:${poolId}`) {
-        try {
-            setCleanupModeInEnv('disabled');
-            console.log(`[config] ${poolId} liquidiert & war fester Cleanup-Pool → CLEANUP_MODE auf 'disabled' umgestellt`);
-        } catch (err) {
-            console.error(`[config] CLEANUP_MODE-Umstellung nach Liquidierung von ${poolId} fehlgeschlagen: ${err.message}`);
-        }
-    }
-
     return true;
 }
 
@@ -526,100 +511,9 @@ export function resolvePoolArg(pools, arg) {
 }
 
 /**
- * Liest den aktuellen CLEANUP_MODE frisch aus der .env-Datei.
- * Wichtig: process.env kann im laufenden Bot-Prozess veraltet sein, weil
- * bots/settings/Score-Limit-Flow die .env zur Laufzeit ändern. Der Cleanup
- * selbst ist ein separater Prozess, der die .env bei jedem Lauf neu liest.
- * @returns {string|null}
- */
-export function getCleanupModeFromEnv() {
-    const envPath = envFile('liquidity');
-    if (!existsSync(envPath)) return process.env.CLEANUP_MODE ?? null;
-    const text = readFileSync(envPath, 'utf-8');
-    const m    = text.match(/^CLEANUP_MODE\s*=\s*(.*)$/m);
-    return m ? m[1].trim() : (process.env.CLEANUP_MODE ?? null);
-}
-
-/**
- * Liest CLEANUP_MAX_DEPOSIT (max. Einzahlung pro Aktion in USDC) frisch aus der
- * .env-Datei. Wichtig: process.env kann im laufenden Bot-Prozess veraltet sein,
- * weil ForgeSettings die .env zur Laufzeit ändert. cleanup.js ist ein eigener
- * Prozess (liest process.env beim Start) — der Bot-Langläufer muss frisch lesen,
- * damit der Cap auch beim Öffnen einer neuen Position (reaktivierter Pool) greift.
- * Parsing identisch zu cleanup.js: 0 = kein Limit, Werte < 10 werden ignoriert.
- * @returns {number} Cap in USDC, 0 = kein Limit
- */
-export function getCleanupMaxDepositFromEnv() {
-    const envPath = envFile('liquidity');
-    let raw = process.env.CLEANUP_MAX_DEPOSIT;
-    if (existsSync(envPath)) {
-        const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_MAX_DEPOSIT\s*=\s*(.*)$/m);
-        if (m) raw = m[1].trim();
-    }
-    const v = parseFloat(raw ?? '0');
-    return v >= 10 ? v : 0;
-}
-
-/**
- * Liest CLEANUP_MIN_DEPOSIT (min. Einzahlung pro Aktion in USDC) frisch aus der
- * .env-Datei — analog zu getCleanupMaxDepositFromEnv(). Dient als absoluter Floor
- * beim Öffnen/Reaktivieren einer Position: liegt das verfügbare Wallet-Kapital
- * darunter, wird keine neue Position eröffnet (verhindert wirtschaftlich unsinnige
- * Mini-Positionen, deren TX-Fees den Ertrag auffressen). Der Bot-Langläufer muss
- * frisch lesen, weil ForgeSettings die .env zur Laufzeit ändert.
- * Parsing identisch zu cleanup.js: 0 = kein Minimum, Werte < 1 werden ignoriert.
- * @returns {number} Floor in USDC, 0 = kein Minimum
- */
-export function getCleanupMinDepositFromEnv() {
-    const envPath = envFile('liquidity');
-    let raw = process.env.CLEANUP_MIN_DEPOSIT;
-    if (existsSync(envPath)) {
-        const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_MIN_DEPOSIT\s*=\s*(.*)$/m);
-        if (m) raw = m[1].trim();
-    }
-    const v = parseFloat(raw ?? '0');
-    return v >= 1 ? v : 0;
-}
-
-/**
- * Liest CLEANUP_TREND_GATE (Komma-Liste geforderter Trend-Zeitebenen, z.B. '4h,1d')
- * frisch aus der .env-Datei — analog zu getCleanupModeFromEnv(). Leer/fehlend =
- * Gate aus, also unverändertes Verhalten.
- *
- * Der Bot-Langläufer muss frisch lesen, weil ForgeSettings die .env zur Laufzeit
- * ändert und bin/export.js den Gate-Zustand jede Minute ins Dashboard schreibt —
- * eine im Prozess eingefrorene Einstellung würde dort eine andere Wahrheit zeigen
- * als der stündliche Cleanup anwendet.
- * @returns {string|null} Rohwert, Parsing über lib/trend-indicators.js parseTrendGate()
- */
-export function getCleanupTrendGateFromEnv() {
-    const envPath = envFile('liquidity');
-    if (!existsSync(envPath)) return process.env.CLEANUP_TREND_GATE ?? null;
-    const m = readFileSync(envPath, 'utf-8').match(/^CLEANUP_TREND_GATE\s*=\s*(.*)$/m);
-    return m ? m[1].trim() : (process.env.CLEANUP_TREND_GATE ?? null);
-}
-
-/**
- * Schreibt CLEANUP_MODE in die Liquidity-.env (persistent über Restarts).
- * Wird beim Liquidieren eines Pools aufgerufen, wenn dieser das feste
- * Cleanup-Ziel (CLEANUP_MODE=pool:<id>) war – siehe setPoolActive.
- */
-export function setCleanupModeInEnv(newMode) {
-    const envPath = envFile('liquidity');
-    if (!existsSync(envPath)) return;
-    let text = readFileSync(envPath, 'utf-8');
-    if (/^CLEANUP_MODE\s*=/m.test(text)) {
-        text = text.replace(/^CLEANUP_MODE\s*=.*$/m, `CLEANUP_MODE=${newMode}`);
-    } else {
-        text += `\nCLEANUP_MODE=${newMode}\n`;
-    }
-    writeFileSync(envPath, text, 'utf-8');
-    console.log(`[config] CLEANUP_MODE → ${newMode} (.env aktualisiert)`);
-}
-
-/**
  * Entfernt Schlüssel vollständig aus der Liquidity-.env (Zeile samt Wert).
- * Genutzt für einmalige Hinweis-Flags (CLEANUP_NOTICE_RANKING_REMOVED, LIQ#000929).
+ * Genutzt für einmalige Hinweis-Flags (CLEANUP_NOTICE_RANKING_REMOVED, LIQ#000929;
+ * CLEANUP_NOTICE_POOL_REMOVED, LIQ#000937) und einen veralteten CLEANUP_MODE.
  * @param {string[]} keys
  * @returns {string[]} tatsächlich entfernte Schlüssel
  */

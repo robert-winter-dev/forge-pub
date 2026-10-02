@@ -1,7 +1,7 @@
 /**
  * FORGE Liquidity – Herkunft der Trailing-Stop-Empfehlungen (Ticket LIQ#0351)
  *
- * Die Naht zwischen Master und Fork, nach dem Vorbild von `invest-score-provider.js`:
+ * Die Naht zwischen Master und Fork, nach dem Muster von `edge-provider.js`:
  *
  *   'local'     – FORGE Master: `bin/trailing-stop-advisor.js` rechnet selbst, das Ergebnis
  *                 steht in `ts_advisor_log`.

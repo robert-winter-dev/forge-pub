@@ -13,6 +13,10 @@ import { envFile } from '../../../config/paths.js';
 import { t } from '../../../lib/i18n.js';
 import { parseEnv, serializeEnv } from '../lib/env-file.js';
 import { enqueueRestart } from '../lib/task-queue.js';
+import {
+    validateReinvestSettings, readEdgeSnapshot, readReinvestPreview,
+    REINVEST_DEFAULT_MIN_USDC, REINVEST_DEFAULT_MAX_USDC,
+} from '../../../lib/reinvest-rules.js';
 
 // .env-Pfade über envFile() (move-agnostisch + fork-aware: im Fork liegt die
 // .env unter local/env/<bot>.env statt neben dem Dienst, siehe config/paths.js).
@@ -31,14 +35,13 @@ const BOT_SERVICES = {
 // Keys die ohne Bot-Neustart wirken (werden pro Zyklus frisch gelesen).
 const NO_RESTART_KEYS = new Set([
     // Liquidity – nur von cleanup.js / Subprozessen gelesen
-    'CLEANUP_MODE',
-    'CLEANUP_MAX_DEPOSIT',
-    'CLEANUP_MIN_DEPOSIT',
     'CLEANUP_ENABLED',
     'CLEANUP_DUST_ENABLED',
     'CLEANUP_DUST_MIN_USDC',
     'CLEANUP_DUST_MAX_USDC',
-    'CLEANUP_TREND_GATE',
+    'CLEANUP_REINVEST_MODE',
+    'CLEANUP_REINVEST_MIN_USDC',
+    'CLEANUP_REINVEST_MAX_USDC',
     // LendingBot – Auto-Deploy: werden per loadAutoDeployConfig() pro Zyklus frisch gelesen
     'AUTO_DEPLOY_MODE',
     'AUTO_DEPLOY_MIN_DEPOSIT',
@@ -62,6 +65,16 @@ const SENSITIVE_KEYS = new Set([
 ]);
 
 const router = Router();
+
+// ── GET /api/config/liquiditybot/reinvest-status ──────────────────────────────
+// Premium-Sperre des Cleanup-Reiters „Reinvest“ (LIQ#000988): stehen aktuelle Premium-Daten
+// (Edge) zur Verfügung? Gleiche Prüfung wie im Cleanup-Lauf selbst (lib/reinvest-rules.js).
+// Liefert außerdem die Vorschau des Zielpools je Modus für die Anzeige im Reiter.
+router.get('/liquiditybot/reinvest-status', (_req, res) => {
+    const { available, reason, source } = readEdgeSnapshot();
+    // preview: in welchen Pool ginge Reinvest je Modus jetzt (vom Export geschrieben), null ohne Premium.
+    res.json({ available, reason, source, preview: available ? readReinvestPreview() : null });
+});
 
 // ── GET /api/config/:bot ──────────────────────────────────────────────────────
 router.get('/:bot', (req, res) => {
@@ -101,6 +114,30 @@ router.put('/:bot', (req, res) => {
     }
 
     const existing = fs.readFileSync(envPath, 'utf8');
+
+    // Cleanup > Reinvest (LIQ#000988): Werte prüfen, Premium-Sperre serverseitig durchsetzen.
+    // Die Oberfläche sperrt den Reiter nur optisch — hier entscheidet die Route.
+    if (req.params.bot === 'liquiditybot' && Object.keys(updates).some(k => k.startsWith('CLEANUP_REINVEST_'))) {
+        const merged  = { ...parseEnv(existing), ...updates };
+        const mode    = String(merged.CLEANUP_REINVEST_MODE ?? 'off').trim().toLowerCase() || 'off';
+        const numOr   = (v, dflt) => (v == null || v === '' ? dflt : Number(v));
+        const check   = validateReinvestSettings({
+            mode,
+            minUsdc: numOr(merged.CLEANUP_REINVEST_MIN_USDC, REINVEST_DEFAULT_MIN_USDC),
+            maxUsdc: numOr(merged.CLEANUP_REINVEST_MAX_USDC, REINVEST_DEFAULT_MAX_USDC),
+        });
+        if (!check.ok) {
+            return res.status(400).json({ error: t('api.config.reinvest_invalid', { reason: check.message }) });
+        }
+        const newMode = updates.CLEANUP_REINVEST_MODE == null ? null : String(updates.CLEANUP_REINVEST_MODE).trim().toLowerCase();
+        if (newMode && newMode !== 'off') {
+            const edge = readEdgeSnapshot();
+            if (!edge.available) {
+                return res.status(403).json({ error: t('api.config.reinvest_premium', { reason: edge.reason }) });
+            }
+        }
+    }
+
     const newContent = serializeEnv(existing, updates);
     fs.writeFileSync(envPath, newContent, 'utf8');
 

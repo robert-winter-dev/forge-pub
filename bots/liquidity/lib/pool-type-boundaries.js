@@ -2,12 +2,8 @@
  * FORGE Liquidity – Pool-Typ-Klassifizierung (öffentlich, keine Score-Gewichte)
  *
  * Nur die Frage "welcher Typ passt zur gemessenen Vola?" — keine PnL-/APR-Gewichte.
- * Bewusst aus lib/invest-score-config.js herausgelöst (gleiches Prinzip wie
- * VOLUME_DUST_USD in lib/volume-dust.js): jene Datei darf kein Entry-Point des
- * FORGE-public-Forks importieren, weil sie die Score-Gewichte (INVEST_WEIGHTS_BY_TYPE)
- * enthält (Befund 2026-07-25). Diese Datei ist unkritisch und darf von bot.js (Fork)
- * importiert werden — invest-score-config.js re-exportiert dieselben Konstanten für
- * bestehende (Master-only) Importe, um keinen Call-Site umschreiben zu müssen.
+ * 2026-07-25 aus der Score-Konfiguration herausgelöst, damit bot.js (Fork) die Grenzen
+ * ohne die Score-Gewichte importieren kann; der Score ist seit LIQ#000932 entfernt.
  *
  * Schwellen/Herleitung: siehe Projekt-Dokumentation zu Pool-Typen und Pool-Type-Advisor.
  */

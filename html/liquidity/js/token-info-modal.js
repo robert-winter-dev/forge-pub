@@ -4,7 +4,7 @@
 // token-info-store.js (JSON-Fetch statt Modul-Import, siehe dort). Lazy-geladen analog
 // pool-chart-modal.js.
 
-import { loadTokenInfo, getTokenInfo } from './token-info-store.js?v=20260727a';
+import { loadTokenInfo, getTokenInfo } from './token-info-store.js?v=20261002a';
 
 let _modal = null;
 
@@ -41,7 +41,7 @@ function ensureModal() {
 //
 // Fuer Pools mit `usdcIsTokenA` (SPX/USDC, EURC/USDC, seit bin/export.js:319 exportiert)
 // steht USDC on-chain als tokenA, das Pair wird aber in Orca-Reihenfolge geschrieben
-// (Nicht-USDC-Seite zuerst) — siehe lib/btc-correlation/index.js, lib/sol-topup.js,
+// (Nicht-USDC-Seite zuerst) — siehe lib/sol-topup.js,
 // bin/cleanup.js. Ein Namensvergleich gegen `pool.pair` geht dabei von der falschen
 // Reihenfolge aus und dreht die Zuordnung um (historischer Bug: im SPX-Tab stand die
 // USDC-Beschreibung). Deshalb hier das maßgebliche Feld direkt auswerten.

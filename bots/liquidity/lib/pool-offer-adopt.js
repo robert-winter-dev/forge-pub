@@ -10,20 +10,19 @@
  *
  * Diese Doppelfreigabe ist entfallen. Der Grund ist keine Lockerung des
  * Sicherheitsmodells, sondern die Einsicht, dass der Klick nichts absicherte, was
- * nicht ohnehin abgesichert war: **über Kapital entscheidet das Score-Ranking, nicht
- * die Freigabe.** Ein übernommener Pool bekommt nur dann Geld, wenn er im stündlichen
- * Cleanup-Ranking auf Platz 1 steht (`CLEANUP_MODE=ranking`) — ein schlecht bewerteter
- * Pool bleibt auch mit `enabled:true` unangetastet. Der Klick verlangte dem Nutzer also
- * ein Urteil über Prüfergebnisse ab, die er nicht beurteilen kann (siehe pool-offers.md
- * „Die Freigabe muss substanziell sein, nicht dekorativ") und verzögerte dabei nur den
- * Zeitpunkt, zu dem das Ranking übernehmen durfte.
+ * nicht ohnehin abgesichert war: **über Kapital entscheidet nicht die Freigabe.** Bis
+ * LIQ#000929 bekam ein übernommener Pool nur Geld, wenn er im stündlichen Cleanup-Ranking
+ * auf Platz 1 stand. Seit LIQ#000937 investiert der Cleanup gar nicht mehr: Ein neu
+ * übernommener Pool erhält Kapital ausschließlich über eine manuelle Einzahlung. Der Klick
+ * verlangte dem Nutzer also ein Urteil über Prüfergebnisse ab, die er nicht beurteilen
+ * kann (siehe pool-offers.md „Die Freigabe muss substanziell sein, nicht dekorativ").
  *
  * Was dadurch NICHT wegfällt — die Sperren, die tatsächlich tragen:
  *   • Die On-Chain-Verifikation jedes prüfbaren Feldes. Eine Abweichung zwischen
  *     Lieferung und Chain führt weiterhin zur Ablehnung, nie zur Korrektur.
  *   • Die Abbruchkriterien (Token-2022, adaptive Fees) samt der `accepted`-Ausnahme.
  *   • Der Herkunftsmarker `premiumOffer`, an dem Rückstufung und Offer-Updates hängen.
- *   • Das Score-Ranking als alleiniger Kapital-Gatekeeper.
+ *   • Kapital fließt nur über eine bewusste Einzahlung in den Pool.
  *
  * Der Nutzer erfährt von jeder Übernahme über eine Nachricht im Message Center
  * (notify.premiumPoolsAdopted) — informiert, statt gefragt.
@@ -35,14 +34,12 @@
 
 import fs from 'fs';
 import path from 'path';
-import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
+import { USDC_MINT } from './wallet.js';
 
 const POOLS_JSON          = PATHS.liquidityPools;
-const SETTINGS_DB         = PATHS.settingsDb;
 const TOKEN_INFO_OVERLAY  = path.join(PATHS.html, 'liquidity', 'data', 'premium', 'token-info.json');
 const WALLET_MONITOR_CONFIG = path.join(PATHS.core, 'wallet-monitor', 'config.json');
-const BOT_ID = 'liquidity';
 
 export function loadLocalPools() {
     try {
@@ -127,7 +124,8 @@ export function buildPoolEntry(offer, now = Date.now()) {
         decimalsB: offer.decimalsB,
         feeTier: offer.feeTier,
         tickSpacing: offer.tickSpacing,
-        usdcIsTokenA: offer.poolShape?.usdcIsTokenA ?? false,
+        // Aus dem Mint, nicht aus der Lieferung: tokenA hat der Validator on-chain geprüft (LIQ#001142).
+        usdcIsTokenA: offer.tokenA === USDC_MINT,
         volatilePair: offer.poolShape?.volatilePair ?? false,
         quotePricePoolId: offer.poolShape?.quotePricePoolId ?? null,
         quoteTokenMint: offer.poolShape?.quoteTokenMint ?? null,
@@ -175,38 +173,9 @@ export function buildPoolEntry(offer, now = Date.now()) {
  * nicht bekannt, `validatePoolOffer()` liefert 'verified'.
  */
 export function applyAdoptSideEffects(offer) {
-    // Kein `cleanup.rankingEligible:false` mehr (die zweite Sperre des alten
-    // Klick-Pfads). Der Pool soll am Ranking teilnehmen — genau dort fällt die
-    // Kapitalentscheidung. Der Default aus lib/pool-settings-defaults.js ist `true`;
-    // eine bestehende Zeile aus einem früheren Leben des Pools wird bereinigt, damit
-    // eine alte Sperre die Übernahme nicht stillschweigend aushebelt.
-    const db = new Database(SETTINGS_DB);
-    try {
-        db.exec(`
-            CREATE TABLE IF NOT EXISTS pool_settings (
-                bot_id   TEXT NOT NULL,
-                pool_id  TEXT NOT NULL,
-                settings TEXT NOT NULL DEFAULT '{}',
-                PRIMARY KEY (bot_id, pool_id)
-            )
-        `);
-        const row = db.prepare(
-            `SELECT settings FROM pool_settings WHERE bot_id = ? AND pool_id = ?`
-        ).get(BOT_ID, offer.id);
-        if (row) {
-            const settings = JSON.parse(row.settings);
-            if (settings.cleanup?.rankingEligible === false) {
-                settings.cleanup = { ...settings.cleanup, rankingEligible: true };
-                db.prepare(`
-                    INSERT INTO pool_settings (bot_id, pool_id, settings) VALUES (?, ?, ?)
-                    ON CONFLICT(bot_id, pool_id) DO UPDATE SET settings = excluded.settings
-                `).run(BOT_ID, offer.id, JSON.stringify(settings));
-            }
-        }
-    } finally {
-        db.close();
-    }
-
+    // Früher stand hier ein Reset von `cleanup.rankingEligible:false` auf `true`, damit
+    // eine alte Klick-Sperre die Übernahme nicht aushebelte. Das Feld wertet seit
+    // LIQ#000929 niemand mehr aus und wurde mit LIQ#000937 entfernt (Migration 0015).
     mergeTokenInfoOverlay(offer.tokenInfo);
     registerTokensIfMissing(offer);
 }

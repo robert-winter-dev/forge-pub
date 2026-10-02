@@ -33,6 +33,36 @@ const WSOL_MINT            = 'So11111111111111111111111111111111111111112';
 const CBTC_MINT            = 'cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij';
 const SOL_TX_FEE_BUFFER    = 0.005;
 const MIN_USDC_AMOUNT      = 1.0;
+// Kleinster USDC-Betrag, für den der manuelle Deposit (deposit.js, Modus A) einen Auto-Swap
+// ausführt. Bewusst niedrig: Bei Pools mit stark ungleichen Token-Preisen (xSOL/SOL) ist eine
+// Seite nur Cent wert, fehlt sie aber, bricht der Deposit ab (LIQ#000971). Die Swap-Gebühr
+// liegt bei etwa 0,001 USD, die Slippage ist relativ zum Betrag und damit klein in Cent.
+export const MIN_AUTO_SWAP_USDC = 0.10;
+
+/** true, wenn ein Auto-Swap über `usdc` USDC ausgeführt werden soll. */
+export function autoSwapNoetig(usdc) {
+    return usdc >= MIN_AUTO_SWAP_USDC;
+}
+
+// SOL-Bedarf des manuellen Deposits (deposit.js, Upfront-Check). Konservativ: Jupiter-Swaps
+// kosten 0,005–0,015 SOL.
+export const DEPOSIT_SOL_FEE_PER_TX = 0.01;
+
+/**
+ * Nutzbares SOL (Wallet MINUS config.solReserve), das der manuelle Deposit für seine TXs
+ * braucht. 🔒 Die Reserve steckt hier NICHT drin: getUsableSolBalance*() hat sie bereits
+ * abgezogen. Bis LIQ#000971 wurde sie ein zweites Mal addiert — ein Wallet mit 0,19 SOL
+ * (0,09 nutzbar) scheiterte an ~0,03 SOL Bedarf, effektiv verlangt waren 0,23 SOL.
+ *
+ * @param {{modeBOrC: boolean, volatilePair: boolean}} p
+ * @returns {{txCount: number, feePerTx: number, usableNeeded: number}}
+ */
+export function depositSolBedarf({ modeBOrC, volatilePair }) {
+    // Modus B/C = 1 TX (kein Swap), volatile pair = 3 (2 Auto-Swaps + Position), sonst 2.
+    const txCount = modeBOrC ? 1 : volatilePair ? 3 : 2;
+    return { txCount, feePerTx: DEPOSIT_SOL_FEE_PER_TX, usableNeeded: txCount * DEPOSIT_SOL_FEE_PER_TX };
+}
+
 export const PRESWAP_SLIPPAGE_BPS = 150; // höherer Slippage für Cleanup-Swaps (cbBTC/EURC illiquid)
 
 // ─── Gemeinsame Hilfsfunktionen ───────────────────────────────────────────────
@@ -81,8 +111,8 @@ export function clmmTokenAForDeposit(depositB, currentPrice, priceLower, priceUp
  *   2. Kleinstpositions-Netz: war die Vorposition < minReopenCapitalUsd und die
  *      Quote-Seite hat mehr, gilt die Quote-Seite (LIQ#0341)
  *   3. nie mehr als real im Wallet verfügbar ist
- *   4. nie mehr als die Max-Einzahlung pro Aktion (Ausnahme: Reopen kurz nach einem
- *      Close stellt bestehendes Kapital wieder her, kein frischer Zufluss)
+ * Die frühere vierte Stufe, die Max-Einzahlung pro Aktion (CLEANUP_MAX_DEPOSIT), entfiel mit
+ * LIQ#000937: Der Bot eröffnet nur noch wieder, und dafür galt sie nie.
  *
  * @returns {number} Zielkapital in USD (0 = nichts zu tun)
  */
@@ -91,8 +121,6 @@ export function reopenTargetCapitalUsd({
     lastPositionCapitalUsd = null,
     quoteSideUsd           = 0,
     walletTotalUsd         = 0,
-    maxDepositUsd          = 0,
-    isPreservationReopen   = false,
     minReopenCapitalUsd    = 5.0,
 }) {
     let capital;
@@ -104,7 +132,6 @@ export function reopenTargetCapitalUsd({
             ? quoteSideUsd
             : Math.min(hist, walletTotalUsd);
     }
-    if (maxDepositUsd > 0 && !isPreservationReopen) capital = Math.min(capital, maxDepositUsd);
     return Math.max(0, capital);
 }
 
@@ -520,7 +547,7 @@ async function _sweepResidualOnce(pool, nftMint, {
             usdc: (amountA * usd.a + amountB * usd.b).toFixed(2),
         }));
 
-        const res = await adapter.increaseLiquidity(pool, nftMint, amountA, amountB, DEPOSIT_SLIPPAGE);
+        const res = await adapter.increaseLiquidity(pool, nftMint, amountA, amountB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
         if (!res?.txHash) return null;   // Quote 0 → keine TX, nichts zu buchen
 
         // res.tokenEstA/B sind seit 2026-08-22 die on-chain bewegten Ist-Mengen (Vault-Deltas
@@ -603,7 +630,7 @@ export async function depositStandard(pool, depositUsdc, keypair, db, adapter, {
 
     let result;
     try {
-        result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE);
+        result = await adapter.increaseLiquidity(pool, position.nft_mint, amountA, amountB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
     } catch (err) {
         console.error(`[deposit-lib] ${pool.pair}: increaseLiquidity fehlgeschlagen – ${err.message}`);
         await notify.error(`deposit ${pool.pair}`, err);
@@ -820,7 +847,7 @@ export async function depositUsdcIsTokenA(pool, depositUsdc, keypair, db, adapte
 
     let result;
     try {
-        result = await adapter.increaseLiquidity(pool, position.nft_mint, walletTokenA, amountB, DEPOSIT_SLIPPAGE);
+        result = await adapter.increaseLiquidity(pool, position.nft_mint, walletTokenA, amountB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
     } catch (err) {
         console.error(`[deposit-lib] ${pool.pair}: increaseLiquidity fehlgeschlagen – ${err.message}`);
         await notify.error(`deposit ${pool.pair}`, err);
@@ -1139,7 +1166,7 @@ export async function depositVolatilePair(pool, keypair, db, adapter, { note = '
 
     let result;
     try {
-        result = await adapter.increaseLiquidity(pool, position.nft_mint, safeA, safeB, DEPOSIT_SLIPPAGE);
+        result = await adapter.increaseLiquidity(pool, position.nft_mint, safeA, safeB, DEPOSIT_SLIPPAGE, { retryOnExpiry: true });
     } catch (err) {
         console.warn(`[deposit-lib] ${pool.pair}: volatilePair deposit übersprungen – ${err.message}`);
         return 0;

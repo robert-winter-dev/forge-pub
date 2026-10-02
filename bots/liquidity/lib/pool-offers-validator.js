@@ -26,6 +26,7 @@ import { getConnection, getKeypair } from './wallet.js';
 import { settle } from './settle-promise.js';
 
 const ORCA_V2 = 'http://127.0.0.1:3100/orcav2';
+import { BACKGROUND_LANE_HEADERS, BACKGROUND_TIMEOUT_MS } from '../../../lib/nexus-lane.js';
 const TOKEN_2022_PROGRAM_ID = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 let _ctx = null;
@@ -71,7 +72,7 @@ export async function fetchOnChainPool(address) {
  * Orca-v2-API, die auch der Master zur Ermittlung nutzt (core/premium/pool-offers.js).
  */
 async function fetchAdaptiveFeeEnabled(address) {
-    const res = await fetch(`${ORCA_V2}/solana/pools/${address}`, { signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(`${ORCA_V2}/solana/pools/${address}`, { headers: BACKGROUND_LANE_HEADERS, signal: AbortSignal.timeout(BACKGROUND_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`Orca-API HTTP ${res.status} für ${address}`);
     const json = await res.json();
     return (json.data ?? json).adaptiveFeeEnabled ?? null;

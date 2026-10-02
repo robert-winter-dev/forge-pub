@@ -2,40 +2,6 @@
 
 /* ── Chart-Modal-Overlay (geteilt: Chart-Modals + Wallet-Modal) ─────────── */
 
-.chart-modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.78);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-}
-.chart-modal-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.8rem 1.25rem;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-}
-.chart-modal-pair {
-    font-size: 1rem;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-.chart-modal-close {
-    background: transparent;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 1.6rem;
-    line-height: 1;
-    cursor: pointer;
-    padding: 0 0.2rem;
-    margin-left: auto;
-    transition: color 0.15s;
-}
-.chart-modal-close:hover { color: var(--text-primary); }
 
 /* ── Chart-Card-Header: Titel-Zeile + Range-Buttons darunter ────────────── */
 
@@ -64,15 +30,11 @@
 }
 
 .chart-modal-dialog {
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     width: min(92vw, 720px);
     height: min(70vh, 460px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
 }
 
 .chart-modal-body {
@@ -114,16 +76,12 @@
 /* ── Wallet-Detail-Modal ─────────────────────────────────��───────────────── */
 
 .wallet-modal-dialog {
-    background: var(--bg-dark);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     width: 92vw;
     max-width: 460px;
     max-height: 80vh;
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
 }
 /* TX-Fees-Modal braucht mehr Breite für die 4-spaltige Tabelle
    (Zeit · Typ · Pool · Fee), sonst entsteht horizontaler Scrollbalken. */
@@ -396,35 +354,12 @@ body.modal-open {
 
 /* ── Pool-APY-Modal ──────────────────────────────────────────────────────── */
 
-.modal-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.65);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    backdrop-filter: blur(3px);
-    -webkit-backdrop-filter: blur(3px);
-    animation: modal-fade-in 0.15s ease;
-}
-.modal-overlay.hidden {
-    display: none;
-}
 
-@keyframes modal-fade-in {
-    from { opacity: 0; }
-    to   { opacity: 1; }
-}
 
+/* Optik liegt zentral in shared.css („Dialog-Standard"). */
 .modal-box {
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 12px;
     padding: 1.5rem;
     width: min(660px, 92vw);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-    animation: modal-slide-in 0.15s ease;
 }
 
 /* Range-Buttons (1D/1W/1M) im Modal-Body rechtsbündig — analog zu Header-Flex-
@@ -437,41 +372,9 @@ body.modal-open {
     margin-right: 0;
 }
 
-@keyframes modal-slide-in {
-    from { transform: translateY(-12px); opacity: 0; }
-    to   { transform: translateY(0);     opacity: 1; }
-}
 
-.modal-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1.25rem;
-}
 
-.modal-header h3 {
-    margin: 0;
-    flex: 1;
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: var(--text-primary);
-}
 
-.modal-close {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 1rem;
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    line-height: 1;
-    transition: background 0.15s ease, color 0.15s ease;
-}
-.modal-close:hover {
-    background: var(--border);
-    color: var(--text-primary);
-}
 
 /* ── Forge Tooltip (JS-gesteuert) ────────────────────────────────────────── */
 

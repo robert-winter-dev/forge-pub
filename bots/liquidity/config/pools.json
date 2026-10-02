@@ -20,8 +20,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 125000,
     "tvlExitThreshold": 62000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-sol-usdc",
@@ -38,8 +37,7 @@
     "proactiveTrigger": 0.75,
     "tvlWarnThreshold": 10000000,
     "tvlExitThreshold": 5000000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-btc-usdc",
@@ -56,8 +54,7 @@
     "proactiveTrigger": 0.75,
     "tvlWarnThreshold": 2000000,
     "tvlExitThreshold": 1000000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-eurc-usdc",
@@ -79,8 +76,7 @@
     },
     "tvlWarnThreshold": 250000,
     "tvlExitThreshold": 200000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-sol-zec",
@@ -106,8 +102,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 200000,
     "tvlExitThreshold": 100000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-zec-usdc",
@@ -129,8 +124,7 @@
       "fixedPct": 3,
       "locked": true
     },
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-hype-sol",
@@ -156,8 +150,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 200000,
     "tvlExitThreshold": 100000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-orca-sol",
@@ -182,8 +175,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 500000,
     "tvlExitThreshold": 300000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-cbtc-wbtc",
@@ -207,8 +199,7 @@
     "rebalanceDisabled": true,
     "tvlWarnThreshold": 1000000,
     "tvlExitThreshold": 500000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-cbtc-sol",
@@ -234,8 +225,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 3000000,
     "tvlExitThreshold": 2000000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-ore-sol",
@@ -261,8 +251,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 190000,
     "tvlExitThreshold": 100000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-render-sol",
@@ -288,8 +277,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 200000,
     "tvlExitThreshold": 100000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-pump-sol",
@@ -315,8 +303,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 500000,
     "tvlExitThreshold": 300000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-hype-usdc",
@@ -338,8 +325,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 200000,
     "tvlExitThreshold": 100000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-bill-usdc",
@@ -361,8 +347,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 300000,
     "tvlExitThreshold": 150000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-jitosol-ref",
@@ -389,8 +374,7 @@
     "uiDepositDisabled": true,
     "tvlWarnThreshold": 1000000,
     "tvlExitThreshold": 500000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-jto-jitosol",
@@ -415,8 +399,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 800000,
     "tvlExitThreshold": 400000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-usdg-usdc",
@@ -438,8 +421,7 @@
     "rebalanceDisabled": true,
     "tvlWarnThreshold": 2000000,
     "tvlExitThreshold": 1000000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-jlp-sol",
@@ -465,8 +447,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 2000000,
     "tvlExitThreshold": 1000000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-spcx-usdc",
@@ -489,8 +470,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 1200000,
     "tvlExitThreshold": 600000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-tslax-usdc",
@@ -513,8 +493,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 75000,
     "tvlExitThreshold": 35000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-mplx-usdc",
@@ -536,8 +515,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 375000,
     "tvlExitThreshold": 190000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-weth-sol",
@@ -563,8 +541,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 2900000,
     "tvlExitThreshold": 1450000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-fartcoin-usdc",
@@ -586,8 +563,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 67966,
     "tvlExitThreshold": 33983,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-syrupusdc-usdc",
@@ -609,8 +585,7 @@
     "rebalanceDisabled": true,
     "tvlWarnThreshold": 6025000,
     "tvlExitThreshold": 3012000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-pengu-sol",
@@ -636,8 +611,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 1400000,
     "tvlExitThreshold": 700000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-useless-sol",
@@ -663,8 +637,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 143409,
     "tvlExitThreshold": 71704,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-borg-sol",
@@ -690,8 +663,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 363558,
     "tvlExitThreshold": 181779,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-wbtc-sol",
@@ -717,8 +689,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 666948,
     "tvlExitThreshold": 333474,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-zbcn-sol",
@@ -744,8 +715,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 71335,
     "tvlExitThreshold": 35667,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-fartcoin-sol",
@@ -771,8 +741,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 360000,
     "tvlExitThreshold": 180000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-trump-sol",
@@ -798,8 +767,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 128000,
     "tvlExitThreshold": 64000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-spx-usdc",
@@ -822,8 +790,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 240000,
     "tvlExitThreshold": 120000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-jlp-usdc",
@@ -845,8 +812,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 640000,
     "tvlExitThreshold": 320000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-jup-sol",
@@ -871,8 +837,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 233000,
     "tvlExitThreshold": 117000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-stonk-sol",
@@ -899,8 +864,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 110000,
     "tvlExitThreshold": 55000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-natix-usdc",
@@ -923,8 +887,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 97000,
     "tvlExitThreshold": 48000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-skr-usdc",
@@ -946,8 +909,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 446000,
     "tvlExitThreshold": 223000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-geod-usdc",
@@ -969,8 +931,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 176000,
     "tvlExitThreshold": 88000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-trump-usdc",
@@ -992,8 +953,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 607000,
     "tvlExitThreshold": 303000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-fartcoin-sol-2",
@@ -1019,8 +979,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 734000,
     "tvlExitThreshold": 367000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-hype-usdc-2",
@@ -1042,8 +1001,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 263000,
     "tvlExitThreshold": 131000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-pltrx-usdc",
@@ -1066,8 +1024,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 75000,
     "tvlExitThreshold": 38000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-gmex-usdc",
@@ -1090,8 +1047,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 68000,
     "tvlExitThreshold": 34000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-kox-usdc",
@@ -1114,8 +1070,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 99000,
     "tvlExitThreshold": 49000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-mcdx-sol",
@@ -1141,8 +1096,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 61000,
     "tvlExitThreshold": 31000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-bonk-sol",
@@ -1168,8 +1122,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 79000,
     "tvlExitThreshold": 40000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-xsol-sol",
@@ -1195,8 +1148,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 92000,
     "tvlExitThreshold": 46000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-ray-sol",
@@ -1222,8 +1174,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 88000,
     "tvlExitThreshold": 44000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-silv-usdc",
@@ -1246,8 +1197,7 @@
     "capitalUSDC": 0,
     "tvlWarnThreshold": 21000,
     "tvlExitThreshold": 10500,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-pyth-sol",
@@ -1274,8 +1224,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 80000,
     "tvlExitThreshold": 40000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-rblx-usdc",
@@ -1297,8 +1246,7 @@
     },
     "tvlWarnThreshold": 73000,
     "tvlExitThreshold": 37000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-bnb-sol",
@@ -1325,8 +1273,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 66000,
     "tvlExitThreshold": 33000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-cost-usdc",
@@ -1348,8 +1295,7 @@
     },
     "tvlWarnThreshold": 53000,
     "tvlExitThreshold": 26500,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-baba-usdc",
@@ -1371,8 +1317,7 @@
     },
     "tvlWarnThreshold": 45000,
     "tvlExitThreshold": 22500,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-djt-usdc",
@@ -1394,8 +1339,7 @@
     },
     "tvlWarnThreshold": 116000,
     "tvlExitThreshold": 58000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-gldx-sol",
@@ -1422,8 +1366,7 @@
     "tvlWarnThreshold": 64000,
     "tvlExitThreshold": 32000,
     "poolType": "rwa",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-stonk-sol-2",
@@ -1450,8 +1393,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 549000,
     "tvlExitThreshold": 274000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-pump-usdc",
@@ -1473,8 +1415,7 @@
     "stopLossPctOpen": 0.7,
     "tvlWarnThreshold": 603000,
     "tvlExitThreshold": 301000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-sol-usdg",
@@ -1500,8 +1441,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 2658000,
     "tvlExitThreshold": 1329000,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-tao-sol",
@@ -1528,8 +1468,7 @@
     "aprAlertDisabled": true,
     "tvlWarnThreshold": 147000,
     "tvlExitThreshold": 73500,
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-kmno-usdc",
@@ -1552,8 +1491,7 @@
     "tvlWarnThreshold": 1057000,
     "tvlExitThreshold": 529000,
     "poolType": "volatil_2",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-spcxx-sol",
@@ -1580,8 +1518,7 @@
     "tvlWarnThreshold": 68000,
     "tvlExitThreshold": 34000,
     "poolType": "rwa",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-ibm-usdc",
@@ -1603,8 +1540,7 @@
     "tvlWarnThreshold": 81000,
     "tvlExitThreshold": 40000,
     "poolType": "rwa",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-metax-usdc",
@@ -1626,8 +1562,7 @@
     "tvlWarnThreshold": 106000,
     "tvlExitThreshold": 53000,
     "poolType": "rwa",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-grass-sol",
@@ -1654,8 +1589,7 @@
     "tvlWarnThreshold": 70000,
     "tvlExitThreshold": 35000,
     "poolType": "volatil_2",
-    "active": false,
-    "enabled": false
+    "active": false
   },
   {
     "id": "liq-spx-sol",
@@ -1682,7 +1616,229 @@
     "tvlWarnThreshold": 61000,
     "tvlExitThreshold": 31000,
     "poolType": "volatil_2",
-    "active": false,
-    "enabled": false
+    "active": false
+  },
+  {
+    "id": "liq-hims-usdc",
+    "protocol": "orca",
+    "address": "7iqWWNjubSTjmWXk9eYJViDLZjBN2KjrYt5Z9j8n8exQ",
+    "pair": "HIMS/USDC",
+    "tokenA": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "tokenB": "HiMSSzzwkZkrXJ4PGVJRdtfLaANeAztjjcgk5Dxe7Lwx",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.3,
+    "tickSpacing": 64,
+    "usdcIsTokenA": true,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 99000,
+    "tvlExitThreshold": 49000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-gldx-usdc",
+    "protocol": "orca",
+    "address": "4Vt3hyHgP3v9jQZWebLetWYXD7deumUQVxGC8bbr6UDS",
+    "pair": "GLDx/USDC",
+    "tokenA": "Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.05,
+    "tickSpacing": 8,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 91000,
+    "tvlExitThreshold": 45000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-silv-usdc-2",
+    "poolType": "rwa",
+    "protocol": "orca",
+    "address": "WVQ6uNtARvaSA4qzsVUrdccastXBj3rdLWVsNMxo46M",
+    "pair": "SILV/USDC",
+    "tokenA": "SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.65,
+    "tickSpacing": 96,
+    "proactiveTrigger": 0.75,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3,
+      "locked": true
+    },
+    "capitalUSDC": 0,
+    "tvlWarnThreshold": 109000,
+    "tvlExitThreshold": 55000,
+    "active": false
+  },
+  {
+    "id": "liq-near-sol",
+    "poolType": "volatil_2",
+    "protocol": "orca",
+    "address": "AhRKZqCo3UtfyGKBWDG4Z9ZHT7mq66k89zryT2hSJC6G",
+    "pair": "SOL/NEAR",
+    "displayPair": "NEAR/SOL",
+    "tokenA": "So11111111111111111111111111111111111111112",
+    "tokenB": "3ZLekZYq2qkZiSpnSvabjit34tUkjSwD1JFuW9as9wBG",
+    "decimalsA": 9,
+    "decimalsB": 9,
+    "feeTier": 1,
+    "tickSpacing": 128,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-sol-usdc",
+    "quoteTokenMint": "So11111111111111111111111111111111111111112",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 104000,
+    "tvlExitThreshold": 52000,
+    "active": false
+  },
+  {
+    "id": "liq-orca-usdc",
+    "protocol": "orca",
+    "address": "5Z66YYYaTmmx1R4mATAGLSc8aV4Vfy5tNdJQzk1GP9RF",
+    "pair": "ORCA/USDC",
+    "tokenA": "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.3,
+    "tickSpacing": 64,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 73000,
+    "tvlExitThreshold": 37000,
+    "poolType": "volatil_2",
+    "active": false
+  },
+  {
+    "id": "liq-near-usdc",
+    "protocol": "orca",
+    "address": "77xSiQHXyH43U9RJr3FSupVzzuhh9WwweG6k3cce9sjR",
+    "pair": "NEAR/USDC",
+    "tokenA": "3ZLekZYq2qkZiSpnSvabjit34tUkjSwD1JFuW9as9wBG",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 0.3,
+    "tickSpacing": 64,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "tvlWarnThreshold": 500000,
+    "tvlExitThreshold": 250000,
+    "poolType": "volatil_2",
+    "active": false
+  },
+  {
+    "id": "liq-spcxx-usdc",
+    "protocol": "orca",
+    "address": "ASAxmEaTT1HFe3mVC3zbKDE4tuB28W7732XQrEMBM5W2",
+    "pair": "SPCXx/USDC",
+    "tokenA": "Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.05,
+    "tickSpacing": 8,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 149000,
+    "tvlExitThreshold": 74000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-nvdax-usdc",
+    "protocol": "orca",
+    "address": "6R4r93V5fcMzc13CL2enEepDSYcr4Qx3ptZBDwudTXCo",
+    "pair": "NVDAx/USDC",
+    "tokenA": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.02,
+    "tickSpacing": 2,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 180000,
+    "tvlExitThreshold": 90000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-mcdx-usdc",
+    "protocol": "orca",
+    "address": "6UaXnzFjCtn9qwcCUEex7EG4hoojSDrf6iZfjQUYaNqP",
+    "pair": "MCDx/USDC",
+    "tokenA": "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 88000,
+    "tvlExitThreshold": 44000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-gp-usdc",
+    "protocol": "orca",
+    "address": "7YGHXMBpNLcDRLPUJfqzN79WMoh8Qniz52cNuZK6go7b",
+    "pair": "GP/USDC",
+    "tokenA": "31k88G5Mq7ptbRDf3AM13HAq6wRQHXHikR8hik7wPygk",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 388000,
+    "tvlExitThreshold": 194000,
+    "poolType": "volatil_2",
+    "active": false
   }
 ]

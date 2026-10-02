@@ -11,7 +11,9 @@
 
 import { showModal, closeModal, getModal } from '/forge/js/modal.js?v=20260731a';
 import { buildWalletDetailHtml } from '/forge/js/wallet-detail-modal.js?v=20260807a';
-import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml, scamManageBadgeHtml } from '/forge/js/scam-tab.js?v=20260921b';
+import { fetchScamTokens, buildScamTabHtml, wireScamTab, scamInfoIconHtml, scamManageBadgeHtml } from '/forge/js/scam-tab.js?v=20260925a';
+import { showFallbackSendHint } from '/forge/js/rpc-fallback-hint.js?v=20260925a';
+import { runFinanceAction } from '/forge/js/finance-job.js?v=20260925a';
 
 // 🔒 Keine nativen Browser-Dialoge (alert/confirm/prompt) – im ganzen Projekt nicht.
 // Meldungen laufen über das Modal-System (html/js/modal.js). `pre-line` erhält die
@@ -401,29 +403,9 @@ function _openBotControlModal() {
     document.getElementById('liquiditybot-btn-restart')?.addEventListener('click', () => _doAction('restart'));
 }
 
-// ── Cleanup-Abschnitt ────────────────────────────────────────────────────────
-
-/**
- * Spiegelt resolveCleanupMode() aus bots/liquidity/lib/cleanup-mode.js (LIQ#000929):
- * gültig sind nur 'disabled' und 'pool:<id>'. Der entfallene Modus 'ranking'
- * („Bester Pool"), ein fehlender und ein unbekannter Wert gelten als 'disabled' —
- * genau so behandelt sie auch der Bot.
- */
-function _parseCleanupMode(cfg) {
-    const v = String(cfg?.CLEANUP_MODE ?? '').trim();
-    return (v.startsWith('pool:') && v.length > 'pool:'.length) ? v : 'disabled';
-}
+// ── Cleanup- und Einzahlungs-Abschnitt ───────────────────────────────────────
 
 function _parseCleanupCfg(cfg) {
-    const mode       = _parseCleanupMode(cfg);
-    const maxDeposit = (() => {
-        const v = parseFloat(cfg.CLEANUP_MAX_DEPOSIT ?? '0');
-        return v >= 10 ? v : 0;
-    })();
-    const minDeposit = (() => {
-        const v = parseFloat(cfg.CLEANUP_MIN_DEPOSIT ?? '0');
-        return v >= 1 ? v : 0;
-    })();
     const dustEnabled = cfg.CLEANUP_DUST_ENABLED !== 'false';
     const dustMin = (() => {
         const v = parseFloat(cfg.CLEANUP_DUST_MIN_USDC ?? '0.01');
@@ -433,32 +415,33 @@ function _parseCleanupCfg(cfg) {
         const v = parseFloat(cfg.CLEANUP_DUST_MAX_USDC ?? '25');
         return v > 0 ? v : 25;
     })();
-    return { mode, maxDeposit, minDeposit, dustEnabled, dustMin, dustMax };
+    // Reinvest (LIQ#000988): fehlender Schlüssel = Deaktiviert, Grenzen mit den Bot-Defaults
+    // (lib/reinvest-rules.js). Ein unbekannter Modus zählt als Deaktiviert.
+    const rawMode = String(cfg.CLEANUP_REINVEST_MODE ?? 'off').trim().toLowerCase();
+    const reinvestMode = ['pnl', 'edge'].includes(rawMode) ? rawMode : 'off';
+    const reinvestMin = (() => { const v = parseFloat(cfg.CLEANUP_REINVEST_MIN_USDC ?? '10'); return v >= 1 ? v : 10; })();
+    const reinvestMax = (() => { const v = parseFloat(cfg.CLEANUP_REINVEST_MAX_USDC ?? '200'); return v > reinvestMin ? v : Math.max(200, reinvestMin + 1); })();
+    return { dustEnabled, dustMin, dustMax, reinvestMode, reinvestMin, reinvestMax };
 }
 
 async function _loadAndRenderCleanupRow(wrap) {
-    const [cfgRes, poolsRes] = await Promise.all([
-        fetch('/api/config/liquiditybot'),
-        _fetchLiquidityPools(),
-    ]);
+    const cfgRes = await fetch('/api/config/liquiditybot');
     if (!cfgRes.ok) throw new Error(tr('sliq.config_unavailable', 'Config nicht verfügbar'));
-    const cfg   = await cfgRes.json();
-    const pools = poolsRes.ok ? poolsRes.data : [];
-    const parsed = _parseCleanupCfg(cfg);
+    const parsed = _parseCleanupCfg(await cfgRes.json());
 
     // Gleiches Tabellen-Layout wie Status/Premium darüber (wallet-action-table) –
-    // Kurzbeschreibung des aktuellen Modus statt der früheren drei Buttons, Verwalten
-    // rechtsbündig über .wat-action.
-    // LIQ#0379, Punkt 4 (revidiert): kein Geltungsbereichs-Text mehr — unverständlich ohne
-    // Kontext. Stattdessen wat-muted: ausgegraut als Signal "läuft unverändert weiter,
-    // nicht per Klick änderbar", nicht als "deaktiviert".
+    // Kurzbeschreibung statt Buttons, Verwalten rechtsbündig über .wat-action.
+    // LIQ#0379, Punkt 4 (revidiert): wat-muted = ausgegraut als Signal "läuft unverändert
+    // weiter, nicht per Klick änderbar", nicht als "deaktiviert".
+    // Min./Max. Einzahlung (bis LIQ#000937 im Reiter „Manuell") sind ersatzlos entfallen:
+    // Neues Kapital kommt nur über „Einzahlen“, der Bot eröffnet nur noch wieder.
     const botInactive = _ctx.getStatus?.(SVC_ID) !== 'active';
     wrap.innerHTML = `
         <table class="wallet-action-table">
             <tbody>
                 <tr>
                     <td class="wat-label">${tr('sliq.cleanup', 'Cleanup')}</td>
-                    <td class="wat-info wat-muted">${_esc(_cleanupModeSummary(parsed, pools))}</td>
+                    <td class="wat-info wat-muted">${_esc(_cleanupSummary(parsed))}</td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="sys-cleanup-manage-btn" ${botInactive ? 'disabled' : ''}>${tr('sb.manage', 'Verwalten')}</button>
                     </td>
@@ -466,37 +449,24 @@ async function _loadAndRenderCleanupRow(wrap) {
             </tbody>
         </table>`;
 
-    // Frische Pools nachladen (Score/active kann sich seit dem letzten Render geändert
-    // haben), bevor das Modal aufgeht – Fallback auf den bereits geladenen Stand.
-    wrap.querySelector('#sys-cleanup-manage-btn')?.addEventListener('click', async () => {
-        try {
-            const res = await fetch(`/api/pools/liquidity?t=${Date.now()}`);
-            const freshPools  = res.ok ? await res.json() : pools;
-            _openCleanupModal(wrap, parsed, freshPools);
-        } catch {
-            _openCleanupModal(wrap, parsed, pools);
-        }
-    });
+    wrap.querySelector('#sys-cleanup-manage-btn')?.addEventListener('click', () => _openCleanupModal(wrap, parsed));
 }
 
-// Kurzfassung des aktuellen Cleanup-Modus für die Zeilen-Vorschau (statt der
-// früheren Buttons). Seit LIQ#000929 gibt es nur noch „Deaktiviert" (kein Invest) und
-// einen festen Pool — „Bester Pool" ist entfallen.
-function _cleanupModeSummary(parsed, pools) {
-    const { mode, dustEnabled } = parsed;
-    let base;
-    if (mode.startsWith('pool:')) {
-        const id = mode.slice('pool:'.length);
-        const p  = pools.find(pp => String(pp.id) === id);
-        base = tr('sliq.cleanup_manual_summary', 'Manuell: {pool}', { pool: p ? (p.displayPair ?? p.pair) : tr('sliq.selected_pool', 'gewählter Pool') });
-    } else {
-        base = tr('sliq.cleanup_no_invest_summary', 'Kein Invest');
-    }
-    return `${base} · ${tr('sliq.dust', 'Dust')} ${dustEnabled ? tr('sliq.dust_on', 'aktiv') : tr('sliq.dust_off', 'aus')}`;
+// Kurzfassung für die Zeilen-Vorschau: Dust und Reinvest (LIQ#000988).
+function _cleanupSummary(parsed) {
+    const dust = `${tr('sliq.dust', 'Dust')} ${parsed.dustEnabled ? tr('sliq.dust_on', 'aktiv') : tr('sliq.dust_off', 'aus')}`;
+    const reinvest = `${tr('sliq.reinvest', 'Reinvest')} ${_reinvestModeLabel(parsed.reinvestMode)}`;
+    return `${dust} · ${reinvest}`;
 }
 
-// Kurzbeschreibung je Tab: sichtbares Kurzlabel + Icon mit ausführlichem
-// Text im Tooltip (Platz sparen, siehe Feature-Anforderung 2026-07-27).
+function _reinvestModeLabel(mode) {
+    if (mode === 'pnl')  return tr('sliq.reinvest_mode_pnl', 'Bester PnL (24h)');
+    if (mode === 'edge') return tr('sliq.reinvest_mode_edge', 'Bester Edge (24h)');
+    return tr('sliq.dust_off', 'aus');
+}
+
+// Kurzbeschreibung mit Icon und ausführlichem Text im Tooltip (Platz sparen, siehe
+// Feature-Anforderung 2026-07-27).
 function _cuDescHtml(shortLabel, tooltipTitle, tooltipContent) {
     return `<div class="cu-panel-desc">
         <span class="info-tip-label" data-tooltip-title="${_esc(tooltipTitle)}" data-tooltip-content="${_esc(tooltipContent)}">&#9432;</span>
@@ -504,98 +474,94 @@ function _cuDescHtml(shortLabel, tooltipTitle, tooltipContent) {
     </div>`;
 }
 
-// ── Cleanup-Modal: zwei Reiter (Manuell / Dust) ──────────────────────────────
-// Bis LIQ#000929 (23.09.2026) gab es einen dritten Reiter „Bester Pool" (Invest in den
-// Pool mit dem höchsten InvestScore). Mit ihm wanderten „Deaktiviert" und die
-// Min./Max.-Einzahlung in den Reiter „Manuell" — beide Einzahlungsgrenzen gelten auch für
-// den Bot selbst (bin/bot.js beim Öffnen einer Position), sie durften nicht mit wegfallen.
-function _openCleanupModal(wrap, cfgParsed, pools) {
+// ── Cleanup-Modal: Reiter Dust und Reinvest ─────────────────────────────────
+// Bis LIQ#000929 (23.09.2026) drei Reiter (Bester Pool / Manuell / Dust), bis LIQ#000937
+// zwei, danach nur Dust ohne Reiterleiste. Mit „Reinvest“ (LIQ#000988) gibt es wieder zwei.
+// Beide Reiter werden auf die Höhe des höheren gebracht, sonst springt das Modal beim Wechsel.
+async function _openCleanupModal(wrap, cfgParsed) {
     const mid = 'liquiditybot-cleanup-modal';
+
+    // Premium-Zustand VOR dem Öffnen holen: er entscheidet, ob der Reinvest-Reiter bedienbar
+    // ist und damit über seine Höhe. Nachträgliches Umbauen ließe das Modal springen.
+    let premium = { available: false, reason: 'unknown' };
+    try {
+        const r = await fetch('/api/config/liquiditybot/reinvest-status');
+        if (r.ok) premium = await r.json();
+    } catch { /* bleibt gesperrt: ohne Nachweis kein Reinvest */ }
 
     showModal({
         id:    mid,
-        // Der Countdown steht im Titel statt in jedem Reiter: das Modal war auf
-        // einem Notebook sonst nicht mehr ohne Scrollen darstellbar (23.08.2026).
+        // Der Countdown steht im Titel: das Modal war auf einem Notebook sonst nicht mehr
+        // ohne Scrollen darstellbar (23.08.2026).
         title: `${tr('sliq.manage_cleanup', 'Cleanup verwalten')}${_cleanupTitleSuffix()}`,
         body:  `
             <div class="wm-tab-bar">
-                <button class="wm-tab active" data-wm="manuell">${tr('sliq.manual', 'Manuell')}</button>
-                <button class="wm-tab" data-wm="dust">${tr('sliq.dust', 'Dust')}</button>
+                <button class="wm-tab active" data-wm="dust">${tr('sliq.dust', 'Dust')}</button>
+                <button class="wm-tab" data-wm="reinvest">${tr('sliq.reinvest', 'Reinvest')}</button>
             </div>
-            <div id="cu-tab-manuell">${_manuellTabHtml(cfgParsed, pools)}</div>
-            <div id="cu-tab-dust" hidden>${_dustTabHtml(cfgParsed)}</div>`,
-        // Rückmeldung („✓ Cleanup gespeichert.") steht links im Modal-Fuß statt als
-        // eigene Zeile in jedem Reiter — .forge-modal-footer-note schiebt sie per
+            <div id="cu-tab-dust">${_dustTabHtml(cfgParsed)}</div>
+            <div id="cu-tab-reinvest" hidden>${_reinvestTabHtml(cfgParsed, premium)}</div>`,
+        // Rückmeldung steht links im Modal-Fuß — .forge-modal-footer-note schiebt sie per
         // margin-right:auto nach links, die Knöpfe bleiben rechts.
         footerNote: '<span class="modal-feedback" id="cu-modal-feedback" style="margin-top:0"></span>',
         actions: [
-            // „Speichern" liegt im Modal-Fuß vor „Schließen" und gilt immer dem sichtbaren
-            // Reiter. Im Reiter „Manuell" speichert es Ziel und Einzahlungsgrenzen ohne
-            // Cleanup-Lauf, „Jetzt starten" speichert und läuft sofort.
-            { label: tr('msg.save', 'Speichern'), onClick: () => _saveActiveCleanupTab(modalTabId(), mid, wrap) },
+            // „Speichern“ gilt immer dem sichtbaren Reiter.
+            { label: tr('msg.save', 'Speichern'), onClick: () => (activeTab() === 'reinvest' ? _saveReinvest(wrap) : _saveDust(wrap)) },
             { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
         ],
     });
 
     const modalEl = getModal(mid);
     if (!modalEl) return;
-
-    const modalTabId = () => modalEl.querySelector('.wm-tab.active')?.dataset.wm ?? 'manuell';
-    const saveBtn    = modalEl.querySelector('.forge-modal-footer .btn');
+    const activeTab = () => modalEl.querySelector('.wm-tab.active')?.dataset.wm ?? 'dust';
+    const saveBtn = modalEl.querySelector('.forge-modal-footer .btn');
     if (saveBtn) saveBtn.id = 'cu-modal-save-btn';
 
-    // Gültigkeitsprüfung des Speichern-Knopfes an den aktiven Reiter binden. Ohne das
-    // bliebe eine Sperre aus dem anderen Reiter stehen (z.B. Dust mit Unter- >=
-    // Obergrenze), obwohl der sichtbare Reiter gültig ist. Die gemeinsame Rückmeldung
-    // wird beim Wechsel geleert.
-    const _syncSaveBtn = () => {
-        const fb = modalEl.querySelector('#cu-modal-feedback');
-        if (fb) { fb.textContent = ''; fb.className = 'modal-feedback'; }
-        if (!saveBtn) return;
-        saveBtn.disabled = false;
-        modalEl._cuValidate?.[modalTabId()]?.();
+    // Gültigkeit des Speichern-Knopfes an den aktiven Reiter binden: eine Sperre aus dem
+    // anderen Reiter (z. B. Dust mit Unter- ≥ Obergrenze) darf nicht stehen bleiben.
+    const validators = {
+        dust:     _wireDustTab(modalEl),
+        reinvest: _wireReinvestTab(modalEl, premium),
     };
+    const refreshSave = () => {
+        const fb  = modalEl.querySelector('#cu-modal-feedback');
+        const msg = validators[activeTab()]?.() ?? null;
+        if (saveBtn) saveBtn.disabled = !!msg;
+        if (fb) {
+            if (msg) { fb.textContent = msg; fb.className = 'modal-feedback error'; }
+            else     { fb.textContent = ''; fb.className = 'modal-feedback'; }
+        }
+    };
+    modalEl._cuRefreshSave = refreshSave;
 
-    // Beide Reiter auf die Höhe des höheren bringen, sonst springt das Modal beim
-    // Reiterwechsel. Gemessen wird, indem beide kurz sichtbar geschaltet werden: das
-    // läuft synchron in einem Rutsch, der Browser zeichnet zwischendurch nicht.
-    const _equalizeTabHeights = () => {
-        const tabs = ['#cu-tab-manuell', '#cu-tab-dust']
-            .map(sel => modalEl.querySelector(sel)).filter(Boolean);
-        if (tabs.length < 2) return;
-        const wasHidden = tabs.map(t => t.hidden);
+    // Beide Reiter auf die Höhe des höheren bringen. Gemessen wird, indem beide kurz sichtbar
+    // geschaltet werden: das läuft synchron in einem Rutsch, der Browser zeichnet dazwischen nicht.
+    const equalizeTabHeights = () => {
+        const tabs = ['#cu-tab-dust', '#cu-tab-reinvest'].map(sel => modalEl.querySelector(sel)).filter(Boolean);
+        const wasHidden = tabs.map(x => x.hidden);
         let max = 0;
-        tabs.forEach(t => { t.style.minHeight = ''; t.hidden = false; });
-        tabs.forEach(t => { max = Math.max(max, t.offsetHeight); });
-        tabs.forEach((t, i) => { t.hidden = wasHidden[i]; t.style.minHeight = `${max}px`; });
+        tabs.forEach(x => { x.style.minHeight = ''; x.hidden = false; });
+        tabs.forEach(x => { max = Math.max(max, Math.ceil(x.getBoundingClientRect().height)); });
+        tabs.forEach((x, i) => { x.hidden = wasHidden[i]; x.style.minHeight = `${max}px`; });
     };
 
     modalEl.querySelectorAll('.wm-tab').forEach(btn => {
         btn.addEventListener('click', () => {
             modalEl.querySelectorAll('.wm-tab').forEach(b => b.classList.toggle('active', b === btn));
-            modalEl.querySelector('#cu-tab-manuell').hidden = btn.dataset.wm !== 'manuell';
-            modalEl.querySelector('#cu-tab-dust').hidden    = btn.dataset.wm !== 'dust';
-            _syncSaveBtn();
+            modalEl.querySelector('#cu-tab-dust').hidden     = btn.dataset.wm !== 'dust';
+            modalEl.querySelector('#cu-tab-reinvest').hidden = btn.dataset.wm !== 'reinvest';
+            refreshSave();
         });
     });
 
-    _wireManuellTab(modalEl, mid, wrap);
-    _wireDustTab(modalEl, mid, wrap);
-    _syncSaveBtn();
-    _equalizeTabHeights();
-}
-
-/** Speichert den gerade sichtbaren Cleanup-Reiter. */
-function _saveActiveCleanupTab(tab, mid, wrap) {
-    if (tab === 'manuell') return _saveManuell(mid, wrap);
-    if (tab === 'dust')    return _saveDust(mid, wrap);
+    refreshSave();
+    equalizeTabHeights();
 }
 
 /**
- * Cleanup-Countdown als Titel-Zusatz (früher `_cleanupHint()` in jedem Reiter).
- * Farbe wie zuvor ab < 10 Minuten warnend — die Aussage steht im Text, nie allein
- * in der Farbe. Seit LIQ#000929 immer sichtbar: der stündliche Lauf (Dust, SOL-Topup,
- * Kapital-Abgleich) findet auch ohne Invest-Ziel statt.
+ * Cleanup-Countdown als Titel-Zusatz. Farbe ab < 10 Minuten warnend — die Aussage steht
+ * im Text, nie allein in der Farbe. Immer sichtbar: der stündliche Lauf (Dust, SOL-Topup,
+ * Kapital-Abgleich) findet auch ohne Invest statt.
  */
 function _cleanupTitleSuffix() {
     const min = (65 - new Date().getMinutes()) % 60;
@@ -608,145 +574,7 @@ function _cleanupTitleSuffix() {
     return ` <span style="font-weight:400;font-size:0.8rem;${style}">· ${_esc(text)}</span>`;
 }
 
-// ── Tab "Manuell": festes Cleanup-Ziel oder kein Invest ─────────────────────
-function _manuellTabHtml(cfgParsed, pools) {
-    const { mode, maxDeposit, minDeposit } = cfgParsed;
-    const sortedPools = pools
-        .slice()
-        .sort((a, b) => (a.displayPair ?? a.pair).localeCompare(b.displayPair ?? b.pair));
-
-    return `
-        ${_cuDescHtml(
-            tr('sliq.manual_desc', 'Investiert das Wallet-Guthaben gezielt in einen von dir gewählten Pool.'),
-            tr('sliq.manual', 'Manuell'),
-            tr('sliq.manual_tip', 'Investiert das investierbare Wallet-Guthaben in den hier gewählten Pool – sofort mit „Jetzt starten“ und danach bei jedem stündlichen Cleanup-Lauf. „Kein Invest“ lässt freies Kapital im Wallet; Dust und SOL-Reserve werden trotzdem jede Stunde gepflegt.')
-        )}
-        <label class="cleanup-radio-option" style="margin-bottom:0.4rem;">
-            <input type="radio" name="cleanup-mode-pool" value="disabled" ${mode === 'disabled' ? 'checked' : ''}>
-            <span>${tr('sliq.cleanup_no_invest', 'Kein Invest')} <small style="opacity:0.7;">${tr('sliq.cleanup_no_invest_hint', '(freies Kapital bleibt im Wallet)')}</small></span>
-        </label>
-        <div style="display:flex;gap:0.4rem;margin-bottom:0.4rem;">
-            <input type="text" id="cu-manuell-search" placeholder="${tr('liq.search_pool', 'Pool suchen…')}"
-                   style="flex:1;min-width:0;box-sizing:border-box;padding:0.3rem 0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:0.875rem">
-            <select id="cu-manuell-active-filter"
-                    style="flex-shrink:0;box-sizing:border-box;padding:0.3rem 0.5rem;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:5px;font-size:0.875rem">
-                <option value="all">${tr('sliq.filter_all', 'Alle')}</option>
-                <option value="active">${tr('sliq.filter_active', 'Aktiv')}</option>
-                <option value="inactive">${tr('sliq.filter_inactive', 'Inaktiv')}</option>
-            </select>
-        </div>
-        <div id="cu-manuell-list" class="cu-panel-body" style="max-height:11rem;overflow-y:auto;display:flex;flex-direction:column;gap:0.2rem;padding-bottom:0.25rem;">
-            ${sortedPools.map(p => `
-            <label class="cleanup-radio-option" data-cu-pool="${_esc(p.displayPair ?? p.pair).toLowerCase()}" data-cu-active="${p.active ? '1' : '0'}">
-                <input type="radio" name="cleanup-mode-pool" value="pool:${p.id}" ${mode === 'pool:' + p.id ? 'checked' : ''}>
-                <span${p.active ? '' : ' style="opacity:0.55;font-style:italic;"'}>Invest in ${_esc(p.displayPair ?? p.pair)}${p.active ? '' : tr('sb.suffix_inactive', ' (inaktiv)')}</span>
-            </label>`).join('')}
-        </div>
-        <div style="border-top:1px solid var(--border);margin-top:0.6rem;padding-top:0.6rem;display:flex;gap:1rem;">
-            <div style="flex:1">
-                <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">
-                    ${tr('sliq.min_deposit_open', 'Min. Einzahlung')}
-                    <span class="info-tip-label"
-                        data-tooltip-title="${tr('sb.min_deposit', 'Minimale Einzahlung')}"
-                        data-tooltip-content="${tr('sliq.min_deposit_tip', 'Liegt weniger als dieser Betrag an verfügbarem Kapital im Wallet, eröffnet der Bot keine neue Position und Cleanup reaktiviert keinen Pool.||Verhindert Mini-Positionen, deren TX-Gebühren den Ertrag auffressen.||Leer lassen oder 0 = kein Minimum.')}">&#9432;</span>
-                </label>
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <input type="number" id="cu-manuell-min-deposit" min="1" max="10000" step="1"
-                           value="${minDeposit > 0 ? minDeposit : ''}" placeholder="${tr('sb.no_minimum', 'kein Minimum')}"
-                           style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
-                    <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
-                </div>
-            </div>
-            <div style="flex:1">
-                <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">
-                    ${tr('sliq.max_deposit_open', 'Max. Einzahlung')}
-                    <span class="info-tip-label"
-                        data-tooltip-title="${tr('sb.max_deposit', 'Maximale Einzahlung')}"
-                        data-tooltip-content="${tr('sliq.max_deposit_tip', 'Begrenzt, mit wie viel USDC der Bot eine Position eröffnet oder nach einem Exit wiedereröffnet.||Beispiel: Limit 500 USDC → die Position startet mit höchstens 500 USDC, der Rest bleibt liquide.||Gilt nicht für den Invest in den hier gewählten Pool.||Leer lassen oder 0 = kein Limit.')}">&#9432;</span>
-                </label>
-                <div style="display:flex;align-items:center;gap:0.4rem;">
-                    <input type="number" id="cu-manuell-max-deposit" min="10" max="10000" step="10"
-                           value="${maxDeposit > 0 ? maxDeposit : ''}" placeholder="${tr('sb.no_limit', 'kein Limit')}"
-                           style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem">
-                    <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
-                </div>
-            </div>
-        </div>
-        <p style="margin:0.3rem 0 0;font-size:0.74rem;color:var(--text-muted)">${tr('sliq.deposit_range_hint', '10–10.000 bzw. 1–10.000 USDC &nbsp;·&nbsp; leer = kein Limit/Minimum')}</p>
-        <div class="bot-actions" style="margin-top:0.6rem;">
-            <button class="btn btn-secondary btn-uniform" id="cu-manuell-start-btn">${tr('sliq.start_now', 'Jetzt starten')}</button>
-        </div>`;
-}
-
-function _wireManuellTab(modalEl, mid, wrap) {
-    const searchInput  = modalEl.querySelector('#cu-manuell-search');
-    const activeFilter = modalEl.querySelector('#cu-manuell-active-filter');
-    const _applyPoolFilter = () => {
-        const q      = searchInput?.value.trim().toLowerCase() ?? '';
-        const filter = activeFilter?.value ?? 'all';
-        modalEl.querySelectorAll('#cu-manuell-list label[data-cu-pool]').forEach(lbl => {
-            const matchesQ      = !q || lbl.dataset.cuPool.includes(q);
-            const matchesActive = filter === 'all' || (filter === 'active') === (lbl.dataset.cuActive === '1');
-            lbl.style.display = (matchesQ && matchesActive) ? '' : 'none';
-        });
-    };
-    searchInput?.addEventListener('input', _applyPoolFilter);
-    activeFilter?.addEventListener('change', _applyPoolFilter);
-
-    requestAnimationFrame(() => {
-        const checked = modalEl.querySelector('input[name="cleanup-mode-pool"]:checked');
-        checked?.closest('label')?.scrollIntoView({ block: 'nearest' });
-    });
-
-    // „Jetzt starten" ergibt nur mit einem gewählten Pool Sinn — bei „Kein Invest"
-    // gibt es nichts zu starten (Speichern im Modal-Fuß genügt).
-    const startBtn = modalEl.querySelector('#cu-manuell-start-btn');
-    const _syncStartBtn = () => {
-        const sel = modalEl.querySelector('input[name="cleanup-mode-pool"]:checked');
-        if (startBtn) startBtn.disabled = !sel || sel.value === 'disabled';
-    };
-    modalEl.querySelectorAll('input[name="cleanup-mode-pool"]').forEach(r => r.addEventListener('change', _syncStartBtn));
-    _syncStartBtn();
-    startBtn?.addEventListener('click', () => _runCleanupManuell(mid, wrap));
-
-    // Min. darf Max. nicht überschreiten — sonst Speichern und Starten sperren, statt eine
-    // widersprüchliche Config zuzulassen.
-    const minDepositInput = modalEl.querySelector('#cu-manuell-min-deposit');
-    const maxDepositInput = modalEl.querySelector('#cu-manuell-max-deposit');
-    const fb              = modalEl.querySelector('#cu-modal-feedback');
-    const saveBtn         = modalEl.querySelector('#cu-modal-save-btn');
-    const _validateDepositRange = () => {
-        const conflict = _cleanupDepositConflict(minDepositInput?.value, maxDepositInput?.value);
-        if (saveBtn) saveBtn.disabled = conflict;
-        if (conflict && startBtn) startBtn.disabled = true; else _syncStartBtn();
-        if (fb) {
-            if (conflict) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
-            else if (fb.classList.contains('error')) { fb.textContent = ''; fb.className = 'modal-feedback'; }
-        }
-    };
-    minDepositInput?.addEventListener('input', _validateDepositRange);
-    maxDepositInput?.addEventListener('input', _validateDepositRange);
-    modalEl._cuValidate = { ...(modalEl._cuValidate ?? {}), manuell: _validateDepositRange };
-}
-
-function _cleanupDepositConflict(minRaw, maxRaw) {
-    const minVal = parseFloat(minRaw ?? '');
-    const maxVal = parseFloat(maxRaw ?? '');
-    return Number.isFinite(minVal) && minVal > 0 && Number.isFinite(maxVal) && maxVal > 0 && minVal > maxVal;
-}
-
-/** Werte des Reiters „Manuell" als .env-Payload (gleiche Normalisierung wie der Bot). */
-function _manuellPayload(modeValue) {
-    const maxRaw = parseFloat(document.getElementById('cu-manuell-max-deposit')?.value ?? '0');
-    const minRaw = parseFloat(document.getElementById('cu-manuell-min-deposit')?.value ?? '0');
-    return {
-        CLEANUP_MODE:        modeValue,
-        CLEANUP_MAX_DEPOSIT: String(maxRaw >= 10 ? maxRaw : 0),
-        CLEANUP_MIN_DEPOSIT: String(minRaw >= 1 ? minRaw : 0),
-    };
-}
-
-// ── Tab "Dust": Dust-Sweep an/aus + Grenzwerte konfigurieren ─────────────────
+// ── Dust-Sweep an/aus + Grenzwerte konfigurieren ─────────────────────────────
 function _dustTabHtml(cfgParsed) {
     const { dustEnabled, dustMin, dustMax } = cfgParsed;
     return `
@@ -783,117 +611,140 @@ function _dustTabHtml(cfgParsed) {
                 </div>
             </div>
             <p style="margin:-0.3rem 0 0;font-size:0.76rem;color:var(--text-muted)">
-                ${tr('sliq.dust_range_hint', 'Reste in diesem Bereich werden nach jedem Cleanup automatisch zu USDC getauscht. Darunter: vernachlässigbar, bleibt liegen. Darüber: bleibt liegen; ohne Invest in einen gewählten Pool nach 24 h ebenfalls zu USDC.')}
+                ${tr('sliq.dust_range_hint', 'Reste in diesem Bereich werden nach jedem Cleanup automatisch zu USDC getauscht. Darunter: vernachlässigbar, bleibt liegen. Darüber: bleibt liegen, nach 24 h ebenfalls zu USDC.')}
             </p>
         </div>`;
 }
 
-function _wireDustTab(modalEl, mid, wrap) {
+// Gibt den Validator zurück: Fehlermeldung oder null. Sperren und Rückmeldung setzt das Modal
+// (refreshSave in _openCleanupModal) für den jeweils sichtbaren Reiter.
+function _wireDustTab(modalEl) {
     const dustMinInput = modalEl.querySelector('#cu-dust-min');
     const dustMaxInput = modalEl.querySelector('#cu-dust-max');
-    const fb           = modalEl.querySelector('#cu-modal-feedback');
-    const saveBtn      = modalEl.querySelector('#cu-modal-save-btn');
-    const _validateDustRange = () => {
-        const minVal   = parseFloat(dustMinInput?.value ?? '');
-        const maxVal   = parseFloat(dustMaxInput?.value ?? '');
+    const validate = () => {
+        const minVal = parseFloat(dustMinInput?.value ?? '');
+        const maxVal = parseFloat(dustMaxInput?.value ?? '');
         const conflict = Number.isFinite(minVal) && Number.isFinite(maxVal) && minVal >= maxVal;
-        if (saveBtn) saveBtn.disabled = conflict;
-        if (fb) {
-            if (conflict) { fb.textContent = tr('sliq.dust_min_lt_max', 'Untergrenze muss kleiner als die Obergrenze sein.'); fb.className = 'modal-feedback error'; }
-            else if (fb.classList.contains('error')) { fb.textContent = ''; fb.className = 'modal-feedback'; }
-        }
+        return conflict ? tr('sliq.dust_min_lt_max', 'Untergrenze muss kleiner als die Obergrenze sein.') : null;
     };
-    dustMinInput?.addEventListener('input', _validateDustRange);
-    dustMaxInput?.addEventListener('input', _validateDustRange);
-    modalEl._cuValidate = { ...(modalEl._cuValidate ?? {}), dust: _validateDustRange };
-    _validateDustRange();
+    dustMinInput?.addEventListener('input', () => modalEl._cuRefreshSave?.());
+    dustMaxInput?.addEventListener('input', () => modalEl._cuRefreshSave?.());
+    return validate;
 }
 
-// ── "Manuell": sofort in den gewählten Pool investieren ──────────────────────
-async function _runCleanupManuell(mid, wrap) {
-    const fb       = document.getElementById('cu-modal-feedback');
-    const selected = document.querySelector('input[name="cleanup-mode-pool"]:checked');
-    if (!selected || selected.value === 'disabled') {
-        if (fb) { fb.textContent = tr('sliq.choose_pool', 'Bitte einen Pool wählen.'); fb.className = 'modal-feedback error'; }
-        return;
-    }
-    const payload = _manuellPayload(selected.value);
-    if (_cleanupDepositConflict(payload.CLEANUP_MIN_DEPOSIT, payload.CLEANUP_MAX_DEPOSIT)) {
-        if (fb) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
-        return;
-    }
+// ── Reinvest (LIQ#000988) ────────────────────────────────────────────────────
+// Deaktiviert · Bester PnL · Bester Edge, dazu Unter-/Obergrenze je Lauf. Premium-Funktion:
+// ohne aktuelle Premium-Daten sind die Modi gesperrt (nur „Deaktiviert“ bleibt wählbar,
+// damit ein früher gesetzter Modus abschaltbar bleibt). Die Route erzwingt dasselbe serverseitig.
+function _reinvestTabHtml(cfgParsed, premium) {
+    const { reinvestMode, reinvestMin, reinvestMax } = cfgParsed;
+    const locked = !premium.available;
+    // Vorschau: in welchen Pool ginge Reinvest mit dieser Option jetzt? Dezent, in Farbe und Schrift
+    // wie der Text neben dem (i) (.cu-panel-desc). Ohne Premium-Daten gibt es keine Vorschau.
+    const previewFor = mode => {
+        if (!premium.available || !premium.preview) return '';
+        const target = premium.preview[mode];
+        const text = target ? target.name : tr('sliq.reinvest_preview_none', 'aktuell kein passender Pool');
+        return ` <span class="cu-preview" style="font-size:0.82rem;color:var(--text-muted)" data-preview-mode="${mode}">${_esc(text)}</span>`;
+    };
+    const radio = (value, label, disabled) => `
+            <label class="cleanup-radio-option"${disabled ? ' style="opacity:0.55"' : ''}>
+                <input type="radio" name="cleanup-reinvest-mode" value="${value}" ${reinvestMode === value ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+                <span>${label}${value === 'off' ? '' : previewFor(value)}</span>
+            </label>`;
+    const lockNote = locked ? `
+            <p class="modal-feedback error" style="margin:0;font-size:0.8rem" id="cu-reinvest-lock">
+                <span class="info-tip-label" data-tooltip-title="${_esc(tr('sliq.reinvest', 'Reinvest'))}"
+                      data-tooltip-content="${_esc(tr('sliq.reinvest_lock_tip', 'Reinvest nutzt die Premium-Daten (Edge). Aktuell liegen keine frischen Premium-Daten vor (Grund: {reason}). Sobald sie wieder eintreffen, wird der Reiter bedienbar.', { reason: premium.reason }))}">&#9432;</span>
+                ${tr('sliq.reinvest_lock', 'Nur mit Premium-Daten verfügbar.')}
+            </p>` : '';
+    const inputStyle = 'width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:0.3rem 0.5rem;border-radius:5px;font-size:0.875rem';
+    return `
+        ${_cuDescHtml(
+            tr('sliq.reinvest_desc', 'Zahlt freies USDC aus dem Wallet in den Pool mit dem besten PnL oder Edge ein.'),
+            tr('sliq.reinvest', 'Reinvest'),
+            tr('sliq.reinvest_tip', 'Nach jedem Cleanup-Lauf wird freies USDC aus dem Wallet in eine bereits bestehende Position eingezahlt: in den Pool mit dem höchsten PnL der letzten 24 Stunden oder dem höchsten Edge (24-Stunden-Prognose), jeweils wie in der Opportunity-Tabelle. Der Wert muss mindestens 0 sein. Es wird nie eine neue Position eröffnet. Haben zwei Pools denselben Wert, entscheidet der jeweils andere Wert, bei erneutem Gleichstand wird nichts investiert. Rechts neben der Option steht der Pool, in den jetzt investiert würde. Untergrenze: darunter wird nichts investiert. Obergrenze: höchster Betrag je Lauf.')
+        )}
+        <div class="cu-panel-body" style="display:flex;flex-direction:column;gap:0.6rem">
+            ${radio('off',  tr('sliq.reinvest_mode_off',  'Deaktiviert'), false)}
+            ${radio('pnl',  tr('sliq.reinvest_mode_pnl',  'Bester PnL (24h)'),  locked)}
+            ${radio('edge', tr('sliq.reinvest_mode_edge', 'Bester Edge (24h)'), locked)}
+            <div style="border-top:1px solid var(--border);padding-top:0.6rem;display:flex;gap:1rem;">
+                <div style="flex:1">
+                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">${tr('sliq.lower_bound', 'Untergrenze')}</label>
+                    <div style="display:flex;align-items:center;gap:0.4rem;">
+                        <input type="number" id="cu-reinvest-min" min="1" step="1" value="${reinvestMin}" ${locked ? 'disabled' : ''} style="${inputStyle}">
+                        <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
+                    </div>
+                </div>
+                <div style="flex:1">
+                    <label style="display:block;font-size:0.82rem;font-weight:600;margin-bottom:0.3rem;color:var(--text-muted)">${tr('sliq.upper_bound', 'Obergrenze')}</label>
+                    <div style="display:flex;align-items:center;gap:0.4rem;">
+                        <input type="number" id="cu-reinvest-max" min="2" step="1" value="${reinvestMax}" ${locked ? 'disabled' : ''} style="${inputStyle}">
+                        <span style="font-size:0.8rem;color:var(--text-muted)">USDC</span>
+                    </div>
+                </div>
+            </div>
+            <p style="margin:-0.3rem 0 0;font-size:0.76rem;color:var(--text-muted)">
+                ${tr('sliq.reinvest_range_hint', 'Betrag je Lauf: darunter wird nichts investiert, darüber bleibt der Rest im Wallet. Eingezahlt wird nur in bestehende Positionen, nie in einen neuen Pool.')}
+            </p>
+            ${lockNote}
+        </div>`;
+}
 
-    if (fb) { fb.textContent = tr('sliq.saving_mode', 'Speichere Modus…'); fb.className = 'modal-feedback'; }
-    const modalEl = getModal(mid);
-    const btns = modalEl
-        ? [...modalEl.querySelectorAll('.forge-modal-footer button'), modalEl.querySelector('#cu-manuell-start-btn')].filter(Boolean)
-        : [];
-    btns.forEach(b => { b.disabled = true; });
-
-    try {
-        const saveRes = await fetch('/api/config/liquiditybot', {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        if (!saveRes.ok) { const d = await saveRes.json(); throw new Error(d.error ?? `HTTP ${saveRes.status}`); }
-        await _loadAndRenderCleanupRow(wrap);
-
-        if (fb) { fb.textContent = tr('sliq.cleanup_running', 'Cleanup läuft… (kann bis zu 5 min dauern)'); fb.className = 'modal-feedback'; }
-        const runRes = await fetch('/api/pools/liquidity/cleanup/run', { method: 'POST' });
-        const data   = await runRes.json().catch(() => ({}));
-
-        if (runRes.ok && data.ok) {
-            if (fb) { fb.textContent = tr('sliq.cleanup_done', '✓ Cleanup erfolgreich abgeschlossen.'); fb.className = 'modal-feedback success'; }
-            _ctx.showToast?.(tr('sliq.cleanup_ok', 'Cleanup erfolgreich'), 'success');
-            const walletEl = _container?.querySelector('.liquiditybot-grid-wallet');
-            const poolsEl  = _container?.querySelector('.liquiditybot-grid-pools');
-            if (walletEl) _renderWallet(walletEl);
-            if (poolsEl)  _renderPools(poolsEl);
-        } else {
-            const msg = data.error ?? data.log?.find(l => l.level === 'error')?.msg ?? `HTTP ${runRes.status}`;
-            throw new Error(msg);
+function _wireReinvestTab(modalEl, premium) {
+    const minInput = modalEl.querySelector('#cu-reinvest-min');
+    const maxInput = modalEl.querySelector('#cu-reinvest-max');
+    const validate = () => {
+        if (!premium.available) return null;  // gesperrt: gespeichert werden kann nur „Deaktiviert“
+        const minVal = parseFloat(minInput?.value ?? '');
+        const maxVal = parseFloat(maxInput?.value ?? '');
+        if (!Number.isFinite(minVal) || !Number.isFinite(maxVal) || minVal < 1 || minVal >= maxVal) {
+            return tr('sliq.reinvest_bounds', 'Untergrenze mindestens 1 USDC und kleiner als die Obergrenze.');
         }
-    } catch (err) {
-        if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
-        _ctx.showToast?.(`Cleanup: ${err.message}`, 'error');
-    } finally {
-        btns.forEach(b => { b.disabled = false; });
-    }
+        return null;
+    };
+    minInput?.addEventListener('input', () => modalEl._cuRefreshSave?.());
+    maxInput?.addEventListener('input', () => modalEl._cuRefreshSave?.());
+    return validate;
 }
 
-// ── "Manuell": Ziel + Einzahlungsgrenzen speichern, ohne Cleanup-Lauf ─────────
-async function _saveManuell(mid, wrap) {
+async function _saveReinvest(wrap) {
     const fb       = document.getElementById('cu-modal-feedback');
-    const selected = document.querySelector('input[name="cleanup-mode-pool"]:checked');
-    if (!selected) {
-        if (fb) { fb.textContent = tr('sb.choose_option', 'Bitte eine Option wählen.'); fb.className = 'modal-feedback error'; }
-        return;
-    }
-    const payload = _manuellPayload(selected.value);
-    if (_cleanupDepositConflict(payload.CLEANUP_MIN_DEPOSIT, payload.CLEANUP_MAX_DEPOSIT)) {
-        if (fb) { fb.textContent = tr('sb.min_gt_max', 'Minimale Einzahlung darf nicht größer als die Maximale sein.'); fb.className = 'modal-feedback error'; }
-        return;
+    const selected = document.querySelector('input[name="cleanup-reinvest-mode"]:checked');
+    if (!selected) return;
+    const mode   = selected.value;  // off | pnl | edge
+    const minVal = parseFloat(document.getElementById('cu-reinvest-min')?.value ?? '');
+    const maxVal = parseFloat(document.getElementById('cu-reinvest-max')?.value ?? '');
+
+    // Ohne Premium ist nur „Deaktiviert“ speicherbar (Grenzen bleiben unangetastet).
+    const body = { CLEANUP_REINVEST_MODE: mode };
+    if (!document.getElementById('cu-reinvest-min')?.disabled) {
+        if (!Number.isFinite(minVal) || !Number.isFinite(maxVal) || minVal < 1 || minVal >= maxVal) {
+            if (fb) { fb.textContent = tr('sliq.reinvest_bounds', 'Untergrenze mindestens 1 USDC und kleiner als die Obergrenze.'); fb.className = 'modal-feedback error'; }
+            return;
+        }
+        body.CLEANUP_REINVEST_MIN_USDC = String(minVal);
+        body.CLEANUP_REINVEST_MAX_USDC = String(maxVal);
     }
 
     if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
-        // CLEANUP_TREND_GATE wird bewusst nicht mitgeschickt: der PUT ändert nur die
-        // übergebenen Schlüssel, der gespeicherte Gate-Wert bleibt so unangetastet.
         const res = await fetch('/api/config/liquiditybot', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify(body),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
-        if (fb) { fb.textContent = tr('sliq.cleanup_saved_dot', '✓ Cleanup gespeichert.'); fb.className = 'modal-feedback success'; }
-        _ctx.showToast?.(tr('sliq.cleanup_saved', 'Cleanup gespeichert'), 'success');
+        if (fb) { fb.textContent = tr('sliq.reinvest_saved_dot', '✓ Reinvest-Einstellungen gespeichert.'); fb.className = 'modal-feedback success'; }
+        _ctx.showToast?.(tr('sliq.reinvest_saved', 'Reinvest-Einstellungen gespeichert'), 'success');
         await _loadAndRenderCleanupRow(wrap);
     } catch (err) {
         if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
 }
 
-// ── "Dust": Dust-Sweep an/aus + Grenzwerte speichern ─────────────────────────
-async function _saveDust(mid, wrap) {
+// ── Dust-Sweep an/aus + Grenzwerte speichern ─────────────────────────────────
+async function _saveDust(wrap) {
     const fb       = document.getElementById('cu-modal-feedback');
     const selected = document.querySelector('input[name="cleanup-dust-mode"]:checked');
     if (!selected) return;
@@ -920,6 +771,7 @@ async function _saveDust(mid, wrap) {
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         if (fb) { fb.textContent = tr('sliq.dust_saved_dot', '✓ Dust-Einstellungen gespeichert.'); fb.className = 'modal-feedback success'; }
         _ctx.showToast?.(tr('sliq.dust_saved', 'Dust-Einstellungen gespeichert'), 'success');
+        await _loadAndRenderCleanupRow(wrap);
     } catch (err) {
         if (fb) { fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); fb.className = 'modal-feedback error'; }
     }
@@ -1323,6 +1175,7 @@ async function _openWalletManageModal(flavor, el, info, balance, addrs) {
     });
 
     _wireSendPanel(modalEl, flavor, tokens, addrs);
+    showFallbackSendHint(modalEl.querySelector('#wm-send'));   // CORE#000992
     _wireReceivePanel(modalEl, info);
     _wireKeyPanel(modalEl, flavor, mid, el, info);
     // Nach einem Löschvorgang Modal schließen und die Karte neu aufbauen — sonst
@@ -1835,16 +1688,16 @@ const POOL_TYPE_LABELS = {
 
 /**
  * Header-Icon (gleicher Mechanismus wie html/liquidity/js/app.js): ausgegraut
- * wenn Premium/Score inaktiv, farbig wenn aktiv, Erklärung per Hover-Tooltip.
- * scoreSource ist ein globaler Zustand, an jedem Pool-Objekt identisch
+ * wenn Premium inaktiv, farbig wenn aktiv, Erklärung per Hover-Tooltip.
+ * edgeSource ist ein globaler Zustand, an jedem Pool-Objekt identisch
  * angehängt (siehe GET /api/pools/liquidity) – ein Pool reicht zum Auslesen.
  */
 function _updatePremiumIcon(pools) {
     const icon = document.getElementById('premiumStatusIcon');
     if (!icon) return;
-    const scoreSource = pools?.[0]?.scoreSource;
+    const edgeSource = pools?.[0]?.edgeSource;
     icon.classList.remove('hidden');
-    const active = !!scoreSource && scoreSource !== 'none';
+    const active = !!edgeSource && edgeSource !== 'none';
     icon.classList.toggle('active', active);
     icon.dataset.tooltipTitle = active ? tr('liq.premium_active', 'Premium aktiv') : tr('liq.premium_inactive', 'Premium inaktiv');
     icon.dataset.tooltipContent = active
@@ -1855,17 +1708,15 @@ function _updatePremiumIcon(pools) {
 async function _renderPools(el) {
     el.innerHTML = '<div class="wallet-loading">' + tr('sliq.loading_pools', 'Lade Pools…') + '</div>';
     try {
-        const [poolsRes, addrsRes, oppRes, hintsRes] = await Promise.all([
+        const [poolsRes, addrsRes, hintsRes] = await Promise.all([
             _fetchLiquidityPools(),
             fetch('/api/addresses'),
-            fetch(`/api/pools/liquidity/opportunity?t=${Date.now()}`),
             fetch(`/api/pools/liquidity/advisor-hints?t=${Date.now()}`),
         ]);
         if (!poolsRes.ok) throw new Error(tr('sliq.pools_load_failed', 'Pools konnten nicht geladen werden (HTTP {status})', { status: poolsRes.status }));
         if (!addrsRes.ok) throw new Error(tr('sb.addrbook_failed', 'Adressbuch konnte nicht geladen werden (HTTP {status})', { status: addrsRes.status }));
         const pools  = poolsRes.data;
         const addrs  = await addrsRes.json();
-        const opp    = oppRes.ok ? await oppRes.json() : { available: false };
         const hints  = hintsRes.ok ? await hintsRes.json() : [];
 
         _advisorHints = hints;
@@ -1888,7 +1739,7 @@ async function _renderPools(el) {
         const card = document.createElement('div');
         card.className = 'settings-card';
         el.appendChild(card);
-        _renderPoolsTable(card, pools, addrs, opp, hints);
+        _renderPoolsTable(card, pools, addrs, hints);
 
         // Hints alle 5 Min neu laden — aktualisiert Icons in der Dropdown-Liste
         // und den Banner für den aktiven Pool (via _refreshPoolsCard).
@@ -1931,16 +1782,11 @@ function _buildRankingBadge(score, scores, pool) {
     return '<span class="pool-summary-off">' + tr('sliq.no_data_yet', '— noch keine Daten —') + '</span>';
 }
 
-function _findOppScore(opp, poolId) {
-    if (!opp?.available) return null;
-    return opp.pools?.find(p => p.id === poolId) ?? null;
-}
-
 function _poolLabel(p) {
     return p.displayLabel ?? p.displayPair ?? p.pair;
 }
 
-function _initPoolPicker(card, pools, addrs, opp, hints = []) {
+function _initPoolPicker(card, pools, addrs, hints = []) {
     const input        = card.querySelector('#pool-picker-input');
     const drop         = card.querySelector('#pool-picker-drop');
     const typeFilter   = card.querySelector('#pool-type-filter');
@@ -2030,7 +1876,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
             const poolChanged = _switchToBestMatchIfNeeded();
 
             if (poolChanged) {
-                _renderPoolsTable(card, pools, addrs, opp, hints);
+                _renderPoolsTable(card, pools, addrs, hints);
             } else {
                 // Leere Query wie beim focus-Handler: der stehengebliebene Text im
                 // Suchfeld (Name des zuletzt gewählten Pools) darf die Liste hier
@@ -2056,7 +1902,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
             const poolChanged = _switchToBestMatchIfNeeded();
 
             if (poolChanged) {
-                _renderPoolsTable(card, pools, addrs, opp, hints);
+                _renderPoolsTable(card, pools, addrs, hints);
             } else {
                 renderDrop('');
                 drop.style.display = '';
@@ -2106,7 +1952,7 @@ function _initPoolPicker(card, pools, addrs, opp, hints = []) {
         localStorage.setItem('liquiditybot.activePool', _activePool);
         _notifyPoolSwitch(_activePool);
         drop.style.display = 'none';
-        _renderPoolsTable(card, pools, addrs, opp, hints);
+        _renderPoolsTable(card, pools, addrs, hints);
         card.classList.remove('card-pool-switch-flash');
         void card.offsetWidth;
         card.classList.add('card-pool-switch-flash');
@@ -2146,7 +1992,7 @@ function _ensurePoolTabsScaffold(card) {
     });
 }
 
-function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
+function _renderPoolsTable(card, pools, addrs, hints = []) {
     // Alphabetische Default-Sortierung (gleiche Logik wie Dashboard, LIQ#000928)
     pools = [...pools].sort((a, b) => {
         const c = (a.displayLabel ?? a.displayPair ?? a.pair).localeCompare(b.displayLabel ?? b.displayPair ?? b.pair, undefined, { sensitivity: 'base' });
@@ -2174,20 +2020,6 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
     //   active=true   → Pool hält offene Position → kann nicht deaktiviert werden.
     const poolEnabled = pool.enabled !== false;
     const hasBalance  = pool.active === true;
-    // Dry-Run-Gate (pool-offers.md Schritt 6): über einen Pool-Offer übernommene Pools
-    // (pool.premiumOffer) dürfen erst aktiviert werden, wenn pool-offers-dryrun.js einen
-    // erfolgreichen deposit.js --dry-run bestätigt hat. Korrigiert 2026-09-04 (LIQ#0380):
-    // vorher lautete das Kriterium cleanup.rankingEligible===false — das setzt aber auch
-    // der ganz normale Modus "Cleanup inaktiv" (kein Offer-Bezug), wodurch so ein Pool nie
-    // wieder aktivierbar war, weil pool-offers-dryrun.js für ihn nie ein Gate erzeugt.
-    const isOfferPool = !!pool.premiumOffer;
-    const dryRunGate   = pool.settings?.dryRunGate ?? null;
-    const gateBlocked  = isOfferPool && dryRunGate?.status !== 'passed';
-    // Tatsächlicher Cleanup-Status (unabhängig von der Herkunft) — separat von isOfferPool,
-    // seit das dort nicht mehr dasselbe ist (LIQ#0380). Bestimmt, was das Select unten als
-    // aktuell ausgewählt anzeigt.
-    const cleanupIneligible = pool.settings?.cleanup?.rankingEligible === false;
-
     // Tooltip-Text fürs (i)-Icon neben einem gesperrten Aktivieren-Button: wann + warum,
     // damit ein gesperrter Pool nicht wie ein stiller Bug aussieht (Fund 2026-08-06:
     // forge-pub1 PUMP/SOL ohne erkennbaren Grund deaktiviert, siehe setPoolEnabled()).
@@ -2204,45 +2036,24 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
             data-tooltip-content="${_escTip(tr('sliq.disabled_since', 'Dieser Pool wurde am {when} deaktiviert.\n\nGrund: {reason}', { when, reason }))}">&#9432;</span>`;
     }
 
-    // Kapitalfluss-Modus (LIQ#0365): fasst enabled + cleanup.rankingEligible zu einer
-    // geordneten Drei-Stufen-Auswahl zusammen — ersetzt den früheren Aktivieren/
-    // Deaktivieren-Button und das dafür unerreichbare Ranking-Modal.
-    const currentMode = !poolEnabled ? 'disabled' : (cleanupIneligible ? 'cleanup-inactive' : 'cleanup-active');
-    const MODE_LABELS = {
-        disabled:         tr('sliq.mode_disabled', 'Deaktiviert'),
-        'cleanup-inactive': tr('sliq.mode_cleanup_inactive', 'Cleanup inaktiv'),
-        'cleanup-active':   tr('sliq.mode_cleanup_active', 'Cleanup aktiv'),
-    };
-
-    // 'disabled' ist gesperrt, solange eine offene Position besteht (Guthaben muss
-    // erst vollständig ausgezahlt werden) — derselbe Wortlaut wie am alten Button.
-    const disabledOptionAttrs = hasBalance
-        ? `disabled title="${_esc(tr('sliq.cannot_deactivate_tip', 'Pool hält eine offene Position. Erst vollständig auszahlen, dann deaktivieren.'))}"`
-        : '';
-    // Beide Cleanup-Stufen sind gesperrt, solange das Dry-Run-Gate für eine aktuell
-    // gesetzte Cleanup-Sperre noch nicht bestanden ist — derselbe Wortlaut wie am
-    // alten Button (native <option title> statt Forge-Tooltip, da ein Browser-Select
-    // seine Optionen ohne DOM/JS-Zugriff rendert).
-    const gateOptionAttrs = gateBlocked
-        ? `disabled title="${_esc(dryRunGate?.status === 'failed'
-            ? tr('sliq.dryrun_failed', 'Dry-Run-Testlauf fehlgeschlagen: {error}. Wird automatisch erneut versucht.', { error: dryRunGate.error ?? tr('sliq.unknown_error_short', 'unbekannter Fehler') })
-            : tr('sliq.dryrun_pending_tip', 'Automatischer Testlauf (deposit.js --dry-run) läuft noch – wartet auf erste Pool-Daten (~1 Bot-Zyklus nach der Übernahme).'))}"`
-        : '';
-
-    // Die gerade aktive Option nie sperren — sonst zeigt der Browser eine
-    // selected+disabled Option (Zustand kann verlassen, aber nicht "gehalten" werden).
-    const modeOption = (value, attrs) =>
-        `<option value="${value}" ${currentMode === value ? 'selected' : ''} ${currentMode === value ? '' : attrs}>${_esc(MODE_LABELS[value])}</option>`;
-
-    // (i)-Icon mit Datum+Grund bleibt neben dem Select, sobald Modus 'disabled' ist —
-    // unabhängig davon ob der Bot selbst gesperrt hat (z.B. TVL-Voll-Exit) oder ob es
-    // manuell geschah (Fund 2026-08-06: gesperrter Pool ohne erkennbaren Grund sah wie ein
-    // stiller Bug aus).
-    const modeHtml = `${!poolEnabled ? disabledSinceTooltip() : ''}<select id="pool-mode-select" class="pool-type-filter${!poolEnabled ? ' btn-pool-disabled' : ''}" style="margin-left:0">
-            ${modeOption('disabled', disabledOptionAttrs)}
-            ${modeOption('cleanup-inactive', gateOptionAttrs)}
-            ${modeOption('cleanup-active', gateOptionAttrs)}
-        </select>`;
+    // Aktivieren/Deaktivieren (LIQ#000937): ersetzt die Drei-Stufen-Auswahl aus LIQ#0365
+    // (Deaktiviert / Cleanup inaktiv / Cleanup aktiv). Die Cleanup-Stufen hatten seit
+    // LIQ#000929 keine Wirkung mehr, der Cleanup investiert nicht mehr.
+    // Deaktivieren ist gesperrt, solange eine offene Position besteht — erst vollständig
+    // auszahlen (serverseitig ebenso erzwungen, POST .../enabled).
+    // (i)-Icon mit Datum+Grund steht neben dem Knopf, solange der Pool deaktiviert ist —
+    // egal ob der Bot selbst gesperrt hat (z.B. TVL-Voll-Exit) oder es manuell geschah
+    // (Fund 2026-08-06: gesperrter Pool ohne erkennbaren Grund sah wie ein stiller Bug aus).
+    let enableBtnHtml;
+    if (!poolEnabled) {
+        enableBtnHtml = `${disabledSinceTooltip()}<button class="btn btn-secondary btn-sm btn-pool-disabled" id="pool-btn-enable">${tr('sb.activate', 'Aktivieren')}</button>`;
+    } else if (hasBalance) {
+        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable" disabled
+            data-tooltip-title="${tr('sliq.cannot_deactivate', 'Deaktivieren nicht möglich')}"
+            data-tooltip-content="${tr('sliq.cannot_deactivate_tip', 'Pool hält eine offene Position. Erst vollständig auszahlen, dann deaktivieren.')}">${tr('sb.deactivate', 'Deaktivieren')}</button>`;
+    } else {
+        enableBtnHtml = `<button class="btn btn-secondary btn-sm" id="pool-btn-enable">${tr('sb.deactivate', 'Deaktivieren')}</button>`;
+    }
 
     panel.innerHTML = `
         <table class="wallet-action-table">
@@ -2263,7 +2074,7 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                         </div>
                     </td>
                     <td class="wat-action">
-                        ${modeHtml}
+                        ${enableBtnHtml}
                     </td>
                 </tr>
                 <tr>
@@ -2271,7 +2082,7 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
                         ${tr('sliq.max_investment', 'Max Investment')}
                         <span class="info-tip-label"
                             data-tooltip-title="${tr('sliq.max_investment', 'Max Investment')}"
-                            data-tooltip-content="${tr('sliq.max_investment_tip', 'Begrenzt, wie viel Kapital per Cleanup-Reinvest oder manueller Einzahlung maximal in diesen Pool fließen darf – schützt vor Übergewichtung in volatilen Pools.||Wird nur beim Hineinlegen geprüft: Autocompounding läuft unverändert weiter, ein bereits über der Grenze liegender Bestand wird nicht automatisch reduziert.||Leer = unbegrenzt (Standard).')}">&#9432;</span>
+                            data-tooltip-content="${tr('sliq.max_investment_tip', 'Begrenzt, wie viel Kapital per manueller Einzahlung maximal in diesen Pool fließen darf – schützt vor Übergewichtung in volatilen Pools.||Wird nur beim Hineinlegen geprüft: Autocompounding läuft unverändert weiter, ein bereits über der Grenze liegender Bestand wird nicht automatisch reduziert.||Leer = unbegrenzt (Standard).')}">&#9432;</span>
                         ${_ndMarker(pool, ['maxInvestment'])}
                     </td>
                     <td class="wat-info">
@@ -2362,11 +2173,9 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
         </table>
         ${noData
             ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.no_pool_data_hint', 'Noch keine verlässlichen Pool-Daten – prüfe oben in der Zeile "Status", ob der Liquidity Bot läuft.')}</p>`
-            : (currentMode === 'disabled'
-                ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_off_hint', '&#128274; Pool deaktiviert – nimmt kein Kapital auf (kein Cleanup-Reinvest), bis er wieder aktiviert wird. Einstellungen können trotzdem gespeichert werden.')}</p>`
-                : (currentMode === 'cleanup-inactive'
-                    ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_cleanup_inactive_row_hint', '&#9888; Cleanup inaktiv – Cleanup investiert nur noch in den unter Cleanup → Manuell gewählten Pool, dieser Modus hat derzeit keine zusätzliche Wirkung. Bestehende Position, manuelle Einzahlung/Auszahlung und Risk-Management laufen unverändert weiter.')}</p>`
-                    : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_idle_hint', '&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.')}</p>` : '')))}`;
+            : (!poolEnabled
+                ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_off_hint', '&#128274; Pool deaktiviert – nimmt kein Kapital auf, bis er wieder aktiviert wird. Einstellungen können trotzdem gespeichert werden.')}</p>`
+                : (!pool.active ? `<p class="wallet-hint" style="margin-top:0.5rem; font-size:0.78rem;">${tr('sliq.pool_idle_hint', '&#9888; Pool ruht – keine offene Position. Einstellungen können trotzdem gespeichert werden.')}</p>` : ''))}`;
 
     if (noData) {
         const input = panel.querySelector('#pool-picker-input');
@@ -2377,11 +2186,11 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
         }
         panel.querySelector('#pool-type-filter')?.setAttribute('disabled', 'disabled');
         panel.querySelector('#pool-active-filter')?.setAttribute('disabled', 'disabled');
-        panel.querySelectorAll('.wat-action button, .wat-action select').forEach(b => { b.disabled = true; });
+        panel.querySelectorAll('.wat-action button').forEach(b => { b.disabled = true; });
         return;
     }
 
-    _initPoolPicker(card, pools, addrs, opp, hints);
+    _initPoolPicker(card, pools, addrs, hints);
 
     card.querySelector('#pool-btn-ac')
         ?.addEventListener('click', () => _openFeeClaimModal(pool, addrs, card));
@@ -2391,8 +2200,8 @@ function _renderPoolsTable(card, pools, addrs, opp, hints = []) {
         ?.addEventListener('click', () => _openMaxInvestmentModal(pool, card));
     card.querySelector('#pool-btn-rebalance')
         ?.addEventListener('click', () => _openPoolRebalanceModal(pool, activeHint));
-    card.querySelector('#pool-mode-select')
-        ?.addEventListener('change', (ev) => _setPoolMode(pool, card, ev.target, currentMode));
+    card.querySelector('#pool-btn-enable')
+        ?.addEventListener('click', () => _togglePoolEnabled(pool, card));
     card.querySelector('#pool-btn-deposit')
         ?.addEventListener('click', () => _openPoolDepositModal(pool));
     card.querySelector('#pool-btn-withdraw')
@@ -2448,8 +2257,8 @@ function _renderPoolTypesTab(container) {
             const rows   = await rowsRes.json();
             const addrs  = addrsRes.ok ? await addrsRes.json() : [];
             const pools  = poolsRes.ok ? await poolsRes.json() : [];
-            // scoreSource ist pro Pool identisch (globaler Feed-Status, s. _updatePremiumIcon).
-            const globalScoreSource = pools[0]?.scoreSource ?? 'none';
+            // edgeSource ist pro Pool identisch (globaler Feed-Status, s. _updatePremiumIcon).
+            const globalEdgeSource = pools[0]?.edgeSource ?? 'none';
 
             // Select-Optionen (mit Pool-Anzahl) aus den frischen Zeilen aufbauen — die aktuelle
             // Auswahl bleibt erhalten, sonst würde ein Reload nach dem Speichern zurückspringen.
@@ -2466,7 +2275,7 @@ function _renderPoolTypesTab(container) {
             const row = rows.find(r => r.poolType === typeSelect.value);
             if (!row) { contentEl.innerHTML = `<p class="wallet-hint">${tr('sliq.no_pools', 'Keine Pools konfiguriert.')}</p>`; return; }
             if (settingSelect.value === 'risk-management') {
-                _renderPoolTypeRiskManagement(contentEl, row, addrs, globalScoreSource, container);
+                _renderPoolTypeRiskManagement(contentEl, row, addrs, globalEdgeSource, container);
             }
         } catch (err) {
             contentEl.innerHTML = `<p class="wallet-hint">Fehler: ${_esc(err.message)}</p>`;
@@ -2496,7 +2305,7 @@ function _renderPoolTypesTab(container) {
  * Kollisionen mit einem gleichzeitig geöffneten Pool-Modal, dessen Save-Funktion
  * unpräfigierte IDs über document.getElementById() liest.
  */
-function _renderPoolTypeRiskManagement(contentEl, row, addrs, globalScoreSource, scaffoldContainer) {
+function _renderPoolTypeRiskManagement(contentEl, row, addrs, globalEdgeSource, scaffoldContainer) {
     const poolType = row.poolType;
     const pseudoPool = {
         settings:           row.settings,
@@ -2505,7 +2314,7 @@ function _renderPoolTypeRiskManagement(contentEl, row, addrs, globalScoreSource,
         currentTvl:         null,
         trailingStopStatus: null,
         tsAdvice:           { available: false, source: 'none' },
-        scoreSource:        globalScoreSource,
+        edgeSource:        globalEdgeSource,
     };
     const investedPools = row.investedPools ?? [];
     const lockDisable   = investedPools.length > 0 && row.settings.enabled !== false;
@@ -2545,7 +2354,7 @@ function _renderPoolTypeRiskManagement(contentEl, row, addrs, globalScoreSource,
     contentEl.querySelector('#pt-ts-enabled')?.addEventListener('change', e => {
         const on = e.target.checked;
         contentEl.querySelectorAll('#pt-panel-ts .ts-dependent').forEach(el => { el.style.opacity = on ? '1' : '0.4'; });
-        ['pt-ts-threshold', 'pt-ts-threshold2', 'pt-ts-swap', 'pt-ts-sendto', 'pt-ts-cooldown'].forEach(id => {
+        ['pt-ts-threshold', 'pt-ts-threshold2', 'pt-ts-swap', 'pt-ts-sendto'].forEach(id => {
             const el = contentEl.querySelector('#' + id);
             if (el) el.disabled = !on;
         });
@@ -2585,7 +2394,6 @@ function _readPoolTypeRiskManagementForm(contentEl) {
             auto,
             autoSwapToUSDC: get('ts-swap')?.checked ?? true,
             sendTo:         get('ts-sendto')?.value ?? '',
-            cooldownHours:  parseInt(get('ts-cooldown')?.value ?? '6', 10),
         },
         tvlProtection: {
             level1: {
@@ -2594,7 +2402,6 @@ function _readPoolTypeRiskManagementForm(contentEl) {
             },
             swapToUsdc:    get('tvl-swap')?.checked ?? true,
             sendTo:        get('tvl-sendto')?.value ?? '',
-            cooldownHours: parseInt(get('tvl-cooldown')?.value ?? '12', 10),
         },
         enabled: get('type-enabled')?.checked ?? true,
     };
@@ -2617,11 +2424,6 @@ function _confirmSavePoolTypeRiskManagement(contentEl, row, scaffoldContainer) {
         }
         if (form.thresholdPct2 >= form.thresholdPct) {
             return setErr(tr('sliq.ts2_order_err', 'Drawdown 2 muss kleiner als Drawdown 1 sein — die zweite Stufe sichert enger ab.'));
-        }
-    }
-    for (const cd of [form.trailingStop.cooldownHours, form.tvlProtection.cooldownHours]) {
-        if (!Number.isFinite(cd) || cd < 1 || cd > 24) {
-            return setErr(tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'));
         }
     }
     if (fb) { fb.textContent = ''; fb.className = 'modal-feedback'; }
@@ -2703,55 +2505,39 @@ function _confirmSavePoolTypeRiskManagement(contentEl, row, scaffoldContainer) {
     });
 }
 
-// ── Kapitalfluss-Modus (Benutzer-Freigabe + Cleanup-Berücksichtigung) ─────────
+// ── Pool aktivieren / deaktivieren (Benutzer-Freigabe, LIQ#000937) ────────────
 
-/** Menschlich lesbare Begründung je Zielmodus, fürs Bestätigungs-Modal. */
-function _modeExplain(mode) {
-    switch (mode) {
-        case 'disabled':
-            return tr('sliq.pool_disable_hint', 'In den Pool wird kein Kapital mehr investiert (kein Cleanup-Reinvest, keine Einzahlung), bis er wieder aktiviert wird.');
-        case 'cleanup-inactive':
-            return tr('sliq.pool_cleanup_inactive_hint', 'Cleanup investiert nur noch in den unter Cleanup → Manuell gewählten Pool, dieser Modus hat derzeit keine zusätzliche Wirkung. Bestehende Position, manuelle Einzahlung/Auszahlung und Risk-Management laufen unverändert weiter.');
-        default:
-            return tr('sliq.pool_enable_hint', 'Der Pool kann danach wieder Kapital aufnehmen (Einzahlungen und Cleanup-Reinvest).');
-    }
-}
+function _togglePoolEnabled(pool, card) {
+    const enable = pool.enabled === false; // aktuell gesperrt → jetzt aktivieren
+    const name   = _esc(pool.displayPair ?? pool.pair);
+    const mid    = 'liquiditybot-toggle-enabled';
 
-/**
- * select-Wechsel bestätigen und speichern (LIQ#0365). Bei Abbruch oder Fehler
- * springt das Select zurück auf den vorherigen Wert — kein stiller Fehlzustand.
- */
-function _setPoolMode(pool, card, selectEl, previousMode) {
-    const targetMode = selectEl.value;
-    const name        = _esc(pool.displayPair ?? pool.pair);
-    const mid         = 'liquiditybot-mode-modal';
-    const modeLabel   = { disabled: tr('sliq.mode_disabled', 'Deaktiviert'), 'cleanup-inactive': tr('sliq.mode_cleanup_inactive', 'Cleanup inaktiv'), 'cleanup-active': tr('sliq.mode_cleanup_active', 'Cleanup aktiv') }[targetMode];
+    const explain = enable
+        ? tr('sliq.pool_enable_hint', 'Der Pool kann danach wieder Kapital aufnehmen.')
+        : tr('sliq.pool_disable_hint', 'In den Pool wird kein Kapital mehr investiert, bis er wieder aktiviert wird.');
 
     const body = `
-        <p style="margin:0 0 0.5rem">${tr('sliq.mode_change_q', 'Pool <strong>{pool}</strong> auf <strong>{mode}</strong> stellen?', { pool: name, mode: _esc(modeLabel) })}</p>
-        <p style="margin:0;color:var(--text-muted);font-size:0.85rem">${_modeExplain(targetMode)}</p>
-        <div id="mode-feedback" style="margin-top:0.6rem;font-size:0.82rem"></div>`;
+        <p style="margin:0 0 0.5rem">${enable ? tr('sliq.pool_enable_q', 'Pool <strong>{pool}</strong> aktivieren?', { pool: name }) : tr('sliq.pool_disable_q', 'Pool <strong>{pool}</strong> deaktivieren?', { pool: name })}</p>
+        <p style="margin:0;color:var(--text-muted);font-size:0.85rem">${explain}</p>
+        <div id="toggle-feedback" style="margin-top:0.6rem;font-size:0.82rem"></div>`;
 
-    let saved = false; // onClose feuert bei JEDEM Schließen (auch nach Erfolg) — nur ohne Erfolg zurückspringen
-
-    const doSet = async () => {
+    const doToggle = async () => {
         const modalEl = getModal(mid);
-        const fb      = modalEl?.querySelector('#mode-feedback');
+        const fb      = modalEl?.querySelector('#toggle-feedback');
         const btns    = modalEl?.querySelectorAll('.forge-modal-footer button') ?? [];
         btns.forEach(b => { b.disabled = true; });
         if (fb) { fb.style.color = 'var(--text-muted)'; fb.textContent = tr('sliq.saving_dots', 'Wird gespeichert…'); }
         try {
-            const res  = await fetch(`/api/pools/liquidity/${pool.id}/mode`, {
+            const res  = await fetch(`/api/pools/liquidity/${pool.id}/enabled`, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ mode: targetMode }),
+                body:    JSON.stringify({ enabled: enable }),
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
-            saved = true;
             closeModal(mid);
-            _ctx.showToast?.(data.message ?? tr('sliq.mode_saved', 'Kapitalfluss-Modus gespeichert.'), 'success');
+            _ctx.showToast?.(data.message ?? (enable ? tr('sliq.pool_activated', 'Pool aktiviert') : tr('sliq.pool_deactivated', 'Pool deaktiviert')), 'success');
             _renderPools(card.parentElement);
         } catch (err) {
             if (fb) { fb.style.color = 'var(--danger)'; fb.textContent = tr('sb.error_prefix', 'Fehler: {error}', { error: err.message }); }
@@ -2761,13 +2547,12 @@ function _setPoolMode(pool, card, selectEl, previousMode) {
 
     showModal({
         id:    mid,
-        title: tr('sliq.mode_change_title', 'Kapitalfluss-Modus ändern'),
+        title: enable ? tr('sliq.activate_pool', 'Pool aktivieren') : tr('sliq.deactivate_pool', 'Pool deaktivieren'),
         body,
         actions: [
-            { label: tr('msg.save', 'Speichern'), primary: true, onClick: doSet },
+            { label: enable ? tr('sb.activate', 'Aktivieren') : tr('sb.deactivate', 'Deaktivieren'), primary: true, onClick: doToggle },
             { label: tr('sliq.cancel', 'Abbrechen'), onClick: () => closeModal(mid) },
         ],
-        onClose: () => { if (!saved) selectEl.value = previousMode; },
     });
 }
 
@@ -2795,8 +2580,6 @@ const NONDEFAULT_LABELS = {
     'trailingStop.auto':        () => tr('sliq.nd_ts_auto',         'Trailing Stop: Auto (Advisor)'),
     'trailingStop.autoSwapToUSDC': () => tr('sliq.nd_ts_swap',       'Trailing Stop: in USDC tauschen'),
     'trailingStop.sendTo':       () => tr('sliq.nd_ts_sendto',       'Trailing Stop: senden an'),
-    'trailingStop.cooldownHours':() => tr('sliq.nd_ts_cooldown',     'Trailing Stop: Cleanup-Sperrfrist'),
-    'cleanup.rankingEligible':   () => tr('sliq.nd_cl_eligible',     'Beim Cleanup berücksichtigen'),
     'maxInvestment.enabled':     () => tr('sliq.nd_maxinv_enabled',  'Max Investment'),
     'maxInvestment.amountUsdc':  () => tr('sliq.nd_maxinv_amount',   'Max Investment: Obergrenze'),
     'tvlProtection.level1.enabled':      () => tr('sliq.nd_tvl1_enabled',   'TVL-Schutz Stufe 1'),
@@ -2804,7 +2587,6 @@ const NONDEFAULT_LABELS = {
     'tvlProtection.level1.withdrawPct':  () => tr('sliq.nd_tvl1_pct',       'TVL-Schutz Stufe 1: Abzug'),
     'tvlProtection.swapToUsdc':          () => tr('sliq.nd_tvl_swap',       'TVL-Schutz: in USDC tauschen'),
     'tvlProtection.sendTo':              () => tr('sliq.nd_tvl_sendto',     'TVL-Schutz: senden an'),
-    'tvlProtection.cooldownHours':       () => tr('sliq.nd_tvl_cooldown',   'TVL-Schutz: Cleanup-Sperrfrist'),
 };
 
 // Einheit je Pfad-Endung – ohne sie wäre "10 → 2" nicht als Prozent lesbar.
@@ -3259,7 +3041,6 @@ function _openSLTPModal(pool, addrs, card) {
         const minVal   = backdrop.querySelector('#ts-min-value');
         const swap     = backdrop.querySelector('#ts-swap');
         const send     = backdrop.querySelector('#ts-sendto');
-        const cooldown = backdrop.querySelector('#ts-cooldown');
         if (thr)      thr.disabled      = !on;
         // #ts-threshold2 fehlte hier bis LIQ#0351: Bei ausgeschaltetem Trailing Stop
         // wirkte die Zeile ausgegraut, blieb aber bedienbar.
@@ -3270,7 +3051,6 @@ function _openSLTPModal(pool, addrs, card) {
         if (minVal)   minVal.disabled   = !on;
         if (swap)     swap.disabled     = !on;
         if (send)     send.disabled     = !on;
-        if (cooldown) cooldown.disabled = !on;
         _tsSyncAdviceDisplay(backdrop);
     });
 
@@ -3364,7 +3144,7 @@ function _buildTrailingStopPanel(pool, addrs = [], mode = 'pool') {
     // (unpräfigierte IDs, document.getElementById-Zugriffe in _saveTrailingStopPanel) und
     // diese eingebettete Ansicht existieren können, ohne dass IDs kollidieren.
     const idp = typeMode ? 'pt-' : '';
-    const ts = pool.settings.trailingStop ?? { enabled: true, thresholdPct: 33, thresholdPct2: null, minimumValueUsd: null, autoSwapToUSDC: true, sendTo: '', cooldownHours: 1 };
+    const ts = pool.settings.trailingStop ?? { enabled: true, thresholdPct: 33, thresholdPct2: null, minimumValueUsd: null, autoSwapToUSDC: true, sendTo: '' };
     const on = !!ts.enabled;
     const threshold = Number.isFinite(Number(ts.thresholdPct)) ? Number(ts.thresholdPct) : 33;
     // null/'' bedeutet „zweite Stufe aus" — nicht auf einen Default fallen, sonst würde
@@ -3372,8 +3152,6 @@ function _buildTrailingStopPanel(pool, addrs = [], mode = 'pool') {
     const threshold2 = (ts.thresholdPct2 != null && ts.thresholdPct2 !== '' && Number.isFinite(Number(ts.thresholdPct2)))
         ? Number(ts.thresholdPct2)
         : null;
-    // Fallback 6 h seit LIQ#0359 — muss POOL_SETTINGS_DEFAULTS.trailingStop.cooldownHours entsprechen.
-    const cooldownHours = Number.isFinite(Number(ts.cooldownHours)) ? Number(ts.cooldownHours) : 6;
     // „Auto": Schwellen vom Trailing-Stop-Advisor übernehmen (LIQ#0351).
     // Einschaltbar nur, wenn eine belastbare Empfehlung vorliegt — ein Schalter ohne
     // Wirkung wäre schlimmer als keiner. Der Grund steht im Tooltip, nie nur „gesperrt".
@@ -3427,7 +3205,7 @@ function _buildTrailingStopPanel(pool, addrs = [], mode = 'pool') {
                 ${tr('sliq.ts_active', 'Trailing Stop aktiv')}
                 <span class="info-tip-label"
                     data-tooltip-title="Trailing Stop"
-                    data-tooltip-content="${tr('sliq.ts_tip', 'Zieht den Stop-Wert dynamisch nach: jeder neue Pool-Höchststand (High-Water-Mark) wird gemerkt. Fällt der aktuelle Pool-Wert um den eingestellten Prozentsatz unter die HWM, wird die Position geschlossen.||Snapshot-Quelle: position_snapshots (alle 5-10 Min, lp_value_usd inkl. offener Fees).||Einmalige Aktion — kein automatischer Wiedereinstieg. Ist unter Cleanup → Manuell ein Pool gewählt, investiert der nächste Lauf das freie Kapital dorthin.||HWM wird beim Öffnen einer neuen Position zurückgesetzt.')}">&#9432;</span>
+                    data-tooltip-content="${tr('sliq.ts_tip', 'Zieht den Stop-Wert dynamisch nach: jeder neue Pool-Höchststand (High-Water-Mark) wird gemerkt. Fällt der aktuelle Pool-Wert um den eingestellten Prozentsatz unter die HWM, wird die Position geschlossen.||Snapshot-Quelle: position_snapshots (alle 5-10 Min, lp_value_usd inkl. offener Fees).||Einmalige Aktion — kein automatischer Wiedereinstieg, das freie Kapital bleibt im Wallet.||HWM wird beim Öffnen einer neuen Position zurückgesetzt.')}">&#9432;</span>
             </span>
             <label class="toggle-switch">
                 <input type="checkbox" id="${idp}ts-enabled" ${on ? 'checked' : ''}>
@@ -3455,7 +3233,7 @@ function _buildTrailingStopPanel(pool, addrs = [], mode = 'pool') {
                 ${tr('sliq.drawdown_threshold', 'Drawdown 1')}
                 <span class="info-tip-label"
                     data-tooltip-title="${tr('sliq.drawdown_threshold', 'Drawdown 1')}"
-                    data-tooltip-content="${tr('sliq.drawdown_tip', 'Gilt ab dem Einstieg. Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Bewusst weit gewählt: direkt nach dem Einstieg soll normale Schwankung nicht sofort zum Ausstieg führen.||Ohne Send-Adresse bleiben die Coins im Wallet. Ist unter Cleanup → Manuell ein Pool gewählt, investiert der nächste Cleanup-Lauf sie dorthin.')}">&#9432;</span>
+                    data-tooltip-content="${tr('sliq.drawdown_tip', 'Gilt ab dem Einstieg. Empfehlung: 25–40 %. Position wird einmalig komplett geschlossen.||Bewusst weit gewählt: direkt nach dem Einstieg soll normale Schwankung nicht sofort zum Ausstieg führen.||Ohne Send-Adresse bleiben die Coins im Wallet.')}">&#9432;</span>
             </span>
             <div class="input-unit-row">
                 <input class="modal-input input-short ts-advised-input${adviceActive ? ' is-advised' : ''}" id="${idp}ts-threshold"
@@ -3519,26 +3297,12 @@ function _buildTrailingStopPanel(pool, addrs = [], mode = 'pool') {
                 <span class="toggle-slider"></span>
             </label>
         </div>
-        <div class="settings-row ts-dependent" style="opacity:${on ? '1' : '0.4'};">
+        <div class="settings-row ts-dependent" style="border:none; opacity:${on ? '1' : '0.4'};">
             <span class="settings-label">${tr('sb.send_to', 'Senden an')}</span>
             <select class="modal-select" id="${idp}ts-sendto" ${on ? '' : 'disabled'}>
                 <option value="">${tr('sliq.dont_send', '– Nicht senden –')}</option>
                 ${_addrOptions(addrs, ts.sendTo ?? '')}
             </select>
-        </div>
-        <div class="settings-row ts-dependent" style="border:none; opacity:${on ? '1' : '0.4'};">
-            <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                ${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}
-                <span class="info-tip-label"
-                    data-tooltip-title="${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}"
-                    data-tooltip-content="${tr('sliq.ts_cooldown_tip', 'Nach einer Liquidation durch den Trailing Stop ist dieser Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Manuelle Einzahlungen bleiben jederzeit möglich.||Cooldown-Start: Zeitpunkt der Liquidation.')}">&#9432;</span>
-            </span>
-            <div class="input-unit-row">
-                <input class="modal-input input-short" id="${idp}ts-cooldown"
-                    type="number" min="1" max="24" step="1" value="${cooldownHours}"
-                    ${on ? '' : 'disabled'}>
-                <span class="input-unit">h</span>
-            </div>
         </div>
         ${statusBlock}
         <div class="modal-feedback" id="${idp}ts-feedback"></div>`;
@@ -3635,7 +3399,6 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
     const auto           = !!(autoEl?.checked) && autoEl?.dataset.locked !== '1';
     const autoSwapToUSDC = document.getElementById('ts-swap')?.checked ?? false;
     const sendTo         = document.getElementById('ts-sendto')?.value ?? '';
-    const cooldownRaw    = document.getElementById('ts-cooldown')?.value ?? '1';
 
     const threshold = parseFloat(thresholdRaw);
     if (!Number.isFinite(threshold) || threshold < 0.5 || threshold > 90) {
@@ -3674,17 +3437,11 @@ async function _saveTrailingStopPanel(pool, card, modalEl) {
         minimumValueUsd = parsedMin;
     }
 
-    const cooldownHours = parseInt(cooldownRaw, 10);
-    if (!Number.isFinite(cooldownHours) || cooldownHours < 1 || cooldownHours > 24) {
-        if (fb) { fb.textContent = tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'); fb.className = 'modal-feedback error'; }
-        return;
-    }
-
     if (fb) { fb.textContent = tr('sb.saving', 'Speichere…'); fb.className = 'modal-feedback'; }
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trailingStop: { enabled, thresholdPct: threshold, thresholdPct2: threshold2, auto, minimumValueUsd, autoSwapToUSDC, sendTo, cooldownHours } }),
+            body: JSON.stringify({ trailingStop: { enabled, thresholdPct: threshold, thresholdPct2: threshold2, auto, minimumValueUsd, autoSwapToUSDC, sendTo } }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         if (fb) { fb.textContent = tr('sliq.saved_no_dot', '✓ Gespeichert'); fb.className = 'modal-feedback success'; }
@@ -3880,7 +3637,6 @@ function _buildTvlPanel(pool, addrs = [], mode = 'pool') {
     const idp      = typeMode ? 'pt-' : '';
     const tp = pool.settings.tvlProtection ?? {};
     const l1 = tp.level1 ?? { enabled: true,  thresholdUsd: null, withdrawPct: 100 };
-    const cooldownHours = Number.isFinite(Number(tp.cooldownHours)) ? Number(tp.cooldownHours) : 1;
 
     const currentTvl = pool.currentTvl != null
         ? `<strong style="color:var(--text);">${_fmtUsd(pool.currentTvl)}</strong>`
@@ -3930,19 +3686,6 @@ function _buildTvlPanel(pool, addrs = [], mode = 'pool') {
                 ${_addrOptions(addrs, tp.sendTo ?? '')}
             </select>
         </div>
-        <div class="settings-row" style="opacity:1;">
-            <span class="settings-label" style="display:flex;align-items:center;gap:0.4rem;">
-                ${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}
-                <span class="info-tip-label"
-                    data-tooltip-title="${tr('sliq.cleanup_cooldown', 'Cleanup-Cooldown')}"
-                    data-tooltip-content="${tr('sliq.tvl_cooldown_tip', 'Nach einem teilweisen TVL-Schutz-Abzug ist der Pool für die eingestellte Zeit für automatisierte Cleanup-Zuweisungen gesperrt.||Bei 100 %-Abzug ist der Pool ohnehin leer.')}">&#9432;</span>
-            </span>
-            <div class="input-unit-row">
-                <input class="modal-input input-short" id="${idp}tvl-cooldown"
-                    type="number" min="1" max="24" step="1" value="${cooldownHours}">
-                <span class="input-unit">h</span>
-            </div>
-        </div>
         <div class="modal-feedback" id="${idp}tvl-feedback"></div>
         </div>`;
 }
@@ -3984,14 +3727,11 @@ async function _saveTvlPanel(pool, card, backdrop) {
     };
     const swapToUsdc    = getEl('tvl-swap')?.checked ?? false;
     const sendTo        = getEl('tvl-sendto')?.value ?? '';
-    const cooldownHours = parseInt(getEl('tvl-cooldown')?.value ?? '1', 10);
 
     // ── Client-seitige Validierung (Backend prüft erneut) ──
     // Stufe 2 ist seit Ticket #0324 nicht mehr über die Oberfläche editierbar; das
     // Feld bleibt im PUT-Payload einfach weg, saveSettings() lässt sie dann unangetastet.
     const setErr = msg => { if (fb) { fb.textContent = msg; fb.className = 'modal-feedback error'; } };
-    if (!Number.isFinite(cooldownHours) || cooldownHours < 1 || cooldownHours > 24)
-        return setErr(tr('sliq.cooldown_range_err', 'Cleanup-Cooldown muss zwischen 1 und 24 h liegen.'));
     if (level1.enabled && !(level1.thresholdUsd > 0))
         return setErr(tr('sliq.tvl1_err', 'TVL-Schwelle muss größer als 0 sein.'));
 
@@ -3999,7 +3739,7 @@ async function _saveTvlPanel(pool, card, backdrop) {
     try {
         const res = await fetch(`/api/pools/liquidity/${pool.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tvlProtection: { level1, swapToUsdc, sendTo, cooldownHours } }),
+            body: JSON.stringify({ tvlProtection: { level1, swapToUsdc, sendTo } }),
         });
         if (!res.ok) { const d = await res.json(); throw new Error(d.error ?? `HTTP ${res.status}`); }
         if (fb) { fb.textContent = tr('sliq.saved_no_dot', '✓ Gespeichert'); fb.className = 'modal-feedback success'; }
@@ -4014,18 +3754,16 @@ async function _saveTvlPanel(pool, card, backdrop) {
 // ── Pools-Karte neu laden (nach Save) ────────────────────────────────────────
 
 async function _refreshPoolsCard(card) {
-    const [poolsRes, addrsRes, oppRes, hintsRes] = await Promise.all([
+    const [poolsRes, addrsRes, hintsRes] = await Promise.all([
         fetch(`/api/pools/liquidity?t=${Date.now()}`),
         fetch('/api/addresses'),
-        fetch(`/api/pools/liquidity/opportunity?t=${Date.now()}`),
         fetch(`/api/pools/liquidity/advisor-hints?t=${Date.now()}`),
     ]);
     const pools = await poolsRes.json();
     const addrs = await addrsRes.json();
-    const opp   = oppRes.ok ? await oppRes.json() : { available: false };
     const hints = hintsRes.ok ? await hintsRes.json() : [];
     _advisorHints = hints;
-    _renderPoolsTable(card, pools, addrs, opp, hints);
+    _renderPoolsTable(card, pools, addrs, hints);
 }
 
 // ── Adress-Optionen für Dropdowns ─────────────────────────────────────────────
@@ -4495,13 +4233,11 @@ function _buildDepositUsdcHint({ walletUsdc, minUsdc, isNew, isBtcPair, tokenALa
 
 async function _openPoolDepositModal(pool) {
     const mid = 'liquiditybot-deposit-modal';
-    const [state, balance, cfgRes] = await Promise.all([
+    const [state, balance] = await Promise.all([
         _fetchPoolState(pool.id),
         _fetchWalletBalanceFresh(),
-        fetch('/api/config/liquiditybot').catch(() => null),
     ]);
     if (!state) { infoModal(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
-    const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'disabled';
 
     const tokenALabel = state.tokenALabel;
     const tokenBLabel = state.tokenBLabel;
@@ -4569,7 +4305,6 @@ async function _openPoolDepositModal(pool) {
         title: `Einzahlen – ${state.displayPair ?? state.pair}`,
         body: `
             <div id="pd-oor-banner">${oorBannerHtml()}</div>
-            ${_cleanupHint(cleanupMode)}
             ${armSectionHtml}
             <div class="wm-tab-bar">
                 <button class="wm-tab active" data-pdtab="usdc">${tr('sliq.by_usdc_amount', 'Per USDC-Betrag')}</button>
@@ -4775,18 +4510,6 @@ async function _openPoolDepositModal(pool) {
     });
 }
 
-// Berechnet das wirtschaftlich maximale Token-Paar aus Wallet + Pool-Preis.
-function _cleanupHint(cleanupMode = 'disabled') {
-    if (cleanupMode === 'disabled') return '';
-    const mm  = new Date().getMinutes();
-    const min = (65 - mm) % 60;
-    if (min === 0) return `<div class="wallet-hint" style="font-size:0.78rem; color:var(--danger);">${tr('sliq.cleanup_running_now', '⚠ Cleanup läuft gerade.')}</div>`;
-    const style = min < 10 ? 'color:var(--danger);' : 'color:var(--text-muted);';
-    return `<div class="wallet-hint" style="font-size:0.78rem; ${style}">${min === 1
-        ? tr('sliq.next_cleanup_one', 'Nächster Cleanup in 1 Minute.')
-        : tr('sliq.next_cleanup', 'Nächster Cleanup in {min} Minuten.', { min })}</div>`;
-}
-
 // Berechnet den effektiven CLMM-Deposit-Ratio (tokenB pro 1 tokenA) basierend auf
 // aktuellem Preis + Range. Weicht vom Spot-Preis ab wenn der Preis nicht im
 // geometrischen Zentrum der Range liegt.
@@ -4804,6 +4527,7 @@ function _clmmDepositRatio(price, priceLower, priceUpper) {
     return tokenBPerLiq / tokenAPerLiq;  // tokenB pro 1 tokenA
 }
 
+// Berechnet das wirtschaftlich maximale Token-Paar aus Wallet + Pool-Preis.
 // price = tokenB pro 1 tokenA (z.B. 91 USDC pro 1 SOL).
 // btcPair: Ratio ≈ 1 → Engpass = min(walletA, walletB).
 function _computeEconomicMax(walletA, walletB, price, isBtcPair) {
@@ -4917,13 +4641,9 @@ function _setSubmitDisabled(backdrop, disabled, reason = '') {
 
 async function _openPoolWithdrawModal(pool, addrs = []) {
     const mid = 'liquiditybot-withdraw-modal';
-    const [state, cfgRes] = await Promise.all([
-        _fetchPoolState(pool.id),
-        fetch('/api/config/liquiditybot').catch(() => null),
-    ]);
+    const state = await _fetchPoolState(pool.id);
     if (!state) { infoModal(tr('sliq.pool_state_failed', 'Pool-State konnte nicht geladen werden.')); return; }
     if (!state.position) { infoModal(tr('sliq.no_open_position', 'Keine offene Position – Auszahlung nicht möglich.')); return; }
-    const cleanupMode = cfgRes?.ok ? _parseCleanupMode(await cfgRes.json()) : 'disabled';
 
     const tokenALabel = state.tokenALabel;
     const tokenBLabel = state.tokenBLabel;
@@ -4950,7 +4670,6 @@ async function _openPoolWithdrawModal(pool, addrs = []) {
         title: `Auszahlen – ${state.displayPair ?? state.pair}`,
         body: `
             <div id="pw-oor-banner">${oorWarningHtml()}</div>
-            ${_cleanupHint(cleanupMode)}
             <div class="wm-tab-bar">
                 <button class="wm-tab active" data-pwtab="usdc">${tr('sliq.by_usdc_value', 'Per USDC-Wert')}</button>
                 <button class="wm-tab" data-pwtab="pair">${tr('sliq.by_token_amounts', 'Per Token-Mengen')}</button>
@@ -5264,11 +4983,12 @@ async function _runPoolAction(mid, action, poolId, isNew) {
     backdrop._actionRunning = true;
     let retryMode = false;
     try {
-        const r = await fetch(`/api/pools/liquidity/${encodeURIComponent(poolId)}/${action}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(built.body),
-        });
-        const data = await r.json();
+        // Läuft serverseitig als losgelöster Job (CORE#000993): Überlebt einen Neustart von
+        // forge-settings; dauert es länger oder bricht die Verbindung ab, wird nachgefragt.
+        const data = await runFinanceAction(
+            `/api/pools/liquidity/${encodeURIComponent(poolId)}/${action}`, built.body,
+            { key: `liq:${poolId}`, onStatus: (_state, text) => { feedbackBox.textContent = text; } },
+        );
         if (data.ok) {
             feedbackBox.className = 'modal-feedback ok';
             const txHash = data.result?.txHash;

@@ -21,38 +21,33 @@ import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
 import dotenv                from 'dotenv';
 import { getSplTokensUsd, getLatestWalletBalance } from '../lib/wallet-monitor-client.js';
-import { config, getCleanupTrendGateFromEnv } from '../lib/config.js';
+import { config } from '../lib/config.js';
 import { checkInvestEligibility } from '../lib/invest-eligibility.js';
-import { poolInvestCooldowns } from '../lib/invest-cooldown.js';
-import { loadTrendStates, checkTrendGate, parseTrendGate, TREND_TIMEFRAMES } from '../lib/trend-indicators.js';
 import { FORGE_TZ, midnightTzMs } from '../../../core/config.js';
 import { readMaintenanceFlag, getMaintenanceWindows } from '../../../core/maintenance.js';
 import { getActiveProfile }       from '../lib/economic-scorer/config.js';
 // PnL: ausschließlich über die zentrale FORGE-Lib (Single Source of Truth).
 // Kein PnL-Code in diesem Bot — siehe FORGE/lib/pnl.js.
-import { computePnlHistory, pnlForPeriod, pnlByScopeForPeriod, pnlWindows, pnlPeakForPeriod, feeLegForPeriod,
+import { computePnlHistory, pnlForPeriod, portfolioPnlForPeriod, pnlByScopeForPeriod, pnlWindows, pnlPeakForPeriod, feeLegForPeriod,
          pnlBreakdownForPeriod }
     from '../../../lib/pnl.js';
-import { loadOpportunityScores, loadInvestScores } from '../lib/invest-score-provider.js';
-import { resolvePnlAnchorMs, resolvePnlAnchorSource, resolvePnlExtremaAnchorMs, chainStartOpenedAt } from '../lib/pnl-anchor.js';
+import { loadPoolSlopes } from '../lib/slopes-provider.js';
+import { resolvePnlAnchorMs, resolvePnlAnchorSource, chainStartOpenedAt,
+         pnlDetailsAnchorMs, sinceOpenPnlUsd } from '../lib/pnl-anchor.js';
 import { getShiftBalanceForPosition } from '../lib/rebalance-shift.js';
 import { getPremiumCoverage } from '../../../lib/premium-wallet.js';
-// Neutrale Blend-Formel (kein IP-Bezug) – NICHT aus lib/invest-score.js importieren,
-// das würde über dessen Kopfimport die Score-Gewichte in invest-score-config.js
-// zurück in den Fork ziehen (Befund 2026-07-25, siehe lib/score-blend.js).
-import { blendInvestScore } from '../lib/score-blend.js';
-import { getPoolTypeConfig }  from '../lib/range-advisor.js';
 import { FEE_MODEL_V2 } from '../lib/fee-model.js';
 // Edge-Prognose (npWindows) nur über die Naht — Rechnung in lib/edge-compute.js (CORE#000931).
-import { loadEdge, EDGE_CAPITAL_USDC } from '../lib/edge-provider.js';
-// Dust-Schwelle aus der neutralen Einzelquelle – NICHT aus invest-score-config.js:
-// dort liegen die Score-Gewichte, die nicht in den FORGE-public-Fork gelangen dürfen.
-import { VOLUME_DUST_USD as VOLUME_MALUS_DUST_USD } from '../lib/volume-dust.js';
-import { computeBtcTrend, BTC_POOL_ID, TIMEFRAMES as BTC_TIMEFRAMES, EMA_SPANS as BTC_EMA_SPANS } from '../lib/btc-trend/index.js';
+import { loadEdge } from '../lib/edge-provider.js';
+import { computeRangeHints } from '../lib/range-hint.js';
+import { VOLUME_DUST_USD } from '../lib/volume-dust.js';
 import { PATHS } from '../../../config/paths.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
 import { displayVersion } from '../../../lib/version.js';
-import { pruneScoreHistories, downsampleScoreHistory } from '../lib/db.js';
+import { pruneScoreHistories, getOpenPosition } from '../lib/db.js';
+import { previewReinvestTargets, exitBlockFor } from '../lib/cleanup-reinvest.js';
+import { isPoolEnabled } from '../lib/config.js';
+import { REINVEST_PNL_WINDOW, edgeValuesByPool, edgeIsPremium } from '../../../lib/reinvest-rules.js';
 import { loadTsAdvice } from '../lib/ts-advice-provider.js';
 import { loadTsConfig, evaluateTsTrigger } from '../lib/trailing-stop.js';
 import { effectiveFeePct } from '../../../lib/effective-fee.js';
@@ -93,7 +88,7 @@ try {
         pools: [], positions: [], transactions: [], notifications: [],
     }, null, 2), 'utf-8');
     writeFileSync(HISTORY_FILE, JSON.stringify({
-        portfolioHistory: [], aprHistory: [], tvlHistory: [],
+        portfolioHistory: [], balanceHistory: [], aprHistory: [], tvlHistory: [],
         priceHistory: [], myAprHistory: [], posValueHistory: [], npHistory: [], scoreHistory: [], pnlHistory: [], compositionHistory: [], volumeHistory: [],
     }), 'utf-8');
     console.log('export.js: DB noch nicht vorhanden – Skeleton geschrieben.');
@@ -281,27 +276,11 @@ for (const row of db.prepare(`
     investedCapital[row.pool_id] = row.total;
 }
 
-// ─── InvestScore: Hilfsdaten (LMB#0117) ──────────────────────────────────────
-// openPosByPool: neueste offene Position je Pool (für capital_usdc als PnL-Basis)
+// openPosByPool: neueste offene Position je Pool
 const openPosByPool = {};
 for (const pos of openPositions) {
     if (!openPosByPool[pos.pool_id] || pos.opened_at > openPosByPool[pos.pool_id].opened_at)
         openPosByPool[pos.pool_id] = pos;
-}
-
-// lastNonZeroCapitalByPool: letztes bekanntes capital_usdc > 0 je Pool (offen ODER geschlossen).
-// Fallback-Normalisierer für inaktive Pools, die noch pnlWindows-Daten aus der letzten
-// aktiven Phase haben. Ohne diesen Fallback werden PnL-Metriken für alle inaktiven
-// Pools null, obwohl echte Performance-Daten vorliegen (z.B. RENDER/SOL nach Schließung).
-const lastNonZeroCapitalByPool = {};
-for (const row of db.prepare(`
-    SELECT pool_id, capital_usdc
-    FROM positions
-    WHERE capital_usdc > 0
-    ORDER BY opened_at DESC
-`).all()) {
-    if (!lastNonZeroCapitalByPool[row.pool_id])
-        lastNonZeroCapitalByPool[row.pool_id] = row.capital_usdc;
 }
 
 // Aktuelle Ranking-Position + Economic-Scorer-Daten je Pool (neuester Snapshot pro Pool)
@@ -384,10 +363,10 @@ const poolsOverview = pools.map(pool => {
     };
 });
 
-// ─── Opportunity-Score (LMB#0116, Phase 1) ────────────────────────────────────
-// Berechnet pro Pool für 3 Profile (short/medium/long) den neuen Score.
-// Liest pool_stats über 168 h (max-Fenster), schreibt einen Snapshot je Profil
-// in opportunity_scores. Phase 1 = nur Anzeige, keine Bot-Entscheidung.
+// ─── Pool-Slopes (Opportunity-Tabelle) ────────────────────────────────────────
+// Liest pool_stats über 168 h (max-Fenster). Die Slopes je Pool und Zeitfenster kommen
+// über lib/slopes-provider.js; ein Snapshot je Zeitfenster geht stündlich in
+// opportunity_scores (Quelle der Slope-Verlaufscharts und der Premium-Sektion `slopes`).
 const _oppNowMs   = Date.now();
 const _oppFromMs  = _oppNowMs - 168 * 3600_000;
 const _oppStatsByPool = {};
@@ -400,60 +379,15 @@ for (const r of _oppRows) {
     (_oppStatsByPool[r.pool_id] ??= []).push(r);
 }
 
-// usdAvg-Augmentierung (LMB Phase 2): für volatilePair-Pools den USD-Mittelwert
-// beider Token je Snapshot anhängen. Quelle = Quote-Pool-Preis aus _oppStatsByPool
-// (kein API-Call). Damit kann der Opportunity-Score-Lib den gerichteten USD-Trend
-// des Token-Korbs als Slope bestimmen — das Signal, das bei volatilePair-Pools fehlt
-// (Ratio-Preis-Slope ist dort kein zuverlässiges Kapital-Drift-Signal).
-// Nur Quote-Pools mit direktem USDC-Bezug (tokenB=USDC) werden aufgelöst; abgeleitete
-// Referenz-Quotes (z.B. jitosol-ref) bleiben undefiniert → Lib behandelt als neutral.
-{
-    const _USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-    const _cfgById = Object.fromEntries(poolsConfigRaw.map(p => [p.id, p]));
-    // Quote-USD an Zeitpunkt ts via Binärsuche im Quote-Pool-Snapshot (max. 90-Min-Lücke).
-    const _quotePriceAt = (quotePoolId, ts) => {
-        const arr = _oppStatsByPool[quotePoolId];
-        if (!arr || arr.length === 0) return null;
-        let lo = 0, hi = arr.length - 1, idx = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            arr[mid].recorded_at <= ts ? (idx = mid, lo = mid + 1) : hi = mid - 1;
-        }
-        if (idx < 0 || ts - arr[idx].recorded_at > 90 * 60_000) return null;
-        return arr[idx].price;
-    };
-    for (const cfg of poolsConfigRaw) {
-        if (!cfg.volatilePair || !cfg.quotePricePoolId || !cfg.quoteTokenMint) continue;
-        const quoteCfg = _cfgById[cfg.quotePricePoolId];
-        // Quote-Pool muss direkten USDC-Bezug haben (price = Quote-Token in USD).
-        if (!quoteCfg || quoteCfg.derivedQuote || quoteCfg.usdcIsTokenA
-            || quoteCfg.tokenB !== _USDC) continue;
-        const quoteIsTokenA = cfg.quoteTokenMint === cfg.tokenA;
-        const rows = _oppStatsByPool[cfg.id] ?? [];
-        for (const row of rows) {
-            const p = row.price;
-            if (!p || p <= 0) continue;
-            const quoteUsd = _quotePriceAt(cfg.quotePricePoolId, row.recorded_at);
-            if (!quoteUsd || quoteUsd <= 0) continue;
-            const usdA = quoteIsTokenA ? quoteUsd : p * quoteUsd;
-            const usdB = quoteIsTokenA ? quoteUsd / p : quoteUsd;
-            if (usdA > 0 && usdB > 0) row.usdAvg = 0.5 * (usdA + usdB);
-        }
-    }
-}
-
-// ─── Score-Naht (2026-07-25) ──────────────────────────────────────────────────
-// Opportunity Score und InvestScore kommen ausschließlich über den Provider:
-// der Master rechnet (lib/invest-score-compute.js), der FORGE-public-Fork erhält sie
-// als Premium-Daten. export.js selbst kennt die Score-Algorithmen nicht mehr.
-// `scoreSource` wird bis ins Dashboard durchgereicht ('none' → Platzhalter).
-const _oppRes           = await loadOpportunityScores({
-    pools, oppStatsByPool: _oppStatsByPool, oppNowMs: _oppNowMs, volatilePairMap,
+// ─── Slopes-Naht ───────────────────────────────────────────────────────────────
+// Der Master rechnet (lib/pool-slopes/), der FORGE-public-Fork erhält die Slopes als
+// Premium-Daten (lib/slopes-provider.js). export.js kennt den Algorithmus nicht.
+// Der USD-Korb (usdAvg) für volatilePair-Pools entsteht seit LIQ#000938 ebenfalls dort.
+const _slopesRes        = await loadPoolSlopes({
+    pools, statsByPool: _oppStatsByPool, poolsConfig: poolsConfigRaw, nowMs: _oppNowMs,
 });
-const opportunityScores = _oppRes.opportunityScores;
-const _timeframeIds     = _oppRes.timeframeIds;
-let   scoreSource       = _oppRes.source;
-let   scoreStale        = _oppRes.stale;
+const poolSlopes        = _slopesRes.poolSlopes;
+const _timeframeIds     = _slopesRes.timeframeIds;
 
 // Premium-Deckung (2026-07-29) — siehe getPremiumCoverage() in lib/premium-wallet.js.
 const _premiumCoverage = getPremiumCoverage();
@@ -472,40 +406,33 @@ try {
         dbWrite.close();
         throw new Error('skipped: < 55min since last snapshot');
     }
+    // Die Score- und Faktor-Spalten der Tabelle bleiben seit LIQ#000932 leer (Score entfernt).
     const insOpp = dbWrite.prepare(`
         INSERT INTO opportunity_scores
-        (pool_id, timeframe, recorded_at, score, yield_per_tvl, gross_apr_pct,
+        (pool_id, timeframe, recorded_at, gross_apr_pct,
          price_slope_pct, yield_slope_pct, tvl_slope_pct, usd_trend_slope_pct,
-         price_factor, yield_factor, tvl_factor, trend_factor, hopium_gate,
          sample_count, window_hours, reason)
-        VALUES (@pool_id, @timeframe, @recorded_at, @score, @yield_per_tvl, @gross_apr_pct,
+        VALUES (@pool_id, @timeframe, @recorded_at, @gross_apr_pct,
                 @price_slope_pct, @yield_slope_pct, @tvl_slope_pct, @usd_trend_slope_pct,
-                @price_factor, @yield_factor, @tvl_factor, @trend_factor, @hopium_gate,
                 @sample_count, @window_hours, @reason)
     `);
     const txn = dbWrite.transaction(() => {
-        for (const [poolId, byTimeframe] of Object.entries(opportunityScores)) {
+        for (const [poolId, byTimeframe] of Object.entries(poolSlopes)) {
             for (const tfId of _timeframeIds) {
                 const s = byTimeframe[tfId];
+                if (!s) continue;
                 insOpp.run({
-                    pool_id:         poolId,
-                    timeframe:       tfId,
-                    recorded_at:     _oppNowMs,
-                    score:           s.score ?? null,
-                    yield_per_tvl:   s.yieldPerTvl ?? null,
-                    gross_apr_pct:   s.grossAprPct ?? null,
+                    pool_id:             poolId,
+                    timeframe:           tfId,
+                    recorded_at:         _oppNowMs,
+                    gross_apr_pct:       s.grossAprPct ?? null,
                     price_slope_pct:     s.priceSlopePct ?? null,
                     yield_slope_pct:     s.yieldSlopePct ?? null,
                     tvl_slope_pct:       s.tvlSlopePct ?? null,
                     usd_trend_slope_pct: s.usdTrendSlopePct ?? null,
-                    price_factor:        s.priceFactor ?? null,
-                    yield_factor:        s.yieldFactor ?? null,
-                    tvl_factor:          s.tvlFactor ?? null,
-                    trend_factor:        s.trendFactor ?? null,
-                    hopium_gate:         s.hopiumGate ?? null,
-                    sample_count:    s.sampleCount ?? 0,
-                    window_hours:    s.windowHours ?? null,
-                    reason:          s.reason ?? null,
+                    sample_count:        s.sampleCount ?? 0,
+                    window_hours:        s.windowHours ?? null,
+                    reason:              s.reason ?? null,
                 });
             }
         }
@@ -515,59 +442,14 @@ try {
     try {
         const del = pruneScoreHistories(dbWrite);
         const sum = Object.values(del).reduce((a, b) => a + b, 0);
-        if (sum > 0) console.log(`export.js: Score-Historie bereinigt (${JSON.stringify(del)})`);
-        const merged = downsampleScoreHistory(dbWrite);
-        if (merged > 0) console.log(`export.js: invest_score_history verdichtet (${merged} Zeilen > 7 d auf 10-min-Raster)`);
+        if (sum > 0) console.log(`export.js: Slope-/Tier-Historie bereinigt (${JSON.stringify(del)})`);
     } catch (pe) {
-        console.warn(`export.js: Score-Historie-Retention fehlgeschlagen (${pe.message})`);
+        console.warn(`export.js: Slope-/Tier-Historie-Retention fehlgeschlagen (${pe.message})`);
     }
     dbWrite.close();
 } catch (e) {
     if (!String(e.message).startsWith('skipped')) {
         console.warn(`export.js: opportunity_scores nicht persistiert (${e.message})`);
-    }
-}
-
-// BTC-Trendmeter (BTC-Korrelation Phase 0): 12-Punkte-Trend aus der stündlichen
-// BTC-Preis-Historie ableiten und stündlich snapshotten. Reine Ableitung aus
-// pool_stats (liq-btc-usdc) — kein API-Call. Throttle wie opportunity_scores (55min).
-try {
-    const dbBtc   = new Database(DB_PATH);
-    dbBtc.pragma('journal_mode = WAL');
-    const lastBtc = dbBtc.prepare(`SELECT MAX(recorded_at) AS ts FROM btc_trend_history`).get();
-    if (Date.now() - (lastBtc?.ts ?? 0) < 55 * 60_000) {
-        dbBtc.close();
-        throw new Error('skipped: < 55min since last btc_trend snapshot');
-    }
-    const btcRows = dbBtc.prepare(
-        `SELECT recorded_at, price FROM pool_stats
-         WHERE pool_id = ? AND price IS NOT NULL
-         ORDER BY recorded_at ASC`
-    ).all(BTC_POOL_ID);
-    const trend = computeBtcTrend(btcRows.map(r => ({ ts: r.recorded_at, price: r.price })));
-    if (trend && trend.ema_available >= 1) {
-        const emaCols = [];
-        for (const tf of BTC_TIMEFRAMES) for (const span of BTC_EMA_SPANS) emaCols.push(`ema_${tf.id}_${span}`);
-        const insBtc = dbBtc.prepare(`
-            INSERT OR IGNORE INTO btc_trend_history
-            (recorded_at, btc_price, ${emaCols.join(', ')}, trend_points, ema_available, trend_pct)
-            VALUES
-            (@recorded_at, @btc_price, ${emaCols.map(c => '@'+c).join(', ')}, @trend_points, @ema_available, @trend_pct)
-        `);
-        const row = {
-            recorded_at:   trend.recorded_at,
-            btc_price:     trend.btc_price,
-            trend_points:  trend.trend_points,
-            ema_available: trend.ema_available,
-            trend_pct:     trend.trend_pct,
-        };
-        for (const c of emaCols) row[c] = trend.emas[c] ?? null;
-        insBtc.run(row);
-    }
-    dbBtc.close();
-} catch (e) {
-    if (!String(e.message).startsWith('skipped')) {
-        console.warn(`export.js: btc_trend_history nicht persistiert (${e.message})`);
     }
 }
 
@@ -686,7 +568,9 @@ const lastRebalance  = db.prepare(`
     SELECT rebalanced_at FROM rebalance_history ORDER BY rebalanced_at DESC LIMIT 1
 `).get();
 
-// Portfolio-Verlauf (letzte 7 Tage, downgesampelt auf 1 Punkt/5 Minuten).
+// Portfolio-Verlauf (letzte 30 Tage wie alle Chart-Reihen; LIQ#000946). Downsampling:
+// letzte 7 Tage 1 Punkt/5 Minuten, ältere Tage 1 Punkt/Stunde. Die 30 Tage braucht die
+// Zeitraum-Sperre (KB Core/chart-range-lib): bei nur 7 Tagen bliebe 1M dauerhaft gesperrt.
 // total_usd ist bereits das vollständige Portfolio (LP + Fees + Wallet) — der Writer
 // in writePortfolioSnapshot summiert diese drei Komponenten. Bis v0.3.46 addierte der
 // Chart-Code Wallet nochmals on top → Doppelt-Zählung. Behoben in v0.3.47.
@@ -696,16 +580,38 @@ const thirtyOneDaysAgo = Date.now() - 31 * 24 * 60 * 60 * 1000; // für 24h-Look
 const portfolioHistRaw = db.prepare(`
     SELECT total_usd, recorded_at FROM portfolio_history
     WHERE recorded_at >= ? ORDER BY recorded_at ASC
-`).all(sevenDaysAgo);
+`).all(thirtyDaysAgo);
 
-// Downsampling: letzter Wert pro 5-Minuten-Bucket
+// Downsampling: letzter Wert je Bucket (Präfix trennt Stunden- und 5-Minuten-Buckets)
 const portfolioBy5Min = new Map();
 for (const row of portfolioHistRaw) {
-    portfolioBy5Min.set(Math.floor(row.recorded_at / 300_000), row);
+    const key = row.recorded_at < sevenDaysAgo
+        ? 'h' + Math.floor(row.recorded_at / 3_600_000)
+        : 'm' + Math.floor(row.recorded_at / 300_000);
+    portfolioBy5Min.set(key, row);
 }
 const portfolioHistory = [...portfolioBy5Min.values()].map(r => ({
     t: r.recorded_at,
     v: round2(r.total_usd ?? 0),
+}));
+
+// Gesamtguthaben-Chart (links im Bot-Dashboard) muss mit der Gesamt-Karte (balance) übereinstimmen:
+// total_usd enthält das volle Wallet inkl. SOL-Reserve, Gesamt zieht sie ab. Deshalb je Punkt
+// Reserve × SOL-Preis zu diesem Zeitpunkt (letzter pool_stats-Preis ≤ t) abziehen.
+// Eigenes Feld: portfolioHistory bleibt unverändert, die Übersicht (html/js/forge.js) rechnet
+// bewusst auf der Basis inkl. Reserve.
+const solPriceHist = solPool ? db.prepare(`
+    SELECT price, recorded_at FROM pool_stats
+    WHERE pool_id = ? AND price > 0 AND recorded_at >= ? ORDER BY recorded_at ASC
+`).all(solPool.id, thirtyOneDaysAgo) : [];
+let _solIdx = 0;
+const solPriceAt = t => {
+    while (_solIdx + 1 < solPriceHist.length && solPriceHist[_solIdx + 1].recorded_at <= t) _solIdx++;
+    return solPriceHist[_solIdx]?.price ?? solPrice;
+};
+const balanceHistory = [...portfolioBy5Min.values()].map(r => ({
+    t: r.recorded_at,
+    v: round2((r.total_usd ?? 0) - solReserve * solPriceAt(r.recorded_at)),
 }));
 
 // APR-Verlauf (letzte 30 Tage, 1 Punkt/Stunde = pool_stats-Intervall)
@@ -991,19 +897,23 @@ const posValueHistory = posValueHistRaw.map(r => {
 const _pnlData = computePnlHistory(db, { flavor: config.botId, now: Date.now(), historyWindowMs: 30 * 24 * 3600 * 1000 });
 const pnlHistory = _pnlData.pnlHistory;
 
-// PnL kalender-ausgerichteter Perioden (Heute/Gestern/Monat).
+// PnL kalender-ausgerichteter Perioden (Heute/Gestern/Monat/24h).
 //
-// Heute:   pnlForPeriod() seit Tagesstart (Portfolio, alle Pools).
+// Alle Portfolio-Werte über portfolioPnlForPeriod(): Gesamtwert-Delta minus Wallet-Flüsse
+// (LIQ#001062). NICHT pnlForPeriod() ohne scope — die Summe der Pool-Kurven verliert Geld,
+// das über das Wallet zwischen Pools wandert (pub1 September 2026: −21,54 statt +48 USDC).
+//
+// Heute:   portfolioPnlForPeriod() seit Tagesstart.
 // Gestern: aus pnl_daily.pnl_value — null wenn noch kein Eintrag (→ "no data").
-//          pnl_daily schreibt der Bot selbst über pnlForPeriod, ist also derselbe
+//          pnl_daily schreibt der Bot selbst über portfolioPnlForPeriod, ist also derselbe
 //          Wert wie eine direkte Abfrage, nur vorberechnet.
-// Monat:   pnlForPeriod() über den Kalendermonat (siehe unten).
+// Monat:   portfolioPnlForPeriod() über den Kalendermonat (siehe unten).
 
 const _pnlDailyRow   = date => db.prepare(`SELECT lp_close, pnl_value FROM pnl_daily WHERE date = ?`).get(date);
 const _yesterdayIso  = new Intl.DateTimeFormat('en-CA', { timeZone: FORGE_TZ }).format(new Date(todayStartMs - 1));
 
 // Heute: Portfolio-PnL seit 00:00 (Berlin) über die zentrale Lib.
-const pnlToday = pnlForPeriod(db, { flavor: config.botId, fromMs: todayStartMs });
+const pnlToday = portfolioPnlForPeriod(db, { flavor: config.botId, fromMs: todayStartMs });
 
 // Gestern: direkt aus pnl_daily.pnl_value (null = no data)
 const pnlYesterday = _pnlDailyRow(_yesterdayIso)?.pnl_value ?? null;
@@ -1017,11 +927,11 @@ const pnlYesterday = _pnlDailyRow(_yesterdayIso)?.pnl_value ?? null;
 // addieren sich). Die direkte Abfrage ist die kürzere Kette, deckt Tage ohne
 // pnl_daily-Eintrag mit ab und stimmt exakt mit der Übersichtsseite überein
 // (analysis/01-export-status.js).
-const pnlMonth = pnlForPeriod(db, { flavor: config.botId, fromMs: monthStartMs });
+const pnlMonth = portfolioPnlForPeriod(db, { flavor: config.botId, fromMs: monthStartMs });
 
 // Rollierender 24h-PnL: Portfolio-PnL über gleitendes 24h-Fenster (zentrale Lib).
 const _now24hMs = Date.now() - 24 * 3600 * 1000;
-const pnl24h    = pnlForPeriod(db, { flavor: config.botId, fromMs: _now24hMs });
+const pnl24h    = portfolioPnlForPeriod(db, { flavor: config.botId, fromMs: _now24hMs });
 
 // ─── dailyPnl: 30-Tage-Serie aus pnl_daily (für Dashboard-Übersicht 1W/1M) ──
 // pnl_daily.pnl_value = Positionswert-Delta + Fees − TX-Fees (echter PnL).
@@ -1145,7 +1055,7 @@ for (const r of scoreHistoryRaw) latestNetAprByPool[r.pool_id] = r.net_apr_pct;
 for (const po of poolsOverview) po.netAprPct = latestNetAprByPool[po.id] != null ? round2(latestNetAprByPool[po.id]) : null;
 
 // Trailing-Stop-Advisor-Empfehlung je Pool (LIQ#0351). Geht ins Dashboard-JSON, damit
-// ForgeSettings auf Master und Fork denselben Lesepfad hat — genau wie `scoreSource`.
+// ForgeSettings auf Master und Fork denselben Lesepfad hat — genau wie `edgeSource`.
 //
 // 🔒 „Zustand immer sichtbar": Die Oberfläche muss die Auto-Checkbox sperren können, wenn
 // keine belastbare Empfehlung vorliegt, UND begründen warum. Ein Schalter, den man
@@ -1501,12 +1411,12 @@ const _shiftBalanceByPool = Object.fromEntries(
 // USELESS/SOL). Gemessen wird ab Pool-Eröffnung (Kettenstart) bzw. ab manuellem
 // "Höchststand zurücksetzen"-Klick, siehe resolvePnlExtremaAnchorMs().
 const _pnlDetailsAnchorByPool = Object.fromEntries(
-    openPositions.map(pos => [pos.pool_id, resolvePnlExtremaAnchorMs(_chainStartAtByPool[pos.pool_id], pos.pnl_anchor_reset_at)])
+    openPositions.map(pos => [pos.pool_id, pnlDetailsAnchorMs(db, pos)])
 );
 // PnL "Aktuell" seit demselben Anker — sonst stünde im Grid ein Wert seit Einzahlung
 // neben Extrempunkten seit Eröffnung, und "Aktuell" könnte über "Maximum" liegen.
 const _sinceOpenPnlByPool = Object.fromEntries(
-    openPositions.map(pos => [pos.pool_id, pnlForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id] })])
+    openPositions.map(pos => [pos.pool_id, sinceOpenPnlUsd(db, pos, config.botId)])
 );
 
 // ─── Überleitung Eingezahlt → Wert heute (LIQ#000867, Reiter "Details") ───────
@@ -1518,6 +1428,8 @@ const _sinceOpenPnlByPool = Object.fromEntries(
 // Delta-Zeitreihe je Pool (LIQ#000891): edgeSeries aus lib/pnl.js, wird unten in
 // metricHistory (Chart hinter der Spalte „Δ") gebucketet statt mit nach data.json zu wandern.
 const _edgeSeriesByPool = {};
+// Dasselbe für den Chart hinter „PnL 24H" (LIQ#001023): sharePnl24hSeries aus lib/pnl.js.
+const _pnl24SeriesByPool = {};
 const _breakdownByPool = Object.fromEntries(
     openPositions.map(pos => {
         const b = pnlBreakdownForPeriod(db, { flavor: config.botId, scope: pos.pool_id, fromMs: _pnlDetailsAnchorByPool[pos.pool_id] });
@@ -1528,8 +1440,9 @@ const _breakdownByPool = Object.fromEntries(
             { symbol: symB ?? null, changePct: b.tokenBChangePct },
         ];
         if (pairFlipMap[pos.pool_id] === true) tokens.reverse();
-        const { tokenAChangePct, tokenBChangePct, fromMs, valueSeries, edgeSeries, ...rest } = b;
+        const { tokenAChangePct, tokenBChangePct, fromMs, valueSeries, edgeSeries, sharePnl24hSeries, ...rest } = b;
         _edgeSeriesByPool[pos.pool_id] = edgeSeries ?? [];
+        _pnl24SeriesByPool[pos.pool_id] = sharePnl24hSeries ?? [];
         return [pos.pool_id, { ...rest, tokens, valueSeries }];
     })
 );
@@ -1903,10 +1816,10 @@ for (const po of poolsOverview) {
             // Nur verwenden wenn jünger als 3h — Stats-Intervall 1h + GeckoTerminal
             // liefert laufende Stunde erst nach Abschluss → Candle kann bis zu ~2h alt
             // sein bevor der nächste Fetch sie ersetzt. 3h gibt ausreichend Puffer.
-            // Dust-Schwelle (dieselbe wie beim Volumen-Malus): einzelne Dust-Trades
-            // (z.B. 6 USDC in einem 1,1-Mio-USD-Pool) ergäben sonst ein irreführendes
-            // ~0,01%-Anzeige statt "no data".
-            if (volRow && volRow.volume_usd > VOLUME_MALUS_DUST_USD && (Date.now() - volRow.ts) < 3 * 3_600_000) {
+            // Dust-Schwelle (lib/volume-dust.js): einzelne Dust-Trades (z.B. 6 USDC in
+            // einem 1,1-Mio-USD-Pool) ergäben sonst ein irreführendes ~0,01%-Anzeige
+            // statt "no data".
+            if (volRow && volRow.volume_usd > VOLUME_DUST_USD && (Date.now() - volRow.ts) < 3 * 3_600_000) {
                 const aprEst = (volRow.volume_usd * 24 * 365 * (feeTier / 100)) / tvl * 100;
                 if (aprEst > 0) {
                     apr1h = round2(aprEst);
@@ -1958,17 +1871,20 @@ for (const p of positionsOut) {
     p.pnl1d = _pnlData.metricsByPool[p.poolId]?.pnl_1d_usd ?? null;
 }
 
-// PnL-Deltas für Opportunity-Score-Timeframes (6h, 12h, 24h, 7d).
+// PnL-Deltas für die Zeitfenster der Opportunity-Tabelle (1h, 6h, 12h, 24h, 7d).
 // Zentrale Lib: session-begrenzte Fenster-PnL aus derselben Kurve wie pnl1d.
+// Das 24h-Fenster kommt aus REINVEST_PNL_WINDOW: „Bester PnL (24h)“ im Cleanup-Reinvest (LIQ#000988)
+// vergleicht genau diese Spalte, und die Vorschau weiter unten liest sie aus demselben Ergebnis.
+let _winPnl = {};
 {
-    const _winPnl = pnlWindows(db, {
+    _winPnl = pnlWindows(db, {
         flavor:  'liquidity',
         now:     Date.now(),
         windows: [
             { id: '1h',  ms:   1 * 3_600_000 },
             { id: '6h',  ms:   6 * 3_600_000 },
             { id: '12h', ms:  12 * 3_600_000 },
-            { id: '24h', ms:  24 * 3_600_000 },
+            REINVEST_PNL_WINDOW,
             { id: '7d',  ms: 168 * 3_600_000 },
         ],
     });
@@ -2031,101 +1947,7 @@ for (const p of positionsOut) {
     }
 }
 
-// ─── InvestScore (LMB#0117) ───────────────────────────────────────────────────
-// 6 Metriken, je auf 0–100 normiert, dann gewichtet (Summe Gewichte = 100%).
-// PnL null (keine offene Position) → Score 50 (neutral statt herausrechnen).
-// Andere null-Metriken → Gewichte proportional umverteilt.
-// APR-Slope bei < 1 Tag Daten unterdrückt (Einführungsspike verfälscht den Slope).
-// 6h-Hopium-Gate (Preis↓ + APR↓ gleichzeitig) wirkt als Score-Veto → max. 40.
-// Ergebnis: po.investScore = { value, arrow, confidence, dataDays, metrics, hopiumVeto }
-// Timestamp geteilt mit npWindows-Fixup (INSERT OR REPLACE braucht exakt denselben Wert).
-//
-// Trend-Zustand einmal geladen, zwei Konsumenten: das Trend-Feinsignal im InvestScore
-// hier UND die Dashboard-Trend-Gate-Anzeige weiter unten (Opportunity 2.0, 2026-08-25) —
-// dieselbe Berechnung, keine zweite Kopie (siehe lib/trend-indicators.js Kopf-Kommentar).
-const _investScoreNowMs = Date.now();
-const _trendStatesForExport = loadTrendStates(db, _allPoolsConfig);
-let _applyRankingAdjustments = null;
 {
-    const _invRes = await loadInvestScores({
-        pools, poolsOverview, volHistRaw, poolTypeMap, openPosByPool,
-        lastNonZeroCapitalByPool, oppStatsByPool: _oppStatsByPool, volatilePairMap,
-        trendStates: _trendStatesForExport,
-    }, opportunityScores);
-    if (_invRes.source !== 'compute') { scoreSource = _invRes.source; scoreStale = _invRes.stale; }
-    _applyRankingAdjustments = _invRes.applyRankingAdjustments ?? null;
-
-    for (const po of poolsOverview) {
-        po.investScore = _invRes.investScores.get(po.id) ?? null;
-    }
-
-    // Persist investScore to invest_score_history
-    try {
-        const nowMs  = _investScoreNowMs;
-        const histDb = new Database(DB_PATH);
-        const ins    = histDb.prepare(
-            `INSERT OR REPLACE INTO invest_score_history (pool_id, recorded_at, score, exit_score)
-             VALUES (@pool_id, @recorded_at, @score, @exit_score)`);
-        histDb.transaction(rows => { for (const r of rows) ins.run(r); })(
-            poolsOverview
-                .filter(po => po.investScore?.value != null)
-                .map(po => ({
-                    pool_id: po.id, recorded_at: nowMs,
-                    score: po.investScore.value, exit_score: po.investScore.exitValue ?? po.investScore.value,
-                }))
-        );
-        histDb.close();
-    } catch (e) {
-        console.warn(`export.js: invest_score_history nicht persistiert (${e.message})`);
-    }
-
-    // Query historical score data for dashboard chart (10-min 1D, daily 1W/1M)
-    try {
-        const nowMs   = Date.now();
-        const cut1d   = nowMs - 86_400_000;
-        const cut7d   = nowMs - 7  * 86_400_000;
-        const cut31d  = nowMs - 31 * 86_400_000;
-        const q10min  = db.prepare(`
-            SELECT CAST(recorded_at / 600000 AS INTEGER) * 600000 AS ts,
-                   ROUND(AVG(score)) AS v
-            FROM invest_score_history
-            WHERE pool_id = ? AND recorded_at > ? AND score IS NOT NULL
-            GROUP BY CAST(recorded_at / 600000 AS INTEGER)
-            ORDER BY ts`);
-        const qHourly = db.prepare(`
-            SELECT CAST(recorded_at / 3600000 AS INTEGER) * 3600000 AS ts,
-                   ROUND(AVG(score)) AS v
-            FROM invest_score_history
-            WHERE pool_id = ? AND recorded_at > ? AND score IS NOT NULL
-            GROUP BY CAST(recorded_at / 3600000 AS INTEGER)
-            ORDER BY ts`);
-        const qDaily  = db.prepare(`
-            SELECT CAST(recorded_at / 86400000 AS INTEGER) * 86400000 AS ts,
-                   ROUND(AVG(score)) AS v
-            FROM invest_score_history
-            WHERE pool_id = ? AND recorded_at > ? AND score IS NOT NULL
-            GROUP BY CAST(recorded_at / 86400000 AS INTEGER)
-            ORDER BY ts`);
-        for (const po of poolsOverview) {
-            const currentScore = po.investScore?.value ?? null;
-            // Letzten Bucket immer mit dem aktuellen Score überschreiben.
-            // Tages-/Stunden-Buckets werden über AVG gemittelt — bei starken Intraday-Bewegungen
-            // weicht der Durchschnitt massiv vom tatsächlichen Stand ab (z.B. 70→20 an einem Tag).
-            const withCurrentEnd = (pts) => {
-                if (!pts.length || currentScore == null) return pts;
-                pts[pts.length - 1] = { ...pts[pts.length - 1], v: currentScore };
-                return pts;
-            };
-            po.scoreHistory = {
-                '1d': withCurrentEnd(q10min .all(po.id, cut1d)  .map(r => ({ ts: r.ts, v: r.v }))),
-                '1w': withCurrentEnd(qHourly.all(po.id, cut7d)  .map(r => ({ ts: r.ts, v: r.v }))),
-                '1m': withCurrentEnd(qDaily .all(po.id, cut31d) .map(r => ({ ts: r.ts, v: r.v }))),
-            };
-        }
-    } catch (e) {
-        console.warn(`export.js: scoreHistory nicht abgefragt (${e.message})`);
-    }
-
     // Query metric history for PnL / Slope charts (5-min 6H, 10-min 12H/1D, hourly 1W, daily 1M)
     // PnL-Werte werden um kumulierte fee_transfers (claim − reinvest) korrigiert, damit
     // der letzte Chart-Punkt exakt mit dem pnlWindows-Tabellenwert übereinstimmt.
@@ -2199,7 +2021,7 @@ let _applyRankingAdjustments = null;
                 .map(([ts, vals]) => ({ ts, v: parseFloat((vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(2)) }));
         };
 
-        // Slopes: price_slope_pct / yield_slope_pct / tvl_slope_pct from opportunity_scores (timeframe=24h)
+        // Slopes: price_slope_pct / yield_slope_pct / tvl_slope_pct aus opportunity_scores (timeframe=24h)
         const qSlope = (col, bucket) => db.prepare(`
             SELECT CAST(recorded_at / ${bucket} AS INTEGER) * ${bucket} AS ts,
                    ROUND(AVG(${col}), 3) AS v
@@ -2214,7 +2036,7 @@ let _applyRankingAdjustments = null;
         const tvlQ = { '6h': qSlope('tvl_slope_pct',   B5m), '12h': qSlope('tvl_slope_pct',   B10m), '1d': qSlope('tvl_slope_pct',   B10m), '1w': qSlope('tvl_slope_pct',   B1h), '1m': qSlope('tvl_slope_pct',   B1d) };
         // volatilePair-Pools (z.B. PUMP/SOL): price_slope_pct ist die Token/Token-Ratio,
         // kein USD-Trend — für die Preis-Slope-Historie dort usd_trend_slope_pct nehmen
-        // (gleiche Weiche wie die aktuelle Tabellenzelle und invest-score-compute.js).
+        // (gleiche Weiche wie die aktuelle Tabellenzelle im Dashboard).
         const utQ  = { '6h': qSlope('usd_trend_slope_pct', B5m), '12h': qSlope('usd_trend_slope_pct', B10m), '1d': qSlope('usd_trend_slope_pct', B10m), '1w': qSlope('usd_trend_slope_pct', B1h), '1m': qSlope('usd_trend_slope_pct', B1d) };
 
         const toPoints = rows => rows.map(r => ({ ts: r.ts, v: r.v }));
@@ -2252,10 +2074,9 @@ let _applyRankingAdjustments = null;
                     aprSlope:   toPoints(asQ[range] .all(po.id, cut)),
                     tvlSlope:   toPoints(tvlQ[range].all(po.id, cut)),
                 };
-                const edge = _edgeSeriesByPool[po.id];
-                if (edge?.length && ['1d', '1w', '1m'].includes(range)) {
-                    po.metricHistory[range].deltaH = _edgePoints(edge, cut, bucket, 'perHourUsd');
-                    po.metricHistory[range].deltaD = _edgePoints(edge, cut, bucket, 'perDayUsd');
+                const pnl24 = _pnl24SeriesByPool[po.id];
+                if (pnl24?.length && ['1d', '1w', '1m'].includes(range)) {
+                    po.metricHistory[range].pnl24h = _edgePoints(pnl24, cut, bucket, 'pct');
                 }
             }
         }
@@ -2266,7 +2087,7 @@ let _applyRankingAdjustments = null;
 
 // Inaktive Pools: pnlWindows leeren – historische PnL-Daten sind für nicht investierte Pools
 // irreführend (keine offene Position → Werte spiegeln vergangene Sessions wider, nicht die
-// aktuelle Marktlage). InvestScore hat sie intern bereits ausgewertet.
+// aktuelle Marktlage).
 for (const po of poolsOverview) {
     if (!openPosByPool[po.id]) po.pnlWindows = {};
 }
@@ -2275,7 +2096,6 @@ for (const po of poolsOverview) {
 // Master rechnet in lib/edge-compute.js, der Fork bekommt die Werte über Premium
 // (lib/edge-provider.js). `edgeSource` wird bis ins Dashboard durchgereicht und
 // steuert dort den Premium-Zugang ('none' → Platzhalter).
-const NP_CAPITAL = EDGE_CAPITAL_USDC;
 const _edgeRes = await loadEdge({
     db, dbPath: DB_PATH, nowMs: _oppNowMs, poolsOverview, poolsConfigRaw,
     statsByPool: _oppStatsByPool, quoteUsdAt: _quoteUsdAt, openPosByPool,
@@ -2292,99 +2112,57 @@ for (const po of poolsOverview) {
     if (e?.npFeeSource) po.npFeeSource = e.npFeeSource;
 }
 
-// ─── InvestScore: npWindows-Fallback für stable/major Pools ──────────────────
-// Pools deren PnL-Metriken noch null sind (kein echtes pnlWindows für ein Fenster),
-// erhalten einen simulierten Wert aus npWindows — nur für stable/major (volatile
-// hat by design hohe MAE und ist über skipMaeAlert=true markiert).
-// Läuft nach npWindows-Berechnung, damit po.npWindows befüllt ist.
+// Range-Empfehlung des Range Advisors (± % um den Kurs) fuer die Range-Ansicht im Kurs-Chart
+// (LIQ#001115). Dieselbe Rechnung auf Master und Fork (range-advisor.js liegt in beiden, kein
+// Orca-Abruf, keine Premium-Lieferung), siehe lib/range-hint.js.
 {
-    const _clampSim = (v, lo = 0, hi = 100) => Math.max(lo, Math.min(hi, Math.round(v)));
-    const WIN_LABEL  = { 'PnL 6h': '6h', 'PnL 12h': '12h', 'PnL 24h': '24h' };
+    const _rangeHints = await computeRangeHints({
+        db, poolIds: poolsOverview.map(po => po.id), poolsConfig: poolsConfigRaw, statsByPool: _oppStatsByPool,
+    });
+    for (const po of poolsOverview) if (_rangeHints[po.id]) po.optimalRangePct = _rangeHints[po.id];
+}
 
-    // Wendet den npWindows-Fallback auf `investScore` an (mutiert es) → true wenn geändert.
-    // Als Funktion, damit der Vergleichslauf (LIQ#000884) ihn auf einer Kopie mit der anderen
-    // Fee-Variante rechnen kann.
-    const applyNpFallback = (po, investScore, npWindows) => {
-        const metrics = investScore.metrics;
-        let changed = false;
-        for (const m of metrics) {
-            const win = WIN_LABEL[m.label];
-            if (!win) continue;            // kein PnL-Metrik
-            if (m.score !== null) continue; // echte Daten vorhanden → nicht überschreiben
-            const raw = npWindows?.[win];
-            if (raw == null) continue;
-            m.pct       = raw / NP_CAPITAL * 100;
-            m.score     = _clampSim(50 + m.pct * 10);
-            m.simulated = true;
-            changed = true;
+// ─── Edge-Verlauf (LIQ#001114) ────────────────────────────────────────────────
+// Der Edge-Wert der Opportunity-Tabelle hat einen Verlauf-Chart. Ein Punkt je neuem pool_stats-
+// Snapshot des Pools (Pools mit Kapital ~alle 11 Min, die übrigen ~stündlich): Schlüssel ist der
+// Zeitstempel des jüngsten Snapshots, INSERT OR IGNORE macht die minütlichen Export-Läufe
+// dazwischen wirkungslos. Keine API-Aufrufe, die Edge kommt aus den lokalen Daten. Gilt identisch
+// auf Master und Fork (npWindows kommt dort über die Premium-Naht). Aufbewahrung 30 Tage
+// (pruneScoreHistories). Die Historie sammelt sich ab dem ersten Lauf, ein Nachtrag ist nicht möglich.
+try {
+    const dbEdge = new Database(DB_PATH);
+    dbEdge.pragma('journal_mode = WAL');
+    dbEdge.exec(`CREATE TABLE IF NOT EXISTS edge_history (
+        pool_id TEXT NOT NULL, recorded_at INTEGER NOT NULL, edge_pct REAL NOT NULL,
+        PRIMARY KEY (pool_id, recorded_at))`);
+    const insEdge = dbEdge.prepare(
+        `INSERT OR IGNORE INTO edge_history (pool_id, recorded_at, edge_pct) VALUES (?, ?, ?)`);
+    dbEdge.transaction(() => {
+        for (const po of poolsOverview) {
+            const v = po.npWindows?.['24h'];
+            const st = _oppStatsByPool[po.id];
+            const ts = st?.length ? st[st.length - 1].recorded_at : null;
+            if (v != null && Number.isFinite(v) && ts != null) insEdge.run(po.id, ts, Math.round(v / 10 * 1000) / 1000);
         }
-        if (!changed) return false;
-
-        // InvestScore-Wert neu normalisieren – über die zentrale Blend-Funktion
-        // (lib/score-blend.js), nicht mehr von Hand nachgerechnet (Befund 2026-07-25:
-        // war eine Formelkopie von blendInvestScore, siehe Changelog).
-        const blended = blendInvestScore(
-            metrics.map(m => ({ score: m.score, weight: m.weight, pnl: m.label.startsWith('PnL') })),
-        );
-        let value = blended ?? investScore.value;
-        if (!openPosByPool[po.id] && value != null) value = Math.max(10, Math.min(90, value));
-        if (investScore.hopiumVeto && value != null) value = Math.min(value, 40);
-
-        // Volumen-Malus + Trend-Feinsignal wie in der Hauptberechnung — sonst umgeht ein
-        // Pool mit simulierter PnL den Malus im Ranking (LIQ#000774). Nur im Master.
-        if (_applyRankingAdjustments) {
-            const tf = investScore.trendFineSignal;
-            value = _applyRankingAdjustments(value, {
-                volumeMalus:     investScore.volumeMalus ?? 0,
-                trendWeight:     tf?.weight ?? 0,
-                trendComposite:  tf?.composite ?? null,
-                hopiumVeto:      !!investScore.hopiumVeto,
-                hasOpenPosition: !!openPosByPool[po.id],
-            }).value;
-        }
-
-        investScore.value     = value;
-        investScore.simulated = true;
-        investScore.arrow     = value == null ? 'flat' : value >= 60 ? 'up' : value <= 34 ? 'down' : 'flat';
-        return true;
-    };
-
+    })();
+    // Verlauf für den Chart, gebucketet wie die Slope-Historie
+    const _nowE = Date.now();
+    const _rangesE = { '6h': [6 * 3_600_000, 300_000], '12h': [12 * 3_600_000, 600_000], '1d': [86_400_000, 600_000],
+                       '1w': [7 * 86_400_000, 3_600_000], '1m': [31 * 86_400_000, 86_400_000] };
+    const _stmtsE = Object.fromEntries(Object.entries(_rangesE).map(([k, [, bucket]]) => [k, dbEdge.prepare(`
+        SELECT CAST(recorded_at / ${bucket} AS INTEGER) * ${bucket} AS ts, ROUND(AVG(edge_pct), 3) AS v
+        FROM edge_history WHERE pool_id = ? AND recorded_at > ?
+        GROUP BY CAST(recorded_at / ${bucket} AS INTEGER) ORDER BY ts`)]));
     for (const po of poolsOverview) {
-        if (!po.investScore) continue;
-        const params = _npParamsByPool[po.id];
-        if (!params) continue;
-        if (getPoolTypeConfig(params.poolCfg).skipMaeAlert) continue; // volatil_2/3 + rwa → MAE by design
-        const cmp = _feeModelCompare[po.id];
-        if (cmp) {
-            const alt = JSON.parse(JSON.stringify(po.investScore));
-            applyNpFallback(po, alt, cmp.npWindowsAlt);
-            cmp.investScoreAlt = alt.value;
-        }
-        applyNpFallback(po, po.investScore, po.npWindows);
-    }
-
-    // Korrigierte Scores in invest_score_history nachschreiben (gleicher Timestamp →
-    // INSERT OR REPLACE überschreibt den zuvor geschriebenen Eintrag exakt).
-    const toFix = poolsOverview.filter(po => po.investScore?.simulated);
-    if (toFix.length > 0) {
-        try {
-            const fixDb = new Database(DB_PATH);
-            const upd   = fixDb.prepare(
-                `INSERT OR REPLACE INTO invest_score_history (pool_id, recorded_at, score, exit_score) VALUES (?,?,?,?)`
-            );
-            fixDb.transaction(() => {
-                // exitValue bleibt von der NP-Simulation unberührt (nur `value` wird oben neu
-                // normalisiert) — muss aber explizit mitgeschrieben werden, sonst würde
-                // INSERT OR REPLACE die Zeile komplett ersetzen und exit_score auf NULL setzen.
-                for (const po of toFix) {
-                    upd.run(po.id, _investScoreNowMs, po.investScore.value, po.investScore.exitValue ?? po.investScore.value);
-                }
-            })();
-            fixDb.close();
-        } catch (e) {
-            console.warn(`export.js: investScore-Fixup nicht persistiert (${e.message})`);
+        po.metricHistory ??= {};
+        for (const [range, [span]] of Object.entries(_rangesE)) {
+            (po.metricHistory[range] ??= {}).edgeModel =
+                _stmtsE[range].all(po.id, _nowE - span).map(r => ({ ts: r.ts, v: r.v }));
         }
     }
+    dbEdge.close();
+} catch (e) {
+    console.warn(`export.js: Edge-Verlauf nicht geschrieben/gelesen (${e.message})`);
 }
 
 // ─── Vergleichslauf LIQ#000884: beide Fee-Varianten je Pool in eine Datei ─────
@@ -2395,10 +2173,8 @@ if (_FEE_MODEL_COMPARE) {
         if (!p) continue;
         const pick = (o) => o && { rangePct: o.rangePct, grossAprPct: o.grossAprPct, netAprPct: o.netAprPct,
                                    rebalCostAprPct: o.rebalCostAprPct, feeSource: o.feeSource ?? 'fallback' };
-        const active = { optimal: pick(p.optimal), npWindows: po.npWindows, investScore: po.investScore?.value ?? null,
-                         simulated: !!po.investScore?.simulated };
-        const alt    = { optimal: pick(p.optimalAlt), npWindows: _feeModelCompare[po.id]?.npWindowsAlt ?? null,
-                         investScore: _feeModelCompare[po.id]?.investScoreAlt ?? po.investScore?.value ?? null };
+        const active = { optimal: pick(p.optimal), npWindows: po.npWindows };
+        const alt    = { optimal: pick(p.optimalAlt), npWindows: _feeModelCompare[po.id]?.npWindowsAlt ?? null };
         out.pools[po.id] = { pair: po.pair ?? p.poolCfg.pair, active: !!openPosByPool[po.id],
                              v1: FEE_MODEL_V2 ? alt : active, v2: FEE_MODEL_V2 ? active : alt };
     }
@@ -2572,11 +2348,11 @@ for (const po of poolsOverview) {
     po.tvlExitThreshold = (l2.enabled && Number(l2.thresholdUsd) > 0) ? Number(l2.thresholdUsd) : null;
 }
 
-// Invest-Guard fürs Dashboard: welche Pools würde „Bester Pool" jetzt überspringen,
-// weil TVL-Schutz oder Score-Limit sie sofort wieder räumen würden (lib/invest-
-// eligibility.js — dieselbe Funktion, die bin/cleanup.js vor dem Sortieren aufruft).
+// Invest-Guard fürs Dashboard: welche Pools würde Cleanup jetzt überspringen, weil
+// TVL-Schutz sie sofort wieder räumen würde (lib/invest-eligibility.js — dieselbe
+// Funktion, die bin/cleanup.js vor dem Invest aufruft).
 //
-// 🔒 Jedes Tor, das „Bester Pool" schließt, braucht eine Entsprechung im Dashboard:
+// 🔒 Jedes Tor, das den Cleanup-Invest schließt, braucht eine Entsprechung im Dashboard:
 // ein still übersprungener Pool ist für den Betreiber sonst nicht von einem defekten
 // zu unterscheiden. Bewusst nur Zahlen + maschinenlesbare Regel — die Oberfläche ist
 // zweisprachig und formuliert den Satz selbst.
@@ -2589,54 +2365,22 @@ for (const po of poolsOverview) {
         });
         po.investBlocked = elig.ok ? null : { rule: elig.rule, ...elig.detail };
     } catch { po.investBlocked = null; }
-
-    // Zweites Tor derselben Klasse: nach einem Risk-Management-Exit ist der Pool für
-    // `cooldownHours` vom Invest ausgeschlossen (lib/invest-cooldown.js — dieselbe
-    // Funktion, mit der bin/cleanup.js seine Rangliste filtert). Ohne Anzeige gewinnt
-    // im Ranking scheinbar grundlos ein niedriger bewerteter Pool.
-    // Nur Schlüssel + Endzeitpunkt: die Restzeit rechnet die Oberfläche beim Rendern
-    // aus, sonst wäre sie bis zum nächsten Export-Lauf veraltet.
-    try {
-        const cds = poolInvestCooldowns(db, po.id, { settings: poolSettings[po.id] ?? null });
-        po.investCooldowns = cds.length ? cds.map(c => ({ key: c.key, untilMs: c.untilMs })) : null;
-    } catch { po.investCooldowns = null; }
 }
 
-// Drittes Tor derselben Klasse: das optionale Trend-Gate (.env CLEANUP_TREND_GATE).
-// Es entscheidet nicht über Kapital, das schon im Pool liegt — es entscheidet, ob
-// welches hinein darf. Ohne Anzeige wäre für den Betreiber wieder nicht erkennbar,
-// warum ein Pool mit Spitzen-Score übersprungen wurde (dieselbe Lücke wie beim
-// Invest-Cooldown am 2026-08-23).
-//
-// Der Trendzustand wird IMMER exportiert (auch bei ausgeschaltetem Gate) — die
-// Opportunity-Tabelle zeigt ihn dann als reine Information, und der Betreiber kann
-// vor dem Einschalten sehen, was das Gate tun würde. Nur `required`/`ok` hängen an
-// der Konfiguration.
-try {
-    const required = parseTrendGate(getCleanupTrendGateFromEnv());
-    const states   = _trendStatesForExport;
-    for (const po of poolsOverview) {
-        const state = states.get(po.id) ?? null;
-        if (!state) { po.trendGate = null; continue; }
-        const gate = checkTrendGate(state, required);
-        po.trendGate = {
-            required,
-            ok: gate.ok,
-            failing: gate.failing,
-            unknown: gate.unknown,
-            // Nur das, was die Oberfläche für Icon und Tooltip braucht — keine
-            // EMA-Rohwerte, die sonst je Minute das data.json aufblähen.
-            state: Object.fromEntries(TREND_TIMEFRAMES.map(tf => [tf, {
-                up:   state[tf]?.up ?? null,
-                rsi:  state[tf]?.rsi == null ? null : Math.round(state[tf].rsi),
-                reason: state[tf]?.reason ?? 'insufficient_data',
-            }])),
-        };
-    }
-} catch (err) {
-    console.warn(`[export] Trend-Zustand nicht ermittelbar: ${err.message}`);
-    for (const po of poolsOverview) po.trendGate ??= null;
-}
+// ─── Vorschau Cleanup > Reinvest (LIQ#000988) ─────────────────────────────────
+// Für die Anzeige neben „Bester PnL (24h)“ / „Bester Edge (24h)“ im Reiter „Reinvest“: in welchen
+// Pool ginge der Reinvest jetzt? Dieselbe Auswahl wie im Cleanup-Lauf (pickReinvestCandidate),
+// nur ohne Wallet-Betrag, Range-Prüfung und Wiedereröffnungs-Wartestand. Ohne Premium-Daten null.
+const reinvestPreview = edgeIsPremium(edgeSource, edgeStale)
+    ? previewReinvestTargets({
+        pools:            config.pools.all.map(p => ({ ...p, displayLabel: displayLabelMap[p.id] ?? p.displayPair ?? p.pair })),
+        isPoolEnabled,
+        getOpenPosition:  poolId => getOpenPosition(db, poolId),
+        exitBlock:        exitBlockFor(db, '[export:reinvest]'),
+        checkEligibility: pool => checkInvestEligibility(pool, db, { settings: poolSettings[pool.id] ?? {} }),
+        pnl24h:           pos => _winPnl[pos.pool_id]?.[REINVEST_PNL_WINDOW.id] ?? null,
+    }, { byPool: edgeValuesByPool(poolsOverview) })
+    : null;
 
 // ─── Zusammenführen ───────────────────────────────────────────────────────────
 
@@ -2722,18 +2466,16 @@ const data = {
     } : null,
 
     pools:       poolsOverview,
-    opportunityScores,
-    // Herkunft der Scores für das Dashboard (Entscheidung 2026-07-25 „Zustand immer
-    // sichtbar"): 'compute' = lokal gerechnet (Master), 'delivered' = über Premium
-    // geliefert, 'none' = kein Score verfügbar → Dashboard zeigt Platzhalter statt
-    // einer unerklärten Lücke. `scoreStale` = gelieferte Daten älter als 2h.
-    scoreSource,
-    scoreStale,
-    // Herkunft der Edge-Prognose (CORE#000931), gleiche Zustände wie scoreSource. Seit
-    // Premium die Edge statt des Scores liefert, entscheidet DIESES Feld über den
-    // Premium-Zugang im Dashboard und in den Settings (hasPremiumAccess()).
+    // Slopes je Pool und Zeitfenster für die Opportunity-Tabelle (lib/slopes-provider.js).
+    poolSlopes,
+    // Herkunft der Edge-Prognose (CORE#000931): 'compute' = lokal gerechnet (Master),
+    // 'delivered' = über Premium geliefert, 'none' = nichts verfügbar → Platzhalter
+    // (Entscheidung 2026-07-25 „Zustand immer sichtbar"). DIESES Feld entscheidet über
+    // den Premium-Zugang im Dashboard und in den Settings (hasPremiumAccess()).
     edgeSource,
     edgeStale,
+    // Vorschau Cleanup > Reinvest: { pnl: {poolId, name}|null, edge: … } oder null ohne Premium-Daten.
+    reinvestPreview,
     // Premium-Deckung fürs Dashboard (2026-07-29): auf dem Master immer
     // { autoPayEnabled:false, coveredUntilMs:null } (getPremiumCoverage() liefert
     // das sauber, kein Sonderfall hier nötig). Auf dem Fork die exakte, bereits
@@ -2781,6 +2523,7 @@ const data = {
 // ─── History-Daten (alle 5 Minuten geschrieben) ───────────────────────────────
 const dataHistory = {
     portfolioHistory,
+    balanceHistory,
     aprHistory,
     tvlHistory,
     priceHistory,
@@ -2814,7 +2557,7 @@ if (historyAgeMs >= HISTORY_MAX_AGE_MS) {
 }
 
 // ─── Price-History-Export (für Chart-Modal) ────────────────────────────────
-// Stündlich gesampelt, letzte 30 Tage, ~160 KB raw / ~60 KB gzip.
+// Stündlich gesampelt, letzte 45 Tage (30 sichtbar + Einschwingphase der Chart-Indikatoren, LIQ#001115).
 // Enthält tokenA/tokenB pro Pool damit der Browser den passenden Pool für
 // USD-Charts (Token vs. USDC) clientseitig finden kann.
 {
@@ -2826,7 +2569,7 @@ if (historyAgeMs >= HISTORY_MAX_AGE_MS) {
                    CAST(recorded_at / 3600000 AS INTEGER) AS hour_bucket,
                    MAX(recorded_at) AS max_ts
             FROM pool_stats
-            WHERE recorded_at > (strftime('%s','now') * 1000 - 30 * 86400000)
+            WHERE recorded_at > (strftime('%s','now') * 1000 - 45 * 86400000)
             GROUP BY pool_id, hour_bucket
         ) h ON ps.pool_id = h.pool_id AND ps.recorded_at = h.max_ts
         ORDER BY ps.pool_id, ps.recorded_at

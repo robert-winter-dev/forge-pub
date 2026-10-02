@@ -3,12 +3,12 @@
  *
  * Reine Vola-Klassifizierung: hat sich die gemessene Tagesvola eines Pools so
  * verschoben, dass er in einen anderen Pool-Typ gehört? Enthält KEINE PnL-/APR-
- * Gewichtsfrage (die bleibt Master-only, lib/pool-type-advisor.js) — nur die Frage
+ * Gewichtsfrage (die gehörte zum Score, entfernt mit LIQ#000932) — nur die Frage
  * "sitzt der Pool noch im richtigen Vola-Bucket?". `rwa` hat keine Vola-Grenze
  * (VOLA_TYPE_BOUNDARIES.rwa = null) und wird darum strukturell übersprungen
  * (nicht über Vola klassifizierbar, siehe Pool-Type-Advisor-Dokumentation).
  *
- * Lift aus lib/pool-type-advisor.js (LIQ#0332, Festlegung): computeVolaDrift()
+ * Lift aus dem früheren lib/pool-type-advisor.js (LIQ#0332, Festlegung): computeVolaDrift()
  * war dort bereits eine reine Funktion ohne PnL-/DB-Abhängigkeit — nur ausgelagert,
  * damit bot.js (Fork-Entry-Point) sie importieren kann, ohne die Master-only-Datei
  * (lib/pnl.js-Abhängigkeit, PnL-Counterfactual) mitzuziehen.

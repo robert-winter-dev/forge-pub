@@ -79,6 +79,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyAgainstTrustAnchor } from '../lib/update-verify.js';
 import { t } from '../lib/i18n.js';
+import { ReleaseIncompleteError, pickCandidate, isReleaseComplete, shouldCacheReleaseList } from '../lib/release-list.js';
 import { renderNotification } from '../lib/notify-render.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -465,11 +466,12 @@ async function fetchRelease({ repo, channel, sourceDir }) {
         });
         if (!res.ok) throw new Error(`GitHub-Releases-API: HTTP ${res.status}`);
         releases = await res.json();
-        writeReleaseListCache(repo, channel, releases);
+        // Unvollständiges neuestes Release (Upload läuft noch) nicht cachen (CORE#000940).
+        if (shouldCacheReleaseList(releases, channel)) writeReleaseListCache(repo, channel, releases);
     }
-    const wantPrerelease = channel === 'staging';
-    const candidate = releases.find((r) => Boolean(r.prerelease) === wantPrerelease);
+    const candidate = pickCandidate(releases, channel);
     if (!candidate) throw new Error(`Kein Release für Channel '${channel}' gefunden.`);
+    if (!isReleaseComplete(candidate)) throw new ReleaseIncompleteError(candidate.tag_name);
     const findAsset = (name) => {
         const a = candidate.assets.find((x) => x.name === name);
         if (!a) throw new Error(`Asset '${name}' fehlt in Release ${candidate.tag_name}.`);
@@ -519,6 +521,12 @@ async function main() {
     try {
         release = await fetchRelease({ repo, channel, sourceDir });
     } catch (err) {
+        // Release wird gerade veröffentlicht: erwartbar, kein Fehlschlag im Sinne des
+        // T4-Zählers — klare Meldung, nächster Klick fragt frisch (CORE#000940).
+        if (err instanceof ReleaseIncompleteError) {
+            log(t('cli.upd.release_publishing', { tag: err.tag }));
+            return;
+        }
         // T4 (Freeze/Eclipse): kein Abbruch mit Fehlercode, nur kein Fortschritt
         // beim einzelnen Fehlschlag. Ab FETCH_FAILURE_NOTIFY_THRESHOLD
         // aufeinanderfolgenden Fehlschlägen meldet sich das System einmalig

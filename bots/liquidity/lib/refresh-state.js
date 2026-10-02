@@ -301,15 +301,6 @@ function makeToUsd(pool, price, quotePrice) {
 // laufen. Hier bleibt nur die DB-Anbindung: den Vorgänger-Snapshot holen und fragen.
 
 /**
- * Drosselung der Meldung: höchstens eine pro Pool und Stunde. Der Lesefehler tritt
- * gehäuft auf, solange der Preis auf einer Tick-Grenze pendelt — ohne Drosselung
- * bekäme der Nutzer im Minutentakt dieselbe Nachricht und würde sie wegklicken.
- * Der Guard selbst greift natürlich bei jedem einzelnen Messwert.
- */
-const NOTIFY_THROTTLE_MS = 60 * 60 * 1000;
-const _lastFeeRejectNotify = new Map();   // poolId → ts
-
-/**
  * Prüft einen frisch gemessenen Pending-Fee-Wert gegen den letzten Snapshot des Pools.
  *
  * @returns {{ ok: boolean, impliedAprPct: number|null, prev: Object|null }}
@@ -395,18 +386,8 @@ export function writePositionSnapshotFromState(db, pool, position, state, price)
             `entspräche ${Math.round(feeCheck.impliedAprPct).toLocaleString('de-DE')} % APR) — ` +
             `Fee-Wert verworfen, Vorgängerwert übernommen`,
         );
-        const lastNotify = _lastFeeRejectNotify.get(pool.id) ?? 0;
-        if (Date.now() - lastNotify > NOTIFY_THROTTLE_MS) {
-            _lastFeeRejectNotify.set(pool.id, Date.now());
-            // Bewusst nicht awaited: der Snapshot-Pfad ist synchron und darf nicht auf den
-            // Nexus warten. Ein Fehlschlag der Meldung darf den Snapshot nie verhindern.
-            notify.feeMeasurementRejected(pool, {
-                measuredUsd:   feesPendingUsd,
-                lpValueUsd,
-                previousUsd:   feeCheck.prev?.fees_pending_usd ?? 0,
-                impliedAprPct: feeCheck.impliedAprPct,
-            }).catch(err => console.warn(`[refresh-state:${pool.id}] Meldung zur Fehlmessung fehlgeschlagen: ${err.message}`));
-        }
+        // Bewusst keine Nutzer-Meldung (LIQ#000985): ein Lesefehler der Kette ist nur für Entwickler
+        // interessant, der Betreiber kann nichts tun. Das Journal-Log oben genügt.
         feesPendingUsd = feeCheck.prev?.fees_pending_usd ?? 0;
         feesPendingA   = feeCheck.prev?.fees_pending_a   ?? 0;
         feesPendingB   = feeCheck.prev?.fees_pending_b   ?? 0;

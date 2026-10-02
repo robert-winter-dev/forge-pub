@@ -10,6 +10,8 @@
  * Pure Funktion, keine Seiteneffekte, keine DB.
  */
 
+import { ACCOUNTS_PER_CALL } from './pool-price-bulk.js';
+
 /** Gemessen 4,77–4,87 Credits je Pool-Zyklus am 19.09.2026 (Stats-Zyklen ↔ getAccountInfo
  *  über 3 Stunden). Bewusst aufgerundet, damit das Budget eher unter- als überschritten wird.
  *  Neu messen, wenn das Orca-SDK aktualisiert wird oder sich _getPriceOnChain() ändert. */
@@ -25,6 +27,12 @@ export const MIN_INTERVAL_MS = 10 * 60 * 1000;
 /** Untergrenze der Datenqualität fürs Ranking. */
 export const MAX_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+/** Modell „gebündelter Preis-Read" (LIQ#000854, seit 21.09.2026): Ein Sweep kostet
+ *  ceil(Pools / 100) getMultipleAccounts-Aufrufe, je 1 Credit. TVL/APR/Fees kommen von der
+ *  Orca-v2-REST-API (keine Helius-Credits), Volumen-Kerzen von GeckoTerminal. Gilt nur, wo der
+ *  Sweep tatsächlich gebündelt liest (Adapter mit getPricesOnChainBulk). */
+export const CREDITS_PER_BULK_CALL = 1;
+
 const DAY_MS = 86_400_000;
 
 /**
@@ -34,12 +42,18 @@ const DAY_MS = 86_400_000;
  * Betreiber, nicht für den Regler.
  *
  * @param {number} inactivePoolCount
+ * @param {{ bulk?: boolean }} [opts]  bulk = Sweep liest die Preise gebündelt (CREDITS_PER_BULK_CALL)
  * @returns {{ intervalMs: number, clamped: 'min'|'max'|null }}
  */
-export function inactiveStatsIntervalMs(inactivePoolCount) {
+export function inactiveStatsIntervalMs(inactivePoolCount, { bulk = false } = {}) {
     if (!(inactivePoolCount > 0)) return { intervalMs: MIN_INTERVAL_MS, clamped: 'min' };
 
-    const raw = DAY_MS * inactivePoolCount * CREDITS_PER_POOL_CYCLE / DAILY_BUDGET_CREDITS;
+    // bulk: Kosten je Sweep = ceil(Pools / 100) Aufrufe statt 5 Credits je Pool (LIQ#001114).
+    // Der Regler bleibt aktiv: wüchse der Katalog auf Größenordnungen, in denen selbst das nicht mehr
+    // ins Budget passt, würde der Takt wieder seltener. Heute (73 Pools) greift die MIN-Klemme.
+    const raw = bulk
+        ? DAY_MS * Math.ceil(inactivePoolCount / ACCOUNTS_PER_CALL) * CREDITS_PER_BULK_CALL / DAILY_BUDGET_CREDITS
+        : DAY_MS * inactivePoolCount * CREDITS_PER_POOL_CYCLE / DAILY_BUDGET_CREDITS;
     if (raw <= MIN_INTERVAL_MS) return { intervalMs: MIN_INTERVAL_MS, clamped: 'min' };
     if (raw >= MAX_INTERVAL_MS) return { intervalMs: MAX_INTERVAL_MS, clamped: 'max' };
     return { intervalMs: raw, clamped: null };

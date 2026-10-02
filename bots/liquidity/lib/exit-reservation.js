@@ -189,7 +189,7 @@ export function describeReservation(entry) {
  *
  * Bewusst binär (blockiert die ganze Aktion) statt den reservierten Anteil vom
  * verfügbaren Bestand abzuziehen — `getExitReservations` kennt nur ja/nein pro Mint,
- * keine Beträge. Gleiche Kosten-Nutzen-Abwägung wie bei `runCleanupInvestPool` in
+ * keine Beträge. Gleiche Kosten-Nutzen-Abwägung wie beim Dust-Sweep in
  * bin/cleanup.js: ein übersprungener Zyklus ist folgenlos, ein falsch investierter
  * Exit-Erlös nicht.
  *

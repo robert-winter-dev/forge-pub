@@ -85,6 +85,9 @@ VERSIONS_RETENTION=1
 LOG_RETENTION=10
 
 SERVICES=(forge-nexus forge-premium forge-settings forge-settings-daemon forge-liquiditybot forge-lendingbot)
+# Bots, deren Autostart dem An/Aus-Schalter im Backend folgt (CORE#001179) —
+# muss mit AUTOSTART_SERVICES in bots/settings/lib/bot-autostart.js übereinstimmen.
+BOT_SERVICES=(forge-liquiditybot forge-lendingbot)
 NOSTR_IDENTITY_NAME="forge-pub-nostr"
 
 # Unterprojekte mit eigener package.json ("" = App-Wurzel). EINE Quelle für

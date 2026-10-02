@@ -529,6 +529,32 @@ export async function runExport() {
         return fillV != null ? { ts: point.ts, v: fillV } : point;
     });
 
+    // Gesamtguthaben-Chart (links im Bot-Dashboard) muss mit der Gesamt-Karte übereinstimmen:
+    // die Karte zählt das komplette Wallet (wallet-monitor total_usd inkl. SOL/Token), die Reihe
+    // oben nur Positionen + Wallet-USDC. Je Punkt den Nicht-USDC-Wallet-Anteil des letzten
+    // wallet-monitor-Snapshots ≤ ts addieren. Eigenes Feld: portfolioHistory bleibt unverändert,
+    // die Übersicht (html/js/forge.js) rechnet bewusst auf der Basis ohne SOL.
+    const balanceHistory = (() => {
+        let wmRows = [];
+        try {
+            const wmDb = new Database(WALLET_MONITOR_DB, { readonly: true });
+            wmRows = wmDb.prepare(`
+                SELECT recorded_at, total_usd - usdc_balance AS other
+                FROM   snapshots
+                WHERE  wallet_id = 'lending' AND recorded_at >= ?
+                       AND total_usd IS NOT NULL AND usdc_balance IS NOT NULL
+                ORDER  BY recorded_at ASC
+            `).all((portfolioHistoryChart[0]?.ts ?? Date.now()) - 3_600_000);
+            wmDb.close();
+        } catch { /* wallet-monitor nicht erreichbar → nur Positionen + USDC */ }
+        let idx = -1;
+        return portfolioHistoryChart.map(point => {
+            while (idx + 1 < wmRows.length && wmRows[idx + 1].recorded_at <= point.ts) idx++;
+            const other = Math.max(0, wmRows[Math.max(0, idx)]?.other ?? 0);
+            return { ts: point.ts, v: Math.round((point.v + other) * 100) / 100 };
+        });
+    })();
+
     // ── Transaktionen (bereits oben befüllt, nur DESC-Reihenfolge für Dashboard) ──
     // transactions wurde oben (vor Positions) bereits aus der DB geladen und mit
     // feeUsdc angereichert. Für das Dashboard nach createdAt absteigend sortieren.
@@ -804,6 +830,7 @@ export async function runExport() {
         tvlHistory,
         liqHistory,
         portfolioHistory: portfolioHistoryChart,
+        balanceHistory,
     };
 
     // Live-Datei immer schreiben

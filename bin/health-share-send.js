@@ -6,7 +6,7 @@
  * Installationen deckt ein Report genau eine Stunde Premium ab, weil `K_H` ohnehin
  * stündlich rotiert.
  *
- * Cron: stündlich (config/cron-jobs.json).
+ * Cron: stündlich (config/cron-jobs.json) plus Nachholjob `--retry-only` alle 20 Min.
  *
  * ─── Drei Regeln, die hier zusammenkommen ───────────────────────────────────
  *
@@ -38,6 +38,10 @@ const RETRY_DELAY_MS = 5000;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const json = process.argv.includes('--json');
+// --retry-only: Nachholversuch (Cron :23/:43). Sendet nur, wenn der letzte Versuch fehlschlug —
+// sonst bliebe ein Relay-Abbruch bis zur nächsten Stunde (120 Min Lücke) über der 90-Min-Frist
+// des Masters (LAPSE_AFTER_MS) und ließe den Premium-Zugang ruhen (LIQ#001108).
+const retryOnly = process.argv.includes('--retry-only');
 
 function out(payload) {
     if (json) console.log(JSON.stringify(payload));
@@ -52,6 +56,11 @@ async function main() {
     if (!maySendReports()) {
         const { phase } = getShareState();
         out({ ok: true, skipped: true, phase, message: `Nicht freigeschaltet (Zustand: ${phase}) – es wird nichts gesendet.` });
+        return 0;
+    }
+
+    if (retryOnly && !getShareState().lastReportError) {
+        out({ ok: true, skipped: true, message: 'Letzter Report gelungen – kein Nachholversuch nötig.' });
         return 0;
     }
 

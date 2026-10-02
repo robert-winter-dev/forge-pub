@@ -13,7 +13,8 @@
  *
  * Sicherheit:
  *   - Nur fest definierte Services (ALLOWED_SERVICES) erlaubt
- *   - Nur start / stop / restart erlaubt
+ *   - Nur start / stop / restart erlaubt (bei den Bots zieht start/stop den
+ *     Autostart per enable/disable mit, siehe ../lib/bot-autostart.js)
  *   - Kein Shell-Aufruf – execFile() mit explizitem Pfad
  *   - sudoers-Regel ist die zweite, unabhängige Schicht: selbst bei einem Bug
  *     hier könnte höchstens einer der exakt gelisteten Befehle ausgeführt werden
@@ -28,6 +29,7 @@ import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { listBots } from '../../../lib/bot-registry.js';
 import { ensureUpdateSchema, openLogFd, logPathFor, finalizeIfFinished } from '../lib/update-tasks.js';
+import { systemctlSteps } from '../lib/bot-autostart.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -97,11 +99,18 @@ async function runTask(db, task) {
     db.prepare(`UPDATE tasks SET status='running', started_at=? WHERE id=?`)
       .run(Date.now(), id);
 
-    console.log(`[daemon] Führe aus: systemctl ${action} ${target}`);
+    // Für die Bots zieht der Schalter den Autostart mit (start → enable,
+    // stop → disable), damit der Zustand einen Reboot übersteht (CORE#001179).
+    const steps = systemctlSteps(action, target);
+    console.log(`[daemon] Führe aus: ${steps.map(a => `systemctl ${a} ${target}`).join(' && ')}`);
 
     try {
-        const { stdout, stderr } = await execFileAsync(SUDO, ['-n', SYSTEMCTL, action, target]);
-        const output = (stdout + stderr).trim();
+        let output = '';
+        for (const step of steps) {
+            const { stdout, stderr } = await execFileAsync(SUDO, ['-n', SYSTEMCTL, step, target]);
+            output += stdout + stderr;
+        }
+        output = output.trim();
         db.prepare(`UPDATE tasks SET status='done', finished_at=?, output=? WHERE id=?`)
           .run(Date.now(), output || '(ok)', id);
         console.log(`[daemon] OK: ${action} ${target}`);

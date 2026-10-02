@@ -18,6 +18,8 @@
  * bewusste, protokollierte Klick zählt.
  */
 
+import { pnlForPeriod } from '../../../lib/pnl.js';
+
 /**
  * @param {number|null|undefined} lastExternalDepositMs  letzter externer Kapitalfluss
  *   (aus capital_flows, usdc_amount>0 AND is_external=1, seit opened_at) oder null
@@ -141,4 +143,31 @@ export function resolvePnlAnchorSource(lastExternalDepositMs, pnlAnchorResetAtMs
  */
 export function resolvePnlExtremaAnchorMs(chainStartMs, pnlAnchorResetAtMs) {
     return pnlAnchorResetAtMs > chainStartMs ? pnlAnchorResetAtMs : chainStartMs;
+}
+
+// ─── Laufzeit-PnL eines Pools ─────────────────────────────────────────────────────────────
+// Anker und Wert der Laufzeit-PnL („seit Eröffnung des Pools“) je Position für die Anzeige im
+// Dashboard (positions[].sinceOpenPnlUsd) und in den Details. Der Cleanup-Reinvest vergleicht
+// dagegen den PnL der letzten 24h (lib/reinvest-rules.js REINVEST_PNL_WINDOW), nicht diesen Wert.
+
+/**
+ * Anker der Laufzeit-PnL einer offenen Position: Eröffnung des Pools (Beginn der Kette) bzw.
+ * manueller „Höchststand zurücksetzen"-Klick.
+ *
+ * @param {object} db
+ * @param {{id: number, opened_at: number, pnl_anchor_reset_at?: number|null}} pos  positions-Zeile
+ * @returns {number} fromMs
+ */
+export function pnlDetailsAnchorMs(db, pos) {
+    return resolvePnlExtremaAnchorMs(chainStartOpenedAt(db, pos.id, pos.opened_at), pos.pnl_anchor_reset_at);
+}
+
+/**
+ * PnL des Pools über die gesamte Laufzeit (USDC) — der Wert des Dashboards. Ausschließlich über
+ * lib/pnl.js (oberste Projektregel), hier nur die Ankerwahl.
+ *
+ * @returns {number|null} null, wenn lib/pnl.js keinen Wert liefert
+ */
+export function sinceOpenPnlUsd(db, pos, flavor) {
+    return pnlForPeriod(db, { flavor, scope: pos.pool_id, fromMs: pnlDetailsAnchorMs(db, pos) });
 }

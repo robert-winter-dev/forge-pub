@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url';
 import { downloadBlob } from '../../../lib/blob-download.js';
 import { decryptBlob } from '../../../lib/premium-blob.js';
 import { insertPoolScoreHistory } from './db.js';
-import { DELIVERED_SCORES_PATH } from './invest-score-provider.js';
+import { DELIVERED_SLOPES_PATH } from './slopes-provider.js';
 import { DELIVERED_EDGE_PATH } from './edge-provider.js';
 import { writePoolOffers, loadPoolOffers } from './premium-offers-store.js';
 import { writeTsAdvice, TS_ADVICE_PATH } from './premium-ts-advice-store.js';
@@ -31,10 +31,10 @@ import { PATHS } from '../../../config/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// 2 = Edge statt Score (CORE#000931): `scores` entfällt, dazu `edge` + `slopes`.
-// 1 bleibt unterstützt (N−1): ein Master, der noch Schema 1 sendet, soll diesen Fork
-// nicht aussperren.
-const SUPPORTED_SCHEMA_VERSIONS = [1, 2];
+// 2 = Edge statt Score (CORE#000931): `edge` + `slopes`. Schema 1 (Sektion `scores`)
+// wird seit LIQ#000932 nicht mehr angenommen: Der Master erzeugt es nicht mehr, und die
+// Premium-Mindestversion 0.9.13 setzt Schema 2 ohnehin voraus.
+const SUPPORTED_SCHEMA_VERSIONS = [2];
 // Publish-Takt ist 10 Min (config/cron-jobs.json) — 30 Min Toleranz deckt einen
 // verpassten Publish-Lauf + Zustellverzögerung ab, ohne echte Ausfälle zu verschleiern.
 const MAX_BLOB_AGE_MS = 30 * 60 * 1000;
@@ -127,7 +127,7 @@ function touchScoresJsonFreshness(scoresJsonPath) {
  * gleichzeitiger Reader (export.js läuft im ~60s-Takt, dieser Ingest nur alle ~10 Min, siehe
  * bot.js) die Datei mitten im Schreibvorgang als Torso sieht: ein `writeFileSync` direkt auf
  * den Zielpfad truncatet zuerst und schreibt dann – ein `readFileSync` in genau diesem Fenster
- * liefert kaputtes JSON, `JSON.parse` wirft, `invest-score-provider.js` wertet das als „nie
+ * liefert kaputtes JSON, `JSON.parse` wirft, der Provider (slopes-/edge-provider.js) wertet das als „nie
  * geliefert" (kind: 'none') statt als transienten Lesefehler und lässt Premium-Tabelle +
  * -Zugriff für einen Export-Zyklus verschwinden, obwohl bezahlt und aktiv (2026-07-30
  * beobachtet). `rename()` innerhalb desselben Dateisystems ist POSIX-atomar – ein Reader sieht
@@ -151,18 +151,18 @@ function writeJsonAtomic(filePath, data) {
  * @param {object} [opts]
  * @param {string} [opts.scoresJsonPath] - Default: bots/liquidity/data/pool-scores.json;
  *   überschreibbar für Tests.
- * @param {string} [opts.deliveredScoresPath] - Default: DELIVERED_SCORES_PATH (die echte
- *   Naht aus invest-score-provider.js); überschreibbar für Tests.
+ * @param {string} [opts.deliveredSlopesPath] - Default: DELIVERED_SLOPES_PATH (Naht aus
+ *   slopes-provider.js); überschreibbar für Tests.
  * @param {string} [opts.deliveredEdgePath] - Default: DELIVERED_EDGE_PATH (Naht aus
  *   edge-provider.js); überschreibbar für Tests.
  * @param {string} [opts.poolOffersPath] - Default: bots/liquidity/data/premium/pool-offers.json
  * @param {string} [opts.tsAdvicePath]   - Default: bots/liquidity/data/premium/trailing-stop-advice.json
  *   (reine Ablage, siehe Kommentar unten); überschreibbar für Tests.
- * @returns {{ ingested: boolean, reason?: string, rows?: number, coveredPools?: string[], scoresWritten?: boolean, poolOffersWritten?: boolean }}
+ * @returns {{ ingested: boolean, reason?: string, rows?: number, coveredPools?: string[], slopesWritten?: boolean, edgeWritten?: boolean, poolOffersWritten?: boolean }}
  */
 export function ingestBlob(db, data, {
     scoresJsonPath = PATHS.liquidityScores,
-    deliveredScoresPath = DELIVERED_SCORES_PATH,
+    deliveredSlopesPath = DELIVERED_SLOPES_PATH,
     deliveredEdgePath = DELIVERED_EDGE_PATH,
     poolOffersPath = path.join(PATHS.liquidityData, 'premium', 'pool-offers.json'),
     tsAdvicePath   = TS_ADVICE_PATH,
@@ -194,8 +194,8 @@ export function ingestBlob(db, data, {
             rows++;
         }
 
-        // Klasse B (scoreHistory) — laufender Score-Punkt, additiv/optional wie
-        // scores. Eigener recorded_at pro Zeile (data.scoreHistory[].t), unabhängig vom
+        // Klasse B (scoreHistory) — laufender Tier-/Rang-Punkt des Economic Scorers,
+        // additiv/optional. Eigener recorded_at pro Zeile (data.scoreHistory[].t), unabhängig vom
         // marketTable-Zeitstempel — beide speisen dieselbe Tabelle mit unterschiedlicher
         // Taktung, das ist beabsichtigt (dichtere Stichprobe der Score-Historie).
         for (const h of data.scoreHistory ?? []) {
@@ -227,38 +227,20 @@ export function ingestBlob(db, data, {
 
     touchScoresJsonFreshness(scoresJsonPath);
 
-    // Klasse A (scores) ist additiv/optional — nicht jeder Blob enthält sie (siehe
-    // core/premium/publish-blob.js: best-effort, fällt bei veralteter data.json weg).
-    // Schreibt exakt an die Stelle, die lib/invest-score-provider.js bereits als
-    // "delivered"-Quelle erwartet (DELIVERED_SCORES_PATH) — kein neues Schema, keine
-    // neue Naht, nur der fehlende Absender.
-    let scoresWritten = false;
-    if (data.scores) {
-        writeJsonAtomic(deliveredScoresPath, JSON.stringify(data.scores));
-        scoresWritten = true;
-    }
-
-    // Schema 2 (CORE#000931): Edge-Prognose statt Score. Ablage für lib/edge-provider.js
-    // ('delivered'), unverändert wie geliefert — der Provider filtert beim Lesen.
+    // Edge-Prognose (CORE#000931). Ablage für lib/edge-provider.js ('delivered'),
+    // unverändert wie geliefert — der Provider filtert beim Lesen.
     let edgeWritten = false;
     if (data.edge) {
         writeJsonAtomic(deliveredEdgePath, JSON.stringify(data.edge));
         edgeWritten = true;
     }
 
-    // Slopes kamen bis Schema 1 in scores.opportunityScores mit und speisen die Slope-
-    // Spalten und Verlaufscharts der Opportunity-Tabelle über invest-score-provider.js.
-    // Schema 2 liefert sie als eigene Sektion ohne Score-Werte; sie landen in derselben
-    // Ablage und Form, damit dieser Anzeigeweg unverändert weiterläuft. Investscores gibt
-    // es nicht mehr — die Ablage enthält bewusst keine.
-    if (data.slopes && !data.scores) {
-        writeJsonAtomic(deliveredScoresPath, JSON.stringify({
-            generatedAt:       data.slopes.generatedAt ?? data.generatedAt,
-            timeframeIds:      data.slopes.timeframeIds ?? [],
-            opportunityScores: data.slopes.pools ?? {},
-            investScores:      {},
-        }));
-        scoresWritten = true;
+    // Slopes der Opportunity-Tabelle. Ablage für lib/slopes-provider.js ('delivered'),
+    // unverändert wie geliefert ({ generatedAt, timeframeIds, pools }).
+    let slopesWritten = false;
+    if (data.slopes) {
+        writeJsonAtomic(deliveredSlopesPath, JSON.stringify(data.slopes));
+        slopesWritten = true;
     }
 
     // Klasse C (poolOffers) — DER INGEST LEGT NUR AB. Kein Schreibzugriff auf pools.json
@@ -287,7 +269,7 @@ export function ingestBlob(db, data, {
         tsAdviceWritten = true;
     }
 
-    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], scoresWritten, edgeWritten, poolOffersWritten, tsAdviceWritten };
+    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], slopesWritten, edgeWritten, poolOffersWritten, tsAdviceWritten };
 }
 
 /**
@@ -320,14 +302,14 @@ export async function selfTest() {
 
     const dbPath = path.join(tmpdir(), `premium-ingest-selftest-${randomBytes(4).toString('hex')}.db`);
     const scoresJsonPath = path.join(tmpdir(), `premium-ingest-selftest-${randomBytes(4).toString('hex')}.json`);
-    const deliveredScoresPath = path.join(tmpdir(), `premium-ingest-selftest-delivered-${randomBytes(4).toString('hex')}.json`);
+    const deliveredSlopesPath = path.join(tmpdir(), `premium-ingest-selftest-slopes-${randomBytes(4).toString('hex')}.json`);
     const poolOffersPath = path.join(tmpdir(), `premium-ingest-selftest-offers-${randomBytes(4).toString('hex')}.json`);
     const tsAdvicePath   = path.join(tmpdir(), `premium-ingest-selftest-tsadvice-${randomBytes(4).toString('hex')}.json`);
     const deliveredEdgePath = path.join(tmpdir(), `premium-ingest-selftest-edge-${randomBytes(4).toString('hex')}.json`);
     const failures = [];
 
-    const sampleBlob = (sequence, ageMs = 0, withScores = false, withScoreHistory = false, withPoolOffers = false, withTsAdvice = false) => ({
-        schemaVersion: 1,
+    const sampleBlob = (sequence, ageMs = 0, withEdgeSlopes = false, withScoreHistory = false, withPoolOffers = false, withTsAdvice = false) => ({
+        schemaVersion: 2,
         generatedAt: new Date(Date.now() - ageMs).toISOString(),
         sequence,
         coveredPools: ['liq-sol-usdc'],
@@ -337,14 +319,11 @@ export async function selfTest() {
             net_apr_pct: 20, gross_apr_pct: 30, confidence: 80,
             rank: 1, of: 5, tier: 'invest', short_term_tier: 'hold',
         }],
-        ...(withScores ? {
-            scores: {
-                generatedAt: new Date(Date.now() - ageMs).toISOString(),
-                timeframeIds: ['24h'],
-                opportunityScores: { 'liq-sol-usdc': { '24h': { score: 0.04, sampleCount: 96, reason: 'ok' } } },
-                investScores: { 'liq-sol-usdc': { value: 63, exitValue: 63, arrow: 'up', confidence: 'high',
-                    dataDays: 14, hopiumVeto: false, volumeMalus: 0, poolType: 'volatil_2', metrics: [] } },
-            },
+        ...(withEdgeSlopes ? {
+            edge: { generatedAt: new Date(Date.now() - ageMs).toISOString(), capitalUsdc: 1000, windowIds: ['6h', '24h'],
+                    pools: { 'liq-sol-usdc': { npWindows: { '6h': -1.5, '24h': 4.2 }, npUnreliableWindows: ['6h'], npFeeSource: 'model' } } },
+            slopes: { generatedAt: new Date(Date.now() - ageMs).toISOString(), timeframeIds: ['24h'],
+                      pools: { 'liq-sol-usdc': { '24h': { sampleCount: 96, priceSlopePct: 0.05, yieldSlopePct: -1, tvlSlopePct: 0.1 } } } },
         } : {}),
         ...(withScoreHistory ? {
             // Bewusst ein ANDERER Zeitstempel als generatedAt (eigene Taktung, siehe
@@ -370,10 +349,11 @@ export async function selfTest() {
     try {
         db = openDatabase(dbPath);
 
-        const r1 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredScoresPath, poolOffersPath, tsAdvicePath });
+        const r1 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredSlopesPath, poolOffersPath, tsAdvicePath });
         if (!r1.ingested || r1.rows !== 1) failures.push(`erster Ingest fehlgeschlagen: ${JSON.stringify(r1)}`);
-        if (r1.scoresWritten) failures.push('scoresWritten war true, obwohl der Blob keine scores enthielt');
-        if (fs.existsSync(deliveredScoresPath)) failures.push('scores.json wurde ohne scores-Feld im Blob angelegt');
+        if (r1.slopesWritten || r1.edgeWritten) failures.push('slopes/edge als geschrieben gemeldet, obwohl der Blob keine enthielt');
+        if (fs.existsSync(deliveredSlopesPath)) failures.push('slopes.json wurde ohne slopes-Feld im Blob angelegt');
+        if (fs.existsSync(deliveredEdgePath)) failures.push('edge.json wurde ohne edge-Feld im Blob angelegt');
         if (r1.poolOffersWritten) failures.push('poolOffersWritten war true, obwohl der Blob keine poolOffers enthielt');
         if (fs.existsSync(poolOffersPath)) failures.push('pool-offers.json wurde ohne poolOffers-Feld im Blob angelegt');
         if (r1.tsAdviceWritten) failures.push('tsAdviceWritten war true, obwohl der Blob keine trailingStopAdvice enthielt');
@@ -383,19 +363,20 @@ export async function selfTest() {
         if (rowCount1 !== 1) failures.push(`erwartete 1 Zeile in pool_score_history, gefunden ${rowCount1}`);
 
         // Alte/gleiche Sequenz erneut → muss abgelehnt werden, keine Doppel-Zeile.
-        const r2 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredScoresPath });
+        const r2 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredSlopesPath });
         if (r2.ingested) failures.push('gleiche Sequenz wurde fälschlich erneut integriert');
 
         // Neuere Sequenz, aber Blob zu alt → muss abgelehnt werden.
-        const r3 = ingestBlob(db, sampleBlob(2, MAX_BLOB_AGE_MS + 60_000), { scoresJsonPath, deliveredScoresPath });
+        const r3 = ingestBlob(db, sampleBlob(2, MAX_BLOB_AGE_MS + 60_000), { scoresJsonPath, deliveredSlopesPath });
         if (r3.ingested) failures.push('zu alter Blob wurde fälschlich integriert');
 
-        // Neuere Sequenz, frisch, MIT scores + scoreHistory + poolOffers → muss durchgehen,
-        // scores.json schreiben, eine zusätzliche pool_score_history-Zeile anlegen UND
+        // Neuere Sequenz, frisch, MIT edge/slopes + scoreHistory + poolOffers → muss durchgehen,
+        // edge.json/slopes.json schreiben, eine zusätzliche pool_score_history-Zeile anlegen UND
         // pool-offers.json als reine Ablage schreiben (keine DB-/pools.json-Wirkung).
-        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredScoresPath, poolOffersPath, tsAdvicePath });
+        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
         if (!r4.ingested) failures.push(`gültiger Folge-Ingest wurde abgelehnt: ${r4.reason}`);
-        if (!r4.scoresWritten) failures.push('scoresWritten war false, obwohl der Blob scores enthielt');
+        if (!r4.slopesWritten) failures.push('slopesWritten war false, obwohl der Blob slopes enthielt');
+        if (!r4.edgeWritten) failures.push('edgeWritten war false, obwohl der Blob edge enthielt');
         if (r4.scoreHistoryRows !== 1) failures.push(`erwartete 1 scoreHistoryRows, bekam ${r4.scoreHistoryRows}`);
         if (!r4.poolOffersWritten) failures.push('poolOffersWritten war false, obwohl der Blob poolOffers enthielt');
         if (!r4.tsAdviceWritten) failures.push('tsAdviceWritten war false, obwohl der Blob trailingStopAdvice enthielt');
@@ -436,43 +417,27 @@ export async function selfTest() {
 
         if (!fs.existsSync(scoresJsonPath)) failures.push('pool-scores.json-Platzhalter wurde nicht angelegt');
 
-        if (!fs.existsSync(deliveredScoresPath)) {
-            failures.push('scores.json wurde trotz scores-Feld im Blob nicht geschrieben');
-        } else {
-            const written = JSON.parse(fs.readFileSync(deliveredScoresPath, 'utf8'));
-            if (written.investScores?.['liq-sol-usdc']?.value !== 63) {
-                failures.push('scores.json-Inhalt weicht vom gelieferten Blob ab');
-            }
-        }
-
-        // Schema 2 (CORE#000931): edge + slopes statt scores.
-        if (fs.existsSync(deliveredEdgePath)) failures.push('edge.json wurde von einem Schema-1-Blob angelegt');
-        const v2 = { ...sampleBlob(3), schemaVersion: 2,
-            edge: { generatedAt: new Date().toISOString(), capitalUsdc: 1000, windowIds: ['6h', '24h'],
-                    pools: { 'liq-sol-usdc': { npWindows: { '6h': -1.5, '24h': 4.2 }, npUnreliableWindows: ['6h'], npFeeSource: 'model' } } },
-            slopes: { generatedAt: new Date().toISOString(), timeframeIds: ['24h'],
-                      pools: { 'liq-sol-usdc': { '24h': { sampleCount: 96, priceSlopePct: 0.05, yieldSlopePct: -1, tvlSlopePct: 0.1 } } } } };
-        const r5 = ingestBlob(db, v2, { scoresJsonPath, deliveredScoresPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
-        if (!r5.ingested) failures.push(`Schema-2-Blob wurde abgelehnt: ${r5.reason}`);
-        if (!r5.edgeWritten) failures.push('edgeWritten war false, obwohl der Blob edge enthielt');
         const { readDeliveredEdge } = await import('./edge-provider.js');
         const edge = readDeliveredEdge(deliveredEdgePath);
         if (edge?.stale !== false || edge?.byPool?.['liq-sol-usdc']?.npWindows?.['24h'] !== 4.2
             || edge.byPool['liq-sol-usdc'].npUnreliableWindows[0] !== '6h') {
             failures.push(`edge.json kam nicht lesbar beim Provider an: ${JSON.stringify(edge)}`);
         }
-        const slopesAsScores = JSON.parse(fs.readFileSync(deliveredScoresPath, 'utf8'));
-        if (slopesAsScores.opportunityScores?.['liq-sol-usdc']?.['24h']?.priceSlopePct !== 0.05) {
-            failures.push('Slopes aus Schema 2 landeten nicht in der scores.json-Ablage');
-        }
-        if (Object.keys(slopesAsScores.investScores ?? {}).length !== 0) {
-            failures.push('scores.json enthält nach Schema 2 noch InvestScores');
+        const slopes = fs.existsSync(deliveredSlopesPath) ? JSON.parse(fs.readFileSync(deliveredSlopesPath, 'utf8')) : null;
+        if (slopes?.pools?.['liq-sol-usdc']?.['24h']?.priceSlopePct !== 0.05 || slopes?.timeframeIds?.[0] !== '24h') {
+            failures.push(`slopes.json-Inhalt weicht vom gelieferten Blob ab: ${JSON.stringify(slopes)}`);
         }
 
-        // Unbekannte Version → abgelehnt, bestehende Ablagen unverändert.
+        // Schema 1 (mit scores) wird seit LIQ#000932 abgelehnt, Ablagen bleiben unverändert.
+        const v2 = sampleBlob(3, 0, true);
         const edgeBefore = fs.readFileSync(deliveredEdgePath, 'utf8');
+        const r5 = ingestBlob(db, { ...v2, schemaVersion: 1, scores: {} },
+            { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
+        if (r5.ingested) failures.push('Blob mit schemaVersion 1 wurde integriert');
+
+        // Unbekannte Version → abgelehnt, bestehende Ablagen unverändert.
         const r6 = ingestBlob(db, { ...v2, sequence: 4, schemaVersion: 3, edge: { pools: {} } },
-            { scoresJsonPath, deliveredScoresPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
+            { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
         if (r6.ingested) failures.push('Blob mit unbekannter schemaVersion 3 wurde integriert');
         if (fs.readFileSync(deliveredEdgePath, 'utf8') !== edgeBefore) failures.push('abgelehnter Blob hat edge.json verändert');
     } catch (err) {
@@ -481,7 +446,7 @@ export async function selfTest() {
         db?.close();
         fs.rmSync(dbPath, { force: true });
         fs.rmSync(scoresJsonPath, { force: true });
-        fs.rmSync(deliveredScoresPath, { force: true });
+        fs.rmSync(deliveredSlopesPath, { force: true });
         fs.rmSync(poolOffersPath, { force: true });
         fs.rmSync(tsAdvicePath, { force: true });
         fs.rmSync(deliveredEdgePath, { force: true });

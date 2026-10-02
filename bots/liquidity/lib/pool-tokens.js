@@ -59,3 +59,29 @@ export function sellSideOf(pool) {
     if (a.isUsdc) return { sell: b, usdcSide: a, sellIsA: false };
     return { sell: a, usdcSide: b.isUsdc ? b : null, sellIsA: true };
 }
+
+/**
+ * Poolpreis in USD-Orientierung: USDC je Token statt Token je USDC.
+ *
+ * 🔒 `pool_stats.price` (und alles, was daraus abgeleitet wird: np_price_history,
+ * Slopes, Trend-Reihen) ist **tokenB je tokenA**. Bei `usdcIsTokenA`-Pools ist das
+ * Token je USDC — der Kehrwert des USD-Preises. Er *fällt*, wenn das Token in USD
+ * *steigt*. Jede Rechnung, die den Preis als „USD je Token“ liest (Richtung, Trend,
+ * LP-Rendite in USD), muss ihn vorher hier durchreichen. Sichtbar geworden am
+ * 30.09.2026 bei NATIX/USDC: Chart, Trend-Icon und Edge-Prognose zeigten „fallend“,
+ * während der Kurs stieg (die Trefferquote der Prognose lag bei 7–21 %).
+ *
+ * Pools ohne USDC-Seite (volatilePair) bleiben unverändert: dort ist der Preis eine
+ * Token/Token-Ratio, für die es keinen USD-Preis gibt (siehe usd-basket.js).
+ *
+ * Entschieden wird über den Mint, nicht über das Config-Flag (siehe Kopf dieser Datei).
+ * Nimmt Config-Objekte (`tokenA`) und DB-Zeilen (`token_a`) an.
+ *
+ * @param   {{tokenA?: string, token_a?: string}} pool
+ * @param   {number} price  roher Poolpreis (tokenB je tokenA)
+ * @returns {number}        USDC je Token bei usdcIsTokenA-Pools, sonst `price`
+ */
+export function usdPerTokenPrice(pool, price) {
+    const tokenA = pool?.tokenA ?? pool?.token_a;
+    return tokenA === USDC_MINT && price > 0 ? 1 / price : price;
+}

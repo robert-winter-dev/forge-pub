@@ -283,19 +283,22 @@ async function main() {
         skip('läuft nur auf einem FORGE-public-Fork – auf dem Master gibt es kein Premium-Wallet.', { json });
     }
 
-    // Eigene Version melden (Versions-Gate, siehe core/premium/server.js
-    // handleVersionCheck) – VOR jedem weiteren Schritt, auch vor --dry-run, damit der
-    // Master immer eine aktuelle Sichtung hat. Best-effort, darf den Zahlungsversuch
-    // selbst nie verhindern.
-    await reportVersionCheck().catch(err => {
-        console.warn(`[premium-pay] Versions-Meldung konnte nicht gesendet werden: ${err.message}`);
-    });
-
     const keypair = loadPremiumKeypair();
     if (!keypair) fail('kein Premium-Wallet konfiguriert (bin/install.sh, Abschnitt "Premium-Wallet")', { json });
 
     const activation = getMyActivationToken();
     if (!activation) skip('kein Aktivierungs-Token vorhanden – wartet auf Aktivierung per "premium-activate" beim Master (kein Fehler).', { json });
+
+    // Eigene Version melden (Versions-Gate, siehe core/premium/server.js
+    // handleVersionCheck) – nur wenn Premium hier tatsächlich eingerichtet ist (Wallet +
+    // Aktivierungs-Token). Ohne Premium gibt es keinen Autopay, den der Kill-Switch
+    // abschalten könnte; die Absage des Masters landete sonst als Nachricht in der
+    // Rubrik „Premium" (CORE#000989: pub2 ohne Premium, 100 Absagen). Steht VOR dem
+    // Guthaben-/--dry-run-Teil, damit der Master weiter jede Sichtung bekommt.
+    // Best-effort, darf den Zahlungsversuch selbst nie verhindern.
+    await reportVersionCheck().catch(err => {
+        console.warn(`[premium-pay] Versions-Meldung konnte nicht gesendet werden: ${err.message}`);
+    });
 
     const pricing = getCurrentPricing();
     if (!pricing?.receivingWallet) {

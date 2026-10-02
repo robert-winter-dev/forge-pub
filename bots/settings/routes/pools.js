@@ -30,7 +30,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const POOLS_JSON  = PATHS.liquidityPools;
 const LIQUIDITYBOT_DATA   = path.join(PATHS.html, 'liquidity', 'data', 'data.json');
 const SCORES_JSON = PATHS.liquidityScores;
-const OPP_DATA    = LIQUIDITYBOT_DATA; // Opportunity Scores sind im gleichen data.json wie das Dashboard
 const SETTINGS_DB = PATHS.settingsDb;
 const LIQUIDITYBOT_DB     = PATHS.liquidityDb;
 
@@ -138,43 +137,14 @@ function loadActivationTvls() {
 }
 
 /**
- * Trendzustand je poolId aus data.json (`pool.trendGate.state`, geschrieben von
- * bots/liquidity/bin/export.js aus lib/trend-indicators.js).
- *
- * Das Cleanup-Modal braucht ihn, um „Aktuell bester Pool" **live** an die gesetzten
- * Trend-Haken anzupassen — also schon bevor gespeichert wurde. Deshalb kommt der
- * Zustand roh herüber und nicht das fertige Gate-Ergebnis aus dem Export: dessen
- * `required` spiegelt die gespeicherte .env, nicht die gerade angeklickten Haken.
+ * Herkunft der Premium-Daten aus data.json (edgeSource/edgeStale, CORE#000931):
+ * 'compute' = lokal gerechnet (Master), 'delivered' = über Premium geliefert,
+ * 'none' = nichts verfügbar. Steuert in der Oberfläche die Premium-Anzeige.
  */
-function loadTrendStates() {
+function loadEdgeState() {
     try {
         const data = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
-        const map  = {};
-        for (const p of (data.pools ?? [])) {
-            if (p.id && p.trendGate?.state) map[p.id] = p.trendGate.state;
-        }
-        return map;
-    } catch {
-        return {};
-    }
-}
-
-/**
- * Herkunft der Score-Daten aus data.json (siehe bin/export.js, 2026-07-25):
- * 'compute' = lokal gerechnet, 'delivered' = über Premium geliefert, 'none' = kein
- * Score verfügbar. Steuert in der Oberfläche die Premium-Anzeige des Scores.
- * Default 'compute': bestehende FORGE-Installationen ohne den neuen Provider-Code
- * (vor Commit dcdb053) haben kein scoreSource-Feld in ihrer data.json.
- */
-function loadScoreState() {
-    try {
-        const data = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
-        // Seit CORE#000931 liefert Premium die Edge statt des Scores — der Premium-Zustand
-        // kommt deshalb aus edgeSource/edgeStale; scoreSource nur für eine data.json vom
-        // alten Export. Die Feldnamen der API (scoreSource/scoreStale) bleiben, bis
-        // LIQ#000932 den Score-Unterbau entfernt.
-        if (data.edgeSource) return { source: data.edgeSource, stale: !!data.edgeStale };
-        return { source: data.scoreSource ?? 'compute', stale: !!data.scoreStale };
+        return { source: data.edgeSource ?? 'compute', stale: !!data.edgeStale };
     } catch {
         return { source: 'compute', stale: false };
     }
@@ -200,7 +170,7 @@ function loadPoolTvls() {
  *
  * Quelle ist bewusst data.json und nicht die Bot-DB: Auf dem Fork gibt es die
  * Advisor-Tabellen gar nicht, die Empfehlung kommt dort über den Premium-Kanal. Der
- * Export legt beides auf denselben Lesepfad — genau wie bei `scoreSource`.
+ * Export legt beides auf denselben Lesepfad — genau wie bei `edgeSource`.
  */
 function loadTsAdvice() {
     try {
@@ -258,8 +228,8 @@ function loadCapitalUsdc() {
 // Pool-Close dagegen, um vom Default abweichende Einstellungen zu protokollieren).
 const DEFAULT_SETTINGS = POOL_SETTINGS_DEFAULTS;
 
-// Pool-Typen: bewusst dupliziert statt aus bots/liquidity/lib/pool-type-advisor.js importiert
-// (POOL_TYPES) — dieses Modul lädt beim Import u.a. config.js/pnl.js des Liquidity Bots und
+// Pool-Typen: bewusst dupliziert statt aus bots/liquidity/lib/ importiert
+// (POOL_TYPES) — die dortigen Module laden beim Import u.a. config.js/pnl.js des Liquidity Bots und
 // würde damit liquidity-bot-spezifische Env-Voraussetzungen in den Settings-Server-Prozess
 // hineinziehen. Bei Änderung der Pool-Typen beide Stellen synchron halten.
 const POOL_TYPES = ['rebalance_free', 'volatil_1', 'volatil_2', 'volatil_3', 'rwa'];
@@ -274,13 +244,10 @@ const DEFAULT_POOL_TYPE_SETTINGS = {
     trailingStop: {
         enabled: true, thresholdPct: null, thresholdPct2: null,
         auto: false, autoSwapToUSDC: true, sendTo: '',
-        // Nicht duplizieren: der TS-Cooldown-Default (6 h seit LIQ#0359) lebt in
-        // lib/pool-settings-defaults.js, dieselbe Quelle wie der Liquidity Bot.
-        cooldownHours: POOL_SETTINGS_DEFAULTS.trailingStop.cooldownHours,
     },
     tvlProtection: {
         level1: { enabled: true, withdrawPct: 100 },
-        swapToUsdc: true, sendTo: '', cooldownHours: 12,
+        swapToUsdc: true, sendTo: '',
     },
     enabled: true,
 };
@@ -469,13 +436,11 @@ function loadNonDefaults(db, botId, pool) {
                 'trailingStop.auto':                  pt.trailingStop?.auto,
                 'trailingStop.autoSwapToUSDC':        pt.trailingStop?.autoSwapToUSDC,
                 'trailingStop.sendTo':                pt.trailingStop?.sendTo,
-                'trailingStop.cooldownHours':         pt.trailingStop?.cooldownHours,
                 'tvlProtection.level1.thresholdUsd':  pt.tvlProtection?.level1?.thresholdUsd,
                 'tvlProtection.level1.enabled':        pt.tvlProtection?.level1?.enabled,
                 'tvlProtection.level1.withdrawPct':    pt.tvlProtection?.level1?.withdrawPct,
                 'tvlProtection.swapToUsdc':            pt.tvlProtection?.swapToUsdc,
                 'tvlProtection.sendTo':                pt.tvlProtection?.sendTo,
-                'tvlProtection.cooldownHours':         pt.tvlProtection?.cooldownHours,
             };
             // Nur übernehmen, wenn der Pool-Typ überhaupt gepflegt ist: ein ungepflegter
             // Typ liefert dieselben lauter-null-Werte wie ein bewusst auf „keine Schwelle"
@@ -510,7 +475,6 @@ export function loadSettings(db, botId, poolId) {
         return {
             autoCompound: { ...DEFAULT_SETTINGS.autoCompound, ...(saved.autoCompound ?? {}) },
             trailingStop: { ...DEFAULT_SETTINGS.trailingStop, ...(saved.trailingStop ?? {}) },
-            cleanup:      { ...DEFAULT_SETTINGS.cleanup,      ...(saved.cleanup      ?? {}) },
             maxInvestment: { ...DEFAULT_SETTINGS.maxInvestment, ...(saved.maxInvestment ?? {}) },
             tvlProtection: {
                 ...DEFAULT_SETTINGS.tvlProtection,
@@ -660,10 +624,11 @@ export function saveSettings(db, botId, poolId, partial, opts = {}) {
     if (partial.autoCompound !== undefined) current.autoCompound = { ...current.autoCompound, ...partial.autoCompound };
     if (partial.trailingStop !== undefined) {
         const merged = { ...current.trailingStop, ...partial.trailingStop };
+        // Entfallen mit LIQ#000942: ein Browser-Tab mit altem JS darf das Feld nicht neu anlegen.
+        delete merged.cooldownHours;
         validateTrailingStop(merged, poolId);
         current.trailingStop = merged;
     }
-    if (partial.cleanup      !== undefined) current.cleanup      = { ...current.cleanup,      ...partial.cleanup      };
     if (partial.maxInvestment !== undefined) {
         const merged = { ...current.maxInvestment, ...partial.maxInvestment };
         const amt = merged.amountUsdc;
@@ -692,6 +657,7 @@ export function saveSettings(db, botId, poolId, partial, opts = {}) {
             tvlAtActivation: current.tvlProtection.tvlAtActivation,
             level1: cleanLevel(current.tvlProtection.level1, p.level1 ?? {}),
         };
+        delete merged.cooldownHours;   // entfallen mit LIQ#000942, s. o.
         validateTvlProtection(merged);
         current.tvlProtection = merged;
     }
@@ -719,8 +685,7 @@ router.get('/liquidity', (req, res) => {
 
         const values         = loadCurrentValues();
         const tsStatus       = loadTrailingStopStatus();
-        const trendStates    = loadTrendStates();
-        const scoreState     = loadScoreState();
+        const edgeState      = loadEdgeState();
         const poolTvls       = loadPoolTvls();
         const tsAdviceMap    = loadTsAdvice();
         const activationTvls = loadActivationTvls();
@@ -744,18 +709,15 @@ router.get('/liquidity', (req, res) => {
                 enabledChangedAt:   pool.enabledChangedAt ?? null,
                 enabledReason:      pool.enabledReason    ?? null,
                 btcPricePoolId:     pool.btcPricePoolId  ?? null,
-                // Herkunftsmarker: true nur für per Pool-Offer übernommene Pools (LIQ#0380,
-                // s. bot-liquidity.js isOfferPool) — NICHT dasselbe wie cleanup.rankingEligible,
-                // das der Nutzer auch über den Modus "Cleanup inaktiv" selbst setzen kann.
+                // Herkunftsmarker: true nur für per Pool-Offer übernommene Pools (LIQ#0380).
                 premiumOffer:       !!pool.premiumOffer,
                 usdcIsTokenA:       pool.usdcIsTokenA    ?? false,
                 volatilePair:       pool.volatilePair     ?? false,
                 uiDepositDisabled:  pool.uiDepositDisabled ?? false,
                 currentValue:       values[pool.id]       ?? null,
                 capitalUsdc:        capitalUsdc[pool.id]  ?? null,
-                trendState:         trendStates[pool.id]  ?? null,
-                scoreSource:        scoreState.source,
-                scoreStale:         scoreState.stale,
+                edgeSource:         edgeState.source,
+                edgeStale:          edgeState.stale,
                 // Advisor-Empfehlung + Begründung; steuert die Auto-Checkbox im
                 // Trailing-Stop-Tab (verfügbar / gesperrt mit Grund).
                 tsAdvice:           tsAdviceMap[pool.id]  ?? { available: false, source: 'none', reason: null },
@@ -791,26 +753,6 @@ router.get('/liquidity/scores', (req, res) => {
         const data = JSON.parse(fs.readFileSync(SCORES_JSON, 'utf-8'));
         const ageMs = Date.now() - (data.generated_ts ?? 0);
         res.json({ available: true, ageMs, ...data });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// ── GET /liquidity/opportunity ────────────────────────────────────────────────────
-// Liefert Opportunity-Scores aller Pools (6h/12h/24h/7d) aus data.json.
-// Gleiche Berechnungs-Grundlage wie das Dashboard (kein doppelter Code).
-router.get('/liquidity/opportunity', (req, res) => {
-    try {
-        res.set('Cache-Control', 'no-store');
-        if (!fs.existsSync(OPP_DATA)) {
-            return res.json({ available: false });
-        }
-        const data  = JSON.parse(fs.readFileSync(OPP_DATA, 'utf-8'));
-        const opp   = data.opportunityScores ?? {};
-        const ageMs = Date.now() - (data.generated_ts ?? data.ts ?? 0);
-        // Flach als Array: [{id, scores: {6h,12h,24h,7d}}]
-        const pools = Object.entries(opp).map(([id, scores]) => ({ id, scores }));
-        res.json({ available: pools.length > 0, ageMs, pools });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -899,8 +841,8 @@ router.get('/liquidity/pool-types', (req, res) => {
 
 // ── PUT /liquidity/pool-types/:poolType ────────────────────────────────────────────
 // Body: {
-//   trailingStop:  { enabled, thresholdPct, thresholdPct2, auto, autoSwapToUSDC, sendTo, cooldownHours },
-//   tvlProtection: { level1: { enabled, withdrawPct }, swapToUsdc, sendTo, cooldownHours },
+//   trailingStop:  { enabled, thresholdPct, thresholdPct2, auto, autoSwapToUSDC, sendTo },
+//   tvlProtection: { level1: { enabled, withdrawPct }, swapToUsdc, sendTo },
 //   enabled?: boolean,  // Kapitalannahme des ganzen Typs (unabhängig von den Sektionen oben)
 // }
 // Schreibt die Werte SOFORT in die individuellen Settings ALLER Pools dieses Typs
@@ -945,14 +887,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
             return res.status(400).json({ error: t('api.pools.trailing_drawdown2_order') });
         }
     }
-    const validateCooldown = (raw, errKey) => {
-        if (raw === undefined) return undefined;
-        const v = Number(raw);
-        if (!Number.isFinite(v) || v < 1 || v > 24) {
-            throw new Error(t(errKey));
-        }
-        return v;
-    };
     const validateStep10 = (raw, errKey) => {
         if (raw === undefined) return undefined;
         const v = Number(raw);
@@ -961,11 +895,9 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
         }
         return v;
     };
-    let tsCooldown, tvlCooldown, tvlPct;
+    let tvlPct;
     try {
-        tsCooldown  = validateCooldown(body.trailingStop?.cooldownHours,  'api.pools.cooldown_range');
-        tvlCooldown = validateCooldown(body.tvlProtection?.cooldownHours, 'api.pools.cooldown_range');
-        tvlPct      = validateStep10(body.tvlProtection?.level1?.withdrawPct, 'api.pools.tvl_pct_step_l1');
+        tvlPct = validateStep10(body.tvlProtection?.level1?.withdrawPct, 'api.pools.tvl_pct_step_l1');
     } catch (err) {
         return res.status(400).json({ error: err.message });
     }
@@ -1000,7 +932,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                 auto:           !!body.trailingStop?.auto,
                 autoSwapToUSDC: body.trailingStop?.autoSwapToUSDC ?? DEFAULT_POOL_TYPE_SETTINGS.trailingStop.autoSwapToUSDC,
                 sendTo:         body.trailingStop?.sendTo ?? '',
-                cooldownHours:  tsCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.trailingStop.cooldownHours,
             },
             tvlProtection: {
                 level1: {
@@ -1009,7 +940,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                 },
                 swapToUsdc:    body.tvlProtection?.swapToUsdc ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.swapToUsdc,
                 sendTo:        body.tvlProtection?.sendTo ?? '',
-                cooldownHours: tvlCooldown ?? DEFAULT_POOL_TYPE_SETTINGS.tvlProtection.cooldownHours,
             },
             enabled: body.enabled ?? true,
         };
@@ -1030,7 +960,7 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                     // eine belastbare Advisor-Empfehlung FÜR DIESEN Pool) — beim Bulk-Write
                     // über einen ganzen Typ hat das selten jeder Pool. Ein hartes Scheitern
                     // des gesamten Pools nur wegen dieses einen Feldes wäre unverhältnismäßig
-                    // (Drawdown/Swap/Senden-an/Cooldown würden sonst mit-verworfen) und
+                    // (Drawdown/Swap/Senden-an würden sonst mit-verworfen) und
                     // erzeugte einen unübersichtlichen Sammel-Fehler-Toast (LIQ#0354,
                     // Befund Rollout 30.08.). Für nicht-qualifizierte Pools wird "auto"
                     // still auf false geklemmt, ohne eigene Rückmeldung — das Info-Icon am
@@ -1046,7 +976,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                         auto:           autoAllowed && newTypeSettings.trailingStop.auto,
                         autoSwapToUSDC: newTypeSettings.trailingStop.autoSwapToUSDC,
                         sendTo:         newTypeSettings.trailingStop.sendTo,
-                        cooldownHours:  newTypeSettings.trailingStop.cooldownHours,
                         // minimumValueUsd bewusst nicht gesetzt — bleibt beim Pool-individuellen Wert.
                     };
                 }
@@ -1059,7 +988,6 @@ router.put('/liquidity/pool-types/:poolType', (req, res) => {
                         },
                         swapToUsdc:    newTypeSettings.tvlProtection.swapToUsdc,
                         sendTo:        newTypeSettings.tvlProtection.sendTo,
-                        cooldownHours: newTypeSettings.tvlProtection.cooldownHours,
                     };
                 }
                 if (Object.keys(partial).length > 0) {

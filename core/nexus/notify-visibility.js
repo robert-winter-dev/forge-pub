@@ -124,6 +124,14 @@ export const LOG_ONLY = new Set([
     'notify.len.sol_topup_done',      // ACTION.selfHealed — Bot hat sich selbst versorgt
     'notify.len.task_failed',         // ACTION.retrying — nächster Zyklus versucht es erneut
     'notify.len.deploy_done',         // ACTION.fyi, alles glattgelaufen (deploy_partial bleibt sichtbar)
+
+    // ── Health-Check: Wartungsjobs (bin/health-check.js) ────────────────────────
+    // Ein Cron-Job, der zweimal in Folge scheitert, läuft beim nächsten Intervall
+    // automatisch erneut (retrying) — für den Nutzer keine Handlung, keine
+    // signifikante Auswirkung (CORE#001107, 29.09.2026). Andere Health-Check-Arten
+    // (kind: service/host/external — echte Dienst-/Server-Ausfälle) bleiben
+    // ausdrücklich sichtbar, nur der Wartungsjob-Fall wird hier gefiltert.
+    'notify.health.cron_failed',
 ]);
 
 /**

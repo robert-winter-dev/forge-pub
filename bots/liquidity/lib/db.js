@@ -27,6 +27,7 @@ import { fileURLToPath } from 'url';
 import { PATHS }         from '../../../config/paths.js';
 import { logChainTx, setChainTxSink } from './chain-tx-log.js';
 import { REINVEST_PENDING_SCHEMA } from './reinvest-pending.js';
+import { isForkInstance } from '../../../lib/premium-identity-context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -346,12 +347,9 @@ function initSchema(db) {
             last_update_sequence   INTEGER
         );
 
-        -- Score-Limit Ausführungs-State-Machine (analog Trailing-Stop)
-        -- trigger_score: InvestScore zum Auslösezeitpunkt
-        -- apr_score/pnl_score_*: Sub-Scores zum Trigger-Zeitpunkt (#0219-Nachzug, 2026-06-19) —
-        -- live aus data.json mitgeschrieben, damit der Pool-Type-Advisor "PnL-getrieben trotz
-        -- gesunder APR" auswerten kann, ohne aus position_snapshots zu rekonstruieren (die nach
-        -- jedem Reopen via clearPositionSnapshots() gelöscht werden, siehe pool-type-advisor.md).
+        -- Score-Limit Ausführungs-State-Machine (analog Trailing-Stop). Historisch: Score-Limit
+        -- ist seit LIQ#000925 entfernt, der Score seit LIQ#000932; die Tabelle bleibt als Archiv.
+        -- trigger_score / apr_score / pnl_score_*: Score und Sub-Scores zum Trigger-Zeitpunkt.
         CREATE TABLE IF NOT EXISTS score_limit_executions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             pool_id         TEXT    NOT NULL,
@@ -527,6 +525,28 @@ export function ensureTsAdvisorTables(db) {
 }
 
 /** Inkrementelle Schema-Migrationen für bestehende DBs. */
+/**
+ * LIQ#000990: Fork-Installationen starteten bis 0.9.13+55 mit `enabled=0` für ALLE Pools
+ * (Export-Sperre in tools/pub-export/sanitize-pools-config.js, Seed über syncPools()). Kapital
+ * fließt seit LIQ#000937 nur noch über „Einzahlen“, die Sperre schützte vor nichts mehr und
+ * zwang jeden Nutzer zur Freigabe von Hand. Einmalig (Marker in kv_config) und nur auf Forks:
+ * Pools mit `enabled=0` OHNE Grund und Zeitstempel sind Seed, keine Entscheidung – jede echte
+ * Sperre (Nutzer-Klick, TVL-Exit, Emergency-Exit) läuft über setPoolEnabled() und trägt beides.
+ * Auf dem Master nie anwenden: dort können ältere Sperren (vor 2026-08-06) ohne Grund vorliegen.
+ *
+ * @returns {number} Anzahl freigegebener Pools
+ */
+export function migratePoolsEnabledSeed(db, { isFork }) {
+    const KEY = 'migration_pools_enabled_seed_v1';
+    if (!isFork || kvGet(db, KEY) !== null) return 0;
+    const info = db.prepare(
+        `UPDATE pools SET enabled = 1 WHERE enabled = 0 AND enabled_reason IS NULL AND enabled_changed_at IS NULL`
+    ).run();
+    kvSet(db, KEY, new Date().toISOString());
+    if (info.changes > 0) console.log(`[db] Migration: ${info.changes} Pool(s) freigegeben (Seed enabled=0 aus dem Fork-Export, LIQ#000990).`);
+    return info.changes;
+}
+
 function migrateSchema(db) {
     // Wertreihen-Archiv (2026-08-22, Ticket #0313). `clearPositionSnapshots()` löschte die
     // position_snapshots eines Pools bei jedem Reopen — bei stündlichem Cleanup also
@@ -720,6 +740,51 @@ function migrateSchema(db) {
         }
     }
 
+    // pnl_invariant_daily: Tagesprüfung Portfolio-PnL gegen Σ Pool-PnL (LIQ#001065), eine Zeile
+    // je Kalendertag. Diagnose für Log und externe Überwachung, keine Nutzermeldung.
+    // 🔒 Spaltennamen sind die Schnittstelle der externen Überwachung, nur gemeinsam umbenennen.
+    if (!tables.includes('pnl_invariant_daily')) {
+        db.exec(`
+            CREATE TABLE pnl_invariant_daily (
+                date       TEXT    PRIMARY KEY,      -- 'YYYY-MM-DD' in FORGE_TZ
+                basis      TEXT    NOT NULL,         -- 'portfolio' | 'scopes' (Rückfall, dann ohne diff)
+                portfolio  REAL,
+                scopes     REAL,
+                diff       REAL,                     -- Pools − Portfolio, NULL bei basis 'scopes'
+                threshold  REAL    NOT NULL,         -- max(3 USDC, 0,5 % des Gesamtwerts)
+                drift      INTEGER NOT NULL,         -- 1 = |diff| > threshold
+                checked_at INTEGER NOT NULL          -- ms
+            );
+        `);
+        console.log('[db] Migration: Tabelle pnl_invariant_daily angelegt.');
+    }
+
+    // wallet_flows: Geld, das das Bot-Wallet mit der Außenwelt tauscht (LIQ#001062).
+    // Ein Zufluss von einem fremden Wallet (+), ein Senden/Exit-sendTo/bin/transfer.js nach
+    // außen (−). NICHT: Wallet ↔ Pool (das ist capital_flows/transactions), Swaps, Claims.
+    // Grundlage des Portfolio-PnL in lib/pnl.js: Gesamtwert-Delta minus Summe dieser Zeilen.
+    // Eine Tx kann mehrere Tokens bewegen → eindeutig je (tx_hash, mint).
+    // Abdeckung: kv_config 'wallet_flows_covered_since' (ms) = ab hier ist die Tabelle
+    // vollständig; davor gilt der Portfolio-PnL als unbelegt.
+    if (!tables.includes('wallet_flows')) {
+        db.exec(`
+            CREATE TABLE wallet_flows (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_hash      TEXT    NOT NULL,
+                mint         TEXT    NOT NULL,          -- Token-Mint; natives SOL = WSOL-Mint
+                amount       REAL    NOT NULL,          -- Tokenmenge, + Zufluss / − Abfluss
+                usd_value    REAL    NOT NULL,          -- USD-Wert zum Zeitpunkt, gleiches Vorzeichen
+                counterparty TEXT,                      -- fremde Adresse (Owner), sofern bekannt
+                source       TEXT    NOT NULL,          -- 'send' | 'exit_send_to' | 'transfer_cli' | 'chain_scan' | 'manual'
+                note         TEXT,
+                created_at   INTEGER NOT NULL,          -- Blockzeit (ms)
+                UNIQUE (tx_hash, mint)
+            );
+            CREATE INDEX idx_wallet_flows_time ON wallet_flows(created_at);
+        `);
+        console.log('[db] Migration: Tabelle wallet_flows angelegt.');
+    }
+
     // tp_executions: Tabelle für bestehende DBs anlegen falls noch nicht vorhanden
     if (!tables.includes('tp_executions')) {
         db.exec(`
@@ -811,6 +876,8 @@ function migrateSchema(db) {
         db.prepare(`UPDATE pools SET notified_new_pool_at = ? WHERE notified_new_pool_at IS NULL`).run(Date.now());
         console.log('[db] Migration: pools.notified_new_pool_at hinzugefügt (Bestand rückwirkend als gemeldet markiert).');
     }
+
+    migratePoolsEnabledSeed(db, { isFork: isForkInstance() });
 
     const posCols = db.prepare(`PRAGMA table_info(positions)`).all().map(c => c.name);
     if (!posCols.includes('hwm_usd')) {
@@ -1233,10 +1300,9 @@ function migrateSchema(db) {
         }
     }
 
-    // opportunity_scores: neues Score-Modell (LMB#0116, Phase 1).
-    // Schreibt pro Pool und Timeframe (4h/12h/24h/7d) einen Snapshot.
-    // Bewusst getrennt von pool_score_history — Schema, Semantik und
-    // Konsumenten sind ein anderes Modell.
+    // opportunity_scores: Slope-Snapshot je Pool und Timeframe (Opportunity-Tabelle,
+    // Premium-Sektion `slopes`). Ursprünglich der Opportunity Score (LMB#0116); die
+    // Score- und Faktor-Spalten werden seit LIQ#000932 nicht mehr befüllt.
     if (!tables.includes('opportunity_scores')) {
         db.exec(`
             CREATE TABLE opportunity_scores (
@@ -1300,69 +1366,29 @@ function migrateSchema(db) {
         db.exec(`ALTER TABLE opportunity_scores ADD COLUMN usd_trend_slope_pct REAL`); // %/h
         console.log('[db] Migration: opportunity_scores.usd_trend_slope_pct ergänzt.');
     }
+    // Edge-Verlauf der Opportunity-Tabelle (LIQ#001114): ein Punkt je neuem pool_stats-Snapshot des Pools
+    // (recorded_at = Zeitstempel des Snapshots), Wert = Edge-Modell 24h in % des Kapitals (npWindows/10).
+    if (!tables.includes('edge_history')) {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS edge_history (
+                pool_id     TEXT    NOT NULL,
+                recorded_at INTEGER NOT NULL,   -- Unix-ms des pool_stats-Snapshots
+                edge_pct    REAL    NOT NULL,
+                PRIMARY KEY (pool_id, recorded_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_edge_history_time ON edge_history(recorded_at);
+        `);
+        // Übernahme der ersten Stundenwerte aus dem Zwischenstand (Spalte opportunity_scores.edge_pct).
+        if (oppCols.includes('edge_pct')) {
+            db.exec(`INSERT OR IGNORE INTO edge_history (pool_id, recorded_at, edge_pct)
+                     SELECT pool_id, recorded_at, edge_pct FROM opportunity_scores
+                     WHERE timeframe = '24h' AND edge_pct IS NOT NULL`);
+        }
+        console.log('[db] Migration: edge_history angelegt.');
+    }
     if (!oppCols.includes('trend_factor')) {
         db.exec(`ALTER TABLE opportunity_scores ADD COLUMN trend_factor REAL`);
         console.log('[db] Migration: opportunity_scores.trend_factor ergänzt.');
-    }
-
-    // Schreibweise-Vereinheitlichung (#0229): score_adviser_log → score_advisor_log.
-    // SQLite ALTER TABLE RENAME erhält die Daten; der Index wird neu benannt.
-    if (tables.includes('score_adviser_log') && !tables.includes('score_advisor_log')) {
-        db.exec(`ALTER TABLE score_adviser_log RENAME TO score_advisor_log`);
-        db.exec(`DROP INDEX IF EXISTS idx_score_adviser_log_time`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_score_advisor_log_time
-                    ON score_advisor_log(evaluated_at DESC)`);
-        const idx = tables.indexOf('score_adviser_log');
-        if (idx >= 0) tables[idx] = 'score_advisor_log';
-        console.log('[db] Migration: score_adviser_log → score_advisor_log umbenannt.');
-    }
-
-    // score_advisor_log: kTrend-Backtest-Spalten (LMB Phase 4). Der Score Advisor
-    // kalibriert kTrend für volatile_pair gegen die Gesamtrendite (Fee + USD-Korb).
-    if (tables.includes('score_advisor_log')) {
-        const salCols = db.prepare(`PRAGMA table_info(score_advisor_log)`).all().map(c => c.name);
-        if (!salCols.includes('best_k_trend')) {
-            db.exec(`ALTER TABLE score_advisor_log ADD COLUMN best_k_trend REAL`);
-            console.log('[db] Migration: score_advisor_log.best_k_trend ergänzt.');
-        }
-        if (!salCols.includes('curr_k_trend')) {
-            db.exec(`ALTER TABLE score_advisor_log ADD COLUMN curr_k_trend REAL`);
-            console.log('[db] Migration: score_advisor_log.curr_k_trend ergänzt.');
-        }
-    }
-
-    // invest_score_history: Historische InvestScore-Werte für Chart im Dashboard
-    if (!tables.includes('invest_score_history')) {
-        db.exec(`
-            CREATE TABLE invest_score_history (
-                pool_id     TEXT    NOT NULL,
-                recorded_at INTEGER NOT NULL,
-                score       INTEGER,
-                exit_score  INTEGER,
-                PRIMARY KEY (pool_id, recorded_at)
-            );
-        `);
-        console.log('[db] Migration: Tabelle invest_score_history angelegt.');
-    } else {
-        // exit_score (2026-07-03): `score` ist investScore.value (mit Volumen-Malus) —
-        // für den Score-Limit-Zyklen-Zähler in ForgeSettings (der bislang fälschlich
-        // gegen `score`/value verglich, statt gegen das malus-freie exitValue, das
-        // lib/score-limit.js tatsächlich für den Exit-Trigger nutzt) braucht es die
-        // getrennte, malus-freie Spalte.
-        const cols = db.prepare(`PRAGMA table_info(invest_score_history)`).all().map(c => c.name);
-        if (!cols.includes('exit_score')) {
-            db.exec(`ALTER TABLE invest_score_history ADD COLUMN exit_score INTEGER`);
-            console.log('[db] Migration: invest_score_history.exit_score ergänzt.');
-        }
-        // LIQ#000836: idx_invest_score_hist (pool_id, recorded_at DESC) war 1:1 der PK-Autoindex
-        // (pool_id, recorded_at) und kostete 133 MB. SQLite liest den PK-Index rückwärts.
-        const dupIdx = db.prepare(
-            `SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_invest_score_hist'`
-        ).get();
-        if (dupIdx) {
-            db.exec(`DROP INDEX idx_invest_score_hist`);
-            console.log('[db] Migration: redundanter Index idx_invest_score_hist entfernt.');
-        }
     }
 
     if (!tables.includes('oracle_prices')) {
@@ -1394,73 +1420,6 @@ function migrateSchema(db) {
                 ON cleanup_decisions(decided_at DESC);
         `);
         console.log('[db] Migration: Tabelle cleanup_decisions angelegt.');
-    }
-
-    if (!tables.includes('score_advisor_log')) {
-        db.exec(`
-            CREATE TABLE score_advisor_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                evaluated_at    INTEGER NOT NULL,
-                pool_type       TEXT    NOT NULL,   -- 'usdc_pair' | 'volatile_pair'
-                timeframe       TEXT    NOT NULL,   -- '6h' | '12h' | '24h' | '7d'
-                spearman_avg    REAL,
-                spearman_med    REAL,
-                positive_pct    REAL,
-                eval_count      INTEGER,
-                best_k_price    REAL,
-                best_k_yield    REAL,
-                best_k_tvl      REAL,
-                best_k_trend    REAL,   -- USD-Korb-Trend-Sensitivität (volatile_pair)
-                best_hopium     REAL,
-                curr_k_price    REAL,
-                curr_k_yield    REAL,
-                curr_k_tvl      REAL,
-                curr_k_trend    REAL,
-                curr_hopium     REAL,
-                drift_score     REAL,
-                action_needed   INTEGER NOT NULL DEFAULT 0,
-                pool_outliers   TEXT
-            );
-            CREATE INDEX idx_score_advisor_log_time
-                ON score_advisor_log(evaluated_at DESC);
-        `);
-        console.log('[db] Migration: Tabelle score_advisor_log angelegt.');
-    }
-
-    if (!tables.includes('pool_type_advisor_log')) {
-        db.exec(`
-            CREATE TABLE pool_type_advisor_log (
-                id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-                evaluated_at             INTEGER NOT NULL,
-                pool_type                TEXT    NOT NULL,   -- rebalance_free | volatil_1 | volatil_2 | volatil_3 | rwa
-                pool_count               INTEGER NOT NULL,
-                segments_current         INTEGER,
-                segments_required        INTEGER,
-                days_current             INTEGER,
-                days_required            INTEGER,
-                sufficiency_eligible     INTEGER NOT NULL DEFAULT 0,
-                reassignment_candidates  INTEGER NOT NULL DEFAULT 0,
-                missignal_total          INTEGER,
-                missignal_candidates     INTEGER,
-                missignal_candidate_pct  REAL,
-                current_net_pnl          REAL,
-                current_max_drawdown_pct REAL,
-                best_variant_label       TEXT,
-                best_net_pnl             REAL,
-                best_max_drawdown_pct    REAL,
-                best_combined_score      REAL,
-                current_combined_score   REAL,
-                counterfactual_indicative_only INTEGER NOT NULL DEFAULT 1,
-                avg_pnl_contribution_pct REAL,
-                avg_apr_contribution_pct REAL,
-                details_json             TEXT
-            );
-            CREATE INDEX idx_pool_type_advisor_log_time
-                ON pool_type_advisor_log(evaluated_at DESC);
-            CREATE INDEX idx_pool_type_advisor_log_type_time
-                ON pool_type_advisor_log(pool_type, evaluated_at DESC);
-        `);
-        console.log('[db] Migration: Tabelle pool_type_advisor_log angelegt.');
     }
 
     if (!tables.includes('np_price_history')) {
@@ -1512,55 +1471,6 @@ function migrateSchema(db) {
         console.log('[db] Migration: pool_stats.fees_24h_usd angelegt.');
     }
 
-    // btc_trend_history: Multi-Timeframe-BTC-Trendmeter (BTC-Korrelation Phase 0).
-    // Reine Ableitung aus pool_stats (liq-btc-usdc) — kein eigener API-Call.
-    // EMA-Werte je (timeframe, span) gespeichert (auditierbar); die 12 Bits
-    // (Preis>EMA) sind daraus + btc_price rekonstruierbar. trend_points zählt die
-    // Trues, ema_available die nicht-null EMAs (Warmup), trend_pct = points/available.
-    // Siehe lib/btc-trend/index.js.
-    if (!tables.includes('btc_trend_history')) {
-        db.exec(`
-            CREATE TABLE btc_trend_history (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                recorded_at   INTEGER NOT NULL UNIQUE,   -- Unix-Timestamp (ms), Candle-Ende
-                btc_price     REAL    NOT NULL,
-                ema_1h_20  REAL, ema_1h_30  REAL, ema_1h_50  REAL,
-                ema_4h_20  REAL, ema_4h_30  REAL, ema_4h_50  REAL,
-                ema_12h_20 REAL, ema_12h_30 REAL, ema_12h_50 REAL,
-                ema_24h_20 REAL, ema_24h_30 REAL, ema_24h_50 REAL,
-                trend_points  INTEGER NOT NULL,           -- 0..12 (Anzahl Preis>EMA)
-                ema_available INTEGER NOT NULL,           -- 0..12 (nicht-null EMAs, Warmup)
-                trend_pct     REAL                        -- trend_points / ema_available * 100
-            );
-            CREATE INDEX idx_btc_trend_time ON btc_trend_history(recorded_at DESC);
-        `);
-        console.log('[db] Migration: Tabelle btc_trend_history angelegt.');
-    }
-
-    // btc_correlation_log: BTC-Korrelations-Advisor (Phase 1, Reporting-only).
-    // Eine Zeile pro Token und Lauf — Pearson-Korrelation der stündlichen USD-Returns
-    // gegen BTC, vorzeichenbehaftet. source_pool_id = Pool, über dessen Preisreihe
-    // die USD-Reihe aufgelöst wurde (direkt oder über quotePricePoolId-Kette).
-    // Siehe lib/btc-correlation/index.js.
-    if (!tables.includes('btc_correlation_log')) {
-        db.exec(`
-            CREATE TABLE btc_correlation_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                evaluated_at    INTEGER NOT NULL,
-                token_mint      TEXT    NOT NULL,
-                token_symbol    TEXT,
-                source_pool_id  TEXT,
-                window_days     INTEGER NOT NULL,
-                sample_count    INTEGER NOT NULL,
-                correlation     REAL,                       -- NULL wenn insufficient_data
-                reason          TEXT                        -- ok | insufficient_data
-            );
-            CREATE INDEX idx_btc_corr_log_time  ON btc_correlation_log(evaluated_at DESC);
-            CREATE INDEX idx_btc_corr_log_token ON btc_correlation_log(token_mint, evaluated_at DESC);
-        `);
-        console.log('[db] Migration: Tabelle btc_correlation_log angelegt.');
-    }
-
     // swap_fail_state: persistenter Fail-Counter für cleanup.js-Swaps über Cron-Läufe
     // hinweg (cleanup.js ist kein Dauerprozess, ein In-Memory-Zähler würde bei jedem
     // Lauf verlorengehen). Analog zum noteFail()-Muster in bots/lending/bin/bot.js:
@@ -1579,10 +1489,9 @@ function migrateSchema(db) {
     }
 
     // dust_watch: verfolgt seit wann ein Pool-Token-Rest >= DUST_SWAP_MAX_USDC im
-    // Wallet liegt, ohne dass ein Cleanup-Invest (Modus 'pool:X') ihn aufgenommen hat.
-    // Ohne Notbremse könnten größere Restbeträge beliebig lange als volatiles Asset
-    // liegen bleiben. sweepDust() in bin/cleanup.js swappt nach CLEANUP_STUCK_HOURS
-    // zwangsweise zu USDC (seit LIQ#000929 in jedem Cleanup-Modus).
+    // Wallet liegt. Ohne Notbremse könnten größere Restbeträge beliebig lange als
+    // volatiles Asset liegen bleiben. sweepDust() in bin/cleanup.js swappt nach
+    // CLEANUP_STUCK_HOURS zwangsweise zu USDC.
     if (!tables.includes('dust_watch')) {
         db.exec(`
             CREATE TABLE dust_watch (
@@ -1697,8 +1606,11 @@ export function clearDustWatch(db, mint) {
  * Wichtig – dynamische Betriebsfelder (Single Source of Truth = DB):
  *   - `active` wird bei bestehenden Pools NICHT aus pools.json überschrieben
  *     (sonst würde ein per Setter geschriebener DB-Zustand jeden Zyklus wieder
- *     durch den eingefrorenen JSON-Wert geclobbert). Nur beim INSERT eines neuen
- *     Pools wird der JSON-Wert als Seed übernommen.
+ *     durch den eingefrorenen JSON-Wert geclobbert). Beim INSERT eines neuen Pools
+ *     entscheidet seit LIQ#000937 nicht mehr der JSON-Wert, sondern ob der Pool eine
+ *     offene Position hat: Ein `"active": true` in pools.json ohne Position hätte den
+ *     Bot im nächsten Zyklus eine Position mit Wallet-Kapital eröffnen lassen. Neues
+ *     Kapital kommt nur noch über „Einzahlen“ (bin/deposit.js setzt danach active=1).
  *   - `enabled` und `range_override_fixed_pct` werden per COALESCE nur befüllt
  *     wenn die DB-Spalte noch NULL ist (Erstbefüllung/Migration aus pools.json);
  *     ein bereits gesetzter DB-Wert bleibt maßgeblich.
@@ -1707,6 +1619,9 @@ export function clearDustWatch(db, mint) {
  * @param {Array}    pools   config.pools.all
  */
 export function syncPools(db, pools) {
+    const openPoolIds = new Set(
+        db.prepare(`SELECT DISTINCT pool_id FROM positions WHERE closed_at IS NULL`).all().map(r => r.pool_id)
+    );
     const upsert = db.prepare(`
         INSERT INTO pools (id, protocol, address, pair, token_a, token_b, decimals_a, decimals_b, fee_tier, tick_spacing, active, enabled, range_override_fixed_pct, pool_type)
         VALUES (@id, @protocol, @address, @pair, @tokenA, @tokenB, @decimalsA, @decimalsB, @feeTier, @tickSpacing, @active, @enabled, @rangeFixedPct, @poolType)
@@ -1741,7 +1656,7 @@ export function syncPools(db, pools) {
                 decimalsB:     p.decimalsB,
                 feeTier:       p.feeTier,
                 tickSpacing:   p.tickSpacing,
-                active:        p.active ? 1 : 0,
+                active:        openPoolIds.has(p.id) ? 1 : 0,
                 enabled:       p.enabled === false ? 0 : 1,
                 rangeFixedPct,
                 poolType:      p.poolType ?? null,
@@ -2151,6 +2066,21 @@ export function insertPortfolioSnapshot(db, snap) {
     `).run({ ...snap, recordedAt: Date.now() });
 }
 
+/** Invarianten-Zeile eines Kalendertags schreiben (LIQ#001065), Zeile aus pnlInvariantRow(). */
+export function upsertPnlInvariantDaily(db, row) {
+    db.prepare(`
+        INSERT OR REPLACE INTO pnl_invariant_daily
+            (date, basis, portfolio, scopes, diff, threshold, drift, checked_at)
+        VALUES
+            (@date, @basis, @portfolio, @scopes, @diff, @threshold, @drift, @checked_at)
+    `).run(row);
+}
+
+/** true, wenn für den Kalendertag schon eine Invarianten-Zeile existiert. */
+export function hasPnlInvariantDaily(db, date) {
+    return !!db.prepare(`SELECT 1 FROM pnl_invariant_daily WHERE date = ?`).get(date);
+}
+
 /**
  * Gibt die letzten N Portfolio-Snapshots zurück.
  * @param {Database} db
@@ -2329,19 +2259,19 @@ export function getAdvisorLog(db, poolId, limit = 96) {
 }
 
 /**
- * Retention für die unbegrenzt wachsenden Score-Historien (LIQ#000836).
+ * Retention für die unbegrenzt wachsenden Slope-/Tier-Historien (LIQ#000836).
  * Löscht in Batches, damit der Bot-Writer nicht sekundenlang blockiert wird.
- * invest_score_history: 35 Tage (Dashboard-Chart '1m' liest 31 Tage).
+ * invest_score_history ist mit LIQ#000932 entfallen (Migration 0013-drop-score-tables).
  * @returns {{[table: string]: number}} gelöschte Zeilen je Tabelle
  */
-export function pruneScoreHistories(db, { investDays = 35, oppDays = 30, poolScoreDays = 30 } = {}) {
+export function pruneScoreHistories(db, { oppDays = 30, poolScoreDays = 30 } = {}) {
     const DAY = 24 * 60 * 60 * 1000;
     const BATCH = 50_000;
     const now = Date.now();
     const jobs = [
-        ['invest_score_history', now - investDays    * DAY],
         ['opportunity_scores',   now - oppDays       * DAY],
         ['pool_score_history',   now - poolScoreDays * DAY],
+        ['edge_history',         now - oppDays       * DAY],
     ];
     const deleted = {};
     for (const [table, cutoff] of jobs) {
@@ -2353,55 +2283,6 @@ export function pruneScoreHistories(db, { investDays = 35, oppDays = 30, poolSco
         deleted[table] = total;
     }
     return deleted;
-}
-
-/**
- * Verdichtet invest_score_history für Zeilen älter als afterDays auf ein Raster von
- * bucketMs (Vorgabe 10 min): je (pool_id, Bucket) bleibt eine Zeile mit dem Bucket-Anfang als
- * recorded_at und dem Mittelwert von score und exit_score (LIQ#000836).
- * Idempotent: verdichtete Zeilen liegen auf einem Vielfachen von bucketMs und werden beim
- * nächsten Lauf nicht mehr angefasst. Läuft in Tages-Chunks, je Chunk eine Transaktion.
- * Lesefenster im Dashboard: 1d im 10-min-Raster, 1w stündlich, 1m täglich — alle mitteln
- * ohnehin; nur ts-what-if/ts-sampling-check verlieren für Zeilen > afterDays die Minutenauflösung.
- * @returns {number} Zeilen, die dadurch weggefallen sind
- */
-export function downsampleScoreHistory(db, { afterDays = 7, bucketMs = 600_000 } = {}) {
-    const DAY = 86_400_000;                                 // Vielfaches von bucketMs → Chunks bucket-aligned
-    const cutoff = Math.floor((Date.now() - afterDays * DAY) / bucketMs) * bucketMs;
-    const first = db.prepare(`SELECT MIN(recorded_at) AS t FROM invest_score_history`).get()?.t;
-    if (first == null || first >= cutoff) return 0;
-    // Steady-State-Kurzschluss: liegt nichts Unverdichtetes mehr vor dem Cutoff, ist nichts zu tun.
-    const pending = db.prepare(
-        `SELECT 1 FROM invest_score_history WHERE recorded_at < ? AND recorded_at % ? != 0 LIMIT 1`
-    ).get(cutoff, bucketMs);
-    if (!pending) return 0;
-
-    const agg = db.prepare(`
-        SELECT pool_id, (recorded_at / ${bucketMs}) * ${bucketMs} AS b,
-               ROUND(AVG(score)) AS score, ROUND(AVG(exit_score)) AS exit_score
-        FROM invest_score_history
-        WHERE recorded_at >= ? AND recorded_at < ?
-        GROUP BY pool_id, recorded_at / ${bucketMs}
-        HAVING COUNT(*) > 1 OR MIN(recorded_at) % ${bucketMs} != 0`);
-    const del = db.prepare(
-        `DELETE FROM invest_score_history WHERE recorded_at >= ? AND recorded_at < ? AND recorded_at % ${bucketMs} != 0`);
-    const ins = db.prepare(
-        `INSERT OR REPLACE INTO invest_score_history (pool_id, recorded_at, score, exit_score) VALUES (?,?,?,?)`);
-    const count = db.prepare(
-        `SELECT COUNT(*) AS n FROM invest_score_history WHERE recorded_at >= ? AND recorded_at < ?`);
-
-    let removed = 0;
-    for (let from = Math.floor(first / DAY) * DAY; from < cutoff; from += DAY) {
-        const to = Math.min(from + DAY, cutoff);
-        db.transaction(() => {
-            const before = count.get(from, to).n;
-            const rows = agg.all(from, to);               // vollständig materialisiert, bevor geschrieben wird
-            del.run(from, to);
-            for (const r of rows) ins.run(r.pool_id, r.b, r.score, r.exit_score);
-            removed += before - count.get(from, to).n;
-        })();
-    }
-    return removed;
 }
 
 /**
@@ -2568,6 +2449,26 @@ export function insertCapitalFlow(db, flow) {
         INSERT INTO capital_flows (pool_id, usdc_amount, balance_snapshot, tx_hash, note, is_external, created_at)
         VALUES (@poolId, @usdcAmount, @balanceSnapshot, @txHash, @note, @isExternal, @createdAt)
     `).run({ txHash: null, note: null, balanceSnapshot: null, isExternal: 1, ...flow, createdAt: Date.now() });
+}
+
+// ─── Wallet-Flows (LIQ#001062) ────────────────────────────────────────────────
+
+/**
+ * Bucht einen Geldfluss Bot-Wallet ↔ außen. Idempotent je (txHash, mint): Quellbuchung
+ * (Senden, Exit-sendTo, bin/transfer.js) und Chain-Scan dürfen dieselbe Tx beide melden,
+ * gezählt wird sie einmal — die zuerst geschriebene Zeile gewinnt.
+ * @param {Database} db
+ * @param {Object}   flow  { txHash, mint, amount, usdValue, source, counterparty?, note?, createdAt? }
+ *                         amount/usdValue: + Zufluss, − Abfluss
+ * @returns {boolean} true wenn neu gebucht
+ */
+export function insertWalletFlow(db, flow) {
+    const r = db.prepare(`
+        INSERT OR IGNORE INTO wallet_flows
+            (tx_hash, mint, amount, usd_value, counterparty, source, note, created_at)
+        VALUES (@txHash, @mint, @amount, @usdValue, @counterparty, @source, @note, @createdAt)
+    `).run({ counterparty: null, note: null, createdAt: Date.now(), ...flow });
+    return r.changes > 0;
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────────

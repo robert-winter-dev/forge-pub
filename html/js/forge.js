@@ -7,11 +7,14 @@
     const { NotifHub }          = await import('./notif-hub.js?v=20260822a');
     const { initMessageBell }   = await import('./message-bell.js?v=20260825a');
     const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260826a');
-    const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260411a');
+    const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260925a');
+    const { wireMaximize } = await import('./modal.js?v=20261002b');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
     // Zahlen-/Datumsformate folgen der Sprache (siehe js/i18n.js). t() wird hier
     // bewusst NICHT importiert: `t` ist in dieser Datei durchgängig ein Timestamp.
     const { NUM_LOCALE, dayMonth, hourLabel } = await import('./i18n.js?v=20260811a');
+    // Zeitraum-Leisten: zentrale Lib (KB Core/chart-range-lib, CORE#000936)
+    const { createRangeBar, historyStartOf, rangeCutoff } = await import('./chart-range.js?v=20260923a');
 
     initNav({ current: 'overview' });
     initFooter();
@@ -28,13 +31,12 @@
     const hub = new NotifHub();
     hub.startPolling('liquidity/data/data.json', 'lending/data/data.json');
 
-    const RANGE_MS  = { '1D': 86_400_000, '1W': 7*86_400_000, '1M': 30*86_400_000 };
-
-    // persistierter Zustand
-    let ovRange  = (['1D','1W','1M'].includes(localStorage.getItem('ovChartRange')))
-                   ? localStorage.getItem('ovChartRange') : '1M';
-    let earRange = (['1D','1W','1M'].includes(localStorage.getItem('earChartRange')))
-                   ? localStorage.getItem('earChartRange') : '1M';
+    // Zeitraum-Zustand: der AKTIVE Zeitraum je Chart (Wunsch + Sperre führt die Lib).
+    // Je Chart zwei Leisten (Inline-Card + Modal), die denselben Zustand teilen.
+    let ovRange  = '1M';
+    let earRange = '1M';
+    let ovBars   = [];   // [Card-Leiste, Modal-Leiste]
+    let earBars  = [];
 
     let _lastData    = null;   // letztes Refresh-Ergebnis
     let _lastPoints  = null;   // aggregierte Portfolio-Punkte (aktueller Range)
@@ -364,7 +366,6 @@
     function renderCharts(data) {
         const { lendLive, liqLive } = data;
         const now    = Date.now();
-        const cutoff = now - (RANGE_MS[ovRange] ?? RANGE_MS['1M']);
 
         // Portfolio-History quellen normalisieren (LendingBot nutzt 'ts' statt 't')
         const sources = [];
@@ -374,6 +375,14 @@
         if (liqLive?.portfolioHistory?.length) {
             sources.push(liqLive.portfolioHistory.map(p => ({ t: p.t, v: p.v })));
         }
+
+        // Historie-Beginn = frühester Punkt der Portfolio-Summe (beide Bots; fehlt eine
+        // Quelle, zählt nur die vorhandene). Auch für die Einnahmen-Leiste: dailyProfits/
+        // dailyPnl sind bis zum Datenbeginn nullgefüllt und verraten den Beginn nicht.
+        // Beide Exporte liefern 30 Tage Portfolio-Historie (sonst bliebe 1M gesperrt).
+        const historyStart = historyStartOf(sources.flat(), p => p.t);
+        [...ovBars, ...earBars].forEach(b => b.setHistoryStart(historyStart));
+        const cutoff = rangeCutoff(ovRange, { now });
 
         const points = aggregatePortfolioHistory(sources, cutoff, now);
 
@@ -575,58 +584,43 @@
         });
     }
 
-    // ── Range-Buttons ─────────────────────────────────────────────────────────
+    // ── Range-Buttons (zentrale Lib chart-range.js) ───────────────────────────
 
-    function syncOvRangeBtns() {
-        ['ovRangeBtns', 'ovModalRangeBtns'].forEach(id =>
-            document.querySelectorAll(`#${id} .ov-range-btn`).forEach(b =>
-                b.classList.toggle('active', b.dataset.range === ovRange)));
-    }
-
-    function syncEarRangeBtns() {
-        ['earningsRangeBtns', 'earModalRangeBtns'].forEach(id =>
-            document.querySelectorAll(`#${id} .ov-range-btn`).forEach(b =>
-                b.classList.toggle('active', b.dataset.range === earRange)));
-    }
-
-    function handleOvRangeClick(e) {
-        const btn = e.target.closest('.ov-range-btn');
-        if (!btn) return;
-        e.stopPropagation();
-        ovRange = btn.dataset.range;
-        localStorage.setItem('ovChartRange', ovRange);
-        syncOvRangeBtns();
-        if (_lastData) renderCharts(_lastData);
-        // Modal neu rendern falls offen
-        const modal = document.getElementById('portfolioModal');
-        if (modal && modal.style.display !== 'none') renderPortfolioModal();
-    }
-
-    function handleEarRangeClick(e) {
-        const btn = e.target.closest('.ov-range-btn');
-        if (!btn) return;
-        e.stopPropagation();
-        earRange = btn.dataset.range;
-        localStorage.setItem('earChartRange', earRange);
-        syncEarRangeBtns();
-        if (_lastData) renderCharts(_lastData);
-        // Modal neu rendern falls offen
-        const modal = document.getElementById('earningsModal');
-        if (modal && modal.style.display !== 'none') renderEarningsModal();
+    // Zwei Leisten (Card + Modal) teilen einen Zustand: Klick in einer Leiste
+    // (reason 'user') wird in die andere gespiegelt, das Modal danach neu gezeichnet.
+    function makeBars(ids, storageKey, onActive, rerenderModal) {
+        const bars = [];
+        ids.forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const bar = createRangeBar(el, {
+                storageKey,
+                onChange: (key, { reason }) => {
+                    onActive(key);
+                    if (reason === 'user') bars.forEach(b => { if (b !== bar) b.setActive(key); });
+                    // 'set' = Spiegelung (die Leiste mit dem Klick zeichnet), 'history' = Rückfall
+                    // mitten in renderCharts() (zeichnet ohnehin gleich weiter)
+                    if (reason !== 'user') return;
+                    if (_lastData) renderCharts(_lastData);
+                    rerenderModal();
+                },
+            });
+            // Klick in der Leiste darf nicht die Card/Overlay-Klicks (Modal öffnen/schließen) auslösen
+            el.addEventListener('click', e => { if (e.target.closest('.chart-range-btn')) e.stopPropagation(); });
+            bars.push(bar);
+        });
+        return bars;
     }
 
     function initRangeButtons() {
-        // Inline-Card Buttons
-        document.getElementById('ovRangeBtns')?.addEventListener('click', handleOvRangeClick);
-        document.getElementById('earningsRangeBtns')?.addEventListener('click', handleEarRangeClick);
-
-        // Modal-Buttons (gleiche Handler, gleicher State)
-        document.getElementById('ovModalRangeBtns')?.addEventListener('click', handleOvRangeClick);
-        document.getElementById('earModalRangeBtns')?.addEventListener('click', handleEarRangeClick);
-
-        // Initial aktive Buttons setzen
-        syncOvRangeBtns();
-        syncEarRangeBtns();
+        ovBars = makeBars(['ovRangeBtns', 'ovModalRangeBtns'], 'ovChartRange',
+            k => { ovRange = k; },
+            () => { if (document.getElementById('portfolioModal')?.style.display === 'flex') renderPortfolioModal(); });
+        earBars = makeBars(['earningsRangeBtns', 'earModalRangeBtns'], 'earChartRange',
+            k => { earRange = k; },
+            () => { if (document.getElementById('earningsModal')?.style.display === 'flex') renderEarningsModal(); });
+        if (ovBars[0])  ovRange  = ovBars[0].active;
+        if (earBars[0]) earRange = earBars[0].active;
     }
 
     // ── Notifications ─────────────────────────────────────────────────────────
@@ -647,12 +641,16 @@
         const tip = document.getElementById('fgt');
         if (!tip) return;
 
+        // [data-tooltip] (Tabellenköpfe) und .has-tooltip[data-tooltip-content] (gesperrte
+        // Zeitraum-Buttons aus chart-range.js) teilen sich denselben Tooltip.
+        const TIP_SEL = '[data-tooltip], .has-tooltip[data-tooltip-content]';
         document.addEventListener('mouseover', e => {
-            const el = e.target.closest('[data-tooltip]');
-            if (!el || !el.dataset.tooltip) { tip.style.display = 'none'; return; }
+            const el = e.target.closest(TIP_SEL);
+            const body = el ? (el.dataset.tooltip || el.dataset.tooltipContent) : '';
+            if (!el || !body) { tip.style.display = 'none'; return; }
             const title = el.dataset.tooltipTitle ?? '';
             tip.innerHTML = (title ? `<div class="fgt-title">${title}</div>` : '') +
-                            `<div class="fgt-body">${el.dataset.tooltip}</div>`;
+                            `<div class="fgt-body">${body}</div>`;
             tip.style.display = 'block';
         });
         document.addEventListener('mousemove', e => {
@@ -665,7 +663,7 @@
             tip.style.top  = y + 'px';
         });
         document.addEventListener('mouseout', e => {
-            if (!e.target.closest('[data-tooltip]')) tip.style.display = 'none';
+            if (!e.target.closest(TIP_SEL)) tip.style.display = 'none';
         });
     }
 
@@ -720,6 +718,8 @@
     // ── Init ──────────────────────────────────────────────────────────────────
 
     initModals();
+    // Maximieren-Schalter (zentral in modal.js); der Callback zeichnet den Chart mit der neuen Fläche neu
+    wireMaximize({ portfolioModal: renderPortfolioModal, earningsModal: renderEarningsModal });
     initRangeButtons();
     initMessageBell();
     initTooltips();

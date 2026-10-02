@@ -1,33 +1,33 @@
 /**
- * FORGE Liquidity – Auflösung von CLEANUP_MODE (LIQ#000929)
+ * FORGE Liquidity – Einordnung eines noch gesetzten CLEANUP_MODE (LIQ#000929, LIQ#000937)
  *
- * Gültige Modi seit LIQ#000929:
- *   'disabled'    → kein Invest. Kapital-Abgleich, SOL-Topup und Dust-Sweep laufen
- *                   trotzdem (bin/cleanup.js) — „disabled" heißt nur „kein Invest".
- *   'pool:<id>'   → fester Zielpool (Settings → Cleanup → Manuell)
+ * Der Cleanup hat keinen Invest-Modus mehr:
+ *   'ranking'    („Bester Pool", Invest in den Pool mit dem höchsten Score) entfiel mit
+ *                LIQ#000929,
+ *   'pool:<id>'  (fester Zielpool, Settings → Cleanup → Manuell) entfiel mit LIQ#000937.
+ * Kapital-Abgleich, SOL-Topup und Dust-Sweep laufen weiter (bin/cleanup.js). Neues Kapital
+ * kommt nur über „Einzahlen“, der Bot eröffnet nur noch wieder (Rebalance).
  *
- * Der frühere Modus 'ranking' („Bester Pool", Invest in den Pool mit dem höchsten
- * InvestScore) ist entfallen. Er war bis dahin der Default, wenn CLEANUP_MODE fehlte.
- * Ein noch gesetztes 'ranking' und jeder unbekannte Wert werden deshalb wie 'disabled'
- * behandelt — nie ein Absturz, nie ein stiller Rückfall auf einen Invest-Pfad.
- * Der neue Default ohne CLEANUP_MODE ist 'disabled'.
- *
- * Eine Quelle für cleanup.js und export.js: zwei Kopien dieser Regel liefen sonst
- * auseinander.
+ * CLEANUP_MODE steuert deshalb nichts mehr. Diese Funktion sagt nur, was in der .env
+ * steht, damit bin/cleanup.js einen Altwert einmal meldet und entfernt — nie ein Absturz,
+ * nie ein Rückfall auf einen Invest-Pfad. Migration 0014 räumt den Schlüssel beim Update
+ * bereits weg; das hier ist das Netz für Installationen, die ihn danach von Hand setzen.
  */
-
-export const CLEANUP_MODE_DEFAULT = 'disabled';
 
 /**
  * @param {string|null|undefined} raw  Wert von CLEANUP_MODE (process.env oder .env)
- * @returns {{ mode: string, legacy: null|'ranking'|'unknown', raw: string }}
- *   `mode` ist immer 'disabled' oder 'pool:<id>'. `legacy` sagt, ob ein veralteter
- *   bzw. unbekannter Wert auf 'disabled' umgedeutet wurde.
+ * @returns {{ legacy: null|'disabled'|'ranking'|'pool'|'unknown', raw: string, poolId: string|null }}
+ *   `legacy` ist null, wenn nichts gesetzt ist. 'disabled' ist ein harmloser Altwert
+ *   (ohne Hinweis zu entfernen), die übrigen waren einmal ein Invest-Modus oder ein
+ *   Tippfehler.
  */
 export function resolveCleanupMode(raw) {
     const v = String(raw ?? '').trim();
-    if (v === '' || v === 'disabled') return { mode: CLEANUP_MODE_DEFAULT, legacy: null, raw: v };
-    if (v.startsWith('pool:') && v.length > 'pool:'.length) return { mode: v, legacy: null, raw: v };
-    if (v === 'ranking') return { mode: CLEANUP_MODE_DEFAULT, legacy: 'ranking', raw: v };
-    return { mode: CLEANUP_MODE_DEFAULT, legacy: 'unknown', raw: v };
+    if (v === '') return { legacy: null, raw: v, poolId: null };
+    if (v === 'disabled') return { legacy: 'disabled', raw: v, poolId: null };
+    if (v === 'ranking') return { legacy: 'ranking', raw: v, poolId: null };
+    if (v.startsWith('pool:') && v.length > 'pool:'.length) {
+        return { legacy: 'pool', raw: v, poolId: v.slice('pool:'.length) };
+    }
+    return { legacy: 'unknown', raw: v, poolId: null };
 }

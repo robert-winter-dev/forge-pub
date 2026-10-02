@@ -38,17 +38,14 @@ import { PATHS }         from '../../../config/paths.js';
 import { readEnvField, loadKeypair, LIQUIDITYBOT_ENV, NEXUS_RPC_FRESH, RPC_CONN_OPTS } from './wallet.js';
 import { t } from '../../../lib/i18n.js';
 import { renderReason, reasonPayload } from '../../../lib/pool-reason.js';
-import { openDb as openSettingsDb, saveSettings } from './pools.js';
+import { registerKind, startJob, waitForJob, jobResponse } from '../lib/finance-jobs.js';
 
 const __dirname        = path.dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT       = PATHS.root;
 const LIQUIDITYBOT_ROOT        = PATHS.liquidity;
 const POOLS_JSON       = path.join(LIQUIDITYBOT_ROOT, 'config', 'pools.json');
 const LIQUIDITYBOT_DB          = PATHS.liquidityDb;
-const CLEANUP_LOCK     = path.join(PATHS.liquidityData, 'cleanup.lock');
-const CLEANUP_STALE_MS = 20 * 60 * 1000;
 const LIQUIDITYBOT_DATA         = path.join(FORGE_ROOT, 'html', 'liquidity', 'data', 'data.json');
-const SETTINGS_DB      = PATHS.settingsDb;
 const LIQUIDITYBOT_DATA_HISTORY = path.join(FORGE_ROOT, 'html', 'liquidity', 'data', 'data-history.json');
 // Empfehlung gilt maximal 48 h als aktuell
 const HINT_STALE_MS = 48 * 60 * 60 * 1000;
@@ -179,20 +176,6 @@ function hasOpenPosition(poolId) {
     }
 }
 
-/** Liest pool_settings (bot_id 'liquidity') aus settings.db – {} wenn kein Eintrag existiert. */
-function loadPoolSettingsEntry(poolId) {
-    try {
-        const sdb = new Database(SETTINGS_DB, { readonly: true });
-        const row = sdb.prepare(
-            `SELECT settings FROM pool_settings WHERE bot_id = 'liquidity' AND pool_id = ?`
-        ).get(poolId);
-        sdb.close();
-        return row ? JSON.parse(row.settings) : {};
-    } catch {
-        return {};
-    }
-}
-
 /** Liest die aktuelle Pool-/Position-Info aus dem live geschriebenen Dashboard-JSON. */
 function readPositionState(poolId) {
     try {
@@ -207,7 +190,11 @@ function readPositionState(poolId) {
     }
 }
 
-/** spawned CLI-Script, sammelt stdout, parst das letzte JSON-Objekt. */
+/**
+ * spawned CLI-Script, sammelt stdout, parst das letzte JSON-Objekt.
+ * 🔒 Nur für lesende Aufrufe (Dry-Run, position-state): Timeout und Neustart beenden den
+ * Prozess. Finanzaktionen laufen über runPoolJob() / lib/finance-jobs.js (CORE#000993).
+ */
 function runCli(scriptRelPath, cliArgs, { timeoutMs = 90_000 } = {}) {
     return new Promise((resolve) => {
         const args = [path.join(LIQUIDITYBOT_ROOT, scriptRelPath), ...cliArgs];
@@ -258,8 +245,8 @@ function runEstimateCosts(poolPair, action, amount) {
 }
 
 /** Baut die CLI-Args aus dem Request-Body. */
-function buildCliArgs(action, body, poolPair) {
-    const args = ['--pool', poolPair, '--json'];
+function buildCliArgs(action, body, poolRef) {
+    const args = ['--pool', poolRef, '--json']; // pool.id, nie pool.pair: gleiche Paare mit anderem Fee-Tier sind mehrdeutig (LIQ#000967)
     if (body.mode === 'full') {
         if (action !== 'withdraw') return { error: t('api.poolact.mode_full_withdraw_only') };
         args.push('--full');
@@ -320,17 +307,6 @@ function triggerExport() {
     proc.unref();
 }
 
-/** Prüft ob cleanup.js gerade läuft (via cleanup.lock, analog zu cleanup-lock.js). */
-function isCleanupRunning() {
-    if (!fs.existsSync(CLEANUP_LOCK)) return false;
-    try {
-        const { pid, startedAt } = JSON.parse(fs.readFileSync(CLEANUP_LOCK, 'utf8'));
-        if (Date.now() - startedAt > CLEANUP_STALE_MS) return false;
-        process.kill(pid, 0);
-        return true;
-    } catch { return false; }
-}
-
 /** Startet wallet-monitor im Hintergrund, damit wallet-monitor.db sofort aktuell ist. */
 function triggerWalletMonitor() {
     const monitorJs = path.join(FORGE_ROOT, 'core', 'wallet-monitor', 'monitor.js');
@@ -338,6 +314,45 @@ function triggerWalletMonitor() {
         cwd: FORGE_ROOT, detached: true, stdio: 'ignore',
     });
     proc.unref();
+}
+
+// ── Einzahlung/Entnahme als losgelöster Job (CORE#000993) ─────────────────────
+// Der Prozess überlebt einen Neustart von forge-settings und wird von keinem Timeout
+// beendet (lib/finance-jobs.js). Die Route wartet so lange wie früher der Timeout war;
+// ist die Aktion dann noch nicht fertig, antwortet sie mit 202 + jobId und die
+// Oberfläche fragt /api/jobs/:id ab. Log und Export laufen in der Nacharbeit, damit sie
+// auch nach einem Neustart genau einmal passieren.
+const POOL_JOB_WAIT_MS = { deposit: 180_000, withdraw: 120_000 };
+
+for (const action of ['deposit', 'withdraw']) {
+    registerKind(`liq-${action}`, {
+        onDone(result, job) {
+            const { pool, body } = job.meta;
+            logAction(result.ok ? 'ausgeführt' : 'fehlgeschlagen', action, pool, body,
+                result.ok ? `tx=${result.result?.txHash ?? 'keine'}` : (result.error ?? 'ohne Fehlertext'));
+            if (result.ok) { triggerExport(); triggerWalletMonitor(); }
+            return result;
+        },
+    });
+}
+
+async function runPoolJob(res, action, pool, body, cliArgs) {
+    const { job, conflict } = startJob({
+        kind:   `liq-${action}`,
+        key:    `liq:${pool.id}`,
+        ref:    body?.clientRef,
+        script: path.join(LIQUIDITYBOT_ROOT, 'bin', `${action}.js`),
+        args:   cliArgs,
+        cwd:    LIQUIDITYBOT_ROOT,
+        meta:   { pool: { id: pool.id, pair: pool.pair }, body },
+    });
+    if (conflict) {
+        return res.status(409).json({ ok: false, error: t('api.jobs.already_running'), busy: true, jobId: conflict.id });
+    }
+    logAction('angefordert', action, pool, body);
+    const current = await waitForJob(job.id, POOL_JOB_WAIT_MS[action]);
+    const { status, body: out } = jobResponse(current, t('api.jobs.still_running'));
+    res.status(status).json(out);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -413,7 +428,7 @@ router.get('/liquidity/:poolId/position-state/live', async (req, res) => {
     const pool = findPool(req.params.poolId);
     if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
     try {
-        const live = await runCli('bin/position-state.js', ['--pool', pool.pair], { timeoutMs: 15_000 });
+        const live = await runCli('bin/position-state.js', ['--pool', pool.id], { timeoutMs: 15_000 });
         res.json(live ?? { ok: false, error: t('api.common.no_result') });
     } catch (err) {
         res.json({ ok: false, error: err.message });
@@ -495,7 +510,7 @@ router.post('/liquidity/:poolId/preview', async (req, res) => {
         return res.status(409).json({ error: t('api.poolact.no_manual_deposit') });
     }
 
-    const built = buildCliArgs(action, req.body, pool.pair);
+    const built = buildCliArgs(action, req.body, pool.id);
     if (built.error) return res.status(400).json({ error: built.error });
 
     const script = action === 'deposit' ? 'bin/deposit.js' : 'bin/withdraw.js';
@@ -521,45 +536,27 @@ router.post('/liquidity/:poolId/preview', async (req, res) => {
     res.json({ dryRun: dry, costs });
 });
 
-router.post('/liquidity/:poolId/deposit', async (req, res) => {
+router.post('/liquidity/:poolId/deposit', (req, res) => {
     const pool = findPool(req.params.poolId);
     if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
     if (pool.uiDepositDisabled) {
         return res.status(409).json({ error: t('api.poolact.no_manual_deposit') });
     }
 
-    const built = buildCliArgs('deposit', req.body, pool.pair);
+    const built = buildCliArgs('deposit', req.body, pool.id);
     if (built.error) return res.status(400).json({ error: built.error });
 
-    // 180 s statt 120 s: seit der Rest-Einzahlung (bin/deposit.js, „Residual-Sweep")
-    // können hinter dem eigentlichen Deposit noch ein Ausgleichs-Swap und ein zweites
-    // increaseLiquidity liegen. Ein Timeout würde den Prozess mitten in der Buchung
-    // abschießen — die On-Chain-TX wäre dann gelaufen, die DB-Einträge nicht.
-    logAction('angefordert', 'deposit', pool, req.body);
-    const result = await runCli('bin/deposit.js', built.args, { timeoutMs: 180_000 });
-    const status = result.ok ? 200 : 409;
-    logAction(result.ok ? 'ausgeführt' : 'fehlgeschlagen', 'deposit', pool, req.body,
-        result.ok ? `tx=${result.result?.txHash ?? 'keine'}` : (result.error ?? 'ohne Fehlertext'));
-    res.status(status).json(result);
-
-    if (result.ok) { triggerExport(); triggerWalletMonitor(); }
+    return runPoolJob(res, 'deposit', pool, req.body, built.args);
 });
 
-router.post('/liquidity/:poolId/withdraw', async (req, res) => {
+router.post('/liquidity/:poolId/withdraw', (req, res) => {
     const pool = findPool(req.params.poolId);
     if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
-    const built = buildCliArgs('withdraw', req.body, pool.pair);
+    const built = buildCliArgs('withdraw', req.body, pool.id);
     if (built.error) return res.status(400).json({ error: built.error });
 
-    logAction('angefordert', 'withdraw', pool, req.body);
-    const result = await runCli('bin/withdraw.js', built.args, { timeoutMs: 120_000 });
-    const status = result.ok ? 200 : 409;
-    logAction(result.ok ? 'ausgeführt' : 'fehlgeschlagen', 'withdraw', pool, req.body,
-        result.ok ? `tx=${result.result?.txHash ?? 'keine'}` : (result.error ?? 'ohne Fehlertext'));
-    res.status(status).json(result);
-
-    if (result.ok) { triggerExport(); triggerWalletMonitor(); }
+    return runPoolJob(res, 'withdraw', pool, req.body, built.args);
 });
 
 router.post('/liquidity/:poolId/rebalance', (req, res) => {
@@ -578,117 +575,49 @@ router.post('/liquidity/:poolId/rebalance', (req, res) => {
     res.json({ ok: true, message: t('api.poolact.rebalance_queued') });
 });
 
-/** POST /api/pools/liquidity/:poolId/mode
- * Setzt den Kapitalfluss-Modus eines Pools — fasst die Benutzer-Freigabe (enabled, in
- * liquiditybot.db) und die Cleanup-Berücksichtigung (cleanup.rankingEligible, in
- * settings.db) zu einer geordneten Skala zusammen (LIQ#0365, ersetzt den früheren
- * getrennten toggle-enabled-Endpoint + das unerreichbare Ranking-Modal):
+/** POST /api/pools/liquidity/:poolId/enabled
+ * Benutzer-Freigabe eines Pools setzen (enabled, in liquiditybot.db) — der Knopf
+ * „Aktivieren"/„Deaktivieren" in der Pool-Zeile (LIQ#000937).
  *
- *   Body: { mode: 'disabled' | 'cleanup-inactive' | 'cleanup-active' }
- *     disabled          → enabled = false
- *     cleanup-inactive  → enabled = true,  cleanup.rankingEligible = false
- *     cleanup-active    → enabled = true,  cleanup.rankingEligible = true
+ *   Body: { enabled: true | false }
  *
- * Regeln (unverändert gegenüber dem alten toggle-enabled):
- *   - Nach 'disabled' nur erlaubt wenn der Pool KEINE offene Position hält.
- *   - Nach 'cleanup-inactive'/'cleanup-active' (jeweils enabled=true) nur erlaubt, wenn
- *     das Dry-Run-Gate für eine aktuell gesetzte Cleanup-Sperre bereits bestanden ist.
- * Greift per Hot-Reload im nächsten Bot-/Cleanup-Zyklus ohne Neustart.
+ * Deaktivieren nur, wenn der Pool KEINE offene Position hält: erst vollständig auszahlen.
+ * Greift per Hot-Reload im nächsten Bot-Zyklus ohne Neustart.
+ *
+ * Ersetzt die Drei-Stufen-Auswahl POST .../mode (LIQ#0365: Deaktiviert / Cleanup inaktiv /
+ * Cleanup aktiv). Deren zweite Achse, `cleanup.rankingEligible`, wertet seit LIQ#000929
+ * niemand mehr aus, und mit ihr entfiel die daran gekoppelte Dry-Run-Sperre für
+ * Pool-Angebote (bin/pool-offers-dryrun.js meldet seither nur noch).
  */
-router.post('/liquidity/:poolId/mode', (req, res) => {
+router.post('/liquidity/:poolId/enabled', (req, res) => {
     const pool = findPool(req.params.poolId);
     if (!pool) return res.status(404).json({ error: t('api.common.pool_not_found') });
 
-    const mode = req.body?.mode;
-    if (!['disabled', 'cleanup-inactive', 'cleanup-active'].includes(mode)) {
-        return res.status(400).json({ error: t('api.poolact.body_mode_required') });
+    const enabled = req.body?.enabled;
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: t('api.poolact.body_enabled_required') });
     }
 
-    if (mode === 'disabled' && hasOpenPosition(pool.id)) {
-        return res.status(409).json({
-            error: t('api.poolact.pool_has_position'),
-        });
+    if (!enabled && hasOpenPosition(pool.id)) {
+        return res.status(409).json({ error: t('api.poolact.pool_has_position') });
     }
 
-    const poolSettings = loadPoolSettingsEntry(pool.id);
-
-    // Dry-Run-Gate (pool-offers.md Schritt 6): ein per Pool-Offer übernommener Pool
-    // (pool.premiumOffer) darf erst Kapital erhalten, wenn pool-offers-dryrun.js einen
-    // erfolgreichen deposit.js --dry-run für ihn bestätigt hat. Ohne diese Sperre könnte
-    // ein technisch kaputter Deposit-Pfad (z.B. fehlendes volatilePair-Flag) erst beim
-    // ersten echten Einzahlversuch mit echtem Kapital aufdecken.
-    //
-    // Korrigiert 2026-09-04 (LIQ#0380): vorher lautete das Kriterium
-    // `cleanup.rankingEligible === false` — das trifft aber auch auf jeden Pool zu, den
-    // der Nutzer selbst über den Modus 'cleanup-inactive' gesperrt hat (kein Offer-Bezug).
-    // pool-offers-dryrun.js erzeugt für solche Pools nie ein Gate (prüft ausschließlich
-    // pool.premiumOffer, s. dort Zeile ~135), also blieb 'cleanup-active' für sie für immer
-    // verwehrt — Sackgasse ohne Ausweg (Fall liq-sol-usdc). Per settings.db-Check am
-    // 04.09.2026 bestätigt: die "Bestandspools", für die die alte, weitere Fassung gedacht
-    // war, existieren nicht mehr (der damalige Klick-Pfad, der cleanup.rankingEligible ohne
-    // premiumOffer setzte, ist abgeschafft; der automatische Import setzt es nicht mehr,
-    // s. bots/liquidity/lib/pool-offer-adopt.js). Das Kriterium ist jetzt deckungsgleich mit
-    // pool-offers-dryrun.js.
-    //
-    // Geprüft wird bewusst der VOR dem Schreiben gültige rankingEligible-Wert — sonst würde
-    // z.B. der Wechsel auf 'cleanup-active' das Gate umgehen, indem er die Sperre im selben
-    // Request erst setzt und dann sofort wieder aufhebt.
-    if (mode !== 'disabled') {
-        if (pool.premiumOffer && poolSettings.cleanup?.rankingEligible === false && poolSettings.dryRunGate?.status !== 'passed') {
-            const gateStatus = poolSettings.dryRunGate?.status ?? 'pending';
-            return res.status(409).json({
-                error: gateStatus === 'failed'
-                    ? t('api.poolact.dryrun_failed', { error: poolSettings.dryRunGate.error ?? t('api.common.unknown_error') })
-                    : t('api.poolact.dryrun_pending'),
-                gateStatus,
-            });
-        }
+    if ((pool.enabled !== false) === enabled) { // Default fehlend = freigegeben
+        return res.json({ ok: true, enabled, message: t('api.poolact.already_in_state'), unchanged: true });
     }
 
-    const currentEnabled  = pool.enabled !== false; // Default fehlend = freigegeben
-    const currentEligible = poolSettings.cleanup?.rankingEligible !== false;
-    const currentMode     = !currentEnabled ? 'disabled' : (currentEligible ? 'cleanup-active' : 'cleanup-inactive');
-    if (currentMode === mode) {
-        return res.json({ ok: true, mode, message: t('api.poolact.already_in_state'), unchanged: true });
-    }
-
-    const targetEnabled  = mode !== 'disabled';
-    const targetEligible = mode === 'cleanup-active';
-
-    if (targetEnabled !== currentEnabled) {
-        try {
-            writeEnabled(pool.id, targetEnabled, reasonPayload(targetEnabled ? 'reason.manual_enable' : 'reason.manual_disable'));
-        } catch (err) {
-            return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
-        }
-    }
-
-    if (mode !== 'disabled' && targetEligible !== currentEligible) {
-        try {
-            const sdb = openSettingsDb();
-            saveSettings(sdb, 'liquidity', pool.id, { cleanup: { rankingEligible: targetEligible } }, { source: 'user' });
-            sdb.close();
-        } catch (err) {
-            return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
-        }
+    try {
+        writeEnabled(pool.id, enabled, reasonPayload(enabled ? 'reason.manual_enable' : 'reason.manual_disable'));
+    } catch (err) {
+        return res.status(500).json({ error: t('api.poolact.enabled_set_failed', { error: err.message }) });
     }
 
     triggerExport();
     res.json({
         ok: true,
-        mode,
-        message: t('api.poolact.mode_set_msg', { pool: pool.displayPair ?? pool.pair, mode: t(`api.poolact.mode_label.${mode}`) }),
+        enabled,
+        message: t(enabled ? 'api.poolact.pool_enabled_msg' : 'api.poolact.pool_disabled_msg', { pool: pool.displayPair ?? pool.pair }),
     });
-});
-
-router.post('/liquidity/cleanup/run', async (req, res) => {
-    if (isCleanupRunning()) {
-        return res.status(409).json({ ok: false, error: t('api.poolact.cleanup_running') });
-    }
-    const result = await runCli('bin/cleanup.js', [], { timeoutMs: 300_000 });
-    const status = result.ok ? 200 : 409;
-    res.status(status).json(result);
-    if (result.ok) { triggerExport(); triggerWalletMonitor(); }
 });
 
 /** POST /api/pools/liquidity/:poolId/advisor-rebalance

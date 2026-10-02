@@ -120,7 +120,8 @@ do_rollback_code() {
     say "$(t DEPLOY_ROLLBACK_STARTING_SERVICES)"
     systemctl start forge-nexus forge-premium forge-settings forge-settings-daemon 2>/dev/null || true
     sleep 3
-    systemctl start forge-liquiditybot forge-lendingbot 2>/dev/null || true
+    # Nur Bots, die im Backend eingeschaltet sind (Autostart gesetzt, CORE#001179).
+    start_enabled_bots
     c_ok "$(t DEPLOY_ROLLBACK_DONE "$target")"
     do_status
 }
@@ -204,7 +205,10 @@ do_restore() {
     fi
     fix_ownership
     say "$(t DEPLOY_RESTORE_STARTING_SERVICES)"
-    systemctl start "${SERVICES[@]}" 2>/dev/null || true
+    systemctl start forge-nexus forge-premium forge-settings forge-settings-daemon 2>/dev/null || true
+    sleep 3
+    # Nur Bots, die im Backend eingeschaltet sind (Autostart gesetzt, CORE#001179).
+    start_enabled_bots
     c_ok "$(t DEPLOY_RESTORE_DONE)"
 }
 

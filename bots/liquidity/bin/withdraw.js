@@ -458,22 +458,24 @@ try {
     if (err.solBalance !== undefined) {
         // Selbstheilung wie bei deposit.js: erst USDC→SOL nachtanken, dann retryen.
         console.warn(`[withdraw] ${t('cli.liq.low_sol_selfheal', { step: 'decreaseLiquidity', sol: err.solBalance.toFixed(4) })}`);
-        const healedSol = await _autoTopUpSol(err.solBalance, config.solReserve + 0.01);
+        // err.solBalance ist der GESAMTE Stand, _autoTopUpSol() rechnet in NUTZBAREM SOL
+        // (Reserve abgezogen) — vor LIQ#000971 vermischt, Log/Hinweis meldeten Fehlschlag.
+        const healedSol = await _autoTopUpSol(Math.max(0, err.solBalance - config.solReserve), 0.01);
         // Retry auch dann, wenn das Topup die Reserve NICHT erreicht hat: ein
         // Withdraw gibt Kapital frei und darf nie an der Reserve scheitern —
         // die existiert genau dafür (2026-07-29, siehe assertSufficientSolForExit()
         // in lib/wallet.js). Der Adapter hat jetzt seinen eigenen, physikalischen
         // Boden; landet die TX wirklich nicht, scheitert sie dort mit klarer Meldung.
-        if (healedSol < config.solReserve) {
-            console.warn(`[withdraw] ${t('cli.lw.topup_below_reserve', { sol: healedSol.toFixed(4) })}`);
-            await notify.solLow(db, healedSol).catch(() => {});
+        if (healedSol < 0.01) {
+            console.warn(`[withdraw] ${t('cli.lw.topup_below_reserve', { sol: (healedSol + config.solReserve).toFixed(4) })}`);
+            await notify.solLow(db, healedSol + config.solReserve).catch(() => {});
         } else {
             console.log(`[withdraw] ${t('cli.liq.selfheal_ok', { sol: healedSol.toFixed(4), step: 'decreaseLiquidity' })}`);
         }
         try {
             result = await adapter.decreaseLiquidity(pool, position.nft_mint, withdrawUsdc, WITHDRAW_SLIPPAGE, refPriceUsdWd);
         } catch (err2) {
-            await notify.solLow(db, err2.solBalance ?? healedSol).catch(() => {});
+            await notify.solLow(db, err2.solBalance ?? healedSol + config.solReserve).catch(() => {});
             db.close();
             abort(err2.message);
         }

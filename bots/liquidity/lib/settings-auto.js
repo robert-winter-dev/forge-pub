@@ -25,13 +25,6 @@ export const DEFAULT_TVL_PROTECTION = {
     level1: { enabled: true, thresholdUsd: null, withdrawPct: 100 },
     swapToUsdc:      true,
     sendTo:          '',
-    // Cleanup-Cooldown: hält AUSSCHLIESSLICH den Cleanup (bin/cleanup.js) davon ab,
-    // einen gerade verlassenen Pool wieder zu befüllen. Der TVL-Schutz selbst läuft
-    // unabhängig davon weiter — er darf nie durch diesen Wert ausgesperrt werden.
-    // 12 h (vorher 1 h): Mit 1 h durchlief SOL/ZEC am 2026-08-13 binnen sechs Stunden
-    // zweimal den Zyklus „Pool reaktiviert → Kapital rein → TVL-Schutz zieht ab →
-    // Exit", jedes Mal mit Transaktionskosten.
-    cooldownHours:   12,
     tvlAtActivation: null,
 };
 

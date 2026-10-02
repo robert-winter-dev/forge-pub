@@ -7,6 +7,7 @@
  * GET  /api/wallet/liquidity/qr               → QR-Code der Adresse (SVG)
  * GET  /api/wallet/liquidity/balance          → Wallet-Balances (aus wallet-monitor.db)
  * POST /api/wallet/liquidity/send             → Token senden (Body: { symbol, amount, toAddress })
+ * GET  /api/wallet/rpc-status                 → Notbetrieb des Nexus aktiv? (CORE#000992)
  * GET  /api/wallet/liquidity/addresses        → Adressbuch lesen
  * POST /api/wallet/liquidity/addresses        → Adresse hinzufügen (Body: { name, address })
  * PUT  /api/wallet/liquidity/addresses/:id    → Name/Adresse ändern (Body: { name?, address? })
@@ -32,9 +33,14 @@ import {
     loadPremiumKeypair, getPremiumPublicKey,
 } from '../../../lib/premium-wallet.js';
 import { t } from '../../../lib/i18n.js';
+import { registerKind, startJob, waitForJob } from '../lib/finance-jobs.js';
+import { awaitSignature } from '../lib/await-signature.js';
 import { classify, buildKnownTokens } from '../../../lib/scam-classify.js';
+import { openDatabase, insertWalletFlow } from '../../liquidity/lib/db.js';
+import { getWalletFlowUsdPrice } from '../../liquidity/lib/wallet-flow-price.js';
 import { visibleLabel } from '../../../lib/token-symbol.js';
 import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
+import { respondSendError, addFallbackPriorityFee, isNexusFallbackActive } from '../../../lib/rpc-fallback-error.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -141,6 +147,48 @@ async function runWalletMonitorRefresh() {
     }
 }
 
+// Natives SOL wird in wallet_flows (wie in capital-reconcile.js/deposit-lib.js) unter
+// der WSOL-Mint gebucht — es gibt keine eigene "SOL-Mint".
+const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+
+/**
+ * Bucht einen Abfluss über /liquidity/send in wallet_flows (LIQ#001063), NUR nachdem
+ * die Tx bestätigt ist — vorher könnte sie noch scheitern und wäre gar kein Fluss.
+ * Fehler hier dürfen den Send nicht rückwirkend als fehlgeschlagen erscheinen lassen
+ * (die Tx ist längst on-chain) — deshalb nur loggen, nie werfen. Der Chain-Scan
+ * (bin/wallet-flow-scan.js) würde eine hier verpasste Buchung ohnehin nachtragen.
+ * @param {string} mint
+ * @param {number} amount  positiv, wird hier negiert (Abfluss)
+ * @param {string} toAddress
+ * @param {string} txHash
+ */
+function bookLiquiditySendFlow({ mint, amount, toAddress, txHash }) {
+    // db.js selbst öffnet keine Verbindung ohne Aufruf und lädt kein Bot-Config/Keypair
+    // beim Import — anders als wallet.js/config.js des Liquidity-Bots. Import ist daher
+    // hier (forge-settings-Prozess) sicher, Roh-SQL auf der Bot-DB ist es laut db.js
+    // ausdrücklich NICHT ("niemals außerhalb dieses Moduls").
+    let db;
+    try {
+        db = openDatabase(PATHS.liquidityDb);
+        const usdPrice = getWalletFlowUsdPrice(db, mint);
+        if (usdPrice == null) {
+            console.warn(`[wallet/send] wallet_flows: kein Kurs für Mint ${mint} – nicht gebucht (Chain-Scan trägt nach, falls Kurs später verfügbar)`);
+            return;
+        }
+        insertWalletFlow(db, {
+            txHash, mint,
+            amount:   -Math.abs(amount),
+            usdValue: -Math.abs(amount * usdPrice),
+            counterparty: toAddress,
+            source: 'send',
+        });
+    } catch (err) {
+        console.warn(`[wallet/send] wallet_flows-Buchung fehlgeschlagen: ${err.message}`);
+    } finally {
+        try { db?.close(); } catch { /* ignore */ }
+    }
+}
+
 /**
  * Stößt nach einem erfolgreichen Send automatisch einen frischen Wallet-Snapshot an —
  * ohne die HTTP-Antwort zu blockieren (Aufrufer NICHT awaiten, siehe Sende-Routen).
@@ -156,13 +204,19 @@ async function runWalletMonitorRefresh() {
  *
  * @param {Connection} connection
  * @param {string}     txHash
+ * @param {{mint: string, amount: number, toAddress: string}} [flow]  LIQ#001063: nur für
+ *        /liquidity/send gesetzt — bucht den Abfluss in wallet_flows nach Bestätigung.
  */
-function scheduleWalletRefreshAfterSend(connection, txHash) {
+function scheduleWalletRefreshAfterSend(connection, txHash, flow = null) {
     (async () => {
-        try {
-            await connection.confirmTransaction(txHash, 'confirmed');
-        } catch (err) {
-            console.warn(`[wallet/send] confirmTransaction fehlgeschlagen (Refresh läuft trotzdem): ${err.message}`);
+        // HTTP-Polling statt confirmTransaction(): dessen WebSocket geht am Nexus vorbei
+        // und reißt bei erschöpftem Anbieter-Kontingent eine endlose 429-Schleife auf
+        // (lib/await-signature.js, CORE#000992).
+        const { confirmed, err } = await awaitSignature(connection, txHash);
+        if (!confirmed || err) {
+            console.warn(`[wallet/send] Bestätigung ${confirmed ? `mit Fehler ${JSON.stringify(err)}` : 'nach 60 s nicht erreicht'} (Refresh läuft trotzdem)`);
+        } else if (flow) {
+            bookLiquiditySendFlow({ ...flow, txHash });
         }
         // Helius-Indexer braucht nach der Bestätigung manchmal noch ein paar Sekunden,
         // bis getParsedTokenAccountsByOwner den neuen Stand zurückgibt (siehe
@@ -613,13 +667,14 @@ router.post('/liquidity/send', async (req, res) => {
                     lamports:   requestedLamports,
                 })
             );
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-            scheduleWalletRefreshAfterSend(connection, txHash);
+            scheduleWalletRefreshAfterSend(connection, txHash, { mint: WSOL_MINT, amount, toAddress });
             return res.json({ ok: true, txHash, symbol: sym, amount });
 
         } else {
@@ -678,18 +733,23 @@ router.post('/liquidity/send', async (req, res) => {
                 data,
             }));
 
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
+
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-            scheduleWalletRefreshAfterSend(connection, txHash);
+            // sentAmount statt `amount`: rawAmount kann auf onChainRaw gedeckelt worden sein
+            // (Snapshot war veraltet) — die Buchung muss den tatsächlich gesendeten Betrag zeigen.
+            const sentAmount = Number(rawAmount) / 10 ** decimals;
+            scheduleWalletRefreshAfterSend(connection, txHash, { mint: TOKEN_MINTS[sym], amount: sentAmount, toAddress });
             return res.json({ ok: true, txHash, symbol: sym, amount });
         }
     } catch (err) {
         console.error(`[wallet/send] Fehler: ${err.message}`);
-        return res.status(500).json({ error: err.message });
+        return respondSendError(res, err);
     }
 });
 
@@ -900,6 +960,7 @@ router.post('/lending/send', async (req, res) => {
                     lamports:   requestedLamports,
                 })
             );
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
@@ -962,6 +1023,8 @@ router.post('/lending/send', async (req, res) => {
                 data,
             }));
 
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
+
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
@@ -973,7 +1036,7 @@ router.post('/lending/send', async (req, res) => {
         }
     } catch (err) {
         console.error(`[wallet/lending/send] Fehler: ${err.message}`);
-        return res.status(500).json({ error: err.message });
+        return respondSendError(res, err);
     }
 });
 
@@ -1242,6 +1305,8 @@ router.post('/:flavor/scam/move', async (req, res) => {
             data,
         }));
 
+        await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
+
         const { blockhash } = await connection.getLatestBlockhash('confirmed');
         tx.recentBlockhash = blockhash;
         tx.feePayer        = keypair.publicKey;
@@ -1257,8 +1322,21 @@ router.post('/:flavor/scam/move', async (req, res) => {
         res.json({ ok: true, txHash, moved: Number(rawAmount) / 10 ** decimals });
     } catch (err) {
         console.error(`[wallet/scam/move] ${err.message}`);
-        res.status(500).json({ error: err.message });
+        return respondSendError(res, err);
     }
+});
+
+// Das Skript trägt einen Fehlergrund nur je Token in result.failed[].error, nicht
+// auf oberster Ebene — die Oberfläche zeigt nur json.error und fiel dadurch auf
+// "unbekannt" zurück (Vorfall 2026-08-21). Ersten Fund als Fallback hochreichen — in
+// der Job-Nacharbeit, damit es auch für per /api/jobs abgefragte Ergebnisse gilt.
+registerKind('scam-burn', {
+    onDone(result) {
+        if (!result.ok && !result.error && result.result?.failed?.length) {
+            result.error = result.result.failed[0].error ?? 'unbekannt';
+        }
+        return result;
+    },
 });
 
 // ── POST /:flavor/scam/burn ───────────────────────────────────────────────────
@@ -1297,32 +1375,22 @@ router.post('/:flavor/scam/burn', async (req, res) => {
     // --skip-warn ist hier nicht optional: ohne den Schalter zählt das Skript
     // WARN-Token zu den brennbaren. Über diesen Weg darf ein WARN-Token NIE
     // verbrannt werden, auch nicht bei einem manipulierten Request.
-    const args = [script, '--mint', mint, '--execute', '--yes', '--json', '--skip-warn'];
+    const args = ['--mint', mint, '--execute', '--yes', '--json', '--skip-warn'];
 
-    const result = await new Promise(resolve => {
-        const proc = spawn('node', args, { cwd: cfg.dir() });
-        let stdout = '';
-        let stderr = '';
-        const timer = setTimeout(() => {
-            try { proc.kill('SIGTERM'); } catch { /* schon beendet */ }
-            resolve({ ok: false, error: 'timeout' });
-        }, 120_000);
-
-        proc.on('error', err => {
-            clearTimeout(timer);
-            resolve({ ok: false, error: err.message });
-        });
-        proc.stdout.on('data', c => { stdout += c.toString(); });
-        proc.stderr.on('data', c => { stderr += c.toString(); });
-        proc.on('close', () => {
-            clearTimeout(timer);
-            const line = stdout.split('\n').map(l => l.trim()).filter(Boolean)
-                .reverse().find(l => l.startsWith('{') && l.endsWith('}'));
-            if (!line) return resolve({ ok: false, error: 'no_json_output', stderr: stderr.slice(0, 500) });
-            try { resolve(JSON.parse(line)); }
-            catch (err) { resolve({ ok: false, error: `json_parse_failed: ${err.message}` }); }
-        });
+    // Losgelöster Job (CORE#000993): Der Burn überlebt einen Neustart von
+    // forge-settings, kein Timeout beendet ihn. Ein Schlüssel je Flavor-Wallet, damit
+    // nicht zwei Burns parallel am selben Wallet signieren.
+    const { job, conflict } = startJob({
+        kind: 'scam-burn', key: `burn:${flavor}`, ref: req.body?.clientRef, script, args, cwd: cfg.dir(), meta: { flavor, mint },
     });
+    if (conflict) {
+        return res.status(409).json({ ok: false, busy: true, error: t('api.jobs.already_running'), jobId: conflict.id });
+    }
+    const current = await waitForJob(job.id, 120_000);
+    if (current?.status !== 'done') {
+        return res.status(202).json({ ok: false, pending: true, jobId: job.id, error: t('api.jobs.still_running') });
+    }
+    const result = { ...current.result, jobId: job.id };
 
     // Der Wochen-Cron hält eine Single-Instance-Lock. Das ist kein Fehler, sondern
     // ein Zustand — die Oberfläche sagt "läuft gerade" statt etwas Rotes zu zeigen.
@@ -1330,21 +1398,15 @@ router.post('/:flavor/scam/burn', async (req, res) => {
 
     // Den Wallet-Monitor-Refresh nach dem Burn triggert das Skript (close-scam-tokens.js)
     // seit 23.08.2026 selbst — zentral für BEIDE Aufrufer (UI-Route hier UND direkter
-    // Terminal-Aufruf). Vorher lief der Refresh nur hier in der Route; wer den Burn im
-    // Terminal auslöste, sah die Auffälligkeits-Liste nie sofort korrigiert. Ein zweiter
-    // Refresh hier wäre nur redundante Wartezeit (bis zu weitere 30s) ohne Zusatznutzen.
-    // result.scamListStale kommt bereits vom Skript, falls sein interner Refresh
-    // scheiterte (Timeout/RPC-Fehler) — die Oberfläche zeigt dann einen Hinweis statt
-    // stillschweigend einen frischen Stand zu behaupten.
-
-    // Das Skript trägt einen Fehlergrund nur je Token in result.failed[].error, nicht
-    // auf oberster Ebene — die Oberfläche zeigt bislang nur json.error und fiel dadurch
-    // auf "unbekannt" zurück (Vorfall 2026-08-21). Ersten Fund als Fallback hochreichen.
-    if (!result.ok && !result.error && result.result?.failed?.length) {
-        result.error = result.result.failed[0].error ?? 'unbekannt';
-    }
-
+    // Terminal-Aufruf). result.scamListStale kommt bereits vom Skript, falls sein interner
+    // Refresh scheiterte — die Oberfläche zeigt dann einen Hinweis.
     res.json(result);
+});
+
+// ── GET /rpc-status ───────────────────────────────────────────────────────────
+// CORE#000992: Notbetrieb des Nexus für den Hinweis im Senden-Reiter.
+router.get('/rpc-status', async (_req, res) => {
+    res.json({ fallbackActive: await isNexusFallbackActive(NEXUS_RPC_FRESH) });
 });
 
 // ── POST /refresh-monitor ─────────────────────────────────────────────────────
@@ -1540,6 +1602,7 @@ router.post('/premium/send', async (req, res) => {
                     lamports:   requestedLamports,
                 })
             );
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
@@ -1602,6 +1665,8 @@ router.post('/premium/send', async (req, res) => {
                 data,
             }));
 
+            await addFallbackPriorityFee(connection, tx);   // CORE#000992: nur im Notbetrieb
+
             const { blockhash } = await connection.getLatestBlockhash('confirmed');
             tx.recentBlockhash = blockhash;
             tx.feePayer        = wallet.publicKey;
@@ -1613,7 +1678,7 @@ router.post('/premium/send', async (req, res) => {
         }
     } catch (err) {
         console.error(`[wallet/send] Premium-Transfer fehlgeschlagen: ${err.message}`);
-        return res.status(500).json({ error: err.message });
+        return respondSendError(res, err);
     }
 });
 

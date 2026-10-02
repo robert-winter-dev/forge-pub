@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title data-i18n="overview.page_title">FORGE - public: Dashboard</title>
     <link rel="icon" type="image/png" href="img/forge-logo.png">
-    <link rel="stylesheet" href="css/forge.css?v=20260822a">
+    <link rel="stylesheet" href="css/shared.css?v=20261002c">
+    <link rel="stylesheet" href="css/forge.css?v=20261002a">
     <link rel="stylesheet" href="css/toast.css?v=20260722b">
     <script>window.FORGE_TZ = 'Europe/Berlin';</script>
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Bewusst synchron und vor allen
@@ -60,11 +61,7 @@
                     <span class="ov-current-val" id="portfolioCurrentVal"></span>
                 </div>
                 <div class="ov-controls">
-                    <div class="ov-range-btns" id="ovRangeBtns">
-                        <button class="ov-range-btn" data-range="1D">1D</button>
-                        <button class="ov-range-btn" data-range="1W">1W</button>
-                        <button class="ov-range-btn active" data-range="1M">1M</button>
-                    </div>
+                    <div class="chart-range-btns" id="ovRangeBtns"></div>
                 </div>
             </div>
             <div class="ov-chart-wrap" id="portfolioChartWrap">
@@ -81,11 +78,7 @@
                     <span class="ov-current-val" id="earningsCurrentVal"></span>
                 </div>
                 <div class="ov-controls">
-                    <div class="ov-range-btns" id="earningsRangeBtns">
-                        <button class="ov-range-btn" data-range="1D">1D</button>
-                        <button class="ov-range-btn" data-range="1W">1W</button>
-                        <button class="ov-range-btn active" data-range="1M">1M</button>
-                    </div>
+                    <div class="chart-range-btns" id="earningsRangeBtns"></div>
                 </div>
             </div>
             <div class="ov-chart-wrap" id="earningsChartWrap">
@@ -131,12 +124,8 @@
     <div class="ov-modal-dialog">
         <div class="ov-modal-header">
             <span class="ov-modal-title" data-i18n="overview.modal.portfolio">Gesamtguthaben – Verlauf</span>
-            <div class="ov-range-btns" id="ovModalRangeBtns">
-                <button class="ov-range-btn" data-range="1D">1D</button>
-                <button class="ov-range-btn" data-range="1W">1W</button>
-                <button class="ov-range-btn active" data-range="1M">1M</button>
-            </div>
-            <button class="ov-modal-close" id="portfolioModalClose" title="Schließen" data-i18n-attr="title:common.close">&times;</button>
+            <div class="chart-range-btns" id="ovModalRangeBtns"></div>
+            <button class="ov-modal-close" id="portfolioModalClose" title="Schließen" data-i18n-attr="title:common.close">✕</button>
         </div>
         <div class="ov-modal-body" id="portfolioModalBody">
             <svg class="ov-modal-svg" id="portfolioModalSvg"></svg>
@@ -149,12 +138,8 @@
     <div class="ov-modal-dialog">
         <div class="ov-modal-header">
             <span class="ov-modal-title" data-i18n="overview.modal.pnl">PnL – Verlauf</span>
-            <div class="ov-range-btns" id="earModalRangeBtns">
-                <button class="ov-range-btn" data-range="1D">1D</button>
-                <button class="ov-range-btn" data-range="1W">1W</button>
-                <button class="ov-range-btn active" data-range="1M">1M</button>
-            </div>
-            <button class="ov-modal-close" id="earningsModalClose" title="Schließen" data-i18n-attr="title:common.close">&times;</button>
+            <div class="chart-range-btns" id="earModalRangeBtns"></div>
+            <button class="ov-modal-close" id="earningsModalClose" title="Schließen" data-i18n-attr="title:common.close">✕</button>
         </div>
         <div class="ov-modal-body" id="earningsModalBody">
             <svg class="ov-modal-svg" id="earningsModalSvg"></svg>
@@ -168,7 +153,7 @@
 <div class="toast-container" id="toastContainer"></div>
 <div id="fgt"></div>
 
-<script type="module" src="js/forge.js?v=20260826b"></script>
+<script type="module" src="js/forge.js?v=20261002a"></script>
 
 </body>
 </html>

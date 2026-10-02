@@ -25,7 +25,7 @@ import { Transaction, SystemProgram, PublicKey, TransactionInstruction } from '@
 import { swapTokens, quoteTokens } from './swap.js';
 import { getKeypair, getConnection, getTokenBalanceFresh, getUsableSolBalanceFresh, USDC_MINT, getTxFee } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
-import { insertTransaction, insertCapitalFlow, setCloseProceeds, setTransactionTxFee } from './db.js';
+import { insertTransaction, insertCapitalFlow, insertWalletFlow, setCloseProceeds, setTransactionTxFee } from './db.js';
 import { logChainTx } from './chain-tx-log.js';
 // Nur für die Entnahmeprüfung unten. notify.js importiert exit-finalizer.js nicht — kein Zyklus.
 import * as notify from './notify.js';
@@ -930,6 +930,9 @@ export async function executeSwapStep(pool, opts) {
  *   @param {boolean}  opts.swapToUsdc     War vorher Swap aktiv?
  *   @param {string}   opts.logPrefix
  *   @param {Function} [opts.onTransferred]  Callback() — persistiert Fortschritt
+ *   @param {Database} [opts.db]  LIQ#001063: bucht jeden Transfer als Abfluss in
+ *        wallet_flows (source: exit_send_to). Ohne db entfällt die Buchung — der
+ *        Chain-Scan (bin/wallet-flow-scan.js) trägt sie dann nach.
  */
 export async function executeTransferStep(pool, opts) {
     const {
@@ -939,6 +942,7 @@ export async function executeTransferStep(pool, opts) {
         swapToUsdc,
         logPrefix,
         onTransferred,
+        db = null,
     } = opts;
 
     const keypair    = getKeypair();
@@ -949,6 +953,28 @@ export async function executeTransferStep(pool, opts) {
     const symA = sideA.symbol, symB = sideB.symbol;
 
     let lastTxHash = null;
+
+    // Bucht einen bestätigten Abfluss. Fehler hier dürfen den bereits on-chain
+    // gelandeten Transfer nicht rückwirkend scheitern lassen — nur loggen.
+    const bookOutflow = (mint, amount, txHash) => {
+        if (!db || !txHash || amount <= 0) return;
+        try {
+            const usdPrice = mint === USDC_MINT ? 1 : getTokenUsdPrice(mint, db);
+            if (usdPrice == null) {
+                console.warn(`${logPrefix} wallet_flows: kein Kurs für Mint ${mint} – nicht gebucht`);
+                return;
+            }
+            insertWalletFlow(db, {
+                txHash, mint,
+                amount:   -amount,
+                usdValue: -(amount * usdPrice),
+                counterparty: sendTo,
+                source: 'exit_send_to',
+            });
+        } catch (err) {
+            console.warn(`${logPrefix} wallet_flows-Buchung fehlgeschlagen: ${err.message}`);
+        }
+    };
 
     if (swapToUsdc) {
         if (swappedUsdc > 0) {
@@ -966,6 +992,7 @@ export async function executeTransferStep(pool, opts) {
                 const r = await sendSplToken(keypair, connection, sendTo, USDC_MINT, USDC_DECIMALS, transferAmount);
                 lastTxHash = r.txHash;
                 console.log(`${logPrefix} Transfer ✓  TX: ${r.txHash}`);
+                bookOutflow(USDC_MINT, transferAmount, r.txHash);
             }
         }
     } else {
@@ -975,11 +1002,13 @@ export async function executeTransferStep(pool, opts) {
                 console.log(`${logPrefix} Transfer: ${coinsA.toFixed(4)} SOL → ${sendTo.slice(0, 8)}…`);
                 lastTxHash = await sendNativeSol(keypair, connection, sendTo, lamports);
                 console.log(`${logPrefix} Transfer SOL ✓  TX: ${lastTxHash}`);
+                bookOutflow(WSOL_MINT, coinsA, lastTxHash);
             } else {
                 console.log(`${logPrefix} Transfer: ${coinsA.toFixed(6)} ${symA} → ${sendTo.slice(0, 8)}…`);
                 const r = await sendSplToken(keypair, connection, sendTo, pool.tokenA, pool.decimalsA, coinsA);
                 lastTxHash = r.txHash;
                 console.log(`${logPrefix} Transfer ${symA} ✓  TX: ${r.txHash}`);
+                bookOutflow(pool.tokenA, coinsA, r.txHash);
             }
         }
         if (coinsB > 0) {
@@ -987,6 +1016,7 @@ export async function executeTransferStep(pool, opts) {
             const r = await sendSplToken(keypair, connection, sendTo, pool.tokenB, pool.decimalsB, coinsB);
             lastTxHash = r.txHash;
             console.log(`${logPrefix} Transfer ${symB} ✓  TX: ${r.txHash}`);
+            bookOutflow(pool.tokenB, coinsB, r.txHash);
         }
     }
 

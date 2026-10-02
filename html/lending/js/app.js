@@ -10,6 +10,7 @@
  *   tvlHistory: [{ ts, kamino?, lulo?, marinade? }],  // TVL in USDC pro Protokoll
  *   liqHistory: [{ ts, kamino?, lulo?, marinade? }],  // sofort abhebbare Liquidität in USDC
  *   portfolioHistory: [{ ts, v }],
+ *   balanceHistory:   [{ ts, v }],  // wie Gesamt-Karte: Positionen + ganzes Wallet (Chart links)
  *   transactions: [{ id, type, protocol, asset, amount, txHash, createdAt }],
  *   config: { apyThreshold, autoCompounding, autoRebalance },
  *   notifications: [{ id, level, message, ts }]
@@ -22,16 +23,19 @@ import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
 import { initMessageBell } from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
 import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260826a';
+import { wireMaximize, fitHeight }             from '../../js/modal.js?v=20261002b';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (15 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
 import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
-import { filterOutliers, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260411a';
+import { filterOutliers, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260925a';
 import {
     TZ, todayISO, startOfDayMs, zonedWallClockToMs,
     partsInTZ, hourBucketKey, makeFmt, fmtDateDE
 } from '../../js/tz.js?v=20260414a';
 import { renderBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
+// Zeitraum-Filter (1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LEN#000935)
+import { DEFAULT_RANGES, createRangeBar, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20260923a';
 
 const toastManager   = new ToastManager({
     storageKey: 'lendingbot_lastToastTs',
@@ -327,7 +331,7 @@ function openGebundenModal(data) {
     modal.style.display = 'flex';
 }
 
-// ─── Portfolio-Chart-Modal (Gesamt-Karte) ─────────────────────────────────────
+// ─── Portfolio-Chart-Modal (Klick auf den Gesamtguthaben-Chart) ─────────────────────────────────
 
 const LS_PORTFOLIO_RANGE    = 'lendingbot_chart_portfolio';
 const LS_PORTFOLIO_OUTLIERS = 'lendingbot_portfolioChartFilterOutliers';
@@ -345,7 +349,8 @@ function renderDetailPortfolioChart(data) {
     if (!svg || !data) return;
 
     const H       = svg.getBoundingClientRect().height || 380;
-    const history = filterByRange(data?.portfolioHistory ?? [], portfolioRange, r => r.ts);
+    const pRange  = activeRange(portfolioRange, data?.balanceHistory ?? [], r => r.ts);
+    const history = filterByRange(data?.balanceHistory ?? [], portfolioRange, r => r.ts);
     if (history.length < 2) {
         svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
         return;
@@ -353,7 +358,7 @@ function renderDetailPortfolioChart(data) {
 
     const baseline = data?.portfolio?.baseline ?? null;
     svg.setAttribute('height', H);
-    const geo = _buildPortfolioSvg(svg, H, 72, 16, 16, 32, history, portfolioRange, _portfolioChartFilterOutliers, baseline);
+    const geo = _buildPortfolioSvg(svg, H, 72, 16, 16, 34, history, pRange, _portfolioChartFilterOutliers, baseline);
     if (geo) attachHoverOverlay(svg, geo);
 }
 
@@ -367,7 +372,7 @@ function initPortfolioChartModal(getData) {
         if (!data) return;
         modal.style.display = 'flex';
         updateChartRangeBtns(
-            data?.portfolioHistory ?? [], r => r.ts,
+            data?.balanceHistory ?? [], r => r.ts,
             'portfolioChartModalRangeBtns',
             () => portfolioRange,
             v  => {
@@ -381,7 +386,7 @@ function initPortfolioChartModal(getData) {
         requestAnimationFrame(() => requestAnimationFrame(() => renderDetailPortfolioChart(getData())));
     };
 
-    document.getElementById('gesamtValue')?.addEventListener('click', openModal);
+    document.getElementById('portfolioChartSvg')?.addEventListener('click', openModal);
 
     closeBtn?.addEventListener('click', () => { modal.style.display = 'none'; });
     modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
@@ -401,12 +406,21 @@ function initPortfolioChartModal(getData) {
 
 // ─── Chart-Range-Definitionen ─────────────────────────────────────────────────
 
-const RANGE_DEFS = [
-    { key: '1D',  label: '1D',   minAgeMs: 0                  },  // immer
-    { key: '1W',  label: '1W',   minAgeMs: 0                  },  // immer (zeigt verfügbare Daten)
-    { key: '1M',  label: '1M',   minAgeMs: 0                  },  // immer (zeigt verfügbare Daten)
-    { key: 'all', label: 'Alle', minAgeMs: 30 * 86_400_000    },  // erst nach 30 Tagen
-];
+// Zeitraum-Filter: zentrale Lib html/js/chart-range.js (LEN#000935). Der Wunsch (gespeicherte
+// Nutzerwahl) steckt in den _xxxRange-Variablen. Angezeigt wird activeRange(): der Wunsch, sofern
+// die Reihe weit genug zurückreicht, sonst der größte wählbare Zeitraum.
+// Kein Zusatz-Zeitraum „Alle": der Export liefert 30 Tage, „Alle" zeigte nie mehr als 1M (KB Core/chart-range-lib).
+// Ein gespeicherter Altwert 'all' ist unbekannt und fällt auf den größten wählbaren Zeitraum zurück.
+
+/** Tatsächlich angezeigter Zeitraum einer Reihe (Rückfall bei zu wenig Historie). */
+function activeRange(wish, series, getTs, ranges = DEFAULT_RANGES) {
+    return resolveRange(wish, historyStartOf(series, getTs), { ranges });
+}
+
+/** Reihe auf den aktiven Zeitraum filtern. */
+function filterByRange(arr, range, getTs, ranges = DEFAULT_RANGES) {
+    return filterToRange(arr, activeRange(range, arr, getTs, ranges), { ranges, getTs });
+}
 
 /**
  * Gibt die passende X-Achsen-Beschriftung zurück:
@@ -417,41 +431,45 @@ function xLabel(ts, range) {
     return range === '1D' ? fmtTime(ts) : fmtDate(ts).slice(0, 5);
 }
 
+// containerId → { bar, container, getRange, historyStart }: eine Leiste je Container, mehrere
+// Container dürfen denselben Wunsch teilen (z.B. Inline-Chart und Modal).
+const _rangeBars = new Map();
+
+function _syncRangeBar(entry) {
+    const wish = normalizeRangeKey(entry.getRange(), entry.bar.ranges);
+    if (wish != null) entry.bar.setActive(wish);   // 'set'/'history' lösen kein onChange-Rendern aus (siehe onChange unten)
+    entry.bar.setHistoryStart(entry.historyStart);
+}
+
 /**
- * Baut die Range-Buttons dynamisch anhand der tatsächlich vorhandenen Daten.
- * Buttons erscheinen nur, wenn der älteste Datenpunkt alt genug ist.
- * Wenn die bisher aktive Range nicht mehr verfügbar ist, wird auf '1D' zurückgefallen.
+ * Hängt die Zeitraum-Leiste `containerId` an die Lib. Gesperrte Zeiträume (zu wenig Historie)
+ * bleiben sichtbar, aber nicht klickbar; der Wunsch bleibt bei einem Rückfall erhalten.
+ * Die Leiste ändert nur den Wunsch (setRange) und ruft rerender; gezeichnet wird mit activeRange().
  */
-function updateChartRangeBtns(history, getTsMs, containerId, getCurrentRange, setRangeFn, rerenderFn) {
+function updateChartRangeBtns(history, getTs, containerId, getRange, setRange, rerender, ranges = DEFAULT_RANGES) {
     const container = document.getElementById(containerId);
     if (!container) return;
-
-    const now     = Date.now();
-    const oldest  = history.length ? Math.min(...history.map(getTsMs)) : now;
-    const maxAge  = now - oldest;
-
-    const available = RANGE_DEFS.filter(r => maxAge >= r.minAgeMs);
-    if (available.length === 0) available.push(RANGE_DEFS[0]);
-
-    // Falls aktive Range nicht mehr verfügbar: auf 1D zurückfallen
-    let activeKey = getCurrentRange();
-    if (!available.find(r => r.key === activeKey)) {
-        activeKey = '1D';
-        setRangeFn('1D');
-    }
-
-    container.innerHTML = available.map(r =>
-        `<button class="chart-range-btn${r.key === activeKey ? ' active' : ''}" data-range="${r.key}">${r.label}</button>`
-    ).join('');
-
-    container.querySelectorAll('.chart-range-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            container.querySelectorAll('.chart-range-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            setRangeFn(btn.dataset.range);
-            rerenderFn();
+    const historyStart = historyStartOf(history, getTs);
+    let entry = _rangeBars.get(containerId);
+    if (!entry || entry.container !== container) {
+        entry?.bar.destroy();
+        entry = { container, getRange, historyStart };
+        entry.bar = createRangeBar(container, {
+            ranges,
+            active: getRange(),
+            historyStart,
+            onChange: (key, { reason }) => {
+                if (reason !== 'user') return;   // Rückfall/Programmwahl: der Aufrufer rendert selbst
+                setRange(key);
+                _rangeBars.forEach(_syncRangeBar);   // andere Leisten mit demselben Wunsch nachziehen
+                rerender();
+            },
         });
-    });
+        _rangeBars.set(containerId, entry);
+    }
+    entry.getRange     = getRange;
+    entry.historyStart = historyStart;
+    _syncRangeBar(entry);
 }
 
 // ─── Portfolio-Chart (Row 2 + Modal) ─────────────────────────────────────────
@@ -507,14 +525,18 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, range
         const t = tMin + spanMs * i / 4;
         xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T + cH + 16).toFixed(1)}">${xLabel(t, range)}</text>`;
     }
+    // Achsentitel: Y = Einheit (gedreht), X = Uhrzeit bzw. Datum.
+    const xTitle = range === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    xLabels += `<text class="chart-label" transform="translate(11,${(PAD_T + cH / 2).toFixed(1)}) rotate(-90)" text-anchor="middle" font-size="10">USDC</text>`;
+    xLabels += `<text class="chart-label" x="${(PAD_L + cW / 2).toFixed(1)}" y="${H - 2}" text-anchor="middle" font-size="10">${xTitle}</text>`;
 
-    // Pfad-Segmente (Lücken bei null durch filterOutliers)
+    // Pfad: herausgefilterte Ausreißer (null) werden übersprungen, die Linie läuft durchgehend
+    // weiter — ein Abbruch je Ausreißer hinterließ Löcher im Chart (LIQ#000986).
     const bottomY = (PAD_T + cH).toFixed(1);
     const segs = [];
     let seg = [];
     for (let i = 0; i < history.length; i++) {
-        if (vs[i] === null) { if (seg.length >= 2) segs.push(seg); seg = []; }
-        else seg.push({ ts: history[i].ts, v: vs[i] });
+        if (vs[i] !== null) seg.push({ ts: history[i].ts, v: vs[i] });
     }
     if (seg.length >= 2) segs.push(seg);
 
@@ -566,19 +588,15 @@ function renderPortfolioChart(data) {
     const emptyMsg = document.getElementById('portfolioChartEmptyMsg');
     if (!svg) return;
 
-    const history = filterByRange(data?.portfolioHistory ?? [], portfolioRange, r => r.ts);
-    if (history.length < 2) {
-        svg.style.display      = 'none';
-        emptyMsg.style.display = 'block';
-        return;
-    }
-
-    svg.style.display      = 'block';
-    emptyMsg.style.display = 'none';
+    // Quelle balanceHistory (Export): dieselbe Basis wie die Gesamt-Karte (Positionen + ganzes Wallet).
+    const pRange  = activeRange(portfolioRange, data?.balanceHistory ?? [], r => r.ts);
+    const history = filterByRange(data?.balanceHistory ?? [], portfolioRange, r => r.ts);
+    svg.style.display = 'block';   // für die Breitenmessung in _buildPortfolioSvg
     svg.setAttribute('height', '160');
-
-    const baseline = data?.portfolio?.baseline ?? null;
-    _buildPortfolioSvg(svg, 160, 55, 40, 20, 30, history, portfolioRange, false, baseline);
+    const geo = history.length >= 2 && _buildPortfolioSvg(svg, 160, 62, 16, 12, 34, history, pRange, false, null);
+    svg.style.display = geo ? 'block' : 'none';
+    if (emptyMsg) emptyMsg.style.display = geo ? 'none' : 'block';
+    if (geo) attachHoverOverlay(svg, geo);
 }
 
 // ─── Aktive Positionen (Row 3) ────────────────────────────────────────────────
@@ -901,7 +919,7 @@ function renderAvailablePools(data) {
 
 
 function _calcInOut1D(proto, txns) {
-    const cutoff = Date.now() - 86_400_000;
+    const cutoff = rangeCutoff('1D');
     const relevant = (txns ?? []).filter(t => t.protocol === proto && t.createdAt >= cutoff);
     if (relevant.length === 0) return null;
     return relevant.reduce((s, t) => s + (t.type === 'deposit' ? t.amount : t.type === 'withdraw' ? -t.amount : 0), 0);
@@ -1339,183 +1357,6 @@ function initStatYieldModal() {
     modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
 }
 
-// ─── APY Chart (Row 2 links + Modal) ─────────────────────────────────────────
-
-let apyRange = localStorage.getItem('lendingbot_chart_apy') ?? '1D';
-
-/**
- * Berechnet die gewichtete Durchschnitts-APY-History aus dem apyHistory-Array.
- * Gewichtung anhand der aktuellen Positions-Beträge.
- */
-function _calcAvgApyHistory(filtered, data) {
-    const weights = {};
-    for (const pos of (data?.positions ?? [])) {
-        if (pos.protocol && (pos.amount ?? 0) > 0) {
-            weights[pos.protocol] = (weights[pos.protocol] ?? 0) + pos.amount;
-        }
-    }
-    const hasWeights = Object.keys(weights).length > 0;
-
-    return filtered.map(r => {
-        const protos = Object.keys(r).filter(k => k !== 'ts' && r[k] != null);
-        if (protos.length === 0) return null;
-        if (hasWeights) {
-            let weightedSum = 0, totalWeight = 0;
-            for (const p of protos) {
-                const w = weights[p] ?? 0;
-                if (w > 0) { weightedSum += r[p] * w; totalWeight += w; }
-            }
-            if (totalWeight > 0) return { ts: r.ts, avg: weightedSum / totalWeight };
-        }
-        return { ts: r.ts, avg: protos.reduce((s, p) => s + r[p], 0) / protos.length };
-    }).filter(Boolean);
-}
-
-/**
- * Zeichnet den APY-Linien-Chart in ein SVG.
- * Wiederverwendbar für Inline (H=160) und Modal.
- * Gibt geo-Objekt für attachHoverOverlay zurück.
- */
-function _buildApySvg(svgEl, avgHistory, H, PAD_L, PAD_R, PAD_T, PAD_B, range) {
-    const W  = svgEl.getBoundingClientRect().width || svgEl.parentElement?.clientWidth || 800;
-    const cW = W - PAD_L - PAD_R;
-    const cH = H - PAD_T - PAD_B;
-
-    const allVals = avgHistory.map(r => r.avg);
-    const tsArr   = avgHistory.map(r => r.ts);
-    const minV    = Math.max(0, Math.min(...allVals) - 0.5);
-    const maxV    = Math.max(...allVals) + 0.5;
-    const rangeV  = maxV - minV || 1;
-    const tMin    = Math.min(...tsArr), tMax = Math.max(...tsArr);
-    const spanMs  = tMax - tMin || 1;
-
-    const sx = t => PAD_L + ((t - tMin) / spanMs) * cW;
-    const sy = v => PAD_T + (1 - (v - minV) / rangeV) * cH;
-
-    const gradId = `apyGrad_${svgEl.id}`;
-
-    let gridLines = '';
-    for (let i = 0; i <= 4; i++) {
-        const v = minV + (rangeV / 4) * i;
-        const y = sy(v).toFixed(1);
-        gridLines += `<line class="chart-grid" x1="${PAD_L}" x2="${(PAD_L + cW).toFixed(1)}" y1="${y}" y2="${y}"/>`;
-        gridLines += `<text class="chart-label chart-label-y" x="${(PAD_L - 5).toFixed(1)}" y="${(+y + 4).toFixed(1)}">${fmt(v, 1)}%</text>`;
-    }
-
-    let xLabels = '';
-    for (let i = 0; i <= 4; i++) {
-        const t = tMin + spanMs * i / 4;
-        xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T + cH + 16).toFixed(1)}">${xLabel(t, range)}</text>`;
-    }
-
-    let linePath = `M ${sx(tsArr[0]).toFixed(1)},${sy(allVals[0]).toFixed(1)}`;
-    for (let i = 1; i < avgHistory.length; i++) {
-        linePath += ` L ${sx(tsArr[i]).toFixed(1)},${sy(allVals[i]).toFixed(1)}`;
-    }
-    const bottomY  = (PAD_T + cH).toFixed(1);
-    const areaPath = `${linePath} L ${sx(tsArr[tsArr.length - 1]).toFixed(1)},${bottomY} L ${sx(tsArr[0]).toFixed(1)},${bottomY} Z`;
-
-    const lastX   = sx(tsArr[tsArr.length - 1]).toFixed(1);
-    const lastY   = sy(allVals[allVals.length - 1]).toFixed(1);
-    const lastVal = allVals[allVals.length - 1];
-    const marker  = `<circle cx="${lastX}" cy="${lastY}" r="5" class="price-marker"/>
-        <circle cx="${lastX}" cy="${lastY}" r="8" class="price-marker-ring" opacity="0.4"/>
-        <text class="chart-label" x="${(+lastX + 10).toFixed(1)}" y="${(+lastY + 4).toFixed(1)}"
-              fill="var(--primary)" font-size="10" font-weight="600">${fmt(lastVal, 2)}%</text>`;
-
-    svgEl.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svgEl.setAttribute('height', H);
-    svgEl.innerHTML = `
-        <defs><linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"   stop-color="var(--primary)" stop-opacity="0.35"/>
-            <stop offset="100%" stop-color="var(--primary)" stop-opacity="0"/>
-        </linearGradient></defs>
-        ${gridLines}${xLabels}
-        <path d="${areaPath}" fill="url(#${gradId})" stroke="none"/>
-        <path d="${linePath}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-        ${marker}`;
-
-    return {
-        tMin, tMax, spanMs,
-        PAD_L, cW, PAD_T, cH, W, H,
-        yMin: minV, yMax: maxV,
-        formatY: v => fmt(v, 2) + ' %',
-    };
-}
-
-function renderApyChart(data) {
-    const svg      = document.getElementById('apyChartSvg');
-    const emptyMsg = document.getElementById('apyChartEmptyMsg');
-    const legend   = document.getElementById('apyChartLegend');
-    if (!svg) return;
-
-    const history = data?.apyHistory ?? [];
-    const filtered = history.length >= 2 ? filterByRange(history, apyRange, r => r.ts) : [];
-    const avgHistory = filtered.length >= 2 ? _calcAvgApyHistory(filtered, data) : [];
-
-    if (avgHistory.length < 2) {
-        svg.style.display      = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('len.apy_building', 'APY-Verlauf wird aufgebaut…');
-        emptyMsg.style.display = 'block';
-        if (legend) legend.innerHTML = '';
-        return;
-    }
-
-    svg.style.display      = 'block';
-    emptyMsg.style.display = 'none';
-    if (legend) legend.innerHTML = '';
-
-    const geo = _buildApySvg(svg, avgHistory, 160, 45, 60, 20, 30, apyRange);
-    if (geo) attachHoverOverlay(svg, geo);
-}
-
-function renderDetailApyChart(data) {
-    const svg = document.getElementById('apyChartModalSvg');
-    if (!svg || !data) return;
-
-    const H        = svg.getBoundingClientRect().height || 380;
-    const filtered = filterByRange(data?.apyHistory ?? [], apyRange, r => r.ts);
-    const avg      = filtered.length >= 2 ? _calcAvgApyHistory(filtered, data) : [];
-
-    if (avg.length < 2) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
-        return;
-    }
-
-    svg.setAttribute('height', H);
-    const geo = _buildApySvg(svg, avg, H, 55, 16, 16, 32, apyRange);
-    if (geo) attachHoverOverlay(svg, geo);
-}
-
-function initApyChartModal(getData) {
-    const modal    = document.getElementById('apyChartModal');
-    const closeBtn = document.getElementById('apyChartModalClose');
-    if (!modal) return;
-
-    const openModal = () => {
-        const data = getData();
-        if (!data) return;
-        modal.style.display = 'flex';
-        updateChartRangeBtns(
-            data?.apyHistory ?? [], r => r.ts,
-            'apyChartModalRangeBtns',
-            () => apyRange,
-            v  => { apyRange = v; localStorage.setItem('lendingbot_chart_apy', v); renderApyChart(getData()); },
-            () => renderDetailApyChart(getData())
-        );
-        requestAnimationFrame(() => requestAnimationFrame(() => renderDetailApyChart(getData())));
-    };
-
-    document.getElementById('apyChartSvg')?.addEventListener('click', openModal);
-
-    closeBtn?.addEventListener('click', () => { modal.style.display = 'none'; });
-    modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && modal.style.display !== 'none') modal.style.display = 'none';
-    });
-}
-
-
 const LS_ACTIVE_COL_MODE = 'lendingbot_active_col_mode';
 let _activePoolsColMode = localStorage.getItem(LS_ACTIVE_COL_MODE) ?? 'investment'; // 'investment' | 'inout1d'
 
@@ -1526,6 +1367,14 @@ let _yieldRange    = localStorage.getItem(LS_YIELD_RANGE) ?? '1W';
 let _yieldResizeOb = null;
 
 const DAYS_DE = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+
+/**
+ * Aktiver Yield-Zeitraum. Historie-Beginn = erster Punkt der Portfolio-Historie (die Balken der
+ * Tage kommen aus dailyProfits, einer festen 30-Tage-Reihe, die keinen Datenbeginn verrät).
+ */
+function _yieldActiveRange(data) {
+    return activeRange(_yieldRange, data?.portfolioHistory ?? [], r => r.ts, DEFAULT_RANGES);
+}
 
 /**
  * Bereitet die Yield-Daten für den gewählten Zeitraum auf.
@@ -1541,7 +1390,7 @@ function _getYieldData(data, range) {
         const txns     = data?.transactions     ?? [];
 
         const nowMs   = Date.now();
-        const startMs = nowMs - 86_400_000; // rolling 24h
+        const startMs = rangeCutoff('1D', { now: nowMs }); // rolling 24h
 
         // Baseline: letzter portfolioHistory-Eintrag VOR dem 24h-Fenster.
         const preWindow = history.filter(r => r.ts < startMs);
@@ -1663,19 +1512,27 @@ function _yieldBarTooltipText(bar) {
     return `${lbl}: ${fmt(usdc, 4)} USDC`;
 }
 
+// 1D braucht einen Portfolio-Wert VOR dem 24h-Fenster. Fehlt er bei vorhandener Historie (Konto jünger
+// als 24 h), zeigt der Chart einen Hinweis statt Wochenbalken unter einer 1D-Beschriftung (LEN#000935).
+function _yieldLacks24h(data, range) {
+    return range === '1D' && (data?.portfolioHistory?.length ?? 0) > 0;
+}
+const _yieldNo24hText = () => tr('len.yield_no_24h', 'Noch keine 24 h Daten');
+
 function renderYieldChart(data) {
     const svg      = document.getElementById('yieldChartSvg');
     const emptyMsg = document.getElementById('yieldChartEmptyMsg');
     const wrapper  = document.getElementById('yieldChartWrapper');
     if (!svg) return;
 
-    let bars = _getYieldData(data, _yieldRange);
-    // Fallback: wenn 1D-History fehlt (data-history.json noch nicht geladen), auf 1W-Ansicht wechseln
-    if (bars.length === 0 && _yieldRange === '1D') bars = _getYieldData(data, '1W');
+    const range = _yieldActiveRange(data);
+    const bars  = _getYieldData(data, range);
 
     if (bars.length === 0) {
         svg.style.display      = 'none';
-        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen') : tr('len.no_yield_data', 'Keine Yield-Daten vorhanden…');
+        if (emptyMsg) emptyMsg.textContent = data?.botActive === false ? tr('liq.no_open_positions', 'Keine offenen Positionen')
+            : _yieldLacks24h(data, range) ? _yieldNo24hText()
+            : tr('len.no_yield_data', 'Keine Yield-Daten vorhanden…');
         emptyMsg.style.display = 'block';
         return;
     }
@@ -1697,11 +1554,13 @@ function renderDetailYieldChart(data) {
     const bodyEl  = document.getElementById('yieldChartModalBody');
     if (!svg || !data) return;
 
-    const H    = svg.getBoundingClientRect().height || 380;
-    const bars = _getYieldData(data, _yieldRange);
+    const H     = svg.getBoundingClientRect().height || 380;
+    const range = _yieldActiveRange(data);
+    const bars  = _getYieldData(data, range);
 
     if (bars.length === 0) {
-        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum')}</text>`;
+        const msg = _yieldLacks24h(data, range) ? _yieldNo24hText() : tr('liq.no_data_range_plain', 'Keine Daten für diesen Zeitraum');
+        svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" class="chart-label" dominant-baseline="middle">${msg}</text>`;
         return;
     }
 
@@ -1718,29 +1577,14 @@ function initYieldChartModal(getData) {
         const data = getData();
         if (!data) return;
         modal.style.display = 'flex';
-        // Yield-Modal-Range-Buttons (3 feste Buttons, analog initYieldRangeBtns)
-        const container = document.getElementById('yieldChartModalRangeBtns');
-        if (container) {
-            const defs = [{ key: '1D', label: '1D' }, { key: '1W', label: '1W' }, { key: '1M', label: '1M' }];
-            container.innerHTML = defs.map(d =>
-                `<button class="chart-range-btn${d.key === _yieldRange ? ' active' : ''}" data-range="${d.key}">${d.label}</button>`
-            ).join('');
-            container.querySelectorAll('.chart-range-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    container.querySelectorAll('.chart-range-btn').forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    _yieldRange = btn.dataset.range;
-                    localStorage.setItem(LS_YIELD_RANGE, _yieldRange);
-                    // Inline-Chart + Modal synchron halten
-                    renderYieldChart(getData());
-                    // Inline-Range-Buttons synchron halten
-                    document.querySelectorAll('#yieldRangeBtns .chart-range-btn').forEach(b => {
-                        b.classList.toggle('active', b.dataset.range === _yieldRange);
-                    });
-                    renderDetailYieldChart(getData());
-                });
-            });
-        }
+        updateChartRangeBtns(
+            data?.portfolioHistory ?? [], r => r.ts,
+            'yieldChartModalRangeBtns',
+            () => _yieldRange,
+            v  => { _yieldRange = v; localStorage.setItem(LS_YIELD_RANGE, v); renderYieldChart(getData()); },
+            () => renderDetailYieldChart(getData()),
+            DEFAULT_RANGES
+        );
         requestAnimationFrame(() => requestAnimationFrame(() => renderDetailYieldChart(getData())));
     };
 
@@ -1750,29 +1594,6 @@ function initYieldChartModal(getData) {
     modal.addEventListener('click', e => { if (e.target === modal) modal.style.display = 'none'; });
     document.addEventListener('keydown', e => {
         if (e.key === 'Escape' && modal.style.display !== 'none') modal.style.display = 'none';
-    });
-}
-
-/** Baut die drei festen Range-Buttons (1D/1W/1M) für den Yield-Chart einmalig auf. */
-function initYieldRangeBtns() {
-    const container = document.getElementById('yieldRangeBtns');
-    if (!container) return;
-    const defs = [
-        { key: '1D', label: '1D' },
-        { key: '1W', label: '1W' },
-        { key: '1M', label: '1M' },
-    ];
-    container.innerHTML = defs.map(d =>
-        `<button class="chart-range-btn${d.key === _yieldRange ? ' active' : ''}" data-range="${d.key}">${d.label}</button>`
-    ).join('');
-    container.querySelectorAll('.chart-range-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            container.querySelectorAll('.chart-range-btn').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            _yieldRange = btn.dataset.range;
-            localStorage.setItem(LS_YIELD_RANGE, _yieldRange);
-            if (dm?.data) renderYieldChart(dm.data);
-        });
     });
 }
 
@@ -1910,6 +1731,7 @@ function renderPoolApyChart() {
     const emptyMsg = document.getElementById('poolApyChartEmptyMsg');
 
     const history  = (data?.apyHistory ?? []).filter(r => r[protoKey] != null);
+    const range    = activeRange(_poolApyRange, history, r => r.ts);
     const filtered = filterByRange(history, _poolApyRange, r => r.ts);
 
     if (filtered.length < 2) {
@@ -1921,8 +1743,8 @@ function renderPoolApyChart() {
     emptyMsg.style.display = 'none';
 
     const points = filtered.map(r => ({ ts: r.ts, v: r[protoKey] }));
-    const H      = parseInt(svg.getAttribute('height')) || 200;
-    const geo    = _buildPoolLineSvg(svg, points, H, 48, 16, 16, 28, _poolApyRange, v => fmt(v, 1) + ' %');
+    const H      = fitHeight(svg, parseInt(svg.getAttribute('height')) || 200);
+    const geo    = _buildPoolLineSvg(svg, points, H, 48, 16, 16, 28, range, v => fmt(v, 1) + ' %');
     if (geo) attachHoverOverlay(svg, geo);
 }
 
@@ -1989,6 +1811,7 @@ function renderPoolTvlChart() {
     const emptyMsg = document.getElementById('poolTvlChartEmptyMsg');
 
     const history  = (data?.tvlHistory ?? []).filter(r => r[protoKey] != null);
+    const range    = activeRange(_poolTvlRange, history, r => r.ts);
     const filtered = filterByRange(history, _poolTvlRange, r => r.ts);
 
     if (filtered.length < 2) {
@@ -2000,8 +1823,8 @@ function renderPoolTvlChart() {
     emptyMsg.style.display = 'none';
 
     const points = filtered.map(r => ({ ts: r.ts, v: r[protoKey] }));
-    const H      = parseInt(svg.getAttribute('height')) || 200;
-    const geo    = _buildPoolLineSvg(svg, points, H, 62, 16, 16, 28, _poolTvlRange, v => fmtTvl(v));
+    const H      = fitHeight(svg, parseInt(svg.getAttribute('height')) || 200);
+    const geo    = _buildPoolLineSvg(svg, points, H, 62, 16, 16, 28, range, v => fmtTvl(v));
     if (geo) attachHoverOverlay(svg, geo);
 }
 
@@ -2062,6 +1885,7 @@ function renderPoolLiqChart() {
     const emptyMsg = document.getElementById('poolLiqChartEmptyMsg');
 
     const history  = (data?.liqHistory ?? []).filter(r => r[protoKey] != null);
+    const range    = activeRange(_poolLiqRange, history, r => r.ts);
     const filtered = filterByRange(history, _poolLiqRange, r => r.ts);
 
     if (filtered.length < 2) {
@@ -2073,8 +1897,8 @@ function renderPoolLiqChart() {
     emptyMsg.style.display = 'none';
 
     const points = filtered.map(r => ({ ts: r.ts, v: r[protoKey] }));
-    const H      = parseInt(svg.getAttribute('height')) || 200;
-    const geo    = _buildPoolLineSvg(svg, points, H, 62, 16, 16, 28, _poolLiqRange, v => fmtLiquidity(v));
+    const H      = fitHeight(svg, parseInt(svg.getAttribute('height')) || 200);
+    const geo    = _buildPoolLineSvg(svg, points, H, 62, 16, 16, 28, range, v => fmtLiquidity(v));
     if (geo) attachHoverOverlay(svg, geo);
 }
 
@@ -2114,11 +1938,13 @@ function closePoolInOutModal() {
     document.body.classList.remove('modal-open');
 }
 
+/** Historie des Pools (Reihe der APY-Werte): bestimmt, welche Zeiträume der Ein-/Auszahlungs-Chart freigibt. */
+function _poolInOutHistory(data) {
+    return (data?.apyHistory ?? []).filter(r => r[_poolInOutProto] != null);
+}
+
 function _getInOutBars(proto, txns, range) {
-    const nowMs  = Date.now();
-    const cutoff = range === '1D' ? nowMs - 86_400_000
-                 : range === '1W' ? nowMs - 7  * 86_400_000
-                 :                  nowMs - 30 * 86_400_000;
+    const cutoff = rangeCutoff(range);
     const relevant = (txns ?? []).filter(t =>
         t.protocol === proto && t.createdAt >= cutoff &&
         (t.type === 'deposit' || t.type === 'withdraw'));
@@ -2207,7 +2033,7 @@ function _renderPoolInOutChart(data) {
     const emptyMsg = document.getElementById('poolInOutChartEmptyMsg');
     if (!svgEl || !_poolInOutProto) return;
 
-    const bars    = _getInOutBars(_poolInOutProto, data?.transactions, _poolInOutRange);
+    const bars    = _getInOutBars(_poolInOutProto, data?.transactions, activeRange(_poolInOutRange, _poolInOutHistory(data), r => r.ts, DEFAULT_RANGES));
     const hasData = bars.some(b => b.net !== 0);
 
     svgEl.style.display    = hasData ? '' : 'none';
@@ -2220,19 +2046,14 @@ function _renderPoolInOutChart(data) {
 }
 
 function _renderPoolInOutRangeBtns(data) {
-    const container = document.getElementById('poolInOutRangeBtns');
-    if (!container) return;
-    container.innerHTML = ['1D','1W','1M'].map(r =>
-        `<button class="chart-range-btn${r === _poolInOutRange ? ' active' : ''}" data-range="${r}">${r}</button>`
-    ).join('');
-    container.querySelectorAll('.chart-range-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            _poolInOutRange = btn.dataset.range;
-            localStorage.setItem(LS_POOL_INOUT_RANGE, _poolInOutRange);
-            _renderPoolInOutRangeBtns(data);
-            _renderPoolInOutChart(data);
-        });
-    });
+    updateChartRangeBtns(
+        _poolInOutHistory(data), r => r.ts,
+        'poolInOutRangeBtns',
+        () => _poolInOutRange,
+        v  => { _poolInOutRange = v; localStorage.setItem(LS_POOL_INOUT_RANGE, v); },
+        ()  => _renderPoolInOutChart(dm.data),   // dm.data statt data: die Leiste wird nur einmal angelegt
+        DEFAULT_RANGES
+    );
 }
 
 function initPoolInOutModal() {
@@ -2259,19 +2080,6 @@ function initPoolInOutModal() {
         if (e.key === 'Escape' && !document.getElementById('poolInOutModal')?.classList.contains('hidden'))
             closePoolInOutModal();
     });
-}
-
-// ─── Chart-Range-Filtering ────────────────────────────────────────────────────
-
-function filterByRange(arr, range, getTsMs) {
-    const now = Date.now();
-    const cutoff = {
-        '1D': now - 86_400_000,
-        '1W': now - 7 * 86_400_000,
-        '1M': now - 30 * 86_400_000,
-        'all': 0,
-    }[range] ?? 0;
-    return arr.filter(r => getTsMs(r) >= cutoff);
 }
 
 // ─── Tooltip-System ───────────────────────────────────────────────────────────
@@ -2322,8 +2130,6 @@ function initTooltips() {
     }
 }
 
-// (Chart-Range-Buttons werden jetzt dynamisch in updateChartRangeBtns() aufgebaut)
-
 // ─── Notification Panel ───────────────────────────────────────────────────────
 
 // Brief-Icon → Message Center (nur LAN). Verdrahtung zentral in js/message-bell.js.
@@ -2338,14 +2144,23 @@ function render(data) {
 
     // Range-Buttons dynamisch aufbauen (vor Chart-Render, damit Range ggf. resettet wird)
     updateChartRangeBtns(
-        data?.apyHistory ?? [], r => r.ts,
-        'apyRangeBtns',
-        () => apyRange,
-        v  => { apyRange = v; localStorage.setItem('lendingbot_chart_apy', v); },
-        ()  => { if (dm.data) renderApyChart(dm.data); }
+        data?.balanceHistory ?? [], r => r.ts,
+        'portfolioRangeBtns',
+        () => portfolioRange,
+        v  => { portfolioRange = v; localStorage.setItem(LS_PORTFOLIO_RANGE, v); },
+        ()  => { if (dm.data) renderPortfolioChart(dm.data); }
     );
 
-    renderApyChart(data);
+    updateChartRangeBtns(
+        data?.portfolioHistory ?? [], r => r.ts,
+        'yieldRangeBtns',
+        () => _yieldRange,
+        v  => { _yieldRange = v; localStorage.setItem(LS_YIELD_RANGE, v); },
+        ()  => { if (dm.data) renderYieldChart(dm.data); },
+        DEFAULT_RANGES
+    );
+
+    renderPortfolioChart(data);
     renderYieldChart(data);
     renderAvailablePools(data);
     renderActivePools(data);
@@ -2385,16 +2200,27 @@ document.addEventListener('DOMContentLoaded', () => {
     initPoolLiqModal();
     initPoolInOutModal();
     initInactiveToggle();
-    initYieldRangeBtns();
     initWalletDetailModal(() => dm.data, {
         solPriceUsd: data => data?.portfolio?.solPrice ?? null,
     });
     initGebundenModal(() => dm.data);
     initPortfolioChartModal(() => dm.data);
-    initApyChartModal(() => dm.data);
     initYieldChartModal(() => dm.data);
     initStatPayedFeesModal();
     initStatYieldModal();
+    // Maximieren-Schalter für alle Dialoge; der Callback zeichnet Charts mit der neuen Fläche neu.
+    wireMaximize({
+        poolApyModal:        () => renderPoolApyChart(),
+        poolTvlModal:        () => renderPoolTvlChart(),
+        poolLiqModal:        () => renderPoolLiqChart(),
+        poolInOutModal:      () => { if (dm.data) _renderPoolInOutChart(dm.data); },
+        portfolioChartModal: () => { if (dm.data) renderDetailPortfolioChart(dm.data); },
+        yieldChartModal:     () => { if (dm.data) renderDetailYieldChart(dm.data); },
+        gebundenModal:       null,
+        walletDetailModal:   null,
+        statPayedFeesModal:  null,
+        statYieldModal:      null,
+    });
     dm.start();
 });
 
@@ -2404,12 +2230,10 @@ window.addEventListener('resize', () => {
     clearTimeout(_resizeTimer);
     _resizeTimer = setTimeout(() => {
         if (dm.data) {
-            renderApyChart(dm.data);
+            renderPortfolioChart(dm.data);
             renderYieldChart(dm.data);
             const pModal = document.getElementById('portfolioChartModal');
             if (pModal && pModal.style.display !== 'none') renderDetailPortfolioChart(dm.data);
-            const aModal = document.getElementById('apyChartModal');
-            if (aModal && aModal.style.display !== 'none') renderDetailApyChart(dm.data);
             const yModal = document.getElementById('yieldChartModal');
             if (yModal && yModal.style.display !== 'none') renderDetailYieldChart(dm.data);
         }
