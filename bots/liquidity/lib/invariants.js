@@ -14,6 +14,7 @@
  * hier hinzufügen.
  */
 
+import { USD_PEG_REF } from './pool-tokens.js';
 import { readFileSync, readdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -152,7 +153,7 @@ function computePoolViolations(pools) {
             for (const field of ['quotePricePoolId', 'quoteTokenMint']) {
                 if (!pool[field]) violations.push(`${label}: volatilePair=true erfordert "${field}"`);
             }
-            if (pool.quotePricePoolId && !allIds.has(pool.quotePricePoolId)) {
+            if (pool.quotePricePoolId && pool.quotePricePoolId !== USD_PEG_REF && !allIds.has(pool.quotePricePoolId)) {
                 violations.push(`${label}: quotePricePoolId "${pool.quotePricePoolId}" verweist auf keinen existierenden Pool`);
             }
         }

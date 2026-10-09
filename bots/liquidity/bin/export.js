@@ -13,6 +13,7 @@
  *   portfolioHistory, aprHistory, volumeHistory, transactions, notifications
  */
 
+import { USD_PEG_REF } from '../lib/pool-tokens.js';
 import Database          from 'better-sqlite3';
 import { notificationText } from '../../../lib/notify-render.js';
 import { roundPrice, quoteSymbol } from '../../../html/js/format-price.js';
@@ -595,23 +596,12 @@ const portfolioHistory = [...portfolioBy5Min.values()].map(r => ({
     v: round2(r.total_usd ?? 0),
 }));
 
-// Gesamtguthaben-Chart (links im Bot-Dashboard) muss mit der Gesamt-Karte (balance) übereinstimmen:
-// total_usd enthält das volle Wallet inkl. SOL-Reserve, Gesamt zieht sie ab. Deshalb je Punkt
-// Reserve × SOL-Preis zu diesem Zeitpunkt (letzter pool_stats-Preis ≤ t) abziehen.
-// Eigenes Feld: portfolioHistory bleibt unverändert, die Übersicht (html/js/forge.js) rechnet
-// bewusst auf der Basis inkl. Reserve.
-const solPriceHist = solPool ? db.prepare(`
-    SELECT price, recorded_at FROM pool_stats
-    WHERE pool_id = ? AND price > 0 AND recorded_at >= ? ORDER BY recorded_at ASC
-`).all(solPool.id, thirtyOneDaysAgo) : [];
-let _solIdx = 0;
-const solPriceAt = t => {
-    while (_solIdx + 1 < solPriceHist.length && solPriceHist[_solIdx + 1].recorded_at <= t) _solIdx++;
-    return solPriceHist[_solIdx]?.price ?? solPrice;
-};
+// Gesamtguthaben-Chart (links im Bot-Dashboard) und Gesamt-Karte (balance) zählen das ganze Wallet
+// inkl. SOL-Reserve: total_usd je Punkt unverändert. Eigenes Feld bleibt bestehen, damit das
+// Dashboard (html/liquidity/js/app.js) nicht umgestellt werden muss.
 const balanceHistory = [...portfolioBy5Min.values()].map(r => ({
     t: r.recorded_at,
-    v: round2((r.total_usd ?? 0) - solReserve * solPriceAt(r.recorded_at)),
+    v: round2(r.total_usd ?? 0),
 }));
 
 // APR-Verlauf (letzte 30 Tage, 1 Punkt/Stunde = pool_stats-Intervall)
@@ -742,6 +732,7 @@ for (const [derivedId, baseId] of Object.entries(_derivedQuoteBase)) {
     });
 }
 function _quoteUsdAt(quotePoolId, ts) {
+    if (quotePoolId === USD_PEG_REF) return 1;
     const arr = _quotePriceArrByPool[quotePoolId];
     if (!arr || arr.length === 0) return 0;
     let lo = 0, hi = arr.length - 1, idx = -1;
@@ -1179,7 +1170,7 @@ function _fallbackUsdValue(t) {
         usd = a + (price > 0 ? b / price : 0);
     } else if (cfg.volatilePair) {
         const arr = _quotePriceArrByPool[cfg.quotePricePoolId] ?? [];
-        const qP  = arr.length ? arr[arr.length - 1].price : 0;
+        const qP  = cfg.quotePricePoolId === USD_PEG_REF ? 1 : (arr.length ? arr[arr.length - 1].price : 0);
         if (qP > 0) {
             const quoteIsA = cfg.quoteTokenMint === pool.token_a;
             usd = quoteIsA ? (a + (price > 0 ? b / price : 0)) * qP
@@ -2296,9 +2287,10 @@ const walletUsdc      = wallet?.usdc ?? null;
 const usableWalletSol = walletSol != null ? Math.max(0, walletSol - solReserve) : null;
 const splTokensUsd    = wallet?.splTokensUsd ?? 0;
 const walletValueUsd  = wallet
-    ? round2(wallet.usdc + Math.max(0, wallet.sol - solReserve) * (wallet.solPriceUsd || solPrice) + wallet.splTokensUsd)
+    ? round2(wallet.usdc + wallet.sol * (wallet.solPriceUsd || solPrice) + wallet.splTokensUsd)
     : null;
-// balance = LP (undampiert aus portfolio_history) + walletValueUsd (gleiche Quelle wie WALLET-Anzeige).
+// balance = LP (undampiert aus portfolio_history) + walletValueUsd (ganzes Wallet inkl. SOL-Reserve,
+// gleiche Quelle wie WALLET-Anzeige).
 // NICHT currentValue/total_usd verwenden: der Spike-Damper kann dessen Wallet-Anteil reduzieren,
 // wodurch GESAMT < WALLET möglich wird. Stattdessen beide Terme aus konsistenten Quellen addieren.
 //
@@ -2378,7 +2370,7 @@ const reinvestPreview = edgeIsPremium(edgeSource, edgeStale)
         getOpenPosition:  poolId => getOpenPosition(db, poolId),
         exitBlock:        exitBlockFor(db, '[export:reinvest]'),
         checkEligibility: pool => checkInvestEligibility(pool, db, { settings: poolSettings[pool.id] ?? {} }),
-        pnl24h:           pos => _winPnl[pos.pool_id]?.[REINVEST_PNL_WINDOW.id] ?? null,
+        pnl24h:           pos => _breakdownByPool[pos.pool_id]?.sharePnl24hPct ?? null,  // = Spalte „PnL 24H“
     }, { byPool: edgeValuesByPool(poolsOverview) })
     : null;
 

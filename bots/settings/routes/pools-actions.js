@@ -27,6 +27,7 @@
  * Sicherheit: dieser Router lebt auf dem internen HTTPS Settings-Server (LAN only).
  */
 
+import { USD_PEG_REF } from '../../liquidity/lib/pool-tokens.js';
 import { Router }        from 'express';
 import fs                from 'fs';
 import path              from 'path';
@@ -377,7 +378,7 @@ router.get('/liquidity/:poolId/position-state', (req, res) => {
         try {
             const d  = JSON.parse(fs.readFileSync(LIQUIDITYBOT_DATA, 'utf8'));
             const ref = (d.pools ?? []).find(p => p.id === pool.quotePricePoolId);
-            quotePrice = ref?.price ?? null;
+            quotePrice = pool.quotePricePoolId === USD_PEG_REF ? 1 : (ref?.price ?? null);
         } catch { /* ignore */ }
     }
     // priceHistory (letzte 24h) aus data-history.json

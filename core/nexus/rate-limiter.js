@@ -9,6 +9,8 @@
  * (Node.js ist single-threaded – Awaits serialisieren automatisch).
  */
 
+import { recordCall } from './api-stats.js';
+
 export class RateLimiter {
     /**
      * @param {string} name         API-Name (für Logs)
@@ -28,7 +30,13 @@ export class RateLimiter {
      *
      * @returns {number} Tatsächlich gewartet in ms (0 = kein Throttling)
      */
-    async wait(accumulatedMs = 0) {
+    async wait() {
+        const waitedMs = await this._wait(0);
+        recordCall(this.name, waitedMs);   // CORE#001287: Auslastung je Limiter dauerhaft zählen
+        return waitedMs;
+    }
+
+    async _wait(accumulatedMs) {
         const now = Date.now();
         this.timestamps = this.timestamps.filter(t => now - t < this.windowMs);
 
@@ -36,7 +44,7 @@ export class RateLimiter {
             const waitMs = this.windowMs - (now - this.timestamps[0]) + 10;
             if (waitMs > 0) {
                 await new Promise(r => setTimeout(r, waitMs));
-                return this.wait(accumulatedMs + waitMs); // nach Warten erneut prüfen
+                return this._wait(accumulatedMs + waitMs); // nach Warten erneut prüfen
             }
         }
 

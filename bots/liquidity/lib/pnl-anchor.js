@@ -18,7 +18,7 @@
  * bewusste, protokollierte Klick zählt.
  */
 
-import { pnlForPeriod } from '../../../lib/pnl.js';
+import { pnlForPeriod, pnlBreakdownForPeriod } from '../../../lib/pnl.js';
 
 /**
  * @param {number|null|undefined} lastExternalDepositMs  letzter externer Kapitalfluss
@@ -148,7 +148,7 @@ export function resolvePnlExtremaAnchorMs(chainStartMs, pnlAnchorResetAtMs) {
 // ─── Laufzeit-PnL eines Pools ─────────────────────────────────────────────────────────────
 // Anker und Wert der Laufzeit-PnL („seit Eröffnung des Pools“) je Position für die Anzeige im
 // Dashboard (positions[].sinceOpenPnlUsd) und in den Details. Der Cleanup-Reinvest vergleicht
-// dagegen den PnL der letzten 24h (lib/reinvest-rules.js REINVEST_PNL_WINDOW), nicht diesen Wert.
+// dagegen den PnL der letzten 24h in % (sharePnl24hPct unten), nicht diesen Wert.
 
 /**
  * Anker der Laufzeit-PnL einer offenen Position: Eröffnung des Pools (Beginn der Kette) bzw.
@@ -170,4 +170,18 @@ export function pnlDetailsAnchorMs(db, pos) {
  */
 export function sinceOpenPnlUsd(db, pos, flavor) {
     return pnlForPeriod(db, { flavor, scope: pos.pool_id, fromMs: pnlDetailsAnchorMs(db, pos) });
+}
+
+/**
+ * PnL der letzten 24h in % (Spalte „PnL 24H“ der Operativen Metriken, LIQ#001023) — die Kennzahl
+ * hinter „Cleanup > Reinvest > Bester PnL (24h)“. Eine Quelle für Tabelle, Vorschau und Cleanup:
+ * `sharePnl24hPct` aus lib/pnl.js (pnlBreakdownForPeriod), % auf das Eingezahlte. Bewusst nicht
+ * `pnlWindows` (absolute USDC, zählt ausgezahlte Fees und Wallet-Rest mit; ein absoluter Wert
+ * bevorzugt außerdem immer den Pool mit dem meisten Kapital, Befund 04.10.2026).
+ *
+ * @returns {number|null} null ohne Wert (Laufzeit < 24h oder lib/pnl.js liefert nichts)
+ */
+export function sharePnl24hPct(db, pos, flavor) {
+    const b = pnlBreakdownForPeriod(db, { flavor, scope: pos.pool_id, fromMs: pnlDetailsAnchorMs(db, pos) });
+    return Number.isFinite(b?.sharePnl24hPct) ? b.sharePnl24hPct : null;
 }

@@ -21,6 +21,7 @@ import { ToastManager }                        from '../../js/toast.js?v=2026080
 import { initMessageBell }                     from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
 import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20261002a';
+import { investedStepsInRange }                from './invested-steps.js?v=20261006a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
 
 'use strict';
@@ -2256,7 +2257,7 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filte
 }
 
 // ── Gesamtguthaben-Chart (Inline + Modal) ────────────────────────────────────
-// Quelle: balanceHistory (Export) — dieselbe Basis wie die Gesamt-Karte (ohne SOL-Reserve).
+// Quelle: balanceHistory (Export) — dieselbe Basis wie die Gesamt-Karte.
 
 const _balanceHistory = data => data?.balanceHistory ?? [];
 let _portfolioResizeOb = null;
@@ -2767,11 +2768,7 @@ function renderPosValueChart(data, poolId) {
     // Stand am linken Rand = letzte Stufe davor; Stufen erst ab Messbeginn.
     const pos = (data?.positions ?? []).find(p => p.poolId === poolId && p.active);
     const inv = pos?.pnlBreakdown?.investedSeries ?? [];
-    const steps = [];
-    for (const e of inv) {
-        if (e.t <= minT) { steps.length = 0; steps.push({ t: minT, usd: e.usd }); }
-        else if (e.t <= maxT) steps.push(e);
-    }
+    const steps = investedStepsInRange(inv, minT, maxT);   // LIQ#001254: Stufen nach maxT klemmen statt verwerfen
     const invVals = steps.map(e => e.usd);
 
     let   minV = Math.min(...vals, ...invVals), maxV = Math.max(...vals, ...invVals);

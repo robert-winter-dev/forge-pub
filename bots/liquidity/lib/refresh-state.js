@@ -25,6 +25,7 @@
  *   - `refreshAfterAction(db, opts)`         – Orchestrator: Portfolio + Wallet + Sync
  */
 
+import { USD_PEG_REF } from './pool-tokens.js';
 import { spawn }             from 'child_process';
 import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
@@ -106,6 +107,7 @@ const ORACLE_MAX_AGE_MS     =  5 * 60 * 1000;
  */
 export function getQuotePriceUsd(db, pool) {
     if (!pool.quoteTokenMint) return 0;
+    if (pool.quotePricePoolId === USD_PEG_REF) return 1;
     if (pool.quotePricePoolId) {
         const now = Date.now();
         const poolRow = db.prepare(

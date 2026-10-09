@@ -22,6 +22,15 @@
 import { USDC_MINT } from './wallet.js';
 
 /**
+ * Pseudo-Referenzpool für Quote-Token, die fest 1 USD gelten (fiat-gedeckte Stablecoin,
+ * z.B. PYUSD in PYUSD/USDe). Als `quotePricePoolId` eingetragen, liefert jede Preisauflösung
+ * 1.0 statt einen Pool zu suchen. Der andere Token wird über die Pool-Ratio bewertet und
+ * bleibt damit marktbepreist: Ein USDe-Depeg zeigt sich im Poolpreis, nicht in einer Konstante.
+ * Nur für Token wählen, deren Peg nicht algorithmisch/synthetisch gehalten wird.
+ */
+export const USD_PEG_REF = 'usd-peg';
+
+/**
  * Seiten eines Pools in der Reihenfolge tokenA/tokenB, mit korrekt zugeordneten Symbolen.
  *
  * @param   {object} pool  braucht pair, tokenA, tokenB, decimalsA, decimalsB

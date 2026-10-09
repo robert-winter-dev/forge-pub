@@ -1,4 +1,5 @@
 import { PublicKey }  from '@solana/web3.js';
+import { USD_PEG_REF } from './pool-tokens.js';
 import { Percentage } from '@orca-so/common-sdk';
 import {
     getUsableSolBalance, getUsableSolBalanceFresh, getTokenBalance, getTokenBalanceFresh,
@@ -238,6 +239,15 @@ export function calcDepositedUsdc(tokenEstA, tokenEstB, price, pool, btcPrice = 
  * USD-Preis eines Token-Mints aus pool_stats.
  * Priorität: 1. direkter USDC-Pool  2. inverser USDC-Pool  3. BTC-Peg-Fallback (WBTC)
  */
+/**
+ * USD-Preis des Quote-Tokens eines Pools. Berücksichtigt den festen Peg (USD_PEG_REF),
+ * sonst Auflösung über den Mint wie getTokenUsdPrice().
+ */
+export function getPoolQuoteUsd(pool, db) {
+    if (pool.quotePricePoolId === USD_PEG_REF) return 1;
+    return getTokenUsdPrice(pool.quoteTokenMint, db);
+}
+
 export function getTokenUsdPrice(mint, db) {
     const direct = db.prepare(`
         SELECT ps.price FROM pool_stats ps

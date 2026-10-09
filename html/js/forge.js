@@ -388,11 +388,8 @@
 
         // Chart-Punkt: gleiche Metrik-Basis wie alle historischen portfolioHistory-Punkte
         // (total_usd = LP + Fees + GESAMTER Wallet inkl. SOL-Reserve, siehe bin/export.js).
-        // liqLive.portfolio.balance zieht die SOL-Reserve bewusst ab (Tabellen-Metrik,
-        // Spike-Damper-Schutz) – als Chart-Punkt verwendet, knickt die Linie am rechten
-        // Rand künstlich ab, sobald genug freies SOL im Wallet liegt (Fund 2026-08-07:
-        // sichtbarer "Einbruch" nach einem manuellen Deposit/Withdraw-Test auf forge-pub1,
-        // obwohl real nichts fehlte – currentValue blieb stabil, nur balance war niedriger).
+        // liqLive.portfolio.balance zählt seit 06.10.2026 ebenfalls das ganze Wallet inkl. SOL-Reserve,
+        // Chart-Punkt (currentValue) und Karte unterscheiden sich nur noch um die Fees (Fund 2026-08-07 erledigt).
         //
         // lendLive.portfolio.currentValue ist NUR die aktiven Pool-Positionen (bewusst ohne
         // Wallet, siehe bin/export.js) – als Chart-/Summen-Punkt verwendet, fällt Kapital,

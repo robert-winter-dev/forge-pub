@@ -77,7 +77,7 @@ import { quoteSymbol } from '../../../html/js/format-price.js';
 import { PoolUtil, PriceMath } from '@orca-so/whirlpools-sdk';
 import { PublicKey }           from '@solana/web3.js';
 import {
-    clmmTokenAForDeposit, calcDepositedUsdc, getTokenUsdPrice, autoSwapNoetig,
+    clmmTokenAForDeposit, calcDepositedUsdc, getTokenUsdPrice, getPoolQuoteUsd, autoSwapNoetig,
     depositSolBedarf, sweepResidualIntoPosition,
     DEPOSIT_SLIPPAGE, SLIPPAGE_FACTOR,
 } from '../lib/deposit-lib.js';
@@ -594,7 +594,7 @@ let quotePrice    = 0;
 let usdPerTokenA  = 0;
 let usdPerTokenB  = 0;
 if (pool.volatilePair) {
-    quotePrice = getTokenUsdPrice(pool.quoteTokenMint, db);
+    quotePrice = getPoolQuoteUsd(pool, db);
     if (quotePrice <= 0) abort(t('cli.liq.quote_price_missing', { mint: pool.quoteTokenMint }));
     const quoteIsTokenA = pool.quoteTokenMint === pool.tokenA;
     usdPerTokenA = quoteIsTokenA ? quotePrice : quotePrice * currentPrice;

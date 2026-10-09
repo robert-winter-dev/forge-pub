@@ -1840,5 +1840,82 @@
     "tvlExitThreshold": 194000,
     "poolType": "volatil_2",
     "active": false
+  },
+  {
+    "id": "liq-pyusd-usde",
+    "protocol": "orca",
+    "address": "FXPopoKVLHeXonysHMEonZZJ4nsUdFqr4RpFuAvLUvFB",
+    "pair": "PYUSD/USDe",
+    "tokenA": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "tokenB": "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT",
+    "decimalsA": 6,
+    "decimalsB": 9,
+    "feeTier": 0.01,
+    "tickSpacing": 1,
+    "volatilePair": true,
+    "quotePricePoolId": "usd-peg",
+    "quoteTokenMint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 0.3
+    },
+    "rebalanceDisabled": true,
+    "tvlWarnThreshold": 1296000,
+    "tvlExitThreshold": 648000,
+    "poolType": "rebalance_free",
+    "active": false
+  },
+  {
+    "id": "liq-pyusd-usdg",
+    "protocol": "orca",
+    "address": "GsKfZZEhrp6KHe3DLLbrD1pft22B6BDB3cxzAbPXZjq9",
+    "pair": "PYUSD/USDG",
+    "tokenA": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "tokenB": "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.01,
+    "tickSpacing": 1,
+    "volatilePair": true,
+    "quotePricePoolId": "usd-peg",
+    "quoteTokenMint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 0.3
+    },
+    "rebalanceDisabled": true,
+    "tvlWarnThreshold": 3000000,
+    "tvlExitThreshold": 1500000,
+    "poolType": "rebalance_free",
+    "active": false
+  },
+  {
+    "id": "liq-zeus-sol",
+    "protocol": "orca",
+    "address": "Dsxt7wUigQU5puH9nHjmfwnUenMycAgsFtrkfggLh8P1",
+    "pair": "SOL/ZEUS",
+    "displayPair": "ZEUS/SOL",
+    "tokenA": "So11111111111111111111111111111111111111112",
+    "tokenB": "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 1,
+    "tickSpacing": 128,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-sol-usdc",
+    "quoteTokenMint": "So11111111111111111111111111111111111111112",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "aprAlertDisabled": true,
+    "tvlWarnThreshold": 67000,
+    "tvlExitThreshold": 34000,
+    "poolType": "volatil_2",
+    "active": false
   }
 ]

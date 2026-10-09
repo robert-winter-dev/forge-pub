@@ -8,7 +8,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "Tokenized Costco share (NASDAQ: COST) from Backpack Securities, legal issuer/custodian is Trek Nexus Markets Ltd (BVI) under the Backpack Securities brand. Backed 1:1 by a share actually held; the tokenized version is legally structured throughout as a \"Tokenized claim\"/\"Claim on SPV\" with reinvested (instead of cash-paid) dividends - this does not contradict direct ownership, it is simply its legal form (the traditional, non-tokenized share has separate UCC Art. 8 direct ownership). Tradable 24/7 on Solana, conversion back into the real share is possible. Token-2022 with the same compliance extensions as SPCX/RBLX - intended design by the issuer, not a rug signal.",
             "url": "https://backpack.exchange",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "BABANGA4JE7Kkam4nTrALAwAVgsNJUuFJnnkF7S16BZp": {
             "symbol": "BABA",
@@ -17,7 +17,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "Tokenized Alibaba share (NYSE: BABA) from Backpack Securities, legal issuer/custodian is Trek Nexus Markets Ltd (BVI) under the Backpack Securities brand. Backed 1:1 by a share actually held; the tokenized version is legally structured throughout as a \"Tokenized claim\"/\"Claim on SPV\" with reinvested (instead of cash-paid) dividends - this does not contradict direct ownership, it is simply its legal form (the traditional, non-tokenized share has separate UCC Art. 8 direct ownership). Tradable 24/7 on Solana, conversion back into the real share is possible. Token-2022 with the same compliance extensions as SPCX/RBLX - intended design by the issuer, not a rug signal.",
             "url": "https://backpack.exchange",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "DJTu7vi8norVzdVAffgvb39VP7wjKeTsgaMBJrzfxvoF": {
             "symbol": "DJT",
@@ -26,7 +26,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "Tokenized share of Trump Media & Technology Group (NASDAQ: DJT) from Backpack Securities, legal issuer/custodian is Trek Nexus Markets Ltd (BVI) under the Backpack Securities brand. Backed 1:1 by a share actually held; the tokenized version is legally structured throughout as a \"Tokenized claim\"/\"Claim on SPV\" with reinvested (instead of cash-paid) dividends - this does not contradict direct ownership, it is simply its legal form (the traditional, non-tokenized share has separate UCC Art. 8 direct ownership). Tradable 24/7 on Solana, conversion back into the real share is possible. Token-2022 with the same compliance extensions as SPCX/RBLX - intended design by the issuer, not a rug signal.",
             "url": "https://backpack.exchange",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "RBLXDGRD64AtRamHMFVcjqne3Ar7NLWtFtYNtsrf1cE": {
             "symbol": "RBLX",
@@ -35,7 +35,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "Tokenized Roblox share (NYSE: RBLX) from Backpack Securities, legal issuer/custodian is Trek Nexus Markets Ltd (BVI) under the Backpack Securities brand. Backed 1:1 by a share actually held; the tokenized version is legally structured throughout as a \"Tokenized claim\"/\"Claim on SPV\" with reinvested (instead of cash-paid) dividends - this does not contradict direct ownership, it is simply its legal form. Tradable 24/7 on Solana, conversion back into the real share is possible. Token-2022 with compliance extensions (permanentDelegate, pausableConfig, transferHook) per the issuer's design. ⚠️ The exact Token-2022 extension combination (permanentDelegate, pausableConfig, transferHook) could not be independently verified for this specific token (only generic Token-2022 documentation found) - unverified, no confirmed contradiction (as of 2026-09-28).",
             "url": "https://backpack.exchange",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "9gP2kCy3wA1ctvYWQk75guqXuHfrEomqydHLtcTCqiLa": {
             "symbol": "BNB",
@@ -44,7 +44,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "BNB brought to Solana via the Wormhole bridge (Portal); BNB is the native token of BNB Chain (Binance ecosystem), backed 1:1 by BNB locked on BNB Chain. The real risk is the bridge/custody risk of Wormhole, not the token itself.",
             "url": "https://wormhole.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "3ZLekZYq2qkZiSpnSvabjit34tUkjSwD1JFuW9as9wBG": {
             "symbol": "NEAR",
@@ -53,7 +53,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "NEAR (native token of NEAR Protocol, a standalone layer 1) on Solana, brought over via NEAR Intents (an intent-based cross-chain swap protocol by NEAR Protocol, not a classic lock-and-mint bridge mechanism) in collaboration with Orb Markets (Helius Labs). Instead of a custody contract, a network of competing market makers fulfils the cross-chain request - the real risk lies in the solver network/market mechanics of NEAR Intents, not in classic bridge custody.",
             "url": "https://near.org",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3": {
             "symbol": "SKR",
@@ -62,7 +62,7 @@
             "categoryEn": "Utility/Governance Token",
             "descriptionEn": "Native token of the Solana Mobile ecosystem (Seeker phone, dApp Store), launched January 2026 with a total supply of 10 billion (30% as airdrop). Used for staking to Guardians for governance and network security; linear inflation starts at 10%/year, decreasing annually to a terminal 2%.",
             "url": "https://solanamobile.com/skr",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "7JA5eZdCzztSfQbJvS8aVVxMFfd81Rs9VvwnocV1mKHu": {
             "symbol": "GEOD",
@@ -71,7 +71,7 @@
             "categoryEn": "DePIN Token",
             "descriptionEn": "Native reward/utility token of GEODNET, a decentralized network of GNSS/space-weather base stations (DePIN). Originally an ERC-20 on Polygon; additionally available as an SPL token on Solana via Wormhole NTT since October 2024 (governance approval of GIP-3 already on 20 August 2024, productive Solana SPL launch via Wormhole NTT in mid-October 2024). Pays for RTK data services (fee burn), rewards base-station operators; fixed total supply of 1 billion.",
             "url": "https://geodnet.com/geod",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3": {
             "symbol": "PYTH",
@@ -80,7 +80,7 @@
             "categoryEn": "Oracle/Governance Token",
             "descriptionEn": "Governance token of Pyth Network, a first-party financial oracle: market data (prices, volatility, other metrics) comes directly from trading firms, market makers and exchanges and is delivered via a pull model to more than 90 blockchains. PYTH (launched November 2023) is used for on-chain governance, fees and staking. Institutional expansion in 2026 includes a Nasdaq collaboration for on-chain distribution of equity market data.",
             "url": "https://www.pyth.network/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "So11111111111111111111111111111111111111112": {
             "symbol": "SOL",
@@ -89,7 +89,7 @@
             "categoryEn": "Layer-1 Coin",
             "descriptionEn": "Native token of the Solana blockchain. Serves as gas token for transaction fees and staking and is the base currency of the entire Solana ecosystem.",
             "url": "https://solana.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "SiLVFMgD3eD2rgK628NbTBq9MnuJF5FW2CRaVyTB35L": {
             "symbol": "SILV",
@@ -98,7 +98,7 @@
             "categoryEn": "Tokenized Precious Metal (RWA)",
             "descriptionEn": "Dominion Silver from Dominion Market (founded by Mark Tormey, live trading since August 2026): each token is a claim on one fine troy ounce of physical silver in an LBMA-standard vault (not: LBMA-certified) in Fort Worth, Texas. Minting happens at the current silver spot price plus a fee. Currently only cash redemption against USDC is live, at exactly 1.5% fee (several official Dominion docs pages consistently confirm 1.5%). Redemption for physical silver is planned 3-6 months after public launch (14 Aug 2026), the window runs to about February 2027, and is not yet available.",
             "url": "https://dominion.market/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
             "symbol": "USDC",
@@ -107,7 +107,7 @@
             "categoryEn": "Stablecoin",
             "descriptionEn": "1:1 USD-backed stablecoin by Circle. Largest stablecoin in the Solana DeFi ecosystem, mostly used as quote currency.",
             "url": "https://www.circle.com/usdc",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr": {
             "symbol": "EURC",
@@ -116,7 +116,7 @@
             "categoryEn": "Stablecoin",
             "descriptionEn": "1:1 euro-backed stablecoin by Circle (the euro counterpart to USDC).",
             "url": "https://www.circle.com/eurc",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij": {
             "symbol": "cbBTC",
@@ -125,7 +125,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "1:1 BTC-backed token by Coinbase, brings Bitcoin exposure to Solana/DeFi.",
             "url": "https://www.coinbase.com/cbbtc",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh": {
             "symbol": "WBTC",
@@ -134,7 +134,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "Token backed 1:1 by BTC, the oldest and most widely used wrapped Bitcoin variant. Custody of the underlying Bitcoin reserves (Ethereum WBTC) has been led by BiT Global (multisig keys in Hong Kong and Singapore) since the custody change announced for 2026-05-01; BitGo holds one of three keys and continues to provide the wallet infrastructure. ⚠️ This Solana mint is the variant brought to Solana via the Wormhole/Portal bridge (\"Wrapped BTC (Portal)\"), NOT the native SPL WBTC minted directly on Solana by BitGo/BiT Global (different mint address 5XZw2LKTyrfvfiskJ78AMpackRjPcyCif1WhUsPDuVqQ according to wbtc.network). In addition to the BiT Global custody there is therefore a further layer of trust: the Wormhole guardians of the bridge.",
             "url": "https://wbtc.network",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs": {
             "symbol": "ETH",
@@ -143,7 +143,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "Ethereum (ETH) brought to Solana via the Wormhole bridge, backed 1:1. ⚠️ Symbol inconsistent in the onchain metadata field: Solana Explorer and Jupiter show \"Ether (Portal)\"/ETH (as maintained here), Solscan/Phantom and other trackers show \"Wrapped Ether (Wormhole)\"/WETH for the same mint. Not conclusively resolved without inspecting the raw onchain metadata (as of 2026-09-13).",
             "url": "https://wormhole.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": {
             "symbol": "ORCA",
@@ -152,7 +152,7 @@
             "categoryEn": "DEX/Governance Token",
             "descriptionEn": "Native token of the Orca DEX - the protocol through which this bot trades all pools. Used for governance; staked as xORCA it receives a share of the protocol's trading fees via buybacks.",
             "url": "https://www.orca.so",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn": {
             "symbol": "JitoSOL",
@@ -161,7 +161,7 @@
             "categoryEn": "Liquid Staking Token (LST)",
             "descriptionEn": "Interest-bearing liquid staking token from Jito - represents staked SOL including MEV rewards, freely tradable/usable in DeFi.",
             "url": "https://www.jito.network",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL": {
             "symbol": "JTO",
@@ -170,7 +170,7 @@
             "categoryEn": "Governance Token",
             "descriptionEn": "Governance token of the Jito Foundation (steers the Jito liquid staking and MEV protocol); since JIP-38 (approved July 2026) also a value-capture asset - 100% of DAO revenue from the new trading platform JTX flows into programmatic JTO buybacks & burns until at least Q4 2027.",
             "url": "https://www.jito.network",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4": {
             "symbol": "JLP",
@@ -179,7 +179,7 @@
             "categoryEn": "Liquidity Pool Token",
             "descriptionEn": "Share in the perp liquidity pool of Jupiter Perpetuals (basket of SOL, ETH, WBTC, USDC, USDT, JupUSD) - holders receive 75% of the trading fees and at the same time bear the risk of the counter-position to the Jupiter perp traders.",
             "url": "https://jup.ag/perps",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": {
             "symbol": "JUP",
@@ -188,7 +188,7 @@
             "categoryEn": "DEX Governance Token",
             "descriptionEn": "Governance and utility token of Jupiter, the largest swap aggregator on Solana (now also perpetuals and launchpad). Staked JUP grants voting rights in the Jupiter DAO, reformed in 2026, which has since focused on tokenomics and treasury decisions.",
             "url": "https://jup.ag",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN": {
             "symbol": "TRUMP",
@@ -197,7 +197,7 @@
             "categoryEn": "Meme Coin",
             "descriptionEn": "OFFICIAL TRUMP, launched on 17 Jan 2025 via Donald Trump's X account. 80% of the supply is held by CIC Digital LLC and Fight Fight Fight LLC (Trump-affiliated companies) with unlocks until 2027/28; the price has fallen by more than 95% since the all-time high of USD 73.43 in January 2025.",
             "url": "https://gettrumpmemes.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr": {
             "symbol": "SPX",
@@ -206,7 +206,7 @@
             "categoryEn": "Memecoin",
             "descriptionEn": "SPX6900, bridged from Ethereum to Solana via Wormhole. Meme coin parodying the S&P 500 index. As with all Wormhole-wrapped assets, the mint authority of the Solana token lies with the bridge itself; automatic scanners occasionally flag this wrongly as an inflation risk. The real risk is bridge/custody risk, not further minting by the project.",
             "url": "https://spx6900.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump": {
             "symbol": "FARTCOIN",
@@ -215,7 +215,7 @@
             "categoryEn": "Memecoin",
             "descriptionEn": "Purely community-driven Solana memecoin without utility, launched via pump.fun. High volatility, no project/roadmap behind it.",
             "url": "https://fart.dev",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn": {
             "symbol": "PUMP",
@@ -224,7 +224,7 @@
             "categoryEn": "Platform Token",
             "descriptionEn": "Native token of pump.fun, the largest launchpad platform for memecoins on Solana.",
             "url": "https://pump.fun",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof": {
             "symbol": "RENDER",
@@ -233,7 +233,7 @@
             "categoryEn": "Utility Token",
             "descriptionEn": "Token of the Render Network - brokers decentralized GPU rendering (e.g. for 3D/AI workloads) between providers and consumers.",
             "url": "https://rendernetwork.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g": {
             "symbol": "HYPE",
@@ -242,7 +242,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "HYPE issued on Solana via Sunrise (Wormhole NTT) - native token of the Hyperliquid chain (perp DEX/L1). NTT mints and burns natively; it is not a classically wrapped token with a lock vault. ⚠️ Contradiction confirmed, differently shaped than previously noted: all price trackers (CoinGecko, Coinbase, CMC/Solanacompass, Uniswap) consistently call exactly this mint address \"Wormhole Bridged HYPE\" (launch ~03 Nov 2025). Solana's official blog describes the same event as a \"Sunrise\" listing (canonical via Wormhole NTT) on 29 Jan 2026, NTT-capable since 03 Sep 2025. No second, differing mint address found - the contradiction lies in terminology/classification and date, not in the address itself. Not conclusively resolved (as of 2026-09-28).",
             "url": "https://hyperliquid.xyz",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS": {
             "symbol": "ZEC",
@@ -251,7 +251,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "Zcash (ZEC) brought to Solana via OmniBridge (NEAR Intents), backed 1:1. Shielded (private) Zcash transactions only work on the native Zcash chain - the Solana version itself is not private.",
             "url": "https://z.cash",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp": {
             "symbol": "ORE",
@@ -260,7 +260,7 @@
             "categoryEn": "Mining/Reward Token",
             "descriptionEn": "Since the ORE relaunch (22 Oct 2025) no longer classic PoW mining: miners stake SOL on a 5×5 grid, and each round a randomly drawn cell wins the SOL stakes of the losing cells plus an ORE reward. ⚠️ Supply cap flagged as disputed: several sources (including November 2025 relaunch press) name 5 million tokens as the cap, other 2026 sources (including the official site ore.fyi) name 3 million - no clear error identifiable, source groups of different ages contradict each other. Mint authority status: consistently confirmed as not revoked/active (freeze authority is revoked). Not conclusively resolved (as of 2026-09-28).",
             "url": "https://ore.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Bi11Je4MH3PpyCNiuTAepRbsA5U6DK3DJy79ZFthddX": {
             "symbol": "BILL",
@@ -269,7 +269,7 @@
             "categoryEn": "Identity Network Utility Token",
             "descriptionEn": "Utility token of Billions Network, a privacy-preserving identity network for humans and AI agents (zero-knowledge verification without disclosing data). Founded by the founders of Disco.xyz, Hermez and Polygon (CEO Evin McMullen). Protocol/chain-agnostic, available on Solana, Base and BNB Chain, among others.",
             "url": "https://billions.network/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk": {
             "symbol": "USELESS",
@@ -278,7 +278,7 @@
             "categoryEn": "Memecoin",
             "descriptionEn": "Satirical Solana memecoin (\"deliberately useless\"), launched in May 2025 via LetsBonk.fun. No utility, no roadmap - pure community/meme momentum.",
             "url": "https://theuselesscoin.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "METAewgxyPbgwsseH8T16a39CQ5VyVxZi9zXiDPY18m": {
             "symbol": "MPLX",
@@ -287,7 +287,7 @@
             "categoryEn": "Infrastructure/Governance Token",
             "descriptionEn": "Token of Metaplex, the standard protocol for NFTs and tokenization on Solana. Governance + share of protocol fees (the DAO continuously buys back MPLX).",
             "url": "https://www.metaplex.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W": {
             "symbol": "SPYx",
@@ -296,7 +296,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025; Kraken acquisition announced 2025-12-02, completed 2025-12-04), backed 1:1 by an S&P 500 ETF share (SPY). Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB": {
             "symbol": "TSLAx",
@@ -305,7 +305,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025; Kraken acquisition announced 2025-12-02, completed 2025-12-04), backed 1:1 by a Tesla share. Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb": {
             "symbol": "SPCX",
@@ -314,7 +314,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "Tokenized SpaceX share from Backpack Securities (since June 2026, simultaneous with the SpaceX Nasdaq listing), backed 1:1 by a SpaceX share actually held. Tradable 24/7 on Solana, redemption into the real share possible.",
             "url": "https://backpack.exchange",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "AvZZF1YaZDziPY2RCK4oJrRVrbN3mTD9NL24hPeaZeUj": {
             "symbol": "syrupUSDC",
@@ -323,7 +323,7 @@
             "categoryEn": "Yield-bearing Stablecoin",
             "descriptionEn": "Interest-bearing USDC wrapper from Maple Finance (Syrup) - deposits flow into fixed-rate, over-collateralized loans to institutional borrowers. The price rises slowly over time instead of a 1:1 peg (yield via price appreciation). Brought from Ethereum to Solana via Chainlink CCIP.",
             "url": "https://maple.finance",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv": {
             "symbol": "PENGU",
@@ -332,7 +332,7 @@
             "categoryEn": "Memecoin / Community Token",
             "descriptionEn": "Ecosystem token of the Pudgy Penguins NFT brand, launched on Solana at the end of 2024 (later multichain, including Ethereum/Abstract). Powers, among other things, the game \"Pudgy World\" and community programs, but the price depends mainly on brand/community sentiment.",
             "url": "https://pengu.pudgypenguins.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "3dQTr7ror2QPKQ3GbBCokJUmjErGg8kTJzdnYjNfvi3Z": {
             "symbol": "BORG",
@@ -341,7 +341,7 @@
             "categoryEn": "Exchange Utility Token",
             "descriptionEn": "Utility token of the crypto platform SwissBorg (originally launched in 2017 as CHSB on Ethereum, rebranded to BORG in October 2023). Unlocks app benefits (lower fees, higher launchpad allocation, higher yield, voting rights in referendums). Bridged 1:1 to Solana via Wormhole since May 2024.",
             "url": "https://swissborg.com/buy-borg",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "ZBCNpuD7YMXzTHB2fhGkGi78MNsHGLRXUhRewNRm9RU": {
             "symbol": "ZBCN",
@@ -350,7 +350,7 @@
             "categoryEn": "Payments Utility Token",
             "descriptionEn": "Governance and utility token of Zebec Network (launched in 2021 as Zebec Protocol on Solana, real-time payments/payroll/DePIN). Rebrand to Zebec Network in April 2024 (migration began 9/10 April 2024 according to the official BusinessWire press release and the Zebec migration guide); the token swap from the predecessor ZBC at a ratio of 1:10 ran from April to May 2024. Utility: primary means of payment for platform fees, staking for yield (fixed lockup periods), held balances unlock better terms and pro features in the SuperApp. The Zebec Carbon debit card (since March 2025, Mastercard) is meant to offer ZBCN-tiered rewards from mid-2026.",
             "url": "https://zebec.io",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "2u1tszSeqZ3qBWF3uNGPFc8TzMk2tdiwknnRMWGWjGWH": {
             "symbol": "USDG",
@@ -359,7 +359,7 @@
             "categoryEn": "Stablecoin",
             "descriptionEn": "1:1 USD-backed stablecoin (Global Dollar), issued by Paxos (regulated in Singapore and the EU/MiCA). Special feature: part of the Global Dollar Network consortium, which shares a large part of the reserve income with participating partners/exchanges (including Robinhood) instead of keeping it all.",
             "url": "https://www.globaldollar.com/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx": {
             "symbol": "STONK",
@@ -368,7 +368,7 @@
             "categoryEn": "Platform Token",
             "descriptionEn": "Native token of StonkFun, a Solana launchpad platform for coins that can be paired with arbitrary assets (memes, xStocks equities, commodities, currencies). According to the project, 60% of platform revenue flows into buyback-and-burn of STONK.",
             "url": "https://www.stonkfun.xyz/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "FRySi8LPkuByB7VPSCCggxpewFUeeJiwEGRKKuhwpKcX": {
             "symbol": "NATIX",
@@ -377,7 +377,7 @@
             "categoryEn": "Utility Token (Physical AI / Data Network)",
             "descriptionEn": "Native token of NATIX Network, a decentralized multi-camera data network that crowdsources driving footage (dashcam app) and generates map data for autonomous driving/robotics from it. The token serves as network incentive and bonding mechanism for node operators.",
             "url": "https://www.natix.network/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "XsoBhf2ufR8fTyNSjqfU71DYGaE6Z3SUGAidpzriAA4": {
             "symbol": "PLTRx",
@@ -386,7 +386,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025), backed 1:1 by a Palantir Technologies share (PLTR). Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc": {
             "symbol": "GMEx",
@@ -395,7 +395,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025), backed 1:1 by a GameStop share (GME). Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "XsaBXg8dU5cPM6ehmVctMkVqoiRG2ZjMo1cyBJ3AykQ": {
             "symbol": "KOx",
@@ -404,7 +404,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025), backed 1:1 by a Coca-Cola share (KO). Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "XsqE9cRRpzxcGKDXj1BJ7Xmg4GRhZoyY1KpmGSxAWT2": {
             "symbol": "MCDx",
@@ -413,7 +413,7 @@
             "categoryEn": "Tokenized Equity (RWA)",
             "descriptionEn": "xStocks token from Backed Finance (Switzerland, regulated under the Swiss DLT Act, wholly owned by Kraken since December 2025), backed 1:1 by a McDonald's share (MCD). Tradable 24/7 on Solana.",
             "url": "https://xstocks.fi",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": {
             "symbol": "BONK",
@@ -422,7 +422,7 @@
             "categoryEn": "Memecoin",
             "descriptionEn": "Dog memecoin on Solana, launched on 25 Dec 2022 via a mass airdrop to the Solana community (including NFT holders, developers) after the FTX collapse. Community-driven (BonkDAO), no VC backing, deflationary burn mechanism. One of the most established and largest Solana memecoins, ecosystem including the launchpad LetsBonk.fun.",
             "url": "https://bonkcoin.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "4sWNB8zGWHkh6UnmwiEtzNxL4XrN7uK9tosbESbJFfVs": {
             "symbol": "xSOL",
@@ -431,7 +431,7 @@
             "categoryEn": "Leveraged Synthetic Token (Leverage)",
             "descriptionEn": "SOL long token of the Hylo protocol (Solana DeFi, dual stablecoin/leverage mechanism around LSTs such as JitoSOL/mSOL), dynamically leveraged 2-4x (about 3.0x at the time of review). No classic liquidation risk as with perp positions - the protocol de-/re-leverages the position automatically. ⚠️ It does structurally carry volatility decay, though: in sideways-oscillating markets xSOL loses value compared with a simple 3x buy-and-hold, even if SOL ends up unchanged.",
             "url": "https://hylo.so",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R": {
             "symbol": "RAY",
@@ -440,7 +440,7 @@
             "categoryEn": "DEX/Governance Token",
             "descriptionEn": "Native token of Raydium, one of the largest decentralized exchanges (AMM) on Solana. RAY serves as governance token (voting rights on protocol decisions) and is staked to earn RAY emissions from the mining reserve (currently about 1.9 million RAY/year); a share of trading fees (12%) flows separately into automatic RAY buybacks held by the protocol (no direct fee share for stakers). Total supply 555 million, team/seed vesting completed since February 2024.",
             "url": "https://raydium.io",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Xsv9hRk1z5ystj9MhnA7Lq4vjSsLwzL2nxrwmwtD3re": {
             "symbol": "GLDx",
@@ -449,7 +449,7 @@
             "categoryEn": "Tokenized Commodity ETF / Tracker Certificate (Real World Asset, xStock)",
             "descriptionEn": "GLDx (\"Gold xStock\") is a tokenized tracker certificate that mirrors the price performance of SPDR Gold Shares (GLD), an ETF whose value is tied to the physical gold price. The issuer is Backed Assets (JE) Limited under the \"xStocks\" offering of Backed Finance; the token exists in parallel as a Solana SPL token and as an ERC-20 token. Category/issuer/ticker confirmed correct. ⚠️ Launch date not conclusively resolved: RWA.xyz gives 20 Jun 2025, Backed's own product page shows only a generic \"Last updated\" date (30 Jun 2025), the CoinMarketCap chart shows the ATL on 30 Jul 2025 - no source confirms exactly the previously stated 12 June 2025. Not conclusively resolved (as of 2026-09-28).",
             "url": "https://assets.backed.fi/products/gold-xstock",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "taoC6xyv2v8tDLcev4uaGUgV4vdQsWJrGft2kcBRrBY": {
             "symbol": "TAO",
@@ -458,7 +458,7 @@
             "categoryEn": "Wrapped Coin",
             "descriptionEn": "Bittensor (TAO), the native token of the decentralized AI network Bittensor, available on Solana. ⚠️ Contradiction about the bridge mechanism cannot be resolved: news sources (tao.media, mexc.com, taodaily.io) describe the mint as \"canonical via Wormhole Sunrise/NTT since 05 May 2026\"; Phantom and SolanaTerminal, by contrast, describe the same mint as \"bridged via LayerZero OFT, backed by a wTAO reserve on Subtensor EVM\" - two contradictory technical bridge statements for the same address. Not conclusively resolved (as of 2026-09-28).",
             "url": "https://bittensor.com",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "KMNo3nJsBXfcpJTVhZcXLW7RmTwTt4GVFE7suUBo9sS": {
             "symbol": "KMNO",
@@ -467,7 +467,7 @@
             "categoryEn": "DeFi Governance Token (Solana)",
             "descriptionEn": "KMNO is the native governance token of Kamino Finance, a DeFi protocol on Solana that combines lending (K-Lend), automated liquidity vaults and leverage features in one product. Token holders can use KMNO to vote on protocol upgrades and resource allocation; staking is part of a quadratic voting mechanism against governance centralization. Issued via a genesis event on 30 April 2024, total supply 10 billion KMNO, mint and freeze authority disabled.",
             "url": "https://kamino.finance",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Xs3oZwbHvqis4NYcf4YKWmEia2eC84wSiVrcYcTqpH8": {
             "symbol": "SPCXx",
@@ -476,7 +476,7 @@
             "categoryEn": "Tokenized Equity (RWA Tracker Certificate, xStocks)",
             "descriptionEn": "SPCXx (SpaceX xStock) is a freely transferable tracker certificate that mirrors the share price of Space Exploration Technologies Corporation (SpaceX) 1:1. The issuer is Backed Assets (JE) Limited (Jersey), tokenized by Backed Finance AG under the xStocks platform; the token runs, among others, as a Solana SPL token (Token-2022) and on Ethereum/EVM chains.",
             "url": "https://assets.backed.fi/products/spacex-xstock",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Xsa62P5mvPszXL1krVUnU5ar38bBSVcWAB6fmPCo5Zu": {
             "symbol": "METAx",
@@ -485,7 +485,7 @@
             "categoryEn": "Tokenized Equity (RWA Tracker Certificate, xStock)",
             "descriptionEn": "METAx (Meta xStock) is a tokenized tracker certificate that mirrors the price of the Meta Platforms share 1:1, without granting voting rights or direct dividends. The issuer is Backed Assets (JE) Limited; Backed Finance AG is the tokenizer/service provider under the xStocks platform, not the legal issuer. Each unit is backed by a real Meta share held at a regulated custodian. The token exists in parallel as an SPL token on Solana and as ERC-20/BEP20 on Ethereum and BNB Chain, is tradable 24/7 and can also be used in DeFi applications.",
             "url": "https://xstocks.com/",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "BMKdM4yUxX12moFqVk195k7coMbaybd4RUKCUdm7D1Sk": {
             "symbol": "IBM",
@@ -494,7 +494,7 @@
             "categoryEn": "Tokenized Equity (RWA) - Backpack Securities",
             "descriptionEn": "IBM is a tokenized version of the IBM share (International Business Machines Corporation), issued on Solana under Backpack Securities, an offering of the crypto exchange Backpack. Backpack Securities holds the underlying shares via brokerage infrastructure and mirrors them 1:1 as tradable, DeFi-compatible tokens that can be traded 24/7 and exchanged back into real share units.",
             "url": "https://backpack.exchange/stocks/IBM",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "HiMSSzzwkZkrXJ4PGVJRdtfLaANeAztjjcgk5Dxe7Lwx": {
             "symbol": "HIMS",
@@ -503,7 +503,7 @@
             "categoryEn": "Tokenized Equity (RWA) - Backpack Securities",
             "descriptionEn": "HIMS is a tokenized version of the share of Hims & Hers Health, Inc. (NYSE: HIMS), issued on Solana under Backpack Securities, an offering of the crypto exchange Backpack. Hims & Hers is a US telemedicine company (founded 2017, headquartered in San Francisco) that sells prescription and over-the-counter products and personal care directly to consumers by subscription. The token mirrors the share 1:1, is traded 24/7 and can be exchanged back into real share units. It is not identical to the Ondo token HIMSon (different mint, different issuer).",
             "url": "https://backpack.exchange/stocks/HIMS",
-            "checkedAt": "2026-09-28"
+            "checkedAt": "2026-10-05"
         },
         "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh": {
             "symbol": "NVDAx",
@@ -512,7 +512,7 @@
             "categoryEn": "RWA / Tokenized Equity (Tracker Certificate on NVIDIA Share)",
             "descriptionEn": "NVDAx is a tokenized tracker certificate that mirrors the share price of NVIDIA Corporation (NASDAQ: NVDA), issued by Backed Assets (JE) Limited (tokenizer: Backed Finance AG, Zug/Switzerland), ISIN CH1436219195. The token is backed 1:1 by real NVIDIA shares at regulated third-party custodians and exists both as a Solana SPL token and as an ERC-20 token; holders receive no shareholder rights, only a value-based replication of the share price.",
             "url": "https://assets.backed.fi/products/nvidia-xstock",
-            "checkedAt": "2026-09-30"
+            "checkedAt": "2026-10-05"
         },
         "31k88G5Mq7ptbRDf3AM13HAq6wRQHXHikR8hik7wPygk": {
             "symbol": "GP",
@@ -520,8 +520,35 @@
             "description": "Graphite Protocol (GP) ist ein Multi-Chain-Infrastrukturprojekt, das laut eigenem X-Profil die Smart Contracts und Technik hinter der BONK- bzw. bonk.fun-Launchpad-Plattform auf Solana bereitstellt und dafür laut ChainCatcher 7,6% der Protokoll-Einnahmen von bonk.fun erhält. Der GP-Token dient als bevorzugtes Zahlungsmittel für Gebühren der \"Creator Suite\" des Projekts; Gebühren in SOL/ETH/MATIC fließen laut CoinMarketCap in Buyback-and-Burn-Mechanismen für GP.",
             "categoryEn": "Creator/Launchpad Infrastructure (Solana ecosystem, bonk.fun)",
             "descriptionEn": "Graphite Protocol (GP) is a multi-chain infrastructure project that, according to its own X profile, provides the smart contracts and technology behind the BONK/bonk.fun launchpad platform on Solana and, according to ChainCatcher, receives 7.6% of bonk.fun's protocol revenue for it. The GP token serves as the preferred means of payment for fees of the project's \"Creator Suite\"; fees in SOL/ETH/MATIC flow, according to CoinMarketCap, into buyback-and-burn mechanisms for GP.",
-            "url": "https://graphiteprotocol.io",
-            "checkedAt": "2026-10-02"
+            "url": "https://www.graphiteprotocol.io/",
+            "checkedAt": "2026-10-05"
+        },
+        "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo": {
+            "symbol": "PYUSD",
+            "category": "Stablecoin",
+            "description": "PayPal USD, 1:1 USD-gedeckter Stablecoin, emittiert von Paxos Trust Company (reguliert) im Auftrag von PayPal. Gedeckt durch Bargeld, US-Staatsanleihen und Repo-Geschäfte. Token-2022 mit Erweiterungen (Transfer-Hook, permanentDelegate, Transfer-Fee-Konfiguration), die der Emittent für Compliance vorhält.",
+            "categoryEn": "Stablecoin",
+            "descriptionEn": "PayPal USD, a 1:1 USD-backed stablecoin issued by Paxos Trust Company (regulated) on behalf of PayPal. Backed by cash, US Treasuries and repo agreements. Token-2022 with extensions (transfer hook, permanent delegate, transfer fee config) that the issuer keeps for compliance.",
+            "url": "https://paxos.com/pyusd/",
+            "checkedAt": "2026-10-05"
+        },
+        "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT": {
+            "symbol": "USDe",
+            "category": "Synthetischer Stablecoin",
+            "description": "Synthetischer Dollar von Ethena, nicht durch Bankguthaben gedeckt: Der Peg entsteht durch Delta-Neutral-Hedging (gestakte ETH/BTC-Bestände gegen gleich große Short-Perpetuals). ⚠ Risiko: negative Funding-Rates, Ausfall einer Börse oder Abflüsse. Die Reserve (Reserve Fund) deckt nur einen kleinen Teil des Supplys. Auf Börsen kam es zu kurzen Flash-Depegs (10.10.2025 bis 0,65 USD auf Binance), on-chain hielt der Peg.",
+            "categoryEn": "Synthetic Stablecoin",
+            "descriptionEn": "Synthetic dollar from Ethena, not backed by bank deposits: the peg comes from delta-neutral hedging (staked ETH/BTC against equal short perpetuals). ⚠ Risks: negative funding rates, exchange failure or outflows. The Reserve Fund covers only a small part of the supply. Exchanges saw brief flash depegs (10 Oct 2025 down to 0.65 USD on Binance); on-chain the peg held.",
+            "url": "https://www.ethena.fi/",
+            "checkedAt": "2026-10-05"
+        },
+        "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq": {
+            "symbol": "ZEUS",
+            "category": "Cross-Chain-/Bitcoin-Interoperabilitätsprotokoll (Governance-/Utility-Token)",
+            "description": "ZEUS ist der native Token des Zeus Network, einer programmierbaren Bitcoin-Infrastruktur, die Bitcoin-Liquidität auf Solana bringt (u. a. über die dApp APOLLO und den 1:1 BTC-gedeckten zBTC). Gegründet 2023 von Justin Wang; im April 2024 folgte eine Seed-Runde über 8 Mio. USD. Der Token hat eine feste Gesamtmenge von 1 Mrd. und dient für Netzwerkgebühren, Governance und die Delegation an Guardian-Nodes.",
+            "categoryEn": "Cross-chain / Bitcoin interoperability protocol (governance/utility token)",
+            "descriptionEn": "ZEUS is the native token of Zeus Network, a programmable Bitcoin infrastructure that brings Bitcoin liquidity to Solana (including via the APOLLO dApp and zBTC, which is backed 1:1 by BTC). Founded in 2023 by Justin Wang; an USD 8 million seed round followed in April 2024. The token has a fixed total supply of 1 billion and is used for network fees, governance and delegation to Guardian nodes.",
+            "url": "https://zeusnetwork.xyz",
+            "checkedAt": "2026-10-08"
         }
     }
 }

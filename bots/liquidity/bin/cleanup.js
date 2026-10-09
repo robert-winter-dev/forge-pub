@@ -45,8 +45,8 @@ import { reconcileCapitalFlows } from '../lib/capital-reconcile.js';
 import { ensureWalletSol, INVEST_SOL_COMFORT, SOL_TOPUP_TARGET } from '../lib/sol-topup.js';
 import { checkInvestEligibility, remainingInvestCapacity } from '../lib/invest-eligibility.js';
 import { planReinvest, executeReinvest, runDepositScript, exitBlockFor } from '../lib/cleanup-reinvest.js';
-import { pnlWindows } from '../../../lib/pnl.js';
-import { parseReinvestConfig, readEdgeSnapshot, REINVEST_PNL_WINDOW } from '../../../lib/reinvest-rules.js';
+import { parseReinvestConfig, readEdgeSnapshot } from '../../../lib/reinvest-rules.js';
+import { sharePnl24hPct } from '../lib/pnl-anchor.js';
 import {
     getOpenPosition, getDustWatch, startDustWatch, clearDustWatch,
 } from '../lib/db.js';
@@ -708,10 +708,6 @@ async function runReinvestStep() {
     const cfg = parseReinvestConfig(process.env);
     const log = msg => console.log(`[cleanup:reinvest] ${DRY_RUN ? DRY : ''}${msg}`);
 
-    // PnL der letzten 24h je Pool: dieselbe Funktion und dasselbe Fenster (REINVEST_PNL_WINDOW) wie
-    // die Spalte der Opportunity-Tabelle im Export, sonst kann der Nutzer die Wahl nicht nachvollziehen.
-    const winPnl = cfg.mode === 'off' ? {} : pnlWindows(db, { flavor: config.botId, now: Date.now(), windows: [REINVEST_PNL_WINDOW] });
-    const pnl24hByPool = Object.fromEntries(Object.entries(winPnl).map(([id, w]) => [id, w?.[REINVEST_PNL_WINDOW.id]]));
 
     const plan = await planReinvest({
         pools:             config.pools.all,
@@ -719,7 +715,9 @@ async function runReinvestStep() {
         getOpenPosition:   poolId => getOpenPosition(db, poolId),
         exitBlock:         exitBlockFor(db),
         checkEligibility:  pool => checkInvestEligibility(pool, db),
-        pnl24h:            pos => pnl24hByPool[pos.pool_id] ?? null,
+        // PnL 24h in %: derselbe Wert wie die Spalte „PnL 24H“ in Operative Metriken (sharePnl24hPct),
+        // sonst kann der Nutzer die Wahl nicht nachvollziehen.
+        pnl24h:            pos => sharePnl24hPct(db, pos, config.botId),
         readEdge:          () => readEdgeSnapshot(),
         getPositionState:  (pool, pos) => getAdapter(pool).getPositionState(pool, pos.nft_mint),
         getWalletUsdc:     () => getUsableUsdcBalanceFresh(keypair.publicKey),

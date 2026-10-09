@@ -20,6 +20,7 @@
  *   - Zielkapital wird aus der letzten DB-Position gelesen (capital_usdc); Fallback: Wallet-Balance
  */
 
+import { USD_PEG_REF } from '../lib/pool-tokens.js';
 import { config, loadPools, updatePoolRangeOverride, isPoolEnabled, setPoolActive, setPoolEnabled, setPoolType, resetPoolSessionState } from '../lib/config.js';
 import { computeVolaDrift } from '../lib/pool-type-drift.js';
 import { VOLA_BOUNDARY_DRIFT_DAYS } from '../lib/pool-type-boundaries.js';
@@ -971,6 +972,7 @@ async function processPool(pool, adapter, preloadedState = null) {
                     // Nach Claim: Dashboard erst jetzt synchronisieren, wenn position_snapshots
                     // (fees_pending=0) und Wallet bereits aktualisiert sind → konsistentes Bild.
                     if (claimed) {
+                        await _flushPortfolioSnapshot();   // Dashboard liest portfolio_history
                         try {
                             await syncDashboard(msg => console.log(`[bot:${pool.id}] ${msg}`));
                             lastExport.ts = Date.now();
@@ -4120,6 +4122,22 @@ async function _retryPendingReinvest(pool, position, state, adapter) {
 
 // ─── Portfolio-Snapshot ───────────────────────────────────────────────────────
 
+// Portfolio-Aggregat einmal pro Zyklus (CORE#001278): _takeSnapshot() schreibt nur den
+// position_snapshot und merkt den Aggregat-Bedarf vor. Zuvor schrieb jeder Pool sofort ein
+// Aggregat, in dem die noch nicht verarbeiteten Pools ihren Vorzyklus-Stand trugen — pro
+// Zyklus N−1 schiefe portfolio_history-Zeilen (pub1 08.10.2026: Tagesende 2 USDC zu tief).
+let _portfolioSnapshotPending = false;
+
+async function _flushPortfolioSnapshot() {
+    if (!_portfolioSnapshotPending) return;
+    _portfolioSnapshotPending = false;
+    try {
+        await writePortfolioSnapshot(db);
+    } catch (err) {
+        console.error(`[bot] Portfolio-Snapshot Fehler: ${err.message}`);
+    }
+}
+
 async function _takeSnapshot(pool, position, state, adapter) {
     try {
         // Live-Preis aus state (bereits in diesem Zyklus on-chain abgefragt, wie beim
@@ -4151,8 +4169,9 @@ async function _takeSnapshot(pool, position, state, adapter) {
             console.warn(`[bot:${pool.id}] HWM-Update fehlgeschlagen (nicht kritisch): ${err.message}`);
         }
 
-        // 2. Aggregat-Snapshot: Summe aller aktiven Pools → portfolio_history
-        await writePortfolioSnapshot(db);
+        // 2. Aggregat-Snapshot: Summe aller aktiven Pools → portfolio_history. Nicht hier,
+        //    sondern einmal nach der Pool-Schleife (_flushPortfolioSnapshot, CORE#001278).
+        _portfolioSnapshotPending = true;
     } catch (err) {
         console.error(`[bot:${pool.id}] Snapshot Fehler: ${err.message}`);
     }
@@ -4211,6 +4230,7 @@ function _recomputePnlDailyPortfolio(todayStr) {
  */
 function _getQuotePrice(pool, db) {
     if (!pool.quoteTokenMint) return 0;
+    if (pool.quotePricePoolId === USD_PEG_REF) return 1;
     if (pool.quotePricePoolId) {
         const fresh = Date.now() - 5 * 60 * 1000;
         const oracle = db.prepare(
@@ -4614,6 +4634,9 @@ async function mainLoop() {
             // Kein continue nötig: Schleifenende. Feuert nur, wenn Check 1/2 es nicht tat.
             await _trailingStopCheck(pool);
         }
+
+        // Portfolio-Aggregat einmal pro Zyklus, wenn alle Pool-Snapshots frisch sind (CORE#001278)
+        await _flushPortfolioSnapshot();
 
         // Stats für inaktive Pools (nur Marktdaten, kein Positionsmanagement)
         startInactiveStatsSweep(freshPools.all.filter(p => !p.active));

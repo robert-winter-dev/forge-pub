@@ -294,6 +294,21 @@
       "symbol": "GP",
       "mint": "31k88G5Mq7ptbRDf3AM13HAq6wRQHXHikR8hik7wPygk",
       "decimals": 9
+    },
+    {
+      "symbol": "PYUSD",
+      "mint": "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo",
+      "decimals": 6
+    },
+    {
+      "symbol": "USDe",
+      "mint": "DEkqHyPN7GMRJ5cArtQFAWefqbZb33Hyf6s5iCwjEonT",
+      "decimals": 9
+    },
+    {
+      "symbol": "ZEUS",
+      "mint": "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq",
+      "decimals": 6
     }
   ],
   "retainDays": 30

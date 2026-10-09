@@ -52,7 +52,7 @@ import { swapTokens } from '../lib/swap.js';
 import { matchErrorCode, describeError } from '../../../lib/error-messages.js';
 import { t } from '../../../lib/i18n.js';
 import * as notify           from '../lib/notify.js';
-import { getTokenUsdPrice }  from '../lib/deposit-lib.js';
+import { getTokenUsdPrice, getPoolQuoteUsd } from '../lib/deposit-lib.js';
 import { getSplTokensUsd }   from '../lib/wallet-monitor-client.js';
 import { refreshAfterAction, writePositionSnapshotFromDelta, establishPositionBaseline } from '../lib/refresh-state.js';
 import {
@@ -344,7 +344,7 @@ console.log(`[withdraw] ${t('cli.liq.head_price', { v: `${currentPrice.toFixed(4
 // Quote-Preis für volatilePair-Pools (z.B. cbBTC/WBTC) aus pool_stats laden
 let refPriceUsdWd = 0;
 if (pool.volatilePair) {
-    refPriceUsdWd = getTokenUsdPrice(pool.quoteTokenMint, db);
+    refPriceUsdWd = getPoolQuoteUsd(pool, db);
     if (refPriceUsdWd <= 0) abort(t('cli.liq.quote_price_missing', { mint: pool.quoteTokenMint }));
     const quoteIsTokenA = pool.quoteTokenMint === pool.tokenA;
     const refLabel = quoteIsTokenA ? tokenALabel : tokenBLabel;

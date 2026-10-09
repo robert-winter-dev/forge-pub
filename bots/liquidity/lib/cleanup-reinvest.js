@@ -105,7 +105,7 @@ export function exitBlockFor(db, logPrefix = '[cleanup:reinvest]') {
  * @param {(poolId) => object|null} deps.getOpenPosition offene Position oder null (frisch aus der DB)
  * @param {(pool) => {blocked: boolean, reason: string|null}} deps.exitBlock  laufender Exit?
  * @param {(pool) => {ok: boolean, reason: string|null}} deps.checkEligibility  TVL-Schutz-Guard
- * @param {(pos) => number|null} deps.pnl24h             PnL der letzten 24h (Spalte der Opportunity-Tabelle)
+ * @param {(pos) => number|null} deps.pnl24h             PnL der letzten 24h in % (Spalte „PnL 24H“ in Operative Metriken)
  * @param {() => object} deps.readEdge                   → readEdgeSnapshot()
  * @param {(pool, pos) => Promise<{inRange: boolean}>} deps.getPositionState
  * @param {() => Promise<number>} deps.getWalletUsdc     investierbares USDC (nach Premium-Reserve)
@@ -152,7 +152,7 @@ export async function planReinvest(deps, cfg) {
     if (excluded.length) log(`Reinvest: ausgeschlossen – ${excluded.join('; ')}`);
 
     const top = sel.ranking.slice(0, 5)
-        .map(c => `${c.name} (PnL ${fmt(c.pnl)} USDC, Edge ${fmt(c.edge)})`).join(' | ');
+        .map(c => `${c.name} (PnL 24h ${fmt(c.pnl, 3)} %, Edge ${fmt(c.edge)})`).join(' | ');
     if (top) log(`Reinvest (${modeLabel}): Rangfolge – ${top}`);
 
     if (!sel.target) {

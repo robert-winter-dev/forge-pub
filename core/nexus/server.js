@@ -41,6 +41,7 @@ import { TxQueue }           from './tx-queue.js';
 import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
+import { recordUpstream429 }   from './api-stats.js';
 import { sanitizeCaller }      from '../../lib/rpc-caller.js';
 import { LANE_HEADER, isBackgroundLane } from '../../lib/nexus-lane.js';
 import { backgroundLimit }    from './lane-limit.js';
@@ -136,7 +137,7 @@ async function sendTelegram(text) {
 
 const UPSTREAM_TIMEOUT_MS = 15_000; // 15s Timeout pro Einzelversuch
 
-async function fetchWithRetry(url, options = {}, label = '', maxRetries = 3) {
+async function fetchWithRetry(url, options = {}, label = '', maxRetries = 3, api = null) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const res = await fetch(url, {
@@ -145,6 +146,7 @@ async function fetchWithRetry(url, options = {}, label = '', maxRetries = 3) {
             });
 
             if (res.status === 429) {
+                if (api) recordUpstream429(api);   // CORE#001287: jeder 429-Versuch zählt
                 if (attempt === maxRetries) return res; // nach maxRetries durchreichen
                 const retryAfter = parseInt(res.headers.get('Retry-After') ?? '0', 10);
                 const waitMs = retryAfter > 0 ? retryAfter * 1_000 : (2 ** attempt) * 1_000;
@@ -843,7 +845,7 @@ async function proxyToJupiter(req, res, limiter, queueTimeoutMs = null, minuteLi
 
         console.log(`[nexus:jupiter] ${req.method} ${url}`);
 
-        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`);
+        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`, 3, limiter.name);
         const text     = await upstream.text();
 
         // Circuit Breaker: Ergebnis auswerten (nach allen internen Retries)
@@ -923,7 +925,7 @@ app.all('/kamino/*', async (req, res) => {
 
         console.log(`[nexus:kamino] ${req.method} ${url}`);
 
-        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`);
+        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`, 3, 'kamino');
         const text     = await upstream.text();
 
         if (upstream.status >= 400) {
@@ -978,7 +980,7 @@ app.all('/loopscale/*', async (req, res) => {
 
         console.log(`[nexus:loopscale] ${req.method} ${url}`);
 
-        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`);
+        const upstream = await fetchWithRetry(url, fetchOpts, `${req.method} ${upstreamPath}`, 3, 'loopscale');
         const text     = await upstream.text();
 
         if (upstream.status >= 400) {
@@ -1025,6 +1027,7 @@ app.get('/blob-fetch', async (req, res) => {
 
         console.log(`[nexus:blob-fetch] GET ${target}`);
         const upstream = await fetch(target, { signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+        if (upstream.status === 429) recordUpstream429('blob-fetch');
         const buffer = Buffer.from(await upstream.arrayBuffer());
 
         if (upstream.status >= 400) {
@@ -1084,6 +1087,7 @@ app.all('/gecko/*', async (req, res) => {
         const text        = await upstream.text();
         const contentType = upstream.headers.get('content-type') ?? 'application/json';
 
+        if (upstream.status === 429) recordUpstream429('gecko');
         if (upstream.status >= 400) {
             console.warn(`[nexus:gecko] ← ${upstream.status} | ${upstreamPath} | Body: ${text.slice(0, 200)}`);
 
@@ -1158,6 +1162,7 @@ app.all('/orcav2/*', async (req, res) => {
         const text        = await upstream.text();
         const contentType = upstream.headers.get('content-type') ?? 'application/json';
 
+        if (upstream.status === 429) recordUpstream429('orcav2');
         if (upstream.status >= 400) {
             console.warn(`[nexus:orcav2] ← ${upstream.status} | ${upstreamPath}`);
         } else {
@@ -1225,7 +1230,7 @@ async function serveFromFallback(res, body, useCache, caller = null) {
         const text = await up.text();
         if (up.status !== 200) {
             console.warn(`[nexus:fallback] ← ${up.status} | Body: ${text.slice(0, 200)}`);
-            if (up.status === 429) fallbackLimiter.penalize(5_000);
+            if (up.status === 429) { recordUpstream429('solana-public'); fallbackLimiter.penalize(5_000); }
             return res.status(up.status).header('X-Forge-Upstream', 'fallback')
                 .header('content-type', up.headers.get('content-type') ?? 'application/json').send(text);
         }
@@ -1334,6 +1339,8 @@ async function handleRpc(req, res, useCache) {
         HELIUS_RPC_URL,
         { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
         label,
+        3,
+        'helius',
     );
 
     const text = await upstream.text();

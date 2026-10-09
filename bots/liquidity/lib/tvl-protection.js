@@ -31,7 +31,7 @@ import { setPoolActive, setPoolEnabled, config } from './config.js';
 import { acquireSlLock, releaseSlLock, waitForCleanupToFinish } from './cleanup-lock.js';
 import { getTxFee, getKeypair, getConnection } from './wallet.js';
 import { ensureExitCapableSol } from './sol-topup.js';
-import { getTokenUsdPrice } from './deposit-lib.js';
+import { getTokenUsdPrice, getPoolQuoteUsd } from './deposit-lib.js';
 import { writePositionSnapshotFromDelta } from './refresh-state.js';
 import { getAdapter } from './pool-adapter/index.js';
 import {
@@ -210,7 +210,7 @@ async function stepWithdrawPartial(pool, db, execId, withdrawPct) {
     // Quote-Preis für volatilePair-Pools
     let refPriceUsd = 0;
     if (pool.volatilePair) {
-        refPriceUsd = getTokenUsdPrice(pool.quoteTokenMint, db);
+        refPriceUsd = getPoolQuoteUsd(pool, db);
         if (!(refPriceUsd > 0)) throw new Error(`Quote-Preis nicht verfügbar für ${pool.quoteTokenMint}.`);
     }
 

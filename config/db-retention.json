@@ -54,7 +54,8 @@
     "rpc-stats.db": {
       "maxMb": 50,
       "tables": {
-        "rpc_stats": { "unbounded": true, "reason": "einzige Quelle für den Helius-Verbrauch (Helius liefert keinen Kontostand, CORE#000808); ca. 10 MB/Jahr. Begrenzt über maxMb, NICHT über die Zeit — ein Zeit-Prune löschte am 21.09.2026 versehentlich 9.266 Zeilen (CORE#000846)" }
+        "rpc_stats": { "unbounded": true, "reason": "einzige Quelle für den Helius-Verbrauch (Helius liefert keinen Kontostand, CORE#000808); ca. 10 MB/Jahr. Begrenzt über maxMb, NICHT über die Zeit — ein Zeit-Prune löschte am 21.09.2026 versehentlich 9.266 Zeilen (CORE#000846)" },
+        "api_stats": { "unbounded": true, "reason": "Auslastung je Rate-Limiter und Stunde (CORE#001287), Grundlage für Skopos; wenige KB/Monat. Begrenzt über maxMb der Datei, nicht über die Zeit" }
       }
     }
   }
