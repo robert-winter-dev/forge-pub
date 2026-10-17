@@ -19,10 +19,10 @@
  *
  * LendingBot:
  *   node FORGE/bin/estimate-costs.js --bot lendingbot --action deposit  --pool kamino-figure     --amount 200
- *   node FORGE/bin/estimate-costs.js --bot lendingbot --action withdraw --pool loopscale-genesis --amount 270
+ *   node FORGE/bin/estimate-costs.js --bot lendingbot --action withdraw --pool kamino --amount 270
  *   node FORGE/bin/estimate-costs.js --bot lendingbot --action withdraw --pool kamino-onre
  *
- * LendingBot-Protokolle: kamino | kamino-figure | kamino-onre | kamino-huma | jupiter | loopscale-onre | loopscale-genesis
+ * LendingBot-Protokolle: Pool-IDs aus config/lending-pools.json
  *
  * Pools: alle aus bots/liquidity/config/pools.json — handgepflegte Einträge unten haben
  * Vorrang, der Rest wird beim Start automatisch daraus ergänzt.
@@ -56,6 +56,7 @@ import { createRequire }  from 'node:module';
 const __dirname  = dirname(fileURLToPath(import.meta.url));
 const FORGE_ROOT = join(__dirname, '..');
 import { PATHS } from '../config/paths.js';
+import { listPools as listLendingPools } from '../lib/lending-pools.js';
 import { t } from '../lib/i18n.js';
 import { costFeePct, effectiveFeePct, isAdaptiveSurcharge } from '../lib/effective-fee.js';
 const require    = createRequire(import.meta.url);
@@ -112,15 +113,9 @@ const TX_COUNT = {
 // cooldown: Loopscale kann je nach Marktlage immediate oder 7-Tage-Cooldown liefern –
 //           der Bot erkennt das automatisch; hier zur Info beide Varianten aufgeführt.
 
-const LB_PROTOCOLS = {
-    'kamino':            { label: 'Kamino Main',      feeSol: 0.000005, cooldown: false },
-    'kamino-figure':     { label: 'Kamino Figure',    feeSol: 0.000005, cooldown: false },
-    'kamino-onre':       { label: 'Kamino OnRe',      feeSol: 0.000005, cooldown: false },
-    'kamino-huma':       { label: 'Kamino Huma',      feeSol: 0.000005, cooldown: false },
-    'jupiter':           { label: 'Jupiter Lend',     feeSol: 0.000005, cooldown: false },
-    'loopscale-onre':    { label: 'Loopscale Public', feeSol: 0.000105, cooldown: 'maybe' },
-    'loopscale-genesis': { label: 'Loopscale Gen',    feeSol: 0.000105, cooldown: 'maybe' },
-};
+// Stammdaten aus dem Pool-Register (config/lending-pools.json).
+const LB_PROTOCOLS = Object.fromEntries(listLendingPools().map(p =>
+    [p.id, { label: p.label, feeSol: p.feeSol, cooldown: p.cooldown }]));
 
 // ─── Bekannte Token-Symbole (Normalisierung) ──────────────────────────────────
 

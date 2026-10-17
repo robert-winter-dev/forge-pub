@@ -291,6 +291,53 @@ export async function fetchFeeSol(txSig) {
 }
 
 /**
+ * USDC-Änderung eines Owners aus einer geladenen Transaktion (post − pre).
+ * Positiv = eingegangen, negativ = abgeflossen, null = Owner/Mint nicht in der TX.
+ * Rein (kein RPC), damit testbar.
+ *
+ * @param {object} tx     Ergebnis von connection.getTransaction()
+ * @param {string} owner  Base58-Adresse des Wallets
+ * @param {string} mint   Mint des Tokens (USDC)
+ */
+export function tokenDeltaOf(tx, owner, mint) {
+    const sum = (list) => (list ?? [])
+        .filter(b => b.owner === owner && b.mint === mint)
+        .reduce((s, b) => s + Number(b.uiTokenAmount?.amount ?? 0), 0);
+    const involved = [...(tx?.meta?.preTokenBalances ?? []), ...(tx?.meta?.postTokenBalances ?? [])]
+        .some(b => b.owner === owner && b.mint === mint);
+    if (!involved) return null;
+    const decimals = (tx.meta.postTokenBalances ?? []).concat(tx.meta.preTokenBalances ?? [])
+        .find(b => b.owner === owner && b.mint === mint)?.uiTokenAmount?.decimals ?? 6;
+    return (sum(tx.meta.postTokenBalances) - sum(tx.meta.preTokenBalances)) / 10 ** decimals;
+}
+
+/**
+ * Tatsächlich im Wallet angekommener USDC-Betrag einer bestätigten TX.
+ * Maßgeblich für Buchungen: der angeforderte Betrag kann vom ausgezahlten
+ * abweichen (Protokoll kappt auf das Vorhandene, veraltete Positionsabfrage) —
+ * eine Buchung mit dem angeforderten Betrag erzeugt Phantom-PnL
+ * (Befund 13.10.2026: 257,02 gebucht, 57,03 ausgezahlt).
+ *
+ * @returns {Promise<number|null>} null wenn nicht ermittelbar (Aufrufer fällt dann zurück)
+ */
+export async function fetchUsdcReceived(txSig, ownerAddress, mint = config.kamino?.usdcMint ?? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v') {
+    for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+            const tx = await getConnection().getTransaction(txSig, {
+                commitment: 'confirmed',
+                maxSupportedTransactionVersion: 0,
+            });
+            if (tx?.meta) {
+                const d = tokenDeltaOf(tx, ownerAddress, mint);
+                return d == null ? null : Math.max(0, d);
+            }
+        } catch { /* nächster Versuch */ }
+        await new Promise(r => setTimeout(r, 1500));
+    }
+    return null;
+}
+
+/**
  * Prüft ob genug SOL für Fees vorhanden ist (Mindest-Reserve aus config).
  * Wirft einen Fehler wenn das Guthaben zu niedrig ist.
  *

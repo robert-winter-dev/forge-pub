@@ -10,6 +10,7 @@ import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { envFile } from '../../../config/paths.js';
+import { listPools, listByType, getPool } from '../../../lib/lending-pools.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: process.env.ENV_FILE ? resolve(__dirname, '..', process.env.ENV_FILE) : envFile('lending') });
@@ -65,52 +66,32 @@ export const config = {
         get enabled() { return !!this.token && !!this.chatId; },
     },
 
-    // ── Aktive Protokolle (Investing) ────────────────────────────────────────
-    protocols: optional('LENDING_PROTOCOLS', 'kamino')
-        .split(',')
-        .map(p => p.trim().toLowerCase())
-        .filter(Boolean),
+    // ── Pools ────────────────────────────────────────────────────────────────
+    // Welche Pools es gibt, steht allein im Pool-Register (config/lending-pools.json,
+    // LEN#001365). 🔒 Vorrang Register: LENDING_PROTOCOLS und MONITOR_PROTOCOLS aus der
+    // .env bestimmen nichts mehr. Sonst könnte eine alte .env einen ausgelaufenen Pool
+    // weiter abfragen lassen oder einen neuen Pool unsichtbar halten. Ob ein Pool im
+    // Tick abgefragt wird, entscheidet sein Zustand (lib/lending-pools.js shouldQuery).
+    protocols: listPools().map(p => p.id),
 
-    // ── Überwachte Protokolle (nur APY/TVL, kein Investing) ──────────────────
-    // APY + TVL werden stündlich erfasst (gleicher Tick wie aktive Protokolle).
-    // Fehler (API down, Vault nicht gefunden) werden still übersprungen.
-    monitorProtocols: optional('MONITOR_PROTOCOLS', '')
-        .split(',')
-        .map(p => p.trim().toLowerCase())
+    // Nur noch für den Hinweis beim Bot-Start, dass die Zeilen wirkungslos sind.
+    legacyEnvProtocols: [optional('LENDING_PROTOCOLS', ''), optional('MONITOR_PROTOCOLS', '')]
         .filter(Boolean),
 
     // ── Kamino ───────────────────────────────────────────────────────────────
     kamino: {
         // Legacy-Felder für Rückwärtskompatibilität (= Main Market)
-        market:      optional('KAMINO_MARKET',       '7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF'),
-        usdcReserve: optional('KAMINO_USDC_RESERVE', 'D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59'),
+        market:      optional('KAMINO_MARKET',       getPool('kamino')?.market),
+        usdcReserve: optional('KAMINO_USDC_RESERVE', getPool('kamino')?.reserve),
         apiBase:     'http://127.0.0.1:3100/kamino', // FORGE API Proxy (Rate-Limiting zentral)
 
-        // Bekannte Kamino klend USDC-Märkte (Adressen via api.kamino.finance verifiziert)
-        // Alle: sofortiger Withdraw, gleicher klend-SDK, nur market + reserve unterschiedlich.
-        // APY-Quelle: isolierte Leverage-Märkte (Borrower zahlen hohe Zinsen → hohe APY für Lender)
-        markets: {
-            'kamino': {
-                market:  '7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF',
-                reserve: 'D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59',
-                label:   'Kamino',
-            },
-            'kamino-figure': {
-                market:  'CqAoLuqWtavaVE8deBjMKe8ZfSt9ghR6Vb8nfsyabyHA',
-                reserve: '9GJ9GBRwCp4pHmWrQ43L5xpc9Vykg7jnfwcFGN8FoHYu',
-                label:   'Kamino Figure',
-            },
-            'kamino-onre': {
-                market:  '47tfyEG9SsdEnUm9cw5kY9BXngQGqu3LBoop9j5uTAv8',
-                reserve: 'AYL4LMc4ZCVyq3Z7XPJGWDM4H9PiWjqXAAuuHBEGVR2Z',
-                label:   'Kamino OnRe',
-            },
-            'kamino-huma': {
-                market:  '52FSGeeokLpgvgAMdqxyt5Hoc2TbUYj5b8yxrEdZ37Vf',
-                reserve: '4QKFoFDzNFnvfkzVazABbCEfMwd3y1pZqUVzmpnkCphj',
-                label:   'Kamino Huma',
-            },
-        },
+        // Bekannte Kamino klend USDC-Märkte: aus dem Pool-Register
+        // (config/lending-pools.json, lib/lending-pools.js). Alle: sofortiger Withdraw,
+        // gleicher klend-SDK, nur market + reserve unterschiedlich. Enthält bewusst auch
+        // entfernte Pools: Auszahlen und die Schutzliste von close-scam-tokens.js dürfen
+        // nie von Zustand oder Sichtbarkeit abhängen.
+        markets: Object.fromEntries(listByType('kamino').map(p =>
+            [p.id, { market: p.market, reserve: p.reserve, label: p.label }])),
     },
 
     // ── Jupiter Lend ──────────────────────────────────────────────────────────
@@ -140,22 +121,11 @@ export const config = {
         // nicht öffentlich gelistet ist – dient als Begleit-Adresse für den Filter-Fallback.
         filterCompanionAddress: '7PeYxZpM2dpc4RRDQovexMJ6tkSVLWtRN4mbNywsU3e6',
 
-        // Verfügbare USDC-Vaults (Adressen unveränderlich – von Loopscale vergeben)
-        vaults: {
-            'loopscale-onre': {
-                // Öffentlich zugänglicher USDC-Vault (RWA-besichert, ~7.9% APY)
-                // In allgemeiner API-Liste enthalten → directQuery funktioniert
-                address: '3gcVWr7Bgpp2EmbuF1VjjW6djHBik1d3vqjZLw2po6os',
-                label:   'Loopscale Public',
-            },
-            'loopscale-genesis': {
-                // Nicht in allgemeiner API-Liste → braucht Filter-Fallback mit ≥2 Adressen
-                // Zugänglich via app.loopscale.com/vault/AXanCP4d...
-                // ~6.76% APY | TVL ~$2.13M (2026-03-25 verifiziert)
-                address: 'AXanCP4dJHtWd7zY4X7nwxN5t5Gysfy2uG3XTxSmXdaB',
-                label:   'Loopscale Gen',
-            },
-        },
+        // Verfügbare USDC-Vaults: aus dem Pool-Register (Adressen unveränderlich, von
+        // Loopscale vergeben). Ob ein Vault in der allgemeinen API-Liste steht oder den
+        // Filter-Fallback braucht, erkennt LoopscaleProtocol._getVaultInfo() selbst.
+        vaults: Object.fromEntries(listByType('loopscale').map(p =>
+            [p.id, { address: p.address, label: p.label }])),
     },
 
     // ── APY-Monitoring ────────────────────────────────────────────────────────

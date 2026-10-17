@@ -10,7 +10,7 @@ import { showToast }           from '/forge/js/toast.js?v=20260722b';
 import { initMessageBell }     from '/forge/js/message-bell.js?v=20260825a';
 import { t as tr }             from '/forge/js/i18n.js?v=20260811a';
 import * as liquidity          from './bot-liquidity.js?v=20260925d';
-import * as lending            from './bot-lending.js?v=20260925b';
+import * as lending            from './bot-lending.js?v=20261013a';
 import { initForgeTooltip }    from './tooltip.js?v=20260811a';
 
 // ── Hash → Service-ID ─────────────────────────────────────────────────────────

@@ -126,44 +126,43 @@ function fmtTime(ts) {
     return String(p.hour).padStart(2, '0') + ':' + String(p.minute).padStart(2, '0');
 }
 
-/** Protocol-Label aus protocol-Schlüssel */
-function protocolLabel(key) {
-    const map = {
-        kamino:              'Kamino',
-        'kamino-figure':     'Kamino Figure',
-        'kamino-onre':       'Kamino OnRe',
-        'kamino-huma':       'Kamino Huma',
-        lulo:                'Lulo',
-        marinade:            'Marinade',
-        // drift:               'Drift',  // DEAKTIVIERT 2026-04-02
-        jupiter:             'Jupiter Lend',
-        loopscale:           'Loopscale',
-        'loopscale-onre':    'Loopscale Public',
-        'loopscale-genesis': 'Loopscale Gen',
-        save:                'Save',
-        marginfi:            'MarginFi',
-    };
-    return map[key] ?? key;
+// Pool-Stammdaten (Name, Farbe, Hinweis, Zustand, Sichtbarkeit) kommen aus dem
+// Pool-Register des Bots und reisen in data.json mit (`data.pools`, geschrieben von
+// bots/lending/bin/export.js). Das Dashboard führt keine eigene Pool-Liste: ein neuer
+// Pool braucht nur einen Eintrag in config/lending-pools.json.
+let POOL_META = {};
+
+function setPoolMeta(data) {
+    if (data?.pools && typeof data.pools === 'object') POOL_META = data.pools;
 }
 
-/** Protocol-Farbe (CSS-Variable) */
+// Namen aus alten Transaktionen, zu denen es keinen Pool im Register gibt.
+const LEGACY_LABELS = {
+    lulo: 'Lulo', marinade: 'Marinade', loopscale: 'Loopscale', save: 'Save', marginfi: 'MarginFi',
+};
+
+/** Protocol-Label aus protocol-Schlüssel */
+function protocolLabel(key) {
+    return POOL_META[key]?.label ?? LEGACY_LABELS[key] ?? key;
+}
+
+/** Protocol-Farbe (Hex) */
 function protocolColor(key) {
-    const map = {
-        kamino:              '#818cf8',  // Indigo
-        'kamino-figure':     '#a78bfa',  // Violet
-        'kamino-onre':       '#c084fc',  // Purple
-        'kamino-huma':       '#e879f9',  // Fuchsia
-        lulo:                '#2dd4bf',
-        marinade:            '#fb923c',
-        // drift:               '#38bdf8',  // DEAKTIVIERT 2026-04-02
-        jupiter:             '#facc15',
-        loopscale:           '#fb923c',
-        'loopscale-onre':    '#fb923c',
-        'loopscale-genesis': '#f59e0b',
-        save:                '#4ade80',
-        marginfi:            '#f472b6',
-    };
-    return map[key] ?? '#94a3b8';
+    return POOL_META[key]?.color ?? '#94a3b8';
+}
+
+/** Pools für die Tabelle "Pool Metriken" und die inaktiven Karten (laut Register sichtbar). */
+function knownPools() {
+    return Object.entries(POOL_META)
+        .filter(([, p]) => p.inMetrics)
+        .map(([id, p]) => ({ id, label: p.label }));
+}
+
+/** Hinweis-Icon ⓘ eines Pools (Texte als i18n-Schlüssel im Register). */
+function poolNoteIcon(id) {
+    const note = POOL_META[id]?.note;
+    if (!note) return '';
+    return ` <span class="pc-info has-tooltip" data-tooltip-title="${escHtml(tr(note.titel, 'Hinweis'))}" data-tooltip-content="${escHtml(tr(note.text, ''))}">ⓘ</span>`;
 }
 
 // ─── Status-Header ────────────────────────────────────────────────────────────
@@ -601,36 +600,6 @@ function renderPortfolioChart(data) {
 
 // ─── Aktive Positionen (Row 3) ────────────────────────────────────────────────
 
-/**
- * Protokolle mit vorhandener API-Implementierung (aktiv oder inaktiv).
- * Nur Protokolle aufführen, deren API-Code in lending-protocols.js existiert.
- */
-const ALL_KNOWN_PROTOCOLS = [
-    { id: 'kamino',            label: 'Kamino' },
-    { id: 'kamino-figure',     label: 'Kamino Figure' },
-    { id: 'kamino-onre',       label: 'Kamino OnRe' },
-    { id: 'kamino-huma',       label: 'Kamino Huma' },
-    // { id: 'drift',             label: 'Drift' },  // DEAKTIVIERT 2026-04-02
-    { id: 'lulo',              label: 'Lulo' },
-    { id: 'jupiter',           label: 'Jupiter Lend' },
-    { id: 'loopscale-onre',    label: 'Loopscale Public' },
-    { id: 'loopscale-genesis', label: 'Loopscale Gen' },
-];
-
-/**
- * Protokoll-spezifische Hinweise (z.B. Reward-Typ, Risiken).
- * Werden als Tooltip-Icon ⓘ im Card-Header angezeigt.
- */
-const PROTOCOL_NOTES = {
-    'loopscale-onre': tr('len.tvl_low_note', 'TVL zu gering. Es kann zu Schwierigkeiten bei Auszahlungen kommen.'),
-    jupiter: 'Rewards werden teilweise in JUP-Token ausgezahlt (~1,15\u202f% APR), nicht in USDC. Der USDC-Anteil beträgt ~2,33\u202f% APY.',
-};
-
-const PROTOCOL_NOTE_TITLES = {
-    'loopscale-onre': tr('len.tvl_low_note_title', 'Hinweis zu geringem TVL'),
-    jupiter: tr('len.jupiter_note', 'Hinweis zu Jupiter Lend'),
-};
-
 function renderPositions(data) {
     const container = document.getElementById('positionsContainer');
     const positions = data?.positions ?? [];
@@ -647,7 +616,7 @@ function renderPositions(data) {
 
     // Inaktive Protokolle (nur mit bekannter APY)
     if (showInactive) {
-        for (const proto of ALL_KNOWN_PROTOCOLS) {
+        for (const proto of knownPools()) {
             if (activeIds.has(proto.id)) continue;
             const stats  = data?.protocolStats?.[proto.id];
             if (stats?.apy == null) continue;
@@ -697,11 +666,7 @@ function renderActiveCard(pos) {
     })();
 
     const tvlStr = fmtTvl(pos.poolTvl);
-    const note      = PROTOCOL_NOTES[proto];
-    const noteTitle = PROTOCOL_NOTE_TITLES[proto] ?? 'Hinweis';
-    const noteIcon = note
-        ? ` <span class="pc-info has-tooltip" data-tooltip-title="${noteTitle}" data-tooltip-content="${note}">ⓘ</span>`
-        : '';
+    const noteIcon = poolNoteIcon(proto);
 
     const investVal    = pos.netInvested ?? pos.amount;
     // Guthaben = On-Chain-Stand direkt (pos.amount), nicht aus netInvested + yield
@@ -717,7 +682,7 @@ function renderActiveCard(pos) {
     })();
 
     return `
-        <div class="position-card ${proto}">
+        <div class="position-card ${proto}" style="--pc-color:${protocolColor(proto)}">
             <div class="pc-header">
                 <span class="pc-protocol">${label}${noteIcon}</span>
                 <span class="pc-apy ${apyCls} apy-clickable" data-protocol="${proto}" data-label="${label}" title="${tr('len.apy_show', 'APY-Verlauf anzeigen')}">${apyStr}</span>
@@ -750,14 +715,10 @@ function renderActiveCard(pos) {
 function renderInactiveCard(proto, stats) {
     const apyStr   = fmt(stats.apy, 2) + '\u202f% APY';
     const tvlStr   = fmtTvl(stats?.tvl ?? null);
-    const note      = PROTOCOL_NOTES[proto.id];
-    const noteTitle = PROTOCOL_NOTE_TITLES[proto.id] ?? 'Hinweis';
-    const noteIcon = note
-        ? ` <span class="pc-info has-tooltip" data-tooltip-title="${noteTitle}" data-tooltip-content="${note}">ⓘ</span>`
-        : '';
+    const noteIcon = poolNoteIcon(proto.id);
 
     return `
-        <div class="position-card ${proto.id} pc-inactive">
+        <div class="position-card ${proto.id} pc-inactive" style="--pc-color:${protocolColor(proto.id)}">
             <div class="pc-header">
                 <span class="pc-protocol">${proto.label}${noteIcon}</span>
                 <span class="pc-apy apy-inactive apy-clickable" data-protocol="${proto.id}" data-label="${proto.label}" title="${tr('len.apy_show', 'APY-Verlauf anzeigen')}">${apyStr}</span>
@@ -809,10 +770,15 @@ function renderAvailablePools(data) {
     const activeIds = new Set((data?.positions ?? []).map(p => p.protocol));
     const stats     = data?.protocolStats ?? {};
 
-    const allRows = ALL_KNOWN_PROTOCOLS
+    const allRows = knownPools()
         .map(proto => {
             const st = stats[proto.id] ?? {};
+            const meta = POOL_META[proto.id] ?? {};
             return {
+                // Zustand laut Pool-Register. Ein nicht mehr abgefragter Pool hat keine
+                // Messwerte: Die Zeile zeigt dann Striche statt eingefrorener Zahlen.
+                depositClosed: meta.state !== 'aktiv',
+                notQueried:    meta.queried === false,
                 id:      proto.id,
                 label:   proto.label,
                 apy:     st.apy ?? null,
@@ -835,8 +801,8 @@ function renderAvailablePools(data) {
                 active:  activeIds.has(proto.id),
             };
         })
-        .filter(r => r.apy != null)
-        .sort((a, b) => b.apy - a.apy);
+        .filter(r => r.apy != null || r.notQueried)
+        .sort((a, b) => (b.apy ?? -Infinity) - (a.apy ?? -Infinity));
 
     const rows = _poolsVisFilter === 'active'   ? allRows.filter(r =>  r.active)
                : _poolsVisFilter === 'inactive' ? allRows.filter(r => !r.active)
@@ -862,16 +828,23 @@ function renderAvailablePools(data) {
     } else {
         let rowsHtml = '';
         for (const r of rows) {
-            // Zeilen-Zustand: deaktivierte Pools werden grau dargestellt und mit
-            // einem Verbots-Icon markiert. Die Bedeutung steht immer im Tooltip —
-            // Farbe allein trägt hier nie die Information.
+            // Zeilen-Zustand: vom Nutzer deaktivierte Pools (Pool-Freigabe aus) werden grau
+            // dargestellt. Kein Verbots-Icon mehr (Festlegung 13.10.2026, LEN#001365). Damit
+            // die Bedeutung nicht allein an der Farbe hängt, trägt der Pool-Name den Tooltip.
             const rowCls = [
                 r.active ? 'lb-row-active' : 'lb-row-inactive',
                 r.enabled ? '' : 'lb-row-disabled',
             ].filter(Boolean).join(' ');
 
-            const disabledIcon = r.enabled ? '' :
-                `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.pool_disabled_title', 'Pool deaktiviert')}" data-tooltip-content="${tr('len.pool_disabled_tip', 'Dieser Pool ist deaktiviert. Es wird weder automatisch noch manuell in ihn eingezahlt, bis du ihn in den Einstellungen wieder aktivierst.')}">\uD83D\uDEAB</span> `;
+            const nameHtml = r.enabled ? escHtml(r.label) :
+                `<span class="has-tooltip" data-tooltip-title="${tr('len.pool_disabled_title', 'Pool deaktiviert')}" data-tooltip-content="${tr('len.pool_disabled_tip', 'Dieser Pool ist deaktiviert. Es wird weder automatisch noch manuell in ihn eingezahlt, bis du ihn in den Einstellungen wieder aktivierst.')}">${escHtml(r.label)}</span>`;
+
+            // Keine Einzahlungen mehr (Zustand im Pool-Register): eigenes Icon mit Tooltip,
+            // unabhängig von der Pool-Freigabe des Nutzers.
+            const closedIcon = !r.depositClosed ? '' :
+                `<span class="lb-pool-icon has-tooltip" data-tooltip-title="${tr('len.pool_closed_title', 'Keine Einzahlungen mehr')}" data-tooltip-content="${r.notQueried
+                    ? tr('len.pool_closed_unqueried_tip', 'Dieser Pool nimmt bei FORGE keine Einzahlungen mehr an und wird nicht mehr abgefragt. Deshalb gibt es keine aktuellen Werte.')
+                    : tr('len.pool_closed_tip', 'Dieser Pool nimmt bei FORGE keine Einzahlungen mehr an. Bestehendes Guthaben kannst du in den Einstellungen auszahlen.')}">\u26D4</span> `;
 
             const apyStr = r.apy != null ? fmt(r.apy, 2) + ' %' : '—';
 
@@ -899,7 +872,7 @@ function renderAvailablePools(data) {
 
             rowsHtml += `
             <div class="lb-pools-row ${rowCls}">
-                <span>${disabledIcon}${escHtml(r.label)}</span>
+                <span>${closedIcon}${nameHtml}</span>
                 <span class="col-r lb-pools-col-asset" style="color:var(--text-muted);font-size:0.78rem">USDC</span>
                 <span class="col-r">${basisIcon}<span class="apy-clickable" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.apy_history', 'APY-Verlauf')}">${apyStr}</span></span>
                 <span class="col-r">${tvlIcon}<span class="tvl-clickable${r.tvlBelow ? ' lb-below' : ''}" data-protocol="${escHtml(r.id)}" data-label="${escHtml(r.label)}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="${tr('len.tvl_history', 'TVL-Verlauf')}">${fmtTvl(r.tvl)}</span></span>
@@ -2137,6 +2110,7 @@ function initTooltips() {
 // ─── Main Render ──────────────────────────────────────────────────────────────
 
 function render(data) {
+    setPoolMeta(data);
     renderStatus(data);
     if (!data) return;
 

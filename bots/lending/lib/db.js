@@ -54,7 +54,7 @@ function initSchema(db) {
         CREATE TABLE IF NOT EXISTS positions (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             bot_id          TEXT    NOT NULL,
-            protocol        TEXT    NOT NULL,   -- 'kamino' | 'jupiter' | 'loopscale-genesis' | ...
+            protocol        TEXT    NOT NULL,   -- Pool-ID (config/lending-pools.json)
             pool_type       TEXT    NOT NULL,   -- 'lending' | 'regular' | 'protected'
             asset           TEXT    NOT NULL DEFAULT 'USDC',
             amount          REAL    NOT NULL,   -- Deposit-Betrag in USDC
@@ -85,7 +85,7 @@ function initSchema(db) {
         CREATE TABLE IF NOT EXISTS protocol_stats (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             bot_id      TEXT    NOT NULL,
-            protocol    TEXT    NOT NULL,   -- 'kamino' | 'drift' | 'loopscale-onre' | ...
+            protocol    TEXT    NOT NULL,   -- Pool-ID (config/lending-pools.json)
             pool_type   TEXT    NOT NULL,   -- 'lending' | 'regular' | 'protected'
             apy         REAL    NOT NULL,   -- APY in %
             tvl         REAL,               -- Total Value Locked in USDC (null = nicht verfügbar)
@@ -249,7 +249,7 @@ function initSchema(db) {
     // 🔒 Nur wenn dieser Snapshot höchstens BACKFILL_MAX_LAG_MS nach dem Positionsstart
     //    liegt. Sonst enthielte er bereits echten Ertrag, der dann dauerhaft als
     //    Kostenbasis gälte und aus der Yield-Anzeige verschwände — beim Master traf das
-    //    `loopscale-genesis` (Start 25.03., frühester Snapshot 08.04. = 13 Tage Versatz,
+    //    Loopscale Gen (Start 25.03., frühester Snapshot 08.04. = 13 Tage Versatz,
     //    ~6 USDC echter Ertrag). Ohne brauchbaren Snapshot bleibt entry_value NULL:
     //    bin/export.js fällt dann auf die alte netInvested-Methode zurück (leicht zu hoch,
     //    aber nicht falsch verankert), und bin/bot.js setzt beim nächsten Cashflow einen
@@ -260,7 +260,7 @@ function initSchema(db) {
     //    fiel dann auf `started_at` zurück und summierte beim ersten Refresh die
     //    Cashflows der GESAMTEN Positionshistorie als vermeintlich neuen Zufluss —
     //    obwohl die längst im DB-Wert stecken. Auf dem Master verankerte das
-    //    `loopscale-genesis` (80+ Cashflows seit März, Nettosumme −12,04) bei 2699,58
+    //    Loopscale Gen (80+ Cashflows seit März, Nettosumme −12,04) bei 2699,58
     //    statt 2708,00 und wies ~8,4 USDC zu viel Ertrag aus. Deshalb setzt die
     //    Migration `entry_valued_at` jetzt IMMER: Positionen ohne brauchbaren Anker
     //    bekommen den Migrationszeitpunkt, wodurch alle historischen Cashflows sauber
@@ -272,7 +272,7 @@ function initSchema(db) {
     //    zeitpunkt in `entry_value` ein, nicht nur die bis zum Snapshot. Trotzdem stand
     //    `entry_valued_at` auf `snap.recorded_at`. bin/bot.js suchte beim ersten Tick
     //    danach erneut nach Cashflows NACH diesem (zu frühen) Zeitpunkt und fand denselben
-    //    Deposit ein zweites Mal. Auf forge-pub1 hat das den Anker von `loopscale-onre`
+    //    Deposit ein zweites Mal. Auf forge-pub1 hat das den Anker von Loopscale Public
     //    (Deposit 20 vor dem Snapshot, Deposit 5 danach) von korrekt 25,02 auf 30,02 USDC
     //    verschoben — höher als die Position selbst, Yield wurde negativ (von
     //    export.js auf 0 gefloort, aber inhaltlich falsch). Im Master-Test nie aufgefallen,

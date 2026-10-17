@@ -7,9 +7,9 @@
  * hindert, Gelder automatisch wieder zu deployen oder umzuschichten.
  *
  * Verwendung:
- *   node bin/move.js --from kamino-huma  --to loopscale-genesis
- *   node bin/move.js --from kamino-figure --to loopscale-genesis --amount 150
- *   node bin/move.js --from kamino-huma  --to loopscale-genesis --dry-run
+ *   node bin/move.js --from kamino-figure --to kamino
+ *   node bin/move.js --from kamino-figure --to kamino --amount 150
+ *   node bin/move.js --from kamino-figure --to kamino --dry-run
  *
  * Optionen:
  *   --from      Quell-Pool (Pflicht)
@@ -26,11 +26,12 @@ import { fileURLToPath }      from 'url';
 
 import { config }             from '../lib/config.js';
 import { t, numLocale } from '../../../lib/i18n.js';
+import { isDepositClosed } from '../../../lib/lending-pools.js';
 import {
     KaminoProtocol, JupiterLendProtocol,
     DriftProtocol, LoopscaleProtocol,
 } from '../lib/lending-protocols.js';
-import { loadKeypair, signAndSend, getSolBalance } from '../lib/wallet.js';
+import { loadKeypair, signAndSend, getSolBalance, fetchUsdcReceived } from '../lib/wallet.js';
 import {
     getDb, openPosition, addToPosition, closePosition,
     getActivePositions, recordTransaction,
@@ -73,6 +74,10 @@ if (!fromProto || !VALID_PROTOCOLS.includes(fromProto)) {
 }
 if (!toProto || !VALID_PROTOCOLS.includes(toProto)) {
     console.error(t('cli.lend.to_required', { list: VALID_PROTOCOLS.join(', ') }));
+    process.exit(1);
+}
+if (isDepositClosed(toProto)) {
+    console.error(t('api.lending.pool_retired', { protocol: toProto }));
     process.exit(1);
 }
 if (fromProto === toProto) {
@@ -253,6 +258,14 @@ async function main() {
         console.log('✓');
         console.log(`        TX: ${txSigWithdraw}`);
 
+        // Gebucht und weiterbewegt wird, was die TX tatsächlich ins Wallet gebracht hat
+        // (Phantom-PnL-Befund 13.10.2026: angeforderter ≠ erhaltener Betrag).
+        const received = await fetchUsdcReceived(txSigWithdraw, walletAddress);
+        const movedAmount = received != null ? Math.min(effectiveAmount, received) : effectiveAmount;
+        if (received != null && Math.abs(received - effectiveAmount) > 0.01) {
+            console.log(`        ⚠ Angefordert ${fmt(effectiveAmount)} USDC, erhalten ${fmt(received)} USDC – weiter mit ${fmt(movedAmount)} USDC`);
+        }
+
         // DB: Quell-Position schließen
         try {
             getDb();
@@ -264,7 +277,7 @@ async function main() {
                 protocol: fromProto,
                 poolType: protoFrom.poolType ?? fromProto,
                 asset:    'USDC',
-                amount:   effectiveAmount,
+                amount:   movedAmount,
                 txHash:   txSigWithdraw,
                 note:     `Move → ${toProto}`,
             });
@@ -272,7 +285,7 @@ async function main() {
             console.warn(`        ⚠ ${t('cli.lend.mv_db_failed', { step: 'Withdraw', error: dbErr.message })}`);
         }
 
-        console.log(`        ✅ ${t('cli.lend.mv_withdraw_ok', { usdc: fmt(effectiveAmount) })}`);
+        console.log(`        ✅ ${t('cli.lend.mv_withdraw_ok', { usdc: fmt(movedAmount) })}`);
 
         // Ungestakte LP-Reste erkennen (nur Loopscale) – siehe
         // LoopscaleProtocol.checkLeftoverLp() in lib/lending-protocols.js für Hintergrund.
@@ -295,7 +308,7 @@ async function main() {
         console.log(`  [2/2] ${t('cli.lend.mv_step2', { label: protoTo.label })}`);
         process.stdout.write(`        ${t('cli.lend.step_build_tx')} `);
         const isLoopscale = protoTo instanceof LoopscaleProtocol;
-        const depositTxData = await protoTo.buildDepositTx(walletAddress, effectiveAmount);
+        const depositTxData = await protoTo.buildDepositTx(walletAddress, movedAmount);
         console.log('✓');
 
         process.stdout.write(`        ${t('cli.lend.step_sign_send')} `);
@@ -310,13 +323,13 @@ async function main() {
             getDb();
             const existingPos = getActivePositions().find(p => p.protocol === toProto);
             if (existingPos) {
-                addToPosition(existingPos.id, effectiveAmount);
+                addToPosition(existingPos.id, movedAmount);
             } else {
                 openPosition({
                     protocol: toProto,
                     poolType: protoTo.poolType ?? toProto,
                     asset:    'USDC',
-                    amount:   effectiveAmount,
+                    amount:   movedAmount,
                     txHash:   txSigDeposit,
                 });
             }
@@ -325,7 +338,7 @@ async function main() {
                 protocol: toProto,
                 poolType: protoTo.poolType ?? toProto,
                 asset:    'USDC',
-                amount:   effectiveAmount,
+                amount:   movedAmount,
                 txHash:   txSigDeposit,
                 note:     `Move ← ${fromProto}`,
             });
@@ -337,7 +350,7 @@ async function main() {
                     currentValue: snap.current_value,
                     totalYield:   snap.total_yield ?? 0,
                     avgApy:       targetApy ?? snap.avg_apy ?? 0,
-                    walletUsdc:   Math.max(0, (snap.wallet_usdc ?? 0) - effectiveAmount),
+                    walletUsdc:   Math.max(0, (snap.wallet_usdc ?? 0) - movedAmount),
                     walletSol:    solBalance,
                 });
             }
@@ -345,14 +358,14 @@ async function main() {
             console.warn(`        ⚠ ${t('cli.lend.mv_db_failed', { step: 'Deposit', error: dbErr.message })}`);
         }
 
-        console.log(`        ✅ ${t('cli.lend.mv_deposit_ok', { usdc: fmt(effectiveAmount) })}`);
+        console.log(`        ✅ ${t('cli.lend.mv_deposit_ok', { usdc: fmt(movedAmount) })}`);
         console.log('');
 
         // ── Ergebnis ──────────────────────────────────────────────────────────
         hr();
         console.log(`  ✅ ${t('cli.lend.mv_done')}`);
         console.log('');
-        console.log(t('cli.lend.mv_res_amount', { v: `${fmt(effectiveAmount)} USDC` }));
+        console.log(t('cli.lend.mv_res_amount', { v: `${fmt(movedAmount)} USDC` }));
         console.log(t('cli.lend.mv_res_from', { v: protoFrom.label }));
         console.log(t('cli.lend.mv_res_to', { v: protoTo.label }));
         console.log(`  Withdraw TX: https://solscan.io/tx/${txSigWithdraw}`);

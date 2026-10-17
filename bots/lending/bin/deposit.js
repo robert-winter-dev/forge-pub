@@ -12,7 +12,7 @@
  *   node bin/deposit.js --protocol kamino         --amount 500 --yes
  *
  * Optionen:
- *   --protocol  kamino | kamino-figure | kamino-onre | jupiter | loopscale-genesis | ...
+ *   --protocol  Pool-ID aus config/lending-pools.json (nur Zustand `aktiv`)
  *   --amount    USDC-Betrag (z.B. 500)    (Pflicht)
  *   --dry-run   Zeigt Vorschau, sendet keine TX
  *   --yes       Überspringt Bestätigung   (für Scripting)
@@ -21,6 +21,7 @@
 import { createInterface }      from 'readline';
 import { config } from '../lib/config.js';
 import { t, numLocale } from '../../../lib/i18n.js';
+import { isDepositClosed } from '../../../lib/lending-pools.js';
 import { KaminoProtocol, JupiterLendProtocol, DriftProtocol, LoopscaleProtocol } from '../lib/lending-protocols.js';
 import { loadKeypair, signAndSend, assertSufficientSol, getSolBalance, fetchFeeSol } from '../lib/wallet.js';
 import { getDb, openPosition, addToPosition, getActivePositions,
@@ -52,11 +53,17 @@ function jerr(msg)  { if (jsonMode) process.stderr.write(msg + '\n'); else conso
 const VALID_PROTOCOLS = [
     ...Object.keys(config.kamino.markets),          // kamino, kamino-figure, kamino-onre, ...
     'jupiter', 'drift',
-    ...Object.keys(config.loopscale.vaults),         // loopscale-onre, loopscale-genesis, ...
+    ...Object.keys(config.loopscale.vaults),         // alle Loopscale-Vaults des Pool-Registers
 ];
 if (!protocol || !VALID_PROTOCOLS.includes(protocol)) {
     if (jsonMode) jout({ ok: false, error: t('cli.lend.unknown_protocol', { protocol }) });
     else console.error(t('cli.lend.protocol_required', { list: VALID_PROTOCOLS.join('|') }));
+    process.exit(1);
+}
+
+if (isDepositClosed(protocol)) {
+    if (jsonMode) jout({ ok: false, error: t('api.lending.pool_retired', { protocol }) });
+    else console.error(t('api.lending.pool_retired', { protocol }));
     process.exit(1);
 }
 

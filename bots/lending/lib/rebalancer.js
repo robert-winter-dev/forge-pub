@@ -23,6 +23,7 @@
 import { getDb } from './db.js';
 import { config } from './config.js';
 import { isPoolEnabled, checkInvestGuards } from './tvl-guard.js';
+import { isDepositAllowed } from '../../../lib/lending-pools.js';
 
 // ── Konfiguration ─────────────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ export const REBALANCER_CONFIG = {
     // nach oben schickt es an die Ranking-Spitze. Beobachtet am 2026-08-18, als
     // jupiter/kamino-figure/kamino-onre wieder ins Polling kamen — kamino-figure
     // stand nach dem ersten Poll (n=1) mit 6,24 % auf Rang 2, 0,07 Punkte hinter
-    // kamino-huma (n=76). Beide Kriterien müssen erfüllt sein:
+    // Kamino Huma (n=76). Beide Kriterien müssen erfüllt sein:
     minDataPoints:           12,  // Messpunkte im Fenster (Poll läuft stündlich)
     minCoverageHours:        24,  // Beobachtungsdauer: ältester Messpunkt im Fenster
 };
@@ -197,6 +198,7 @@ export function getQualifiedPools(poolStats72h) {
         // (Begründung in checkInvestGuards, lib/tvl-guard.js).
         if (!checkInvestGuards(protocol, stats).ok) continue;
         if (!isPoolEnabled(protocol)) continue;
+        if (!isDepositAllowed(protocol)) continue; // Pool-Register: nur Zustand `aktiv` bekommt Kapital
         const maxDepositUsdc = tvl >= tvlCapThreshold ? Infinity : depositCapUsdc;
         result.push({ protocol, avgApy: stats.avgApy, tvl: stats.tvl, maxDepositUsdc });
     }

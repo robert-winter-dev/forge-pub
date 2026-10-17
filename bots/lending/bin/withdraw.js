@@ -8,10 +8,9 @@
  *   node bin/withdraw.js --protocol kamino         --amount 500
  *   node bin/withdraw.js --protocol kamino-figure  --amount all
  *   node bin/withdraw.js --protocol jupiter        --amount 50
- *   node bin/withdraw.js --protocol loopscale-genesis --amount all
  *
  * Optionen:
- *   --protocol  kamino | kamino-figure | kamino-onre | jupiter | loopscale-genesis | ...
+ *   --protocol  Pool-ID aus config/lending-pools.json (auch ausgelaufene Pools)
  *   --amount    USDC-Betrag oder 'all'   (Pflicht)
  *   --dry-run   Zeigt Vorschau, sendet keine TX
  *   --yes       Überspringt Bestätigung  (für Scripting)
@@ -21,7 +20,7 @@ import { createInterface }      from 'readline';
 import { config } from '../lib/config.js';
 import { t, numLocale } from '../../../lib/i18n.js';
 import { KaminoProtocol, JupiterLendProtocol, DriftProtocol, LoopscaleProtocol } from '../lib/lending-protocols.js';
-import { loadKeypair, signAndSend, getSolBalance, fetchFeeSol } from '../lib/wallet.js';
+import { loadKeypair, signAndSend, getSolBalance, fetchFeeSol, fetchUsdcReceived } from '../lib/wallet.js';
 import { getDb, closePosition, updatePosition, getActivePositions,
          createPendingWithdrawal, recordTransaction, recordProtocolStat,
          upsertWalletSnapshot, getWalletSnapshot, addNotification } from '../lib/db.js';
@@ -58,7 +57,7 @@ const amount = amountRaw === 'all' ? 'all'
 const VALID_PROTOCOLS = [
     ...Object.keys(config.kamino.markets),          // kamino, kamino-figure, kamino-onre, ...
     'jupiter', 'drift',
-    ...Object.keys(config.loopscale.vaults),         // loopscale-onre, loopscale-genesis, ...
+    ...Object.keys(config.loopscale.vaults),         // alle Loopscale-Vaults des Pool-Registers
 ];
 if (!protocol || !VALID_PROTOCOLS.includes(protocol)) {
     if (jsonMode) jout({ ok: false, error: t('cli.lend.unknown_protocol', { protocol }) });
@@ -261,25 +260,35 @@ async function main() {
         getDb();
 
         if (withdrawResult.type === 'immediate') {
+            // Gebucht wird, was die TX tatsächlich ins Wallet gebracht hat, nicht der
+            // angeforderte Betrag: bei 'all' oder veralteter Positionsabfrage kann er
+            // höher sein als das Vorhandene (13.10.2026: 200 USDC Phantom-PnL).
+            const received = await fetchUsdcReceived(txSig, walletAddress);
+            const bookedAmount = received ?? effectiveAmount;
+            if (received != null && Math.abs(received - effectiveAmount) > 0.01) {
+                jlog(`  ⚠ Angefordert ${fmt(effectiveAmount)} USDC, tatsächlich erhalten ${fmt(received)} USDC – Buchung mit dem erhaltenen Betrag`);
+            } else if (received == null) {
+                jlog('  ⚠ Erhaltener Betrag nicht ermittelbar – Buchung mit dem angeforderten Betrag');
+            }
             const activeForProtocol = getActivePositions().filter(p => p.protocol === protocol);
-            const remainingOnChain  = (position?.amount ?? 0) - effectiveAmount;
+            const remainingOnChain  = (position?.amount ?? 0) - bookedAmount;
             const isFullWithdraw    = remainingOnChain <= 0.01;
 
             if (isFullWithdraw) {
                 activeForProtocol.forEach(p => closePosition(p.id));
             } else {
-                activeForProtocol.forEach(p => updatePosition(p.id, { amount: p.amount - effectiveAmount }));
+                activeForProtocol.forEach(p => updatePosition(p.id, { amount: p.amount - bookedAmount }));
             }
 
             const feeSolImmediate = await fetchFeeSol(txSig);
-            recordTransaction({ type: 'withdraw', protocol, poolType, asset: 'USDC', amount: effectiveAmount, txHash: txSig, feeSol: feeSolImmediate });
+            recordTransaction({ type: 'withdraw', protocol, poolType, asset: 'USDC', amount: bookedAmount, txHash: txSig, feeSol: feeSolImmediate });
 
             const snap = getWalletSnapshot();
             upsertWalletSnapshot({
-                currentValue: Math.max(0, (snap?.current_value ?? 0) - effectiveAmount),
+                currentValue: Math.max(0, (snap?.current_value ?? 0) - bookedAmount),
                 totalYield:   snap?.total_yield ?? 0,
                 avgApy:       snap?.avg_apy ?? 0,
-                walletUsdc:   (snap?.wallet_usdc ?? 0) + effectiveAmount,
+                walletUsdc:   (snap?.wallet_usdc ?? 0) + bookedAmount,
                 walletSol:    solBalance,
             });
 

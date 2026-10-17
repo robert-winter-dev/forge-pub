@@ -27,11 +27,12 @@ import { fileURLToPath }    from 'url';
 
 import { config, loadAutoDeployConfig } from '../lib/config.js';
 import * as notify from '../lib/notify.js';
+import { classifyExitFailure, isSelfHealing, createFailureTracker } from '../lib/auto-exit-failure.js';
 import { isUpdateInProgress } from '../lib/notify.js';
 import { t } from '../../../lib/i18n.js';
 import { KaminoProtocol, /* DriftProtocol (DEAKTIVIERT 2026-04-02), */ LoopscaleProtocol, JupiterLendProtocol,
          createProtocolByName } from '../lib/lending-protocols.js';
-import { getSolBalance, getUsdcBalance, loadKeypair, signAndSend, sendUsdc, fetchFeeSol } from '../lib/wallet.js';
+import { getSolBalance, getUsdcBalance, loadKeypair, signAndSend, sendUsdc, fetchFeeSol, fetchUsdcReceived } from '../lib/wallet.js';
 import {
     getDb,
     recordProtocolStat,
@@ -62,6 +63,11 @@ import {
 } from '../lib/rebalancer.js';
 import { loadTvlGuard, loadLiqGuard, isPoolEnabled, disablePool, checkInvestGuards } from '../lib/tvl-guard.js';
 import { syncDashboard } from '../lib/sync.js';
+import { listPools, isDepositClosed, listProbePools, watchConfig, retireReason } from '../../../lib/lending-pools.js';
+import { createRetiredQueryGate } from '../lib/retired-query.js';
+import { adviseRetiredPoolOncePerDay } from '../lib/retired-advice.js';
+import { createRecoveryProbe, createErrorLog } from '../lib/len-pool-advisor.js';
+import { isMasterInstance } from '../../../lib/premium-identity-context.js';
 import { FORGE_TZ, todayTz } from '../../../core/config.js';
 import { PATHS, botPidPath } from '../../../config/paths.js';
 
@@ -188,42 +194,22 @@ const NEXUS_URL = 'http://127.0.0.1:3100'; // FORGE API Proxy (Jupiter-Quotes f�
 
 // ─── Protokolle ───────────────────────────────────────────────────────────────
 
-/** Erstellt eine Protokoll-Instanz für einen konfigurierten Pool-Namen. */
-function instantiateProtocol(name) {
-    // if (name === 'drift')   return new DriftProtocol();  // DEAKTIVIERT 2026-04-02
-    if (name === 'jupiter') return new JupiterLendProtocol();
-    const kaminoMarket = config.kamino.markets[name];
-    if (kaminoMarket) return new KaminoProtocol({
-        name,
-        label:       kaminoMarket.label,
-        market:      kaminoMarket.market,
-        usdcReserve: kaminoMarket.reserve,
-    });
-    const loopscaleVault = config.loopscale.vaults[name];
-    if (loopscaleVault) return new LoopscaleProtocol({
-        name,
-        label:        loopscaleVault.label,
-        vaultAddress: loopscaleVault.address,
-    });
-    return null;
-}
-
 /**
- * Erstellt Protokoll-Instanzen für ALLE konfigurierten Pools
- * (LENDING_PROTOCOLS + MONITOR_PROTOCOLS, dedupliziert).
+ * Erstellt Protokoll-Instanzen für alle Pools des Registers (config/lending-pools.json,
+ * ohne entfernte). Welche davon ein Tick tatsächlich abfragt, entscheidet
+ * selectQueriedProtocols(): ausgelaufene Pools nur mit Guthaben (LEN#001365).
  *
  * Die Qualifikationskriterien (TVL/APY) entscheiden automatisch,
  * welche Pools tatsächlich Kapital erhalten – keine manuelle Trennung nötig.
  */
 function buildAllProtocols() {
-    const seen   = new Set();
     const protos = [];
-    for (const name of [...config.protocols, ...config.monitorProtocols]) {
-        if (seen.has(name)) continue;
-        seen.add(name);
-        const proto = instantiateProtocol(name);
-        if (proto) protos.push(proto);
-        else logErr(`Unbekanntes Protokoll: ${name} (wird übersprungen)`);
+    for (const pool of listPools()) {
+        try {
+            protos.push(createProtocolByName(pool.id));
+        } catch (err) {
+            logErr(`Pool ${pool.id} nicht nutzbar: ${err.message} (wird übersprungen)`);
+        }
     }
     return protos;
 }
@@ -248,6 +234,44 @@ const DUST_THRESHOLD_USDC  = 1.0;  // Positionen unter diesem Betrag gelten als 
 // mindestens aber MIN_PLAUSIBLE_JUMP pro Tick. Post-Withdrawal-Spikes (250+ USDC) werden weiterhin erkannt.
 const MIN_PLAUSIBLE_JUMP   = 1.0;   // absolutes Minimum pro Tick in USDC
 const MAX_STALE_APY        = 1.00;  // 100% APY als obere Schranke – unrealistisch für Lending, fängt aber Post-Withdrawal-Spikes (250+ USDC) sicher ab
+
+// Abfrage-Tor für ausgelaufene Pools (LEN#001365): ohne Guthaben werden sie nicht
+// abgefragt. Ablauf und Test: lib/retired-query.js.
+const retiredGate = createRetiredQueryGate({
+    kvGet, kvSet, log,
+    activeDbProtocols: () => new Set(getActivePositions().map(p => p.protocol)),
+    dustUsdc: DUST_THRESHOLD_USDC,
+});
+
+// Erholungs-Probe für ausgelaufene Pools mit Block `pruefung` im Register (LEN#001366):
+// höchstens ein Aufruf je Pool und Tag, Reihe in kv_config. Ohne Block passiert nichts.
+// Ablauf und Test: lib/len-pool-advisor.js; ausgewertet wird per bin/len-pool-advisor.js.
+const recoveryProbe = createRecoveryProbe({
+    kvGet, kvSet, log, today: todayTz,
+    // Nur Master: Forks messen nicht (Nicht-Ziel LEN#001366), auch wenn sie das Register erben.
+    probePools: () => (isMasterInstance() ? listProbePools() : []),
+});
+// Abfragefehler der Pools im Angebot je Tag, Grundlage der Ausfall-Prüfung (LEN#001366).
+const queryErrorLog = createErrorLog({
+    kvGet, kvSet, today: todayTz,
+    isWatched: id => isMasterInstance() && watchConfig(id) !== null,
+});
+
+// Pools, die der letzte Tick abgefragt hat. Der 5-Minuten-Snapshot nutzt dieselbe
+// Auswahl, damit er einen ausgelaufenen Pool ohne Guthaben nicht doch wieder abfragt.
+let _queriedProtocols = null;
+
+/**
+ * Tägliche Auszahlungsempfehlung für ausgelaufene Pools (LEN#001352).
+ * Ablauf und Test: lib/retired-advice.js.
+ */
+function adviseRetiredPool(proto, amount) {
+    return adviseRetiredPoolOncePerDay(proto, amount, {
+        kvGet, kvSet, today: todayTz, fmt, log, addNotification,
+        send: (pool, amt) => notify.poolRetiredWithdrawAdvice(pool, amt, retireReason(proto.name)),
+        dustUsdc: DUST_THRESHOLD_USDC,
+    });
+}
 
 /**
  * Prüft nach jedem DB-Schreiben:
@@ -317,6 +341,7 @@ async function checkApys(protocols) {
             resetFail(`apy:${proto.name}`);
         } catch (err) {
             noteFail(`apy:${proto.name}`, { k: 'notify.len.task_apy', p: { pool: proto.label } }, err);
+            queryErrorLog.note(proto.name, err);
             continue;
         }
 
@@ -345,6 +370,10 @@ async function checkApys(protocols) {
 }
 
 // ─── Auto-Exit (TVL- / Liquiditäts-Schutz) ────────────────────────────────────
+
+// Fehlversuche in Folge je Protokoll (LEN#001363): gleicher Fehler stündlich ergibt
+// keine stündliche Meldung, siehe lib/auto-exit-failure.js.
+const exitFailures = createFailureTracker();
 
 /**
  * Prüft alle aktiven Positionen auf Unterschreitung einer der beiden
@@ -421,6 +450,9 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
         log(`Pool automatisch deaktiviert (kein Investment, TVL unter Schwelle): ${proto.name}`);
     }
 
+    // Schutz löst nicht (mehr) aus → Fehlversuchs-Zähler zurücksetzen (LEN#001363)
+    exitFailures.resetExcept(new Set(exitInfo.keys()));
+
     if (exitInfo.size === 0) return;
 
     const keypair = loadKeypair();
@@ -445,8 +477,13 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
 
             // Aktive DB-Positionen schließen
             const toClose   = activePositions.filter(p => p.protocol === protocolName);
-            const exitAmount = toClose.reduce((s, p) => s + (p.amount ?? 0), 0);
+            // Tatsächlich erhaltener Betrag aus der TX, DB-Summe nur als Rückfall
+            // (DB-Wert kann vom Auszahlungsbetrag abweichen → Phantom-PnL, 13.10.2026).
+            const dbExitAmount = toClose.reduce((s, p) => s + (p.amount ?? 0), 0);
+            const receivedExit = await fetchUsdcReceived(txSig, walletAddress);
+            const exitAmount   = receivedExit ?? dbExitAmount;
             toClose.forEach(p => closePosition(p.id));
+            exitFailures.reset(protocolName);
 
             // Pool deaktivieren – ab jetzt keine Deposits mehr (manuell + Auto-Deploy),
             // bis der Nutzer im Settings-UI bewusst wieder aktiviert. Nur beim
@@ -533,11 +570,41 @@ async function checkAndAutoExit(allProtocols, walletAddress) {
             // simulate() – hier braucht es die Diagnose, nicht die Beruhigung.
             const detail = err.technicalDetail ?? err.message;
             logErr(`Auto-Exit fehlgeschlagen (${protocolName}): ${detail}`);
-            await notify.autoExitFailed(protocolName, tvlFmt, detail,
-                isLiq ? { k: 'notify.len.metric_liquidity' } : { k: 'notify.len.metric_tvl' });
-            addNotification({ level: 'warn', msgKey: 'notify.len.auto_exit_failed_short',
-                params: { pool: protocolName, message: detail } });
+
+            // Nutzermeldung (LEN#001363): Ursachenklasse in Alltagssprache statt Roh-Fehler,
+            // Anzeigename statt interner Pool-ID, gleicher Fehler nicht stündlich neu.
+            const poolLabel      = safeProtocolLabel(protocolName);
+            const positionAmount = activePositions
+                .filter(p => p.protocol === protocolName)
+                .reduce((sum, p) => sum + (p.amount ?? 0), 0);
+            const liquidity = isLiq ? guard.value : (stats72h.get(protocolName)?.liquidity ?? null);
+            const reason    = classifyExitFailure({ err, liquidity, positionAmount });
+            const { count, notify: due } = exitFailures.record(protocolName);
+
+            if (due) {
+                await notify.autoExitFailed(poolLabel, {
+                    metric:      isLiq ? 'liquidity' : 'tvl',
+                    value:       guard.value ?? 0,
+                    threshold:   exitThreshold,
+                    reason,
+                    selfHealing: isSelfHealing(reason),
+                    count,
+                });
+                addNotification({ level: 'warn', msgKey: 'notify.len.exit_failed_short',
+                    params: { pool: poolLabel, reason: { k: `notify.len.exit_reason.${reason}` } } });
+            } else {
+                log(`Auto-Exit ${protocolName}: Fehlversuch ${count} in Folge (${reason}), keine neue Meldung`);
+            }
         }
+    }
+}
+
+/** Anzeigename eines Protokolls; fällt auf die interne ID zurück, nie auf einen Fehler. */
+function safeProtocolLabel(protocolName) {
+    try {
+        return createProtocolByName(protocolName)?.label ?? protocolName;
+    } catch {
+        return protocolName;
     }
 }
 
@@ -610,6 +677,7 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
         try {
             const pos = await proto.getPosition(walletAddress);
             resetFail(`position:${proto.name}`);
+            retiredGate.notePosition(proto.name, pos?.amount ?? 0);
 
             // Defensiver Fallback: wenn On-Chain-Balance = 0, null oder Dust (<1 USDC) →
             // alle aktiven DB-Positionen schließen (verhindert fake Yield nach Withdrawal).
@@ -662,6 +730,7 @@ async function takePortfolioSnapshot(protocols, walletAddress, apyMap = new Map(
                 } else {
                     log(`Position ${proto.label}: ${fmt(pos.amount)} USDC – Pool deaktiviert, zählt nicht zum Positionswert`);
                 }
+                await adviseRetiredPool(proto, pos.amount);
 
                 // DB-Position aktualisieren: aktueller Betrag (für Yield-Berechnung) + APY
                 const currentApy = apyMap.get(proto.name) ?? null;
@@ -981,6 +1050,11 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
         }
         // Pool-Freigabe prüfen – vom Nutzer deaktiviert oder durch TVL-Schutz
         // automatisch deaktiviert (siehe checkAndAutoExit/disablePool)
+        if (isDepositClosed(protocolId)) {
+            log(`Auto-Deploy übersprungen: ${protocolId} nimmt keine Einzahlungen mehr an`);
+            await notify.autoDeploySkippedRetired(protocolId);
+            return;
+        }
         if (!isPoolEnabled(protocolId)) {
             log(`Auto-Deploy übersprungen: ${protocolId} ist deaktiviert (Pool-Freigabe)`);
             await notify.autoDeploySkippedDisabled(protocolId);
@@ -1128,9 +1202,14 @@ async function checkAndDeployNewFunds(walletUsdc, walletAddress) {
 async function tick(allProtocols, walletAddress) {
     log('── Tick ──────────────────────────────────────');
     try {
-        const apyMap     = await checkApys(allProtocols);
-        const walletUsdc = await takePortfolioSnapshot(allProtocols, walletAddress, apyMap);
-        await checkAndAutoExit(allProtocols, walletAddress);
+        // Ausgelaufene Pools ohne Guthaben fallen hier heraus: keine APY-, TVL- und
+        // Positionsabfrage, also auch keine 429 mehr von dort (LEN#001365).
+        const protocols  = await retiredGate.select(allProtocols, walletAddress);
+        _queriedProtocols = protocols;
+        await recoveryProbe.run(allProtocols).catch(err => log(`Erholungs-Probe: ${err.message}`));
+        const apyMap     = await checkApys(protocols);
+        const walletUsdc = await takePortfolioSnapshot(protocols, walletAddress, apyMap);
+        await checkAndAutoExit(protocols, walletAddress);
         await checkAndTopupSol(walletAddress);          // SOL-Reserve vor Deploy prüfen
         await checkAndDeployNewFunds(walletUsdc, walletAddress);
     } catch (err) {
@@ -1233,7 +1312,10 @@ async function start() {
     log(`  ${config.botDisplayName} gestartet`);
     log(`  PID       : ${process.pid}`);
     log(`  Wallet    : ${walletAddress}`);
-    log(`  Protokolle: ${[...config.protocols, ...config.monitorProtocols].join(', ')}`);
+    log(`  Protokolle: ${config.protocols.join(', ')} (Pool-Register)`);
+    if (config.legacyEnvProtocols.length > 0) {
+        log('  Hinweis   : LENDING_PROTOCOLS / MONITOR_PROTOCOLS in der .env sind wirkungslos, es gilt config/lending-pools.json');
+    }
     log(`  Interval  : ${(APY_INTERVAL_MS / 60_000).toFixed(0)} min`);
     log(`  Sync      : ${config.syncTarget || '(deaktiviert)'}`);
     log(`════════════════════════════════════════════`);
@@ -1242,10 +1324,10 @@ async function start() {
     getDb();
     kvSet('bot_state', 'running');
 
-    // Alle Protokoll-Instanzen (LENDING + MONITOR, dedupliziert)
+    // Alle Protokoll-Instanzen aus dem Pool-Register
     const allProtocols = buildAllProtocols();
     if (allProtocols.length === 0) {
-        logErr('Keine Protokolle konfiguriert (LENDING_PROTOCOLS / MONITOR_PROTOCOLS). Bot beendet sich.');
+        logErr('Keine Pools im Register (config/lending-pools.json). Bot beendet sich.');
         process.exit(1);
     }
     log(`  Pools bekannt: ${allProtocols.map(p => p.label).join(', ')}`);
@@ -1300,7 +1382,7 @@ async function start() {
     // ── Sync-Interval (alle 5 Minuten) ────────────────────────────────────────
     setInterval(async () => {
         if (shuttingDown) return;
-        const walletUsdc = await takePortfolioSnapshot(allProtocols, walletAddress);
+        const walletUsdc = await takePortfolioSnapshot(_queriedProtocols ?? allProtocols, walletAddress);
         await checkAndDeployNewFunds(walletUsdc, walletAddress);
         await runExport();
         await runSync();

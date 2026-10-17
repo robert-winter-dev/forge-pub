@@ -15,15 +15,28 @@
 
 import './config.js'; // stellt sicher, dass dotenv.config() für .env gelaufen ist
 
+/** Ticket-Body in der Form, die Agora von Skripten verlangt: Abschnitt „Kurz gesagt“ zuerst (AGO#001314). */
+export function ticketBody(kurz, details) {
+    if (typeof kurz !== 'string' || !kurz.trim()) {
+        throw new TypeError('ticketAnlegen: opts.kurz fehlt — Agora lehnt Tickets ohne „Kurz gesagt“ ab (AGO#001314).');
+    }
+    return `## Kurz gesagt\n${kurz.trim()}\n\n${details}`;
+}
+
 /**
  * @param {string} kuerzel z.B. 'LIQ'
  * @param {string} titel
- * @param {string} body Markdown
- * @param {{prio?: 'hoch'|'normal'|'niedrig', zu?: string}} [opts] `zu`: Akteur, dem das
- *   Ticket direkt zugewiesen wird (z.B. 'talos:admin-system'); leer/weggelassen = unzugewiesen.
- * @returns {Promise<{schluessel: string}|null>} null bei Fehler (wird nur geloggt, nie geworfen)
+ * @param {string} body Markdown, die Details unter dem Abschnitt „Kurz gesagt“
+ * @param {{kurz: string, prio?: 'hoch'|'normal'|'niedrig', zu?: string}} opts `kurz` (Pflicht):
+ *   höchstens drei Sätze in Alltagssprache — was ist passiert, ist es schlimm, was muss der
+ *   Betreiber tun. Agora lehnt Tickets ohne diesen Abschnitt ab (AGO#001314), der Befund ginge dann
+ *   verloren; fehlt `kurz`, wirft der Aufruf deshalb sofort (Programmierfehler, kein Laufzeitfall).
+ *   `zu`: Akteur, dem das Ticket direkt zugewiesen wird (z.B. 'talos:admin-system');
+ *   leer/weggelassen = unzugewiesen.
+ * @returns {Promise<{schluessel: string}|null>} null bei Fehler des Dienstes (wird nur geloggt)
  */
-export async function ticketAnlegen(kuerzel, titel, body, { prio = 'normal', zu } = {}) {
+export async function ticketAnlegen(kuerzel, titel, body, { kurz, prio = 'normal', zu } = {}) {
+    body = ticketBody(kurz, body);
     const basis = process.env.AGORA_URL;
     const token = process.env.AGORA_TOKEN;
     if (!basis || !token) {

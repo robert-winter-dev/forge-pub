@@ -42,6 +42,7 @@ import { displayVersion } from '../../../lib/version.js';
 // (pct-Nenner, pnl = yield − tx_fees).
 import { pnlForPeriod } from '../../../lib/pnl.js';
 import { PATHS } from '../../../config/paths.js';
+import { getPool, isVisible, dashboardPools } from '../../../lib/lending-pools.js';
 import { isPoolEnabled, checkGuards } from '../lib/tvl-guard.js';
 import { get72hPoolStats, checkDataBasis, REBALANCER_CONFIG } from '../lib/rebalancer.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
@@ -68,46 +69,20 @@ async function fetchSolPrice() {
 // ─── TX-Gebühren-Fallback (in SOL) pro Protokoll ─────────────────────────────
 // Ermittelt aus beobachteten on-chain Gebühren; konservativ nach oben gerundet.
 
-const FEE_FALLBACK_SOL = {
-    'kamino':            0.000005,
-    'kamino-figure':     0.000005,
-    'kamino-onre':       0.000005,
-    'kamino-huma':       0.000005,
-    // 'drift':             0.000005,  // DEAKTIVIERT 2026-04-02
-    'jupiter':           0.000005,
-    'loopscale-onre':    0.000105,
-    'loopscale-genesis': 0.000105,
-};
-
 function txFeeFallback(protocol) {
-    return FEE_FALLBACK_SOL[protocol] ?? 0.000005;
+    return getPool(protocol)?.feeSol ?? 0.000005;
 }
 
 // ─── Helper ───────────────────────────────────────────────────────────────
 /**
- * 🔒 Kanonische Labels – wird live an data.json.positions[].protocolLabel und die
- * Pool-Metriken-Tabelle weitergegeben. Bei Änderungen IMMER auch synchron halten mit:
- *   - html/lending/js/app.js       (protocolLabel()-Map + ALL_KNOWN_PROTOCOLS)
- *   - bots/settings/routes/lending-actions.js  (PROTOCOL_LABELS)
- * Abweichende Labels lassen denselben Pool im Dashboard/Settings wie zwei
- * verschiedene Pools aussehen (Befund 2026-08-09, siehe Changelog).
+ * 🔒 Kanonische Labels kommen aus dem Pool-Register (lib/lending-pools.js) – dieselbe
+ * Quelle wie Dashboard und Settings. Darunter nur Namen aus alten Transaktionen, zu
+ * denen es nie einen Pool im Register gab.
  */
+const LEGACY_LABELS = { save: 'Save', marginfi: 'MarginFi', marinade: 'Marinade', solend: 'Solend' };
+
 function labelFor(protocol) {
-    const labels = {
-        'kamino':            'Kamino',
-        'kamino-figure':     'Kamino Figure',
-        'kamino-onre':       'Kamino OnRe',
-        'kamino-huma':       'Kamino Huma',
-        // 'drift':             'Drift',  // DEAKTIVIERT 2026-04-02
-        'jupiter':           'Jupiter Lend',
-        'loopscale-onre':    'Loopscale Public',
-        'loopscale-genesis': 'Loopscale Gen',
-        'save':              'Save',
-        'marginfi':          'MarginFi',
-        'marinade':          'Marinade',
-        'solend':            'Solend',
-    };
-    return labels[protocol] || protocol;
+    return getPool(protocol)?.label ?? LEGACY_LABELS[protocol] ?? protocol;
 }
 const VERSION        = displayVersion();
 const DATA_DIR       = resolve(__dirname, '../../../html/lending/data');
@@ -199,11 +174,15 @@ export async function runExport() {
 
     const latestStats   = getLatestProtocolStats();
 
-    // ── Nur aktuell überwachte Protokolle ins Dashboard ──────────────────────
+    // ── Nur sichtbare, aktuell abgefragte Pools ins Dashboard ────────────────
+    // Sichtbarkeit und Abfrage kommen aus dem Pool-Register (LEN#001365): ein
+    // ausgelaufener Pool ohne Guthaben wird nicht mehr abgefragt und erscheint nicht.
+    // Der Befund darunter ist der Grund, warum ein nicht abgefragter Pool nie mit
+    // seinen letzten Messwerten gezeigt wird (siehe `poolMeta[..].queried`).
     // `protocol_stats` ist eine Historientabelle und behält jede je geschriebene
     // Zeile. getLatestProtocolStats() liefert den letzten Stand pro Protokoll —
     // ohne Rücksicht darauf, ob es noch gepollt wird. Wird ein Protokoll aus
-    // LENDING_PROTOCOLS/MONITOR_PROTOCOLS genommen, friert sein letzter Wert ein
+    // der Abfrage genommen, friert sein letzter Wert ein
     // und das Dashboard zeigte ihn weiter als *aktuellen* Pool-Wert an.
     // Beobachtet am 2026-08-18 auf dem Master: Jupiter Lend mit APY/TVL vom
     // 13.05., Kamino Figure und Kamino OnRe mit Stand vom 01.06. — bei Kamino
@@ -213,9 +192,10 @@ export async function runExport() {
     // Protokolle mit offener Position sind immer enthalten — eine gehaltene
     // Position darf nie aus dem Dashboard verschwinden.
     const openProtocols  = new Set(mergedPositions.map(p => p.protocol));
+    const poolMeta       = dashboardPools(id => openProtocols.has(id));
     const liveProtocols  = new Set([
-        ...config.protocols,
-        ...config.monitorProtocols,
+        ...Object.keys(poolMeta).filter(id => poolMeta[id].queried
+            && isVisible(id, 'metriken', { hasPosition: openProtocols.has(id) })),
         ...openProtocols,
     ]);
     const currentStats = latestStats.filter(s => liveProtocols.has(s.protocol));
@@ -432,7 +412,7 @@ export async function runExport() {
     // ── APY-Verlauf (letzten 30 Tage) → für Dashboard-Chart ──────────────────
     const rawStats = getProtocolStatsHistory(30);
 
-    // Aggregiere zu Zeitreihe: { ts, kamino?, drift?, 'loopscale-onre'?, ... }
+    // Aggregiere zu Zeitreihe: { ts, <pool-id>?: apy, ... }
     // Downsampling: 1 Punkt pro Stunde – jeder Protokoll-Schlüssel wird dynamisch gesetzt
     const statsByHour = new Map();
     const tvlByHour   = new Map();
@@ -799,6 +779,9 @@ export async function runExport() {
         statistics,
         positions,
         protocolStats,
+        // Pool-Stammdaten aus dem Register: Name, Farbe, Hinweis, Zustand, Sichtbarkeit.
+        // Das Dashboard hat keine eigene Pool-Liste mehr.
+        pools: poolMeta,
         pendingWithdrawals,
         transactions: transactionsSorted,
         config: {

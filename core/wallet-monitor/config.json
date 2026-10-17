@@ -309,6 +309,16 @@
       "symbol": "ZEUS",
       "mint": "ZEUS1aR7aX8DFFJf5QjWj2ftDDdNTroMNGo8YoQm3Gq",
       "decimals": 6
+    },
+    {
+      "symbol": "LIT",
+      "mint": "EicWvteVi2fWepEzS3FYWsnuPoP6caZfjnKqNvydLjCH",
+      "decimals": 8
+    },
+    {
+      "symbol": "W",
+      "mint": "85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ",
+      "decimals": 6
     }
   ],
   "retainDays": 30

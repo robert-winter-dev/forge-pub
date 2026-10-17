@@ -42,6 +42,7 @@ import { RpcCache }          from './rpc-cache.js';
 import { HttpCache }         from './http-cache.js';
 import { record as rpcRecord } from './rpc-stats.js';
 import { recordUpstream429 }   from './api-stats.js';
+import { fetchWithRetry, UPSTREAM_TIMEOUT_MS } from './fetch-retry.js';
 import { sanitizeCaller }      from '../../lib/rpc-caller.js';
 import { LANE_HEADER, isBackgroundLane } from '../../lib/nexus-lane.js';
 import { backgroundLimit }    from './lane-limit.js';
@@ -125,59 +126,7 @@ async function sendTelegram(text) {
 }
 
 // ─── fetchWithRetry – Retry für 429 / 5xx / Timeout ──────────────────────────
-//
-// Zentraler Fetch-Wrapper für alle Upstream-Calls in Nexus.
-// Fängt transiente Fehler ab, bevor sie an die Bots weitergegeben werden.
-//
-// Verhalten:
-//   429          → Retry mit Backoff (Retry-After-Header oder 1s/2s/4s)
-//   5xx          → Retry mit Backoff (1s/2s/4s)
-//   Timeout/Netz → Retry mit Backoff
-//   Nach maxRetries: letzten Status/Fehler durchreichen (Bot entscheidet selbst)
-
-const UPSTREAM_TIMEOUT_MS = 15_000; // 15s Timeout pro Einzelversuch
-
-async function fetchWithRetry(url, options = {}, label = '', maxRetries = 3, api = null) {
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            const res = await fetch(url, {
-                ...options,
-                signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-            });
-
-            if (res.status === 429) {
-                if (api) recordUpstream429(api);   // CORE#001287: jeder 429-Versuch zählt
-                if (attempt === maxRetries) return res; // nach maxRetries durchreichen
-                const retryAfter = parseInt(res.headers.get('Retry-After') ?? '0', 10);
-                const waitMs = retryAfter > 0 ? retryAfter * 1_000 : (2 ** attempt) * 1_000;
-                console.warn(`[nexus:retry] 429 ${label} – warte ${waitMs}ms (Versuch ${attempt + 1}/${maxRetries})`);
-                await new Promise(r => setTimeout(r, waitMs));
-                continue;
-            }
-
-            if (res.status >= 500 && attempt < maxRetries) {
-                const waitMs = (2 ** attempt) * 1_000;
-                console.warn(`[nexus:retry] ${res.status} ${label} – warte ${waitMs}ms (Versuch ${attempt + 1}/${maxRetries})`);
-                await new Promise(r => setTimeout(r, waitMs));
-                continue;
-            }
-
-            return res;
-
-        } catch (err) {
-            const isTransient = err.name === 'TimeoutError' || err.name === 'AbortError'
-                             || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT'
-                             || err.code === 'ECONNREFUSED';
-            if (isTransient && attempt < maxRetries) {
-                const waitMs = (2 ** attempt) * 1_000;
-                console.warn(`[nexus:retry] ${err.name ?? err.code} ${label} – warte ${waitMs}ms (Versuch ${attempt + 1}/${maxRetries})`);
-                await new Promise(r => setTimeout(r, waitMs));
-                continue;
-            }
-            throw err;
-        }
-    }
-}
+// Ausgelagert nach ./fetch-retry.js (CORE#001333, dort testbar).
 
 // ─── Throttle-Logging (kein Telegram – nur console.warn) ─────────────────────
 

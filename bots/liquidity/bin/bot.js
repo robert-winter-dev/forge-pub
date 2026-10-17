@@ -34,7 +34,7 @@ import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition
          insertCapitalFlow, clearPositionSnapshots,
          insertAdvisorDecision, pruneAdvisorDecisions, kvGet, kvSet,
          getIncompleteTsExecutions, latestStopValueUsd,
-         upsertPnlInvariantDaily, hasPnlInvariantDaily } from '../lib/db.js';
+         upsertPnlInvariantDaily } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
 import { calculateRange }  from '../lib/range.js';
 import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
@@ -4707,9 +4707,10 @@ async function mainLoop() {
                     db.prepare(`INSERT OR IGNORE INTO pnl_daily (date, lp_close, pnl_value, created_at) VALUES (?, ?, ?, ?)`)
                       .run(dayStr, lpClose, pnlValue, Date.now());
                     console.log(`[bot] pnl_daily: ${dayStr} nachgeführt (lp_close=${lpClose.toFixed(2)}, pnl=${pnlValue.toFixed(2)} USDC)`);
-                } else if (hasPnlInvariantDaily(db, dayStr)) {
-                    continue;
                 }
+                // Die Invariante der letzten drei Tage wird jedes Mal neu gerechnet (INSERT OR
+                // REPLACE), nicht übersprungen: So korrigiert der Bot eine Zeile selbst, wenn sich
+                // die Prüfung oder nachgetragene Daten ändern (CORE#001308), ohne SQL von außen.
 
                 // Invariante (LIQ#001062/LIQ#001065): Σ Pool-PnL muss zum Gesamtergebnis passen.
                 // Diagnose für Log und Tabelle pnl_invariant_daily (externe Überwachung), keine

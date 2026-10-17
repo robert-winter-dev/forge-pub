@@ -1,0 +1,82 @@
+{
+  "_comment": "Zentrales Pool-Register des LendingBots (LEN#001365) – einzige Quelle für Pool-ID, Anzeigename, Typ, Adressen, Farbe, Hinweistext, TX-Gebühr, Zustand und Sichtbarkeit. Zugriff nur über lib/lending-pools.js (prüft beim Laden, bricht bei Fehlern laut ab). Zustand: aktiv | einzahlung_zu | ausgelaufen | entfernt. sichtbar.metriken / sichtbar.settings: immer | bei_position | nie (ohne Angabe: aktiv/einzahlung_zu = immer, ausgelaufen = bei_position, entfernt = nie). Ein Pool mit Guthaben bleibt IMMER sichtbar und abgefragt, egal was hier steht. pruefung (optional, für den Pool-Advisor LEN#001366; ohne Block wird ein Pool nie geprüft): intervallTage (Wiederholungsschutz nach einem Ticket), zeitraumTage (Erholung: so lange muss ein ausgelaufener Pool alle Schwellen halten), ausfallTage (Ausfall: so viele Tage in Folge unter einer Schwelle, dann fliegt ein Pool im Angebot raus), minLiquiditaetUsd, minTvlUsd, tvlTrend (steigend | nicht_fallend | egal). messwerteAb (YYYY-MM-DD, optional): Messwerte davor zählen bei der Ausfall-Prüfung als nicht gemessen (nachweislich falsche Historie). grund (liquiditaet | tvl | schnittstelle): warum der Pool ausgelaufen ist, bestimmt den Text der täglichen Auszahlungsempfehlung; setzt bin/pool-state.js. Zustandswechsel durch den Advisor nur über bots/lending/bin/pool-state.js. Änderungen wirken nach Neustart von forge-lendingbot und forge-settings. Begründung: pool-register.md in der Projektdokumentation.",
+  "pools": {
+    "kamino": {
+      "label": "Kamino",
+      "typ": "kamino",
+      "market": "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF",
+      "reserve": "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59",
+      "farbe": "#818cf8",
+      "feeSol": 0.000005,
+      "cooldown": false,
+      "zustand": "aktiv",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend", "messwerteAb": "2026-10-14" }
+    },
+    "kamino-figure": {
+      "label": "Kamino Figure",
+      "typ": "kamino",
+      "market": "CqAoLuqWtavaVE8deBjMKe8ZfSt9ghR6Vb8nfsyabyHA",
+      "reserve": "9GJ9GBRwCp4pHmWrQ43L5xpc9Vykg7jnfwcFGN8FoHYu",
+      "farbe": "#a78bfa",
+      "feeSol": 0.000005,
+      "cooldown": false,
+      "zustand": "aktiv",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend" }
+    },
+    "kamino-onre": {
+      "label": "Kamino OnRe",
+      "typ": "kamino",
+      "market": "47tfyEG9SsdEnUm9cw5kY9BXngQGqu3LBoop9j5uTAv8",
+      "reserve": "AYL4LMc4ZCVyq3Z7XPJGWDM4H9PiWjqXAAuuHBEGVR2Z",
+      "farbe": "#c084fc",
+      "feeSol": 0.000005,
+      "cooldown": false,
+      "zustand": "aktiv",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend", "messwerteAb": "2026-10-14" }
+    },
+    "kamino-huma": {
+      "label": "Kamino Huma",
+      "typ": "kamino",
+      "market": "52FSGeeokLpgvgAMdqxyt5Hoc2TbUYj5b8yxrEdZ37Vf",
+      "reserve": "4QKFoFDzNFnvfkzVazABbCEfMwd3y1pZqUVzmpnkCphj",
+      "farbe": "#e879f9",
+      "feeSol": 0.000005,
+      "cooldown": false,
+      "zustand": "aktiv",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend" }
+    },
+    "jupiter": {
+      "label": "Jupiter Lend",
+      "typ": "jupiter",
+      "farbe": "#facc15",
+      "feeSol": 0.000005,
+      "cooldown": false,
+      "hinweis": { "titel": "len.jupiter_note", "text": "len.jupiter_note_text" },
+      "zustand": "aktiv",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend" }
+    },
+    "loopscale-onre": {
+      "label": "Loopscale Public",
+      "typ": "loopscale",
+      "address": "3gcVWr7Bgpp2EmbuF1VjjW6djHBik1d3vqjZLw2po6os",
+      "farbe": "#fb923c",
+      "feeSol": 0.000105,
+      "cooldown": "maybe",
+      "hinweis": { "titel": "len.tvl_low_note_title", "text": "len.tvl_low_note" },
+      "grund": "liquiditaet",
+      "zustand": "ausgelaufen",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend" }
+    },
+    "loopscale-genesis": {
+      "label": "Loopscale Gen",
+      "typ": "loopscale",
+      "address": "AXanCP4dJHtWd7zY4X7nwxN5t5Gysfy2uG3XTxSmXdaB",
+      "farbe": "#f59e0b",
+      "feeSol": 0.000105,
+      "cooldown": "maybe",
+      "grund": "liquiditaet",
+      "zustand": "ausgelaufen",
+      "pruefung": { "intervallTage": 30, "zeitraumTage": 14, "ausfallTage": 3, "minLiquiditaetUsd": 100000, "minTvlUsd": 100000, "tvlTrend": "nicht_fallend" }
+    }
+  }
+}

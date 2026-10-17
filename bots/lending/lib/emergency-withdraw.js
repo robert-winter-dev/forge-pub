@@ -62,24 +62,11 @@ function log(msg) {
 }
 
 async function createProtocolInstance(protocol) {
-    const { KaminoProtocol, JupiterLendProtocol, LoopscaleProtocol, DriftProtocol } =
-        await import('./lending-protocols.js');
-    const { config } = await import('./config.js');
-
-    if (protocol.startsWith('kamino'))    return new KaminoProtocol();
-    if (protocol.startsWith('jupiter'))   return new JupiterLendProtocol();
-    if (protocol.startsWith('loopscale')) {
-        // Direkter Objekt-Lookup wie überall sonst im Code (bot.js, deposit.js,
-        // withdraw.js, move.js, lending-protocols.js) — config.loopscale.vaults ist
-        // ein Objekt (Vault-ID → Config), kein Array. Der vorherige .find()-Aufruf
-        // warf immer einen TypeError (gefunden 2026-08-04, erster echter
-        // Emergency-Exit-Dry-Run, betraf die reale loopscale-onre-Position).
-        const vaultCfg = config.loopscale?.vaults?.[protocol];
-        if (!vaultCfg) throw new Error(`Unbekannter Loopscale-Vault: ${protocol}`);
-        return new LoopscaleProtocol({ name: protocol, label: vaultCfg.label, vaultAddress: vaultCfg.address });
-    }
-    if (protocol.startsWith('drift'))     return new DriftProtocol();
-    throw new Error(`Unbekanntes Protokoll: ${protocol}`);
+    await import('./config.js'); // Lädt .env
+    const { createProtocolByName } = await import('./lending-protocols.js');
+    // Pool-Register (lib/lending-pools.js): gilt auch für ausgelaufene Pools, ein
+    // Notfall-Withdraw muss dort immer möglich bleiben.
+    return createProtocolByName(protocol);
 }
 
 // ─── Mode A: Konnektivitätscheck ─────────────────────────────────────────────

@@ -45,6 +45,7 @@ import { spawn }         from 'node:child_process';
 import Database          from 'better-sqlite3';
 import { PATHS, envFile } from '../../../config/paths.js';
 import { t } from '../../../lib/i18n.js';
+import { listPools, isKnown as isKnownPool, isDepositClosed, isVisible } from '../../../lib/lending-pools.js';
 import { registerKind, startJob, waitForJob, jobResponse } from '../lib/finance-jobs.js';
 
 const __dirname      = path.dirname(fileURLToPath(import.meta.url));
@@ -220,23 +221,8 @@ function readEnv() {
     } catch { return {}; }
 }
 
-/**
- * Bekannte Protokolle mit Labels.
- * 🔒 Muss Wort für Wort mit labelFor() in bots/lending/bin/export.js übereinstimmen —
- * das ist die Quelle, die im Dashboard live angezeigt wird. Abweichende Labels hier
- * ließen denselben Pool im Dashboard und in den Settings wie zwei verschiedene Pools
- * aussehen (Befund 2026-08-09: 'Loopscale Onre' hier vs. 'Loopscale Public' im
- * Dashboard für dasselbe Protokoll `loopscale-onre`).
- */
-const PROTOCOL_LABELS = {
-    'kamino':             'Kamino',
-    'kamino-figure':      'Kamino Figure',
-    'kamino-onre':        'Kamino OnRe',
-    'kamino-huma':        'Kamino Huma',
-    'jupiter':            'Jupiter Lend',
-    'loopscale-genesis':  'Loopscale Gen',
-    'loopscale-onre':     'Loopscale Public',
-};
+// Pool-Stammdaten (ID, Name, Zustand, Sichtbarkeit) kommen aus dem Pool-Register
+// (lib/lending-pools.js, LEN#001365) – dieselbe Quelle wie Bot und Dashboard.
 
 // ── Routen ────────────────────────────────────────────────────────────────────
 
@@ -271,23 +257,36 @@ router.get('/config', (req, res) => {
     }
 
     const sdb = openSettingsDb();
-    const protocols = Object.entries(PROTOCOL_LABELS).map(([id, label]) => {
+    // Sichtbarkeit laut Register. Guthaben zählt doppelt abgesichert: data.json ODER
+    // direkt die Bot-DB. Fehlt data.json, darf ein ausgelaufener Pool mit Guthaben nicht
+    // aus der Liste fallen, sonst wäre der Auszahlungsweg weg.
+    const visiblePools = listPools().filter(p => isVisible(p.id, 'settings', {
+        hasPosition: (activeAmounts.get(p.id) ?? 0) > 0 || hasProtocolCapital(p.id),
+    }));
+    const protocols = visiblePools.map(({ id, label }) => {
         const stats     = protocolStats[id] ?? {};
         const apy       = stats.apy  ?? null;
         const tvl       = stats.tvl  ?? 0;
         const liquidity = stats.liquidity ?? null;
         const amount    = activeAmounts.get(id) ?? 0;
         const active    = amount > 0;
-        const enabled   = loadPoolEnabled(sdb, id);
+        // Gesperrt für Einzahlungen (Zustand im Pool-Register): hier nur Anzeige, `enabled` false hält
+        // Einzahlen-Schaltfläche und Dropdown-Markierung konsistent. Die Pool-Freigabe in
+        // settings.db bleibt unberührt, ein Bot-Tick zählt die Position weiter mit.
+        const retired   = isDepositClosed(id);
+        const enabled   = loadPoolEnabled(sdb, id) && !retired;
 
         // Nutzbar = Pool freigegeben (Einzahlen manuell immer möglich) ODER aktive
         // Position vorhanden. Nur die Pool-Freigabe selbst sperrt hier noch —
         // APY-Schwelle/Datenbasis sind seit 2026-08-21 reine Auto-Deploy-Kriterien
         // (siehe lib/rebalancer.js), manuelles Investieren bleibt uneingeschränkt.
-        const disabledReason = (!enabled && !active) ? t('api.lending.reason_pool_disabled') : null;
+        const disabledReason = (!enabled && !active)
+            ? (retired ? t('api.lending.reason_pool_retired') : t('api.lending.reason_pool_disabled'))
+            : null;
+        const retiredNote = retired ? t('api.lending.pool_retired', { protocol: label }) : null;
 
         return {
-            id, label, active, enabled, apy, amount, disabledReason,
+            id, label, active, enabled, apy, amount, disabledReason, retired, retiredNote,
             currentTvl:      tvl || null,
             currentLiquidity: liquidity,
             tvlGuard:        loadTvlGuard(sdb, id),
@@ -303,7 +302,7 @@ router.get('/config', (req, res) => {
 // ── PUT /api/lending/tvl-guard/:protocolId – TVL-Schutz pro Protokoll speichern ──
 router.put('/tvl-guard/:protocolId', (req, res) => {
     const { protocolId } = req.params;
-    if (!PROTOCOL_LABELS[protocolId]) {
+    if (!isKnownPool(protocolId)) {
         return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
     }
     const body = req.body ?? {};
@@ -323,7 +322,7 @@ router.put('/tvl-guard/:protocolId', (req, res) => {
 // ── PUT /api/lending/liq-guard/:protocolId – Liquiditäts-Schutz speichern ────
 router.put('/liq-guard/:protocolId', (req, res) => {
     const { protocolId } = req.params;
-    if (!PROTOCOL_LABELS[protocolId]) {
+    if (!isKnownPool(protocolId)) {
         return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
     }
     const body = req.body ?? {};
@@ -350,12 +349,15 @@ router.put('/liq-guard/:protocolId', (req, res) => {
 // wieder deaktiviert werden.
 router.put('/pool-enabled/:protocolId', (req, res) => {
     const { protocolId } = req.params;
-    if (!PROTOCOL_LABELS[protocolId]) {
+    if (!isKnownPool(protocolId)) {
         return res.status(404).json({ ok: false, error: t('api.lending.unknown_protocol') });
     }
     const { enabled } = req.body ?? {};
     if (typeof enabled !== 'boolean') {
         return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'enabled (bool)' }) });
+    }
+    if (enabled === true && isDepositClosed(protocolId)) {
+        return res.status(409).json({ ok: false, error: t('api.lending.pool_retired', { protocol: protocolId }) });
     }
     if (enabled === false && hasProtocolCapital(protocolId)) {
         return res.status(409).json({
@@ -458,6 +460,11 @@ router.post('/deposit', async (req, res) => {
     const { protocol, amount } = req.body ?? {};
     if (!protocol) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'protocol' }) });
     if (amount == null) return res.status(400).json({ ok: false, error: t('api.common.missing_field', { field: 'amount' }) });
+
+    // Für Einzahlungen gesperrte Pools (Pool-Register) sind unabhängig von der Pool-Freigabe zu.
+    if (isDepositClosed(protocol)) {
+        return res.status(409).json({ ok: false, error: t('api.lending.pool_retired', { protocol }) });
+    }
 
     // Deaktivierte Pools sind für JEDEN Deposit-Weg gesperrt, nicht nur Auto-Deploy.
     {

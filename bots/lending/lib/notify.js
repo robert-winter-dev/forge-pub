@@ -74,6 +74,8 @@ const ACTION = {
     support:    'notify.len.act.support',
     check:      'notify.len.act.check_dashboard',
     vanished:   'notify.len.act.position_vanished',
+    poolRetired:         'notify.len.act.pool_retired',
+    deploySkippedRetired:'notify.len.act.deploy_skipped_retired',
 };
 
 // ─── Interner Sender ──────────────────────────────────────────────────────────
@@ -164,9 +166,31 @@ export async function autoExitSendFailed(pool, message) {
     await send('warn', 'system', 'notify.len.auto_exit_send_failed', { pool, message, _action: ACTION.inWallet });
 }
 
-export async function autoExitFailed(pool, tvl, message, metric) {
-    await send('warn', 'system', 'notify.len.auto_exit_failed', {
-        pool, metric: metric ?? { k: 'notify.len.metric_tvl' }, tvl, message, _action: ACTION.checkPool,
+/**
+ * Auto-Exit fehlgeschlagen (LEN#001363). Der Nutzer bekommt eine Ursachenklasse in
+ * Alltagssprache statt des Roh-Fehlers; der technische Text bleibt im Bot-Log.
+ *
+ * @param {string} pool       Anzeigename des Pools (z. B. "Kamino Huma"), nie die interne ID
+ * @param {object} p
+ * @param {'liquidity'|'tvl'} p.metric  Kennzahl, die den Exit ausgelöst hat
+ * @param {number} p.value       Messwert in USDC
+ * @param {number} p.threshold   Schutzschwelle in USDC
+ * @param {string} p.reason      Ursachenklasse (EXIT_REASON, lib/auto-exit-failure.js)
+ * @param {boolean} p.selfHealing  true: Bot versucht es erneut, der Nutzer muss nichts tun
+ * @param {number} p.count       Fehlversuche in Folge (1 = erster)
+ */
+export async function autoExitFailed(pool, { metric, value, threshold, reason, selfHealing, count }) {
+    await send('warn', 'system', 'notify.len.exit_failed', {
+        pool,
+        trigger: {
+            k: metric === 'liquidity' ? 'notify.len.exit_trigger_liquidity' : 'notify.len.exit_trigger_tvl',
+            p: { value: { n: value, d: 0 }, threshold: { n: threshold, d: 0 } },
+        },
+        reason:  { k: `notify.len.exit_reason.${reason}` },
+        repeatLine: count > 1
+            ? { k: 'notify.len.exit_repeat_n', p: { count } }
+            : { k: 'notify.len.exit_repeat_first' },
+        _action: selfHealing ? 'notify.len.act.exit_failed_wait' : 'notify.len.act.exit_failed_manual',
     });
 }
 
@@ -178,6 +202,24 @@ export async function autoDeploySkippedUnavailable(pool) {
 
 export async function autoDeploySkippedDisabled(pool) {
     await send('warn', 'trade', 'notify.len.deploy_skipped_disabled', { pool, _action: ACTION.enablePool });
+}
+
+/** Fester Auto-Deploy-Pool nimmt keine Einzahlungen mehr an (LEN#001352). */
+export async function autoDeploySkippedRetired(pool) {
+    await send('warn', 'trade', 'notify.len.deploy_skipped_retired', { pool, _action: ACTION.deploySkippedRetired });
+}
+
+/**
+ * Tägliche Auszahlungsempfehlung für einen Pool, der keine Einzahlungen mehr annimmt
+ * (LEN#001352, Loopscale). Level warn: unerwartet und mit Auswirkung auf Kapital, aber
+ * kein akuter Verlust. Der Aufrufer begrenzt auf eine Meldung je Pool und Kalendertag.
+ */
+export async function poolRetiredWithdrawAdvice(pool, amount, grund = null) {
+    // Grund aus dem Pool-Register (RETIRE_REASONS); ohne Grund der allgemeine Text.
+    const suffix = { liquiditaet: '_liquidity', tvl: '_tvl', schnittstelle: '_api' }[grund] ?? '';
+    await send('warn', 'system', `notify.len.pool_retired${suffix}`, {
+        pool, amount, _action: ACTION.poolRetired,
+    });
 }
 
 /**

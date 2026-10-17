@@ -1606,7 +1606,7 @@ function _renderProtocolsTable(card, lending, cfg) {
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="lb-btn-pool-enabled"
-                            ${noData ? 'disabled' : ''}>${active?.enabled ? tr('sb.deactivate', 'Deaktivieren') : tr('sb.activate', 'Aktivieren')}</button>
+                            ${noData || active?.retired ? 'disabled' : ''}>${active?.enabled ? tr('sb.deactivate', 'Deaktivieren') : tr('sb.activate', 'Aktivieren')}</button>
                     </td>
                 </tr>
                 <tr>
@@ -1675,6 +1675,10 @@ function _renderProtocolsTable(card, lending, cfg) {
         <p style="margin:0.6rem 0 0;font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
             ${tr('slen.pool_not_usable', '⊘ <strong>{pool}</strong> ist derzeit nicht nutzbar: {reason}.', { pool: _esc(active.label), reason: _esc(active.disabledReason) })}
             ${tr('slen.pool_info_only', 'Der Pool wird nur zur Information gelistet – Einzahlen, Auszahlen und TVL-Schutz sind deaktiviert.')}
+        </p>` : ''}
+        ${!noData && active && active.retired && !active.disabledReason ? `
+        <p style="margin:0.6rem 0 0;font-size:0.78rem;color:var(--text-muted);line-height:1.4;">
+            ⚠ <strong>${_esc(active.label)}</strong>: ${_esc(active.retiredNote ?? '')}
         </p>` : ''}`;
 
     card.querySelector('#lb-pool-selector')?.addEventListener('change', e => {

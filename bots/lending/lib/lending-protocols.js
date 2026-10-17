@@ -21,6 +21,8 @@ import { config } from './config.js';
 import { getConnection } from './wallet.js';
 import { RateLimiter } from './rate-limiter.js';
 import { rpcCallerHeaders } from '../../../lib/rpc-caller.js';
+import { createPageCache } from './loopscale-vault-cache.js';
+import { getPool, listPools } from '../../../lib/lending-pools.js';
 
 // ─── Konstanten ───────────────────────────────────────────────────────────────
 
@@ -28,6 +30,9 @@ const KAMINO_API  = config.kamino.apiBase;
 
 /** Standard-Timeout für API-Calls (ms) */
 const TIMEOUT_MS = 10_000;
+
+/** Allgemeine Loopscale-Vault-Liste: Seiten kurz zwischen allen Vault-Instanzen teilen (LEN#001352) */
+const loopscaleListCache = createPageCache({ ttlMs: 15_000 });
 
 // ─── Hilfsfunktionen ──────────────────────────────────────────────────────────
 
@@ -38,7 +43,7 @@ async function apiFetch(url, options = {}) {
         const res = await fetch(url, { ...options, signal: controller.signal });
         if (!res.ok) {
             const body = await res.text().catch(() => '');
-            throw new Error(`HTTP ${res.status} – ${url}\n${body.slice(0, 200)}`);
+            throw new Error(`HTTP ${res.status} – ${url}\n${body.slice(0, 500)}`);
         }
         return await res.json();
     } finally {
@@ -132,11 +137,15 @@ export class KaminoProtocol {
         const url  = `${KAMINO_API}/kamino-market/${this.market}/reserves/metrics`;
         const data = await apiFetch(url);
 
-        const usdc = data.find(r =>
-            r.liquidityToken === 'USDC' ||
-            r.reserve === this.usdcReserve
-        );
-        if (!usdc) throw new Error('Kamino: USDC Reserve nicht in API-Antwort gefunden');
+        // 🔒 Nur die eingetragene Reserve, nie "irgendeine mit Token USDC": Ein Markt hat
+        // mehrere USDC-Reserven, und vor der richtigen kann eine leere stehen. Bis
+        // LEN#001367 nahm die Suche den ersten Treffer und maß beim Hauptmarkt und bei
+        // Kamino OnRe monatelang 0,10 USDC TVL statt 120 bzw. 67 Mio. Fehlt die Reserve,
+        // scheitert die Messung laut: ein falscher Wert ist gefährlicher als keiner.
+        const usdc = Array.isArray(data) ? data.find(r => r.reserve === this.usdcReserve) : null;
+        if (!usdc) {
+            throw new Error(`Kamino: Reserve ${this.usdcReserve} nicht in der Antwort für Markt ${this.market}`);
+        }
 
         const apy = parseFloat(usdc.supplyApy) * 100; // 0.01356 → 1.356 %
         // TVL: totalSupply ist in USDC (nicht Lamports)
@@ -235,7 +244,23 @@ export class KaminoProtocol {
      * @returns {Promise<WithdrawResult>}
      */
     async buildWithdrawTx(walletAddress, amount) {
-        const amountStr = String(amount);
+        // Kamino akzeptiert nur einen positiven Dezimalbetrag ("decimal-positive-amount").
+        // 'all' wird deshalb hier in den aktuellen Positionsbetrag aufgelöst, sonst
+        // lehnt die API mit 500 FST_ERR_FAILED_ERROR_SERIALIZATION ab (LEN#001361:
+        // Auto-Exit und Notfall-Withdraw sind bei Kamino nie durchgelaufen).
+        let value = amount;
+        if (amount === 'all') {
+            const position = await this.getPosition(walletAddress);
+            value = position?.maxWithdrawable ?? position?.amount ?? 0;
+            if (!(value > 0)) {
+                throw new Error(`Kamino Withdraw: keine Position in ${this.label} (Betrag nicht ermittelbar)`);
+            }
+        }
+        if (!(Number(value) > 0) || !Number.isFinite(Number(value))) {
+            throw new Error(`Kamino Withdraw: ungültiger Betrag "${amount}"`);
+        }
+        // Feste Nachkommastellen (USDC = 6): String(1e-7) wäre "1e-7" und kein Dezimalbetrag.
+        const amountStr = Number(value).toFixed(6);
 
         const data = await apiPost(`${KAMINO_API}/ktx/klend/withdraw`, {
             wallet:  walletAddress,
@@ -739,7 +764,7 @@ const LOOPSCALE_API = config.loopscale.apiBase;
 /**
  * Loopscale USDC Lending Vault.
  *
- * Eine Instanz pro Vault (loopscale-onre, loopscale-genesis).
+ * Eine Instanz pro Vault (Pools vom Typ loopscale im Pool-Register).
  * Vault-Info (APY, TVL, Position, TX) wird über die Loopscale REST API abgefragt.
  * Transaktionen werden server-seitig als base64 VersionedMessage geliefert und
  * hier in vollständige VersionedTransactions gewrappt (kompatibel mit wallet.js).
@@ -748,7 +773,7 @@ const LOOPSCALE_API = config.loopscale.apiBase;
  */
 export class LoopscaleProtocol {
     /**
-     * @param {string} name          – 'loopscale-onre' | 'loopscale-genesis'
+     * @param {string} name          – Pool-ID des Vaults (Pool-Register)
      * @param {string} label         – 'Loopscale Public' | 'Loopscale Gen'
      * @param {string} vaultAddress  – Vault PublicKey (base58)
      */
@@ -786,10 +811,12 @@ export class LoopscaleProtocol {
         const MAX_PAGES = 5; // 34 Vaults → max. 4 Seiten; 5 als Puffer
 
         for (let page = 1; page <= MAX_PAGES; page++) {
-            const data = await apiPost(`${LOOPSCALE_API}/markets/lending_vaults/info`, {
-                page,
-                pageSize: PAGE_SIZE,
-            });
+            // Listenseiten teilen sich alle Vault-Instanzen kurz (LEN#001352)
+            const data = await loopscaleListCache.get(page, () =>
+                apiPost(`${LOOPSCALE_API}/markets/lending_vaults/info`, {
+                    page,
+                    pageSize: PAGE_SIZE,
+                }));
 
             // Response: { lendVaults: [...], total: N }
             const vaults = Array.isArray(data) ? data
@@ -1307,70 +1334,48 @@ export class LoopscaleProtocol {
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
 /**
- * Erstellt Protocol-Instanzen basierend auf config.protocols.
- * @returns {Map<string, KaminoProtocol|DriftProtocol|LoopscaleProtocol|JupiterLendProtocol>}
+ * Erstellt Protocol-Instanzen für alle Pools des Registers (ohne entfernte).
+ * @returns {Map<string, KaminoProtocol|LoopscaleProtocol|JupiterLendProtocol>}
  */
 export function createProtocols() {
-    const protocols = new Map();
-    for (const name of config.protocols) {
-        if (name === 'kamino')  protocols.set('kamino',  new KaminoProtocol());
-        if (name === 'jupiter') protocols.set('jupiter', new JupiterLendProtocol());
-        // if (name === 'drift')   protocols.set('drift',   new DriftProtocol());  // DEAKTIVIERT 2026-04-02
-
-        // Loopscale-Vaults: Schlüssel entspricht dem Vault-Namen in config.loopscale.vaults
-        const loopscaleVault = config.loopscale.vaults[name];
-        if (loopscaleVault) {
-            protocols.set(name, new LoopscaleProtocol({
-                name,
-                label:        loopscaleVault.label,
-                vaultAddress: loopscaleVault.address,
-            }));
-        }
-    }
-    return protocols;
+    return new Map(listPools().map(p => [p.id, createProtocolByName(p.id)]));
 }
 
 /**
- * Erstellt eine einzelne Protokoll-Instanz anhand ihres Namens.
- * Wird vom Rebalancer und Auto-Deposit genutzt um auch nicht-aktive Protokolle
- * anzusprechen (z.B. wenn ein neuer Pool als Deposit-Ziel qualifiziert).
+ * Erstellt eine einzelne Protokoll-Instanz anhand ihrer Pool-ID. Stammdaten kommen aus
+ * dem Pool-Register (lib/lending-pools.js); ein neuer Pool braucht nur dort einen Eintrag.
+ * Funktioniert bewusst auch für ausgelaufene und entfernte Pools: Auszahlen muss immer
+ * gehen. Ob eingezahlt werden darf, prüft der Aufrufer über isDepositAllowed().
  *
- * @param {string} name  Protokoll-Schlüssel (z.B. 'kamino-figure', 'loopscale-onre')
- * @returns {KaminoProtocol|LoopscaleProtocol|DriftProtocol|JupiterLendProtocol}
- * @throws {Error} wenn das Protokoll nicht bekannt ist
+ * @param {string} name  Pool-ID aus dem Register
+ * @returns {KaminoProtocol|LoopscaleProtocol|JupiterLendProtocol}
+ * @throws {Error} wenn der Pool nicht im Register steht
  */
 export function createProtocolByName(name) {
-    if (name === 'kamino')  return new KaminoProtocol();
-    if (name === 'jupiter') return new JupiterLendProtocol();
-    // if (name === 'drift')   return new DriftProtocol();  // DEAKTIVIERT 2026-04-02
+    const pool = getPool(name);
+    if (!pool) throw new Error(`createProtocolByName: Unbekanntes Protokoll '${name}'`);
+    // if (pool.typ === 'drift') return new DriftProtocol();  // DEAKTIVIERT 2026-04-02
 
-    const kaminoMarket = config.kamino.markets[name];
-    if (kaminoMarket) {
-        return new KaminoProtocol({
-            name,
-            label:       kaminoMarket.label,
-            market:      kaminoMarket.market,
-            usdcReserve: kaminoMarket.reserve,
-        });
+    if (pool.typ === 'jupiter') return new JupiterLendProtocol();
+    if (pool.typ === 'loopscale') {
+        return new LoopscaleProtocol({ name: pool.id, label: pool.label, vaultAddress: pool.address });
     }
-
-    const loopscaleVault = config.loopscale.vaults[name];
-    if (loopscaleVault) {
-        return new LoopscaleProtocol({
-            name,
-            label:        loopscaleVault.label,
-            vaultAddress: loopscaleVault.address,
-        });
-    }
-
-    throw new Error(`createProtocolByName: Unbekanntes Protokoll '${name}'`);
+    // Der Hauptmarkt läuft über den Standard-Konstruktor: dort greifen die
+    // .env-Überschreibungen KAMINO_MARKET / KAMINO_USDC_RESERVE.
+    if (pool.id === 'kamino') return new KaminoProtocol();
+    return new KaminoProtocol({
+        name:        pool.id,
+        label:       pool.label,
+        market:      pool.market,
+        usdcReserve: pool.reserve,
+    });
 }
 
 // ─── JSDoc Types ──────────────────────────────────────────────────────────────
 
 /**
  * @typedef {Object} PositionInfo
- * @property {string}      protocol        – 'kamino' | 'jupiter' | 'loopscale-genesis' | ...
+ * @property {string}      protocol        – Pool-ID (Pool-Register)
  * @property {string}      poolType        – 'lending' | 'regular' | 'protected'
  * @property {string}      asset           – 'USDC'
  * @property {number}      amount          – Aktueller Wert inkl. Yield

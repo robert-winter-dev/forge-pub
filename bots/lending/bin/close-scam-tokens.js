@@ -177,9 +177,9 @@ async function buildWhitelist() {
     //    konfigurierten oder die mit offener DB-Position.
     //
     //    Vorfall 2026-08-12 (~70 USDC vernichtet): Der Loopscale-Indexer-Bug ließ
-    //    eine echte `loopscale-onre`-Position als "0 USDC" erscheinen, woraufhin
+    //    eine echte Loopscale-Public-Position als "0 USDC" erscheinen, woraufhin
     //    bin/bot.js sie in der DB schloss. Gleichzeitig stand das Protokoll nicht
-    //    mehr in LENDING_PROTOCOLS. Damit fiel der LP-Mint aus BEIDEN damaligen
+    //    mehr in der Pool-Liste der .env. Damit fiel der LP-Mint aus BEIDEN damaligen
     //    Quellen, landete als "unbekannter Token" im Scan und wurde – kein
     //    Jupiter-Preis (LP-Token haben systematisch keinen) + Balance < 100 –
     //    als BURN eingestuft und irreversibel verbrannt.
