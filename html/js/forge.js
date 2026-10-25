@@ -12,7 +12,7 @@
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
     // Zahlen-/Datumsformate folgen der Sprache (siehe js/i18n.js). t() wird hier
     // bewusst NICHT importiert: `t` ist in dieser Datei durchgängig ein Timestamp.
-    const { NUM_LOCALE, dayMonth, hourLabel } = await import('./i18n.js?v=20260811a');
+    const { NUM_LOCALE, dayMonth, hourLabel, t: tr } = await import('./i18n.js?v=20260811a');
     // Zeitraum-Leisten: zentrale Lib (KB Core/chart-range-lib, CORE#000936)
     const { createRangeBar, historyStartOf, rangeCutoff } = await import('./chart-range.js?v=20260923a');
 
@@ -53,12 +53,12 @@
     }
 
     function fmt2(v) {
-        if (v == null || isNaN(v)) return '–';
+        if (v == null || isNaN(v)) return tr('common.no_data', 'no data');
         return v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     function fmtSigned(v, dec = 2) {
-        if (v == null || isNaN(v)) return '–';
+        if (v == null || isNaN(v)) return tr('common.no_data', 'no data');
         const sign = v >= 0 ? '+' : '';
         return sign + v.toLocaleString(NUM_LOCALE, { minimumFractionDigits: dec, maximumFractionDigits: dec }) + '\u00A0USDC';
     }

@@ -1998,5 +1998,72 @@
     "tvlExitThreshold": 42000,
     "poolType": "rwa",
     "active": false
+  },
+  {
+    "id": "liq-stonk-usdc",
+    "protocol": "orca",
+    "address": "5BQCndqT4ZHv4PDqVX4kXD2rZNLfDb64akKd1ATrVwsz",
+    "pair": "STONK/USDC",
+    "tokenA": "6GmAFSYs4gk3FDao5FzzySQpPZaWsa4rUJHacpMpUNgx",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 0.08,
+    "tickSpacing": 8,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 106000,
+    "tvlExitThreshold": 53000,
+    "poolType": "volatil_2",
+    "active": false
+  },
+  {
+    "id": "liq-tsla-usdc",
+    "protocol": "orca",
+    "address": "4hZm9mBGP4A8hXM9TB7DnfqfYT7qrXr58q8jYXcXLDo3",
+    "pair": "TSLA/USDC",
+    "tokenA": "TSLAqBbv4CNCnzWFeB7LmydAyEiNMJtve7DYKLpdK4S",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 550000,
+    "tvlExitThreshold": 275000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-meta-usdc",
+    "protocol": "orca",
+    "address": "Ba5EzSmhTb5frEcuSvUkd7VuRWm1areu3BWiQiAbKqyB",
+    "pair": "META/USDC",
+    "tokenA": "METAaH6MMZZgy2CTEJq3QdNi7AFVTV3NxHFBfFgLEDd",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 537000,
+    "tvlExitThreshold": 269000,
+    "poolType": "rwa",
+    "active": false
   }
 ]

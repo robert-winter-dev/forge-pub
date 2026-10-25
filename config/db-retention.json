@@ -28,7 +28,7 @@
       }
     },
     "wallet-monitor.db": {
-      "maxMb": 150,
+      "maxMb": 200,
       "tables": {
         "snapshots":      { "column": "recorded_at", "unit": "ms", "retentionDays": 30, "prune": "monitor.js, config.json retainDays" },
         "token_balances": { "boundedBy": "snapshots" }

@@ -319,6 +319,16 @@
       "symbol": "W",
       "mint": "85VBFQZC9TZkfaptBWjvUw7YbZjy52A6mjtPGjstQAmQ",
       "decimals": 6
+    },
+    {
+      "symbol": "TSLA",
+      "mint": "TSLAqBbv4CNCnzWFeB7LmydAyEiNMJtve7DYKLpdK4S",
+      "decimals": 6
+    },
+    {
+      "symbol": "META",
+      "mint": "METAaH6MMZZgy2CTEJq3QdNi7AFVTV3NxHFBfFgLEDd",
+      "decimals": 6
     }
   ],
   "retainDays": 30
