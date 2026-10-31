@@ -13,6 +13,12 @@
  * rotiert das Secret automatisch mit und macht damit alle vorher ausgestellten
  * Cookies ungültig — Passwort ändern loggt also überall aus.
  *
+ * Schlüssel-Trennung (CORE#001537): Das Secret in der DB ist NICHT der Signierschlüssel.
+ * Der Schlüssel entsteht als HMAC(Schlüsseldatei, DB-Secret). Die Schlüsseldatei
+ * (<PATHS.secrets>/site-auth.key) liegt außerhalb des Klartext-Backups der DB und
+ * läuft über backup-secrets.sh verschlüsselt ins Offsite-Backup — wer nur ein
+ * settings.db-Archiv hat, kann kein Cookie fälschen.
+ *
  * Notausgang bei verlorenem Passwort: bin/reset-settings-password.js läuft
  * lokal per SSH (kein Web-API-Weg) und löscht die Zeile — ein Web-Endpunkt
  * dafür wäre gegen die eigene Anmeldesperre nicht erreichbar (Henne-Ei) und
@@ -20,6 +26,8 @@
  */
 
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { t } from '../../../lib/i18n.js';
@@ -56,6 +64,33 @@ export function ensureAuthSchema(db) {
 
 export function openAuthDb() {
     return ensureAuthSchema(new Database(PATHS.settingsDb));
+}
+
+// Schlüsseldatei: beim ersten Zugriff angelegt (0600), danach im Speicher gehalten.
+// 'wx' statt exists+write: parallele erste Anfragen dürfen sich nicht überschreiben.
+const KEY_FILE = path.join(PATHS.secrets, 'site-auth.key');
+let fileKey = null;
+
+function getFileKey() {
+    if (fileKey) return fileKey;
+    try {
+        fileKey = fs.readFileSync(KEY_FILE, 'utf8').trim();
+    } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+        fs.mkdirSync(path.dirname(KEY_FILE), { recursive: true, mode: 0o700 });
+        try {
+            fs.writeFileSync(KEY_FILE, crypto.randomBytes(32).toString('hex') + '\n', { flag: 'wx', mode: 0o600 });
+        } catch (werr) {
+            if (werr.code !== 'EEXIST') throw werr;
+        }
+        fileKey = fs.readFileSync(KEY_FILE, 'utf8').trim();
+    }
+    return fileKey;
+}
+
+/** Signierschlüssel für Cookies aus dem DB-Secret der Zeile. */
+function signingKey(rowSecret) {
+    return crypto.createHmac('sha256', getFileKey()).update(rowSecret).digest();
 }
 
 function hashPassword(password, salt) {
@@ -142,7 +177,7 @@ export function parseCookies(header) {
  */
 export function issueSessionCookie(res, secret, remember) {
     const maxAgeMs = remember ? REMEMBER_MAX_AGE_MS : SESSION_MAX_AGE_MS;
-    const token = sign({ exp: Date.now() + maxAgeMs }, secret);
+    const token = sign({ exp: Date.now() + maxAgeMs }, signingKey(secret));
     const parts = [`${COOKIE_NAME}=${token}`, 'Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax'];
     if (remember) parts.push(`Max-Age=${Math.floor(maxAgeMs / 1000)}`);
     res.setHeader('Set-Cookie', parts.join('; '));
@@ -156,7 +191,7 @@ export function verifySessionFromReq(db, req) {
     const row = getAuthRow(db);
     if (!row) return null;
     const cookies = parseCookies(req.headers.cookie);
-    return verify(cookies[COOKIE_NAME], row.secret);
+    return verify(cookies[COOKIE_NAME], signingKey(row.secret));
 }
 
 /**

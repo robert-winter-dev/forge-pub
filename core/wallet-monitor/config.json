@@ -329,6 +329,16 @@
       "symbol": "META",
       "mint": "METAaH6MMZZgy2CTEJq3QdNi7AFVTV3NxHFBfFgLEDd",
       "decimals": 6
+    },
+    {
+      "symbol": "RUSH",
+      "mint": "SATqS9DYpLQsM2z51P4QCoqJRHa5wboV4qjJerJRUSH",
+      "decimals": 9
+    },
+    {
+      "symbol": "AMZN",
+      "mint": "AMZNw7cwU9L9c7ewZXxTws2PwQYxBGm2Rxg3FLDBJz9B",
+      "decimals": 6
     }
   ],
   "retainDays": 30

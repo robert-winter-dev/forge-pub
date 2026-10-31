@@ -857,7 +857,22 @@ const ALERT_MSG_KEY = {
     host:     'notify.health.host_exceeded',
     external: 'notify.health.external_unreachable',
     service:  'notify.health.service_unreachable',
+    recovered: 'notify.health.recovered',
 };
+
+// ── Recovery-Meldung nach einem Alarm ──────────────────────────────────────────
+// Bis 2026-10-27 kam nur das Problem an, das Ende eines Ausfalls blieb stumm
+// (Filebase: Alarm, danach nur noch `ok` im Log). Jetzt merkt sich host_state, für
+// welche Dienste ein Alarm RAUSGING (`alert_open:<id>`, Wert = Alarmzeit in ms), und
+// meldet nach RECOVERY_OK_RUNS aufeinanderfolgenden ok-Messungen "wieder erreichbar"
+// (Level info). Zwei Läufe statt einem, damit ein kurzes Flackern nicht sofort als
+// Entwarnung gilt — dieselbe Idee wie recover_runs in Skopos.
+// Bewusst NICHT erfasst: host_oom (ein Ereignis, kein Zustand — "wieder ok" wäre bei
+// jedem Alarm der nächste Lauf) und Wartungsjobs (deren Alarm ist in
+// core/nexus/notify-visibility.js ohnehin nur Log, eine Entwarnung ohne sichtbaren
+// Alarm wäre Rauschen).
+const RECOVERY_OK_RUNS = 2;
+const ALERT_OPEN_PREFIX = 'alert_open:';
 const ALERT_DEFAULT_DETAIL = {
     cron: () => t('health_check.no_reason_logged'),
     host: () => t('health_check.no_metric_logged'),
@@ -865,7 +880,7 @@ const ALERT_DEFAULT_DETAIL = {
     service:  () => 'Timeout',
 };
 
-async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) {
+async function sendPersistenceAlert(svcName, detail, { kind = 'service', level = 'error', params: extraParams = {} } = {}) {
     try {
         // 'external' getrennt von 'service' (2026-08-13): "den betroffenen Dienst neu
         // starten" ist die richtige Anweisung für einen lokalen systemd-Dienst, aber
@@ -873,7 +888,8 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
         // Server und es gibt dort nichts zum Neustarten. Genau dieser Text schickte am
         // 2026-08-13 die Fehlersuche in die falsche Richtung (siehe classifyTimeout oben).
         const msgKey = ALERT_MSG_KEY[kind] ?? ALERT_MSG_KEY.service;
-        const params = { svcName, detail: detail ?? ALERT_DEFAULT_DETAIL[kind]?.() ?? ALERT_DEFAULT_DETAIL.service() };
+        const params = { svcName, ...extraParams };
+        if (kind !== 'recovered') params.detail = detail ?? ALERT_DEFAULT_DETAIL[kind]?.() ?? ALERT_DEFAULT_DETAIL.service();
         const msg = renderNotification(
             { msgKey, params, displayName: 'Monitoring', timestamp: Date.now() },
             getLang(),
@@ -887,7 +903,7 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
             body:    JSON.stringify({
                 botId:       'health-check',
                 displayName: 'Monitoring',
-                level:       'error',
+                level,
                 category:    'system',
                 message:     msg, msgKey, params,
             }),
@@ -895,12 +911,19 @@ async function sendPersistenceAlert(svcName, detail, { kind = 'service' } = {}) 
         });
         if (!res.ok) {
             console.warn(`[health] Alert abgelehnt (${svcName}): HTTP ${res.status} – ${await res.text()}`);
-            return;
+            return false;
         }
-        console.log(`[health] Alert gesendet: ${svcName}`);
+        console.log(`[health] ${kind === 'recovered' ? 'Recovery' : 'Alert'} gesendet: ${svcName}`);
+        return true;
     } catch (e) {
         console.warn(`[health] Alert nicht gesendet (${svcName}): ${e.message}`);
+        return false;
     }
+}
+
+/** Alarm gesendet → offen merken (nur bei erfolgreicher Zustellung, nie für Wartungsjobs). */
+function markAlertOpen(key, sent) {
+    if (sent && readHostState(ALERT_OPEN_PREFIX + key) === null) writeHostState(ALERT_OPEN_PREFIX + key, Date.now());
 }
 
 // ── Cron-Jobs: data/cron-state.json (von bin/forge-cron.js geschrieben) ────────
@@ -1032,11 +1055,11 @@ for (const chain of chains) {
         if (!chain.services.length) continue;
         const allDown = chain.services.every(svc => latest[svc.id]?.status === 'error');
         if (allDown && chain.services.every(svc => isSecondConsecutiveError(svc.id))) {
-            await sendPersistenceAlert(
+            markAlertOpen('chain:nostr', await sendPersistenceAlert(
                 'Nostr (alle Relays)',
                 'Alle konfigurierten Relays gleichzeitig nicht verbunden – Message Center und Premium-Auslieferung sind funktionsunfähig.',
                 { kind: 'external' },
-            );
+            ));
         }
         continue;
     }
@@ -1074,9 +1097,50 @@ for (const chain of chains) {
             const kind = svc.type === 'systemd'          ? 'service'
                        : svc.type?.startsWith('host_')   ? 'host'
                        :                                   'external';
-            await sendPersistenceAlert(svc.name, latest[svc.id].detail, { kind });
+            markAlertOpen(svc.id, await sendPersistenceAlert(svc.name, latest[svc.id].detail, { kind }));
         }
     }
+}
+
+// ── Recovery: offene Alarme beenden ───────────────────────────────────────────
+// Ein Alarm gilt als beendet, wenn die letzten RECOVERY_OK_RUNS Messungen ok sind.
+// Schlüssel ohne Dienst in diesem Lauf (aus der Konfiguration entfernt) werden still
+// verworfen, damit nichts ewig offen bleibt. `chain:nostr` ist erholt, sobald ein
+// Relay ok ist (der Alarm galt dem gleichzeitigen Ausfall ALLER Relays).
+function lastRunsOk(svcId) {
+    const rows = db.prepare(`
+        SELECT status FROM health_checks
+        WHERE service_id = ?
+        ORDER BY timestamp_ms DESC LIMIT ?
+    `).all(svcId, RECOVERY_OK_RUNS);
+    return rows.length >= RECOVERY_OK_RUNS && rows.every(r => r.status === 'ok');
+}
+
+const openAlerts = db.prepare(`SELECT key, value FROM host_state WHERE key LIKE ?`)
+    .all(ALERT_OPEN_PREFIX + '%');
+for (const row of openAlerts) {
+    const key = row.key.slice(ALERT_OPEN_PREFIX.length);
+    let name, recovered;
+    if (key === 'chain:nostr') {
+        const nostr = chains.find(c => c.id === 'nostr');
+        name      = 'Nostr (alle Relays)';
+        recovered = Boolean(nostr?.services.some(svc => lastRunsOk(svc.id)));
+    } else {
+        const svc = chains.flatMap(c => c.services ?? []).find(x => x.id === key);
+        if (!svc || !(key in latest)) {
+            db.prepare('DELETE FROM host_state WHERE key = ?').run(row.key);
+            continue;
+        }
+        name      = svc.name;
+        recovered = lastRunsOk(key);
+    }
+    if (!recovered) continue;
+    const sent = await sendPersistenceAlert(name, null, {
+        kind: 'recovered', level: 'info',
+        params: { since: { t: Number(row.value) } },
+    });
+    // Nur bei erfolgreicher Zustellung schließen: scheitert Nexus, kommt der nächste Lauf wieder.
+    if (sent) db.prepare('DELETE FROM host_state WHERE key = ?').run(row.key);
 }
 
 // "2 Fehlschläge in Folge" = zwei tatsächliche Job-Läufe, nicht zwei Durchläufe

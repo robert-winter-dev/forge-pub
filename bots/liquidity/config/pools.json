@@ -2065,5 +2065,101 @@
     "tvlExitThreshold": 269000,
     "poolType": "rwa",
     "active": false
+  },
+  {
+    "id": "liq-rush-usdc",
+    "protocol": "orca",
+    "address": "AFdizLL2M716aPcV8gu4azEL3JxFpT7wWFgjVwNU3RNm",
+    "pair": "RUSH/USDC",
+    "tokenA": "SATqS9DYpLQsM2z51P4QCoqJRHa5wboV4qjJerJRUSH",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 0.65,
+    "tickSpacing": 96,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 409000,
+    "tvlExitThreshold": 204000,
+    "poolType": "volatil_3",
+    "active": false
+  },
+  {
+    "id": "liq-amzn-usdc",
+    "protocol": "orca",
+    "address": "7HZrWQE8o4dtC5XPNsRuWLKbgz5oRJCfZEbfdjkY8e1S",
+    "pair": "AMZN/USDC",
+    "tokenA": "AMZNw7cwU9L9c7ewZXxTws2PwQYxBGm2Rxg3FLDBJz9B",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.3,
+    "tickSpacing": 64,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 172000,
+    "tvlExitThreshold": 86000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-near-zec",
+    "protocol": "orca",
+    "address": "6oRRewEDBVnrrUu9hira9j9KjDEh3xNHq8YXoGs4CpXi",
+    "pair": "NEAR/ZEC",
+    "tokenA": "3ZLekZYq2qkZiSpnSvabjit34tUkjSwD1JFuW9as9wBG",
+    "tokenB": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "decimalsA": 9,
+    "decimalsB": 8,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-zec-usdc",
+    "quoteTokenMint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 15
+    },
+    "stopLossPctOpen": 0.7,
+    "aprAlertDisabled": true,
+    "tvlWarnThreshold": 82000,
+    "tvlExitThreshold": 41000,
+    "poolType": "volatil_2",
+    "active": false
+  },
+  {
+    "id": "liq-cbtc-zec",
+    "protocol": "orca",
+    "address": "3BRFxaZBNVwz5FmYCLWjEcozJws1enVzsJvtaCY1oQH5",
+    "pair": "cbBTC/ZEC",
+    "tokenA": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+    "tokenB": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "decimalsA": 8,
+    "decimalsB": 8,
+    "feeTier": 0.04,
+    "tickSpacing": 4,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-zec-usdc",
+    "quoteTokenMint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 15
+    },
+    "stopLossPctOpen": 0.7,
+    "aprAlertDisabled": true,
+    "tvlWarnThreshold": 116000,
+    "tvlExitThreshold": 58000,
+    "poolType": "volatil_2",
+    "active": false
   }
 ]

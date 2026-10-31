@@ -15,6 +15,7 @@
 export const EXIT_REASON = Object.freeze({
     NO_LIQUIDITY: 'no_liquidity',  // im Pool zu wenig frei für die ganze Position
     NETWORK:      'network',       // Verbindung/Timeout
+    REMAINDER:    'remainder',     // Kamino: Rest nach Auszahlung zu klein (NetValueRemainingTooSmall, LEN#001645)
     SIMULATION:   'simulation',    // Transaktion vor dem Senden nicht freigegeben, nichts gesendet
     PROVIDER:     'provider',      // Anbieter (Kamino, Loopscale …) hat Aufruf abgelehnt
     OTHER:        'other',
@@ -29,6 +30,9 @@ export function isSelfHealing(reason) {
 }
 
 const NETWORK_RE = /AbortError|aborted|timed? ?out|timeout|fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|network/i;
+
+// Kamino-Programmfehler 6092 steht im technicalDetail der Simulation, nicht in der Nutzermeldung.
+const REMAINDER_RE = /NetValueRemainingTooSmall|"Custom":\s*6092\b/;
 
 /**
  * Ursachenklasse eines gescheiterten Auto-Exit.
@@ -47,6 +51,10 @@ export function classifyExitFailure({ err, liquidity = null, positionAmount = nu
     const text = `${err?.name ?? ''} ${err?.message ?? ''}`;
 
     if (NETWORK_RE.test(text)) return EXIT_REASON.NETWORK;
+
+    // Vor der Liquiditätsprüfung: Kamino prüft den Rest vor der Liquidität (belegt per Simulation
+    // 30.10.2026), 6092 sagt also nichts über die Liquidität, sondern über den Rundungsrest.
+    if (REMAINDER_RE.test(`${text} ${err?.technicalDetail ?? ''}`)) return EXIT_REASON.REMAINDER;
 
     if (Number.isFinite(liquidity) && Number.isFinite(positionAmount)
         && positionAmount > 0 && liquidity < positionAmount) {

@@ -162,7 +162,7 @@ const WSOL_MINT = 'So11111111111111111111111111111111111111112';
  * @param {string} toAddress
  * @param {string} txHash
  */
-function bookLiquiditySendFlow({ mint, amount, toAddress, txHash }) {
+function bookLiquiditySendFlow({ mint, amount, toAddress, txHash, inflow = false }) {
     // db.js selbst öffnet keine Verbindung ohne Aufruf und lädt kein Bot-Config/Keypair
     // beim Import — anders als wallet.js/config.js des Liquidity-Bots. Import ist daher
     // hier (forge-settings-Prozess) sicher, Roh-SQL auf der Bot-DB ist es laut db.js
@@ -175,10 +175,13 @@ function bookLiquiditySendFlow({ mint, amount, toAddress, txHash }) {
             console.warn(`[wallet/send] wallet_flows: kein Kurs für Mint ${mint} – nicht gebucht (Chain-Scan trägt nach, falls Kurs später verfügbar)`);
             return;
         }
+        // inflow: Zufluss aufs Liquidity-Wallet aus einem anderen eigenen Wallet (z.B. Lending →
+        // Liquidity). Ohne sofortige Buchung zählt er bis zum nächsten Chain-Scan (30 Min) als Gewinn.
+        const sign = inflow ? 1 : -1;
         insertWalletFlow(db, {
             txHash, mint,
-            amount:   -Math.abs(amount),
-            usdValue: -Math.abs(amount * usdPrice),
+            amount:   sign * Math.abs(amount),
+            usdValue: sign * Math.abs(amount * usdPrice),
             counterparty: toAddress,
             source: 'send',
         });
@@ -228,6 +231,19 @@ function scheduleWalletRefreshAfterSend(connection, txHash, flow = null) {
             console.warn(`[wallet/send] Automatischer Wallet-Refresh fehlgeschlagen: ${err.message}`);
         }
     })();
+}
+
+/**
+ * Flow-Beschreibung für scheduleWalletRefreshAfterSend(), wenn ein Send von einem ANDEREN Wallet
+ * (Lending) an das Liquidity-Wallet geht — dann ist es dort ein Zufluss (LIQ#001063-Buchung, nur
+ * in Gegenrichtung). Sonst null.
+ * @param {string} mint
+ * @param {number} amount
+ * @param {string} toAddress
+ */
+function liquidityInflowFlow(mint, amount, toAddress) {
+    const kp = loadKeypair(readEnvField(LIQUIDITYBOT_ENV, 'KEYPAIR_PATH'));
+    return kp && kp.pubkey === toAddress ? { mint, amount, toAddress, inflow: true } : null;
 }
 
 // ── Adressbuch-Tabelle sicherstellen ──────────────────────────────────────────
@@ -967,7 +983,7 @@ router.post('/lending/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-            scheduleWalletRefreshAfterSend(connection, txHash);
+            scheduleWalletRefreshAfterSend(connection, txHash, liquidityInflowFlow(WSOL_MINT, amount, toAddress));
             return res.json({ ok: true, txHash, symbol: sym, amount });
 
         } else {
@@ -1031,7 +1047,8 @@ router.post('/lending/send', async (req, res) => {
             tx.sign(wallet);
 
             const txHash = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-            scheduleWalletRefreshAfterSend(connection, txHash);
+            const sentAmount = Number(rawAmount) / 10 ** decimals;
+            scheduleWalletRefreshAfterSend(connection, txHash, liquidityInflowFlow(TOKEN_MINTS[sym], sentAmount, toAddress));
             return res.json({ ok: true, txHash, symbol: sym, amount });
         }
     } catch (err) {

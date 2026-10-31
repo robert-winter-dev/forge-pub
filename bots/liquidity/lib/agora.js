@@ -65,3 +65,26 @@ export async function ticketAnlegen(kuerzel, titel, body, { kurz, prio = 'normal
         return null;
     }
 }
+
+/**
+ * Status eines Tickets (GET /tickets/:schluessel). `null` bei Fehler — Aufrufer behandeln
+ * „unbekannt“ als offen, damit kein Doppel-Ticket entsteht.
+ * @param {string} schluessel z.B. 'LIQ#001600'
+ * @returns {Promise<string|null>}
+ */
+export async function ticketStatus(schluessel) {
+    const basis = process.env.AGORA_URL;
+    const token = process.env.AGORA_TOKEN;
+    if (!basis || !token) return null;
+    try {
+        const res = await fetch(`${basis}/tickets/${encodeURIComponent(schluessel)}`, {
+            signal: AbortSignal.timeout(10_000),
+            headers: { authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return null;
+        const daten = await res.json();
+        return daten.status ?? daten.ticket?.status ?? null;
+    } catch {
+        return null;
+    }
+}

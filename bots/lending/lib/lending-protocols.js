@@ -28,6 +28,9 @@ import { getPool, listPools } from '../../../lib/lending-pools.js';
 
 const KAMINO_API  = config.kamino.apiBase;
 
+/** Kamino-Vollausstieg: Anforderung = Positionswert × Faktor, Kamino kappt auf die Position (LEN#001645) */
+export const FULL_EXIT_MARGIN = 1.02;
+
 /** Standard-Timeout für API-Calls (ms) */
 const TIMEOUT_MS = 10_000;
 
@@ -74,13 +77,20 @@ async function apiPost(url, body, extraHeaders = {}) {
  * Ein Layoutwechsel fiele über die Prüfungen von Markt, Mint und Dezimalstellen laut
  * auf, statt still einen falschen Wert zu liefern.
  *
- * @returns {Promise<{rate: number, decimals: number}>}
+ * `availableAmount` (Offset 224) ist zugleich die sofort abhebbare Liquidität der Reserve
+ * (LEN#001646): Supply − Borrow aus der API ist bei fast voller Auslastung 0 oder negativ,
+ * obwohl on-chain noch Geld frei ist.
+ *
+ * Aufteilung: parseKlendReserve() ist die reine Auswertung (testbar), readKlendReserve() holt den Account.
+ *
+ * @param {Buffer} b                 Account-Daten der Reserve
+ * @param {string} reserveAddress    nur für Fehlermeldungen
+ * @param {string} marketAddress     erwarteter Markt
+ * @returns {Promise<{rate: number, decimals: number, availableUsdc: number}>}
  */
-async function readKlendReserve(reserveAddress, marketAddress) {
-    const { PublicKey } = await import('@solana/web3.js');
-    const acc = await getConnection().getAccountInfo(new PublicKey(reserveAddress));
-    const b = acc?.data;
+export async function parseKlendReserve(b, reserveAddress, marketAddress) {
     if (!b || b.length < 2600) throw new Error(`Kamino: Reserve ${reserveAddress} nicht lesbar`);
+    const { PublicKey } = await import('@solana/web3.js');
 
     const SF   = 2n ** 60n;
     const u64  = (o) => b.readBigUInt64LE(o);
@@ -101,7 +111,14 @@ async function readKlendReserve(reserveAddress, marketAddress) {
     // Kurs mit 1e12 Nachkommastellen aus BigInt, erst dann nach Number
     const rate = Number((liquiditySf * 10n ** 12n) / (cSupply * SF)) / 1e12;
     if (!(rate >= 1 && rate < 10)) throw new Error(`Kamino: Austauschkurs unplausibel (${rate})`);
-    return { rate, decimals };
+    return { rate, decimals, availableUsdc: Number(u64(224)) / 10 ** decimals };
+}
+
+/** Reserve-Account über den Nexus-RPC holen und auswerten (1× getAccountInfo). */
+async function readKlendReserve(reserveAddress, marketAddress) {
+    const { PublicKey } = await import('@solana/web3.js');
+    const acc = await getConnection().getAccountInfo(new PublicKey(reserveAddress));
+    return parseKlendReserve(acc?.data, reserveAddress, marketAddress);
 }
 
 /**
@@ -129,8 +146,13 @@ export class KaminoProtocol {
         // Rate-Limiting zentral durch FORGE API Proxy (127.0.0.1:3100/kamino)
     }
 
+    /** Reserve on-chain lesen (eigene Methode, damit Tests ohne RPC auskommen). */
+    _readReserve() {
+        return readKlendReserve(this.usdcReserve, this.market);
+    }
+
     /**
-     * APY, TVL und sofort verfügbare Liquidität in einem API-Call abfragen.
+     * APY und TVL aus dem API-Call, sofort verfügbare Liquidität on-chain aus der Reserve.
      * @returns {Promise<{apy: number, tvl: number|null, liquidity: number|null}>}
      */
     async getPoolStats() {
@@ -152,16 +174,19 @@ export class KaminoProtocol {
         const tvlRaw = usdc.totalSupply ?? usdc.supplyAmount ?? usdc.liquidityAmount ?? null;
         const tvl = tvlRaw != null ? parseFloat(tvlRaw) || null : null;
 
-        // Sofort verfügbare (abhebbare) Liquidität: Was eingezahlt, aber nicht verliehen
-        // ist. Kamino exponiert das nicht direkt, totalSupply − totalBorrow ist die
-        // übliche Herleitung. Bewusst NICHT aus dem TVL abgeleitet — TVL ist eine
-        // Wachstumszahl und sagt nichts über die Abhebbarkeit aus — ein beobachteter
-        // Vault hatte bei 1 Mio. USDC TVL 0,00 USDC sofort verfügbare Liquidität.
-        const supplyRaw = usdc.totalSupply != null ? parseFloat(usdc.totalSupply) : null;
-        const borrowRaw = usdc.totalBorrow != null ? parseFloat(usdc.totalBorrow) : null;
-        const liquidity = Number.isFinite(supplyRaw) && Number.isFinite(borrowRaw)
-            ? Math.max(0, supplyRaw - borrowRaw)
-            : null;
+        // Sofort verfügbare (abhebbare) Liquidität: `availableAmount` der Reserve, direkt
+        // on-chain gelesen (LEN#001646). Bewusst NICHT totalSupply − totalBorrow aus der API:
+        // Bei fast voller Auslastung liegt Borrow (mit aufgelaufenen Zinsen) über Supply, die
+        // Formel zeigte am 30.10.2026 bei Kamino, OnRe und Huma 0, obwohl on-chain 224.126,
+        // 4.361 und 10.279 USDC frei waren. Auch nicht aus dem TVL abgeleitet — TVL sagt nichts
+        // über die Abhebbarkeit. Ist der Chain-Read nicht möglich: null ("keine Daten") statt
+        // einer Ersatzformel, eine falsche Angabe ist gefährlicher als gar keine.
+        let liquidity = null;
+        try {
+            liquidity = (await this._readReserve()).availableUsdc;
+        } catch (err) {
+            console.error(`Kamino ${this.name}: Liquidität on-chain nicht lesbar: ${err.message}`);
+        }
 
         return { apy, tvl, liquidity };
     }
@@ -255,6 +280,13 @@ export class KaminoProtocol {
             if (!(value > 0)) {
                 throw new Error(`Kamino Withdraw: keine Position in ${this.label} (Betrag nicht ermittelbar)`);
             }
+            // 🔒 Vollausstieg = bewusst etwas MEHR als die Position anfordern (LEN#001645).
+            // Der auf die kleinste Einheit abgerundete Positionswert lässt einen Rest in der
+            // Obligation stehen, und Kamino verlangt Rest 0 oder über dem Mindestwert
+            // (NetValueRemainingTooSmall, 6092). Ein Überbetrag wird von Kamino auf die ganze
+            // Position gekappt (Simulation 30.10.2026: 100,50 und 1.000.000 USDC bei einer
+            // Position von 100,33 USDC ohne Fehler, der exakte Betrag mit 6092).
+            value = Math.ceil(value * FULL_EXIT_MARGIN * 1e6) / 1e6;
         }
         if (!(Number(value) > 0) || !Number.isFinite(Number(value))) {
             throw new Error(`Kamino Withdraw: ungültiger Betrag "${amount}"`);
