@@ -198,6 +198,13 @@ let _updateAvailable = false;
 async function loadStatus() {
     try {
         const statusRes = await fetch('/api/update/status', { cache: 'no-store' }).then(r => r.json());
+        // Master: wird nie über GitHub aktualisiert (kein Trust-Anchor) – Modus, Prüfen und
+        // Einspielen ausblenden, nur der Selbsttest bleibt nützlich. API sperrt zusätzlich (403).
+        if (statusRes.master) {
+            $('upModeManual').closest('.settings-card').style.display = 'none';
+            $('upCheckBtn').closest('.up-option-row').style.display = 'none';
+            $('upApplyBtn').closest('.up-option-row').style.display = 'none';
+        }
         const version = (await currentVersion()) ?? '?';
         const versionText = statusRes.releasedAt
             ? `v${version} vom ${fmtDate(statusRes.releasedAt)}`
@@ -353,11 +360,22 @@ async function pollLiveTask(taskId, action) {
 
 // check ist kurz (Sekunden) – auf den Endzustand warten und dann als
 // gestaffelte Checkliste einblenden, statt Zwischenstände zu pollen.
-async function pollUntilDone(taskId) {
+async function pollUntilDone(taskId, onProgress) {
     while (true) {
         await sleep(1500);
-        const task = await fetch(`/api/update/tasks/${taskId}`, { cache: 'no-store' }).then(r => r.json());
-        if (task.status === 'pending' || task.status === 'running') continue;
+        let task;
+        try {
+            task = await fetch(`/api/update/tasks/${taskId}`, { cache: 'no-store' }).then(r => r.json());
+        } catch {
+            // Im Auto-Modus spielt der Check das Update gleich selbst ein und startet dabei
+            // forge-settings neu – der Server ist dann kurz weg ("Failed to fetch"), der
+            // Task läuft aber weiter. Weiter pollen, nicht abbrechen.
+            continue;
+        }
+        if (task.status === 'pending' || task.status === 'running') {
+            if (onProgress) onProgress(task);
+            continue;
+        }
         return task;
     }
 }
@@ -424,8 +442,18 @@ async function runCheck() {
             return;
         }
         showToast(ACTION_TOAST.check.start, 'info');
-        const task = await pollUntilDone(body.taskId);
-        if (task.status === 'done') {
+        // Hat der Check im Auto-Modus ein Update gefunden, läuft das Einspielen im selben Task
+        // (Minuten) – dann die echten Phasen live zeigen statt einer starren Zeile.
+        const isApply = (t) => /^──/m.test(t.output ?? '');
+        const task = await pollUntilDone(body.taskId, t => {
+            if (isApply(t)) renderChecklist(parseSetupPhases(t.output, t.status));
+        });
+        if (isApply(task)) {
+            renderChecklist(parseSetupPhases(task.output, task.status));
+            await loadStatus();
+            showToast(task.status === 'done' ? ACTION_TOAST.apply.done : tr('upd.check_failed', 'Prüfung fehlgeschlagen'), task.status === 'done' ? 'success' : 'error');
+            await refreshMessageBell();
+        } else if (task.status === 'done') {
             await loadStatus(); // aktualisiert _updateAvailable + #upAvailableVersion
             const line3 = _updateAvailable
                 ? tr('upd.check_update_available', 'Es ist ein neues Update auf Version {version} verfügbar.', { version: $('upAvailableVersion').textContent })

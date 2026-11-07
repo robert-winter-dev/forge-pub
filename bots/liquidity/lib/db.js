@@ -952,6 +952,15 @@ function migrateSchema(db) {
         db.exec(`ALTER TABLE positions ADD COLUMN pnl_anchor_reset_at INTEGER`);
         console.log('[db] Migration: positions.pnl_anchor_reset_at hinzugefügt.');
     }
+    // range_pct — eigene halbe Range-Breite (±%) dieser Position, gewählt beim Einzahlen
+    // (deposit.js --new --range-pct, LIQ#001776). Wird bei jedem Rebalance an die neue
+    // Position der Kette weitergegeben und hat dort Vorrang vor Pool-Breite und Range Advisor.
+    // NULL = keine eigene Breite → Verhalten wie bisher (gilt für den gesamten Altbestand).
+    // KB: Liquidity Bot/range-breite-je-position.md
+    if (!posCols.includes('range_pct')) {
+        db.exec(`ALTER TABLE positions ADD COLUMN range_pct REAL`);
+        console.log('[db] Migration: positions.range_pct hinzugefügt.');
+    }
 
     // score_limit_executions: Score-Limit State-Machine
     if (!tables.includes('score_limit_executions')) {
@@ -1758,16 +1767,17 @@ export function getPositionForExit(db, poolId, triggeredAt) {
  * @returns {number}  neue Zeilen-ID
  */
 export function insertPosition(db, pos) {
+    // rangePct optional (LIQ#001776): fehlt es, bleibt range_pct NULL wie beim Altbestand.
     const result = db.prepare(`
         INSERT INTO positions
             (pool_id, nft_mint, tick_lower, tick_upper, price_lower, price_upper,
              liquidity, capital_usdc, hodl_token_a, hodl_token_b, hodl_price_usd,
-             open_tx, opened_at)
+             open_tx, opened_at, range_pct)
         VALUES
             (@poolId, @nftMint, @tickLower, @tickUpper, @priceLower, @priceUpper,
              @liquidity, @capitalUsdc, @hodlTokenA, @hodlTokenB, @hodlPriceUsd,
-             @openTx, @openedAt)
-    `).run(pos);
+             @openTx, @openedAt, @rangePct)
+    `).run({ ...pos, rangePct: pos.rangePct ?? null });
     return result.lastInsertRowid;
 }
 

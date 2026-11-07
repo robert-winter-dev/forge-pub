@@ -27,6 +27,7 @@ import Database from 'better-sqlite3';
 import { PATHS } from '../../../config/paths.js';
 import { ensureUpdateSchema, readLog, finalizeIfFinished } from '../lib/update-tasks.js';
 import { t } from '../../../lib/i18n.js';
+import { isForkInstance } from '../../../lib/premium-identity-context.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +48,14 @@ function openDb() {
 }
 
 const router = Router();
+
+// Der Master hat keinen Trust-Anchor (local/trust/trust-anchor.json) und wird nie über
+// GitHub aktualisiert – Prüfen/Einspielen/Zurückrollen gibt es nur auf Forks. Ohne diese
+// Sperre lief "Jetzt prüfen" auf dem Master in "Kein Trust-Anchor … Exit-Code 2".
+const forkOnly = (_req, res, next) => {
+    if (!isForkInstance()) return res.status(403).json({ error: t('api.premium.fork_only') });
+    next();
+};
 
 // "Erzeugt: <ISO8601>"-Zeile aus der VERSION-Datei (siehe tools/pub-export/
 // build-artifact.js) – das Datum, an dem DIESE Version gebaut/veröffentlicht
@@ -78,7 +87,7 @@ function installedVersionCode() {
 
 // ── GET /status ────────────────────────────────────────────────────────────────
 router.get('/status', (_req, res) => {
-    const base = { releasedAt: releasedAt() };
+    const base = { releasedAt: releasedAt(), master: !isForkInstance() };
     if (!existsSync(UPDATE_STATUS_PATH)) {
         return res.json({ ...base, available: false });
     }
@@ -129,7 +138,7 @@ router.get('/policy', (_req, res) => {
     }
 });
 
-router.post('/policy', (req, res) => {
+router.post('/policy', forkOnly, (req, res) => {
     const { autoApplyPatch } = req.body ?? {};
     if (typeof autoApplyPatch !== 'boolean') {
         return res.status(400).json({ error: t('api.update.autoapply_boolean') });
@@ -167,17 +176,17 @@ function enqueueUpdateTask(action, res) {
 }
 
 // ── POST /check ────────────────────────────────────────────────────────────────
-router.post('/check', (_req, res) => enqueueUpdateTask('check', res));
+router.post('/check', forkOnly, (_req, res) => enqueueUpdateTask('check', res));
 
 // ── POST /apply ────────────────────────────────────────────────────────────────
-router.post('/apply', (_req, res) => enqueueUpdateTask('apply', res));
+router.post('/apply', forkOnly, (_req, res) => enqueueUpdateTask('apply', res));
 
 // ── POST /rollback ───────────────────────────────────────────────────────────────
 // 🔒 Sicherheitsgrenze (bewusste Entscheidung): NUR anbieten, wenn der letzte
 // automatische Rollback-Versuch selbst fehlgeschlagen ist. Bei 'stopped-migration'
 // (Datenbank bereits migriert) wäre ein Rollback gefährlicher als der aktuelle
 // Zustand – dieselbe Grenze wie in bin/update-check.js (hasMigrations-Zweig).
-router.post('/rollback', (_req, res) => {
+router.post('/rollback', forkOnly, (_req, res) => {
     if (!existsSync(LAST_RESULT_PATH)) {
         return res.status(409).json({ error: t('api.update.no_result') });
     }

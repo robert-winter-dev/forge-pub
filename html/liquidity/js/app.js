@@ -678,7 +678,7 @@ function renderOpportunityTable(data) {
             if (!el) return;
             const pool = (_lastData?.pools ?? []).find(p => p.id === el.dataset.poolId);
             if (!pool) return;
-            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261001b');
+            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261107a');
             openPoolChartModal(pool);
         });
     }

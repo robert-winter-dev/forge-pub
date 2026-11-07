@@ -40,7 +40,7 @@ import { getPremiumCoverage } from '../../../lib/premium-wallet.js';
 import { FEE_MODEL_V2 } from '../lib/fee-model.js';
 // Edge-Prognose (npWindows) nur über die Naht — Rechnung in lib/edge-compute.js (CORE#000931).
 import { loadEdge } from '../lib/edge-provider.js';
-import { computeRangeHints } from '../lib/range-hint.js';
+import { computeRangeHints, positionRangeHints } from '../lib/range-hint.js';
 import { VOLUME_DUST_USD } from '../lib/volume-dust.js';
 import { PATHS } from '../../../config/paths.js';
 import { writeFrontendBundle } from '../../../lib/i18n.js';
@@ -1687,6 +1687,8 @@ function buildPosition(pos, isActive) {
         active:             isActive,
         priceLower:         roundPrice(pos.price_lower),
         priceUpper:         roundPrice(pos.price_upper),
+        // Eigene halbe Range-Breite der Position in % (LIQ#001776), null = Pool-/Advisor-Breite.
+        rangePct:           pos.range_pct ?? null,
         priceNow:           roundPrice(priceNow),
         priceUnit:          priceUnitMap[pos.pool_id] ?? null,
         impermanentLossUsd: round2(posSnap?.il_usd ?? null),
@@ -2111,6 +2113,12 @@ for (const po of poolsOverview) {
         db, poolIds: poolsOverview.map(po => po.id), poolsConfig: poolsConfigRaw, statsByPool: _oppStatsByPool,
     });
     for (const po of poolsOverview) if (_rangeHints[po.id]) po.optimalRangePct = _rangeHints[po.id];
+    // Offene Position mit eigener Breite (LIQ#001776): der Bot rebalanct mit dieser, also zeigt
+    // der Chart sie statt der Advisor-/Pool-Breite.
+    const _posRanges = positionRangeHints(openPositions);
+    for (const po of poolsOverview) {
+        if (_posRanges[po.id] != null) { po.optimalRangePct = _posRanges[po.id]; po.rangeSource = 'position'; }
+    }
 }
 
 // ─── Edge-Verlauf (LIQ#001114) ────────────────────────────────────────────────

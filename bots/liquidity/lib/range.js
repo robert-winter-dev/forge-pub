@@ -96,6 +96,77 @@ export function calculateRange(pool, currentPrice, rangeConfig, db) {
     };
 }
 
+// ─── Range-Breite je Position (LIQ#001776) ───────────────────────────────────
+// Eine Position kann beim Eröffnen eine eigene halbe Range-Breite bekommen
+// (deposit.js --new --range-pct <n>). Sie steht in positions.range_pct und gilt für die
+// ganze Rebalance-Kette dieser Position — vor der Pool-Breite (range_override_fixed_pct)
+// und vor der Range-Advisor-Empfehlung. NULL heißt: Verhalten wie bisher.
+// Warum und Grenzen: KB "Liquidity Bot/range-breite-je-position.md".
+
+export const POSITION_RANGE_PCT_MIN = 1;
+export const POSITION_RANGE_PCT_MAX = 30;
+
+/**
+ * Prüft eine gewünschte halbe Range-Breite in Prozent.
+ * @param {unknown} value  Zahl oder String (CLI)
+ * @returns {{ok:true, value:number}|{ok:false, error:string}}
+ */
+export function validatePositionRangePct(value) {
+    const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+    if (typeof n !== 'number' || !Number.isFinite(n)) {
+        return { ok: false, error: `Range-Breite "${value}" ist keine Zahl.` };
+    }
+    if (n < POSITION_RANGE_PCT_MIN || n > POSITION_RANGE_PCT_MAX) {
+        return {
+            ok: false,
+            error: `Range-Breite ±${n} % liegt außerhalb ${POSITION_RANGE_PCT_MIN}–${POSITION_RANGE_PCT_MAX} %.`,
+        };
+    }
+    return { ok: true, value: n };
+}
+
+/**
+ * Gespeicherte Breite einer Positionszeile, nur wenn gültig. Ungültige oder fehlende
+ * Werte (Altbestand, Spalte fehlt) ergeben null → Pool-/Advisor-Range wie bisher.
+ * @param {Object|null|undefined} position  Zeile aus positions
+ * @returns {number|null}
+ */
+export function positionRangePct(position) {
+    const v = position?.range_pct;
+    if (v === null || v === undefined) return null;
+    const r = validatePositionRangePct(v);
+    return r.ok ? r.value : null;
+}
+
+/**
+ * Wählt die Range für Eröffnen/Rebalance einer Position.
+ * Reihenfolge: Breite der Position → Range-Advisor → Pool-/Config-Range.
+ *
+ * @param {Object}   p
+ * @param {Object}   p.pool
+ * @param {number}   p.price             aktueller Preis
+ * @param {number|null} p.rangePct       Breite der Position (null = keine eigene)
+ * @param {Object}   p.fallbackRange     effektive Pool-Range-Config (config.range + rangeOverride)
+ * @param {Database} p.db
+ * @param {() => Promise<Object|null>} [p.advise]  Range-Advisor; nur gefragt ohne eigene Breite
+ * @returns {Promise<{range:Object, source:'position'|'advisor'|'pool'}>}
+ */
+export async function resolvePositionRange({ pool, price, rangePct, fallbackRange, db, advise = null }) {
+    const own = rangePct === null || rangePct === undefined ? null : validatePositionRangePct(rangePct);
+    if (own?.ok) {
+        console.log(`[range] ${pool.id}: Breite der Position ±${own.value}% (Pool-/Advisor-Range übergangen)`);
+        return { range: calculateRange(pool, price, { mode: 'fixed', fixedPct: own.value }, db), source: 'position' };
+    }
+    if (own && !own.ok) {
+        console.warn(`[range] ${pool.id}: gespeicherte Breite ungültig (${own.error}) — Pool-Range wie bisher`);
+    }
+    if (advise) {
+        const advised = await advise();
+        if (advised) return { range: advised, source: 'advisor' };
+    }
+    return { range: calculateRange(pool, price, fallbackRange, db), source: 'pool' };
+}
+
 /**
  * Prüft ob ein gegebener Preis innerhalb eines Tick-Bereichs liegt,
  * unter Berücksichtigung des Rebalancing-Puffers.

@@ -11,6 +11,7 @@
  */
 
 import { analyzePool } from './range-advisor.js';
+import { positionRangePct } from './range.js';
 
 /** Referenzkapital der Empfehlung: die Range haengt ueber die Rebalance-Kosten vom Einsatz ab. */
 export const RANGE_HINT_CAPITAL_USDC = 1000;
@@ -50,6 +51,22 @@ export async function computeRangeHints({ db, poolIds, poolsConfig, statsByPool,
             // Ein Pool ohne poolType/Historie darf den Export nicht stoppen: kein Hinweis.
             console.warn(`range-hint: ${id} uebersprungen (${err.message})`);
         }
+    }
+    return out;
+}
+
+/**
+ * Eigene Range-Breite offener Positionen (LIQ#001776). Hat eine Position eine eigene Breite
+ * (positions.range_pct), rebalanct der Bot sie mit genau dieser Breite — der Kurs-Chart zeigt
+ * dann diese statt der Advisor-/Pool-Breite.
+ * @param {object[]} openPositions  Zeilen aus positions (closed_at IS NULL)
+ * @returns {Record<string, number>}  poolId → Breite in ± %
+ */
+export function positionRangeHints(openPositions) {
+    const out = {};
+    for (const p of openPositions ?? []) {
+        const pct = positionRangePct(p);
+        if (pct != null) out[p.pool_id] = pct;
     }
     return out;
 }

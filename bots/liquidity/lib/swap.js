@@ -78,6 +78,23 @@ export function isWhirlpoolMintOrderError(err) {
     return msg.includes('0x1788');
 }
 
+// Jupiter-Error 6001 (0x1771) "SlippageToleranceExceeded" bei frischem Quote: Die Route
+// liefert bei der Ausführung weniger als zugesagt — beobachtet bei DJT (Backpack-Aktien-
+// Token, Token-2022) über GoonFi V2 > Manifest: scheiterte in der Simulation auch mit
+// 150 bps, ohne Manifest (Whirlpool) sofort ok (LIQ#001700). Mehr Slippage hilft also
+// nicht; Workaround: die DEXe der gescheiterten Route beim nächsten Versuch ausschließen.
+export function isRouteShortfallError(err) {
+    const msg = err?.message ?? String(err);
+    return msg.includes('0x1771') || msg.includes('"Custom":6001');
+}
+
+// Fügt die DEX-Labels einer gescheiterten Route zur excludeDexes-Liste hinzu.
+export function mergeExcludeDexes(current, labels) {
+    const set = new Set((current ? current.split(',') : []).map(s => s.trim()).filter(Boolean));
+    for (const l of labels ?? []) if (l) set.add(l);
+    return set.size ? [...set].join(',') : null;
+}
+
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ─── Landing-Check nach Confirm-Timeout ──────────────────────────────────────
@@ -195,9 +212,13 @@ export async function swapTokens({ inputMint, outputMint, inputDecimals, outputD
             lastErr = err;
             const retryable = isRetryableSwapError(err);
             if (attempt < retries && retryable) {
-                if (!excludeDexes && isWhirlpoolMintOrderError(err)) {
-                    excludeDexes = 'Whirlpool';
+                if (!(excludeDexes ?? '').split(',').includes('Whirlpool') && isWhirlpoolMintOrderError(err)) {
+                    excludeDexes = mergeExcludeDexes(excludeDexes, ['Whirlpool']);
                     console.warn('[swap] Whirlpool-Routing-Fehler (0x1788) erkannt — nächster Versuch ohne Whirlpool-Route');
+                }
+                if (isRouteShortfallError(err) && err.routeLabels?.length) {
+                    excludeDexes = mergeExcludeDexes(excludeDexes, err.routeLabels);
+                    console.warn(`[swap] Route lieferte zu wenig (6001) — nächster Versuch ohne ${err.routeLabels.join(', ')}`);
                 }
                 if (!onlyDirectRoutes && isTxTooLargeError(err)) {
                     onlyDirectRoutes = true;
@@ -282,6 +303,9 @@ async function _doSwapOnce({ inputMint, outputMint, inputDecimals, outputDecimal
     try {
         sig = await submitAndConfirm(serialized);
     } catch (err) {
+        if (err && typeof err === 'object') {
+            err.routeLabels ??= [...new Set((quote.routePlan ?? []).map(r => r?.swapInfo?.label).filter(Boolean))];
+        }
         if (!err?.unconfirmed || !err?.signature) throw err;
 
         console.warn(`[swap] Confirm-Timeout — prüfe on-chain ob ${err.signature.slice(0, 12)}… gelandet ist…`);

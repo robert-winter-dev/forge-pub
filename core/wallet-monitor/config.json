@@ -339,6 +339,26 @@
       "symbol": "AMZN",
       "mint": "AMZNw7cwU9L9c7ewZXxTws2PwQYxBGm2Rxg3FLDBJz9B",
       "decimals": 6
+    },
+    {
+      "symbol": "wECX",
+      "mint": "6ombVv3YMs9qpx1QkycD9XW8HKSfv7vGrCFX3cxCYMVY",
+      "decimals": 8
+    },
+    {
+      "symbol": "CHIP",
+      "mint": "chipCAT7vi5CZtbZsn9z7iMPXvFwyAnKz3QFu8XVuHm",
+      "decimals": 9
+    },
+    {
+      "symbol": "NVDA",
+      "mint": "NVDAVuiB7hwd3m5Wa1JuHNovPaPG6BH1QNztbKFxNjv",
+      "decimals": 6
+    },
+    {
+      "symbol": "UNI",
+      "mint": "uniHfuPhEQSrtpzXpJZDCSq53yaejKKpNhFUiKoHKHV",
+      "decimals": 8
     }
   ],
   "retainDays": 30

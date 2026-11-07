@@ -1,4 +1,4 @@
-// pool-chart-modal.js v20260930a
+// pool-chart-modal.js v20261107a
 // Kurs-Charts fuer Pools.
 // Datenquelle 1 (bevorzugt): lokale price-history.json aus pool_stats-DB
 // Datenquelle 2 (Fallback): GeckoTerminal API (CORS: access-control-allow-origin: *)
@@ -765,7 +765,7 @@ function renderAll(tabIdx) {
         const pct = (a, b) => b ? Math.round(100 * a / b) + ' %' : 'k. A.';
         const fmtPct = v => v.toLocaleString('de-DE', { maximumFractionDigits: 2 });
         extra.push(
-            { label: 'Range ±' + fmtPct(rp) + ' % (Bot) · in 24 h verlassen: ' + pct(st.exit24, st.n24) + ' · in 72 h: ' + pct(st.exit72, st.n72),
+            { label: 'Range ±' + fmtPct(rp) + ' % (' + (_pool?.rangeSource === 'position' ? 'Position' : 'Bot') + ') · in 24 h verlassen: ' + pct(st.exit24, st.n24) + ' · in 72 h: ' + pct(st.exit72, st.n72),
               data: [{ x: x0, y: last * (1 + w) }, { x: x1, y: last * (1 + w) }], parsing: false,
               borderColor: 'rgba(6,214,160,0.9)', borderDash: [8, 4], backgroundColor: 'transparent', fill: false,
               pointRadius: 0, borderWidth: 1.3, tension: 0 },

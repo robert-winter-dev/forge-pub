@@ -181,9 +181,9 @@ export const ABORTED_REBALANCE_MAX_AGE_MS = 24 * 3_600_000;
  *   claimedA: number, claimedB: number, preValueUsd: number|null }}
  */
 export function abortedRebalanceContext(db, poolId, nowMs = Date.now()) {
+    // SELECT *: trägt auch range_pct (LIQ#001776) mit, ohne zu scheitern, wo die Spalte fehlt.
     const prev = db.prepare(`
-        SELECT id, tick_lower, tick_upper, capital_usdc, hwm_usd, entry_usd, d2_armed_at, closed_at
-          FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1
+        SELECT * FROM positions WHERE pool_id = ? ORDER BY opened_at DESC LIMIT 1
     `).get(poolId);
     if (!prev || !(prev.closed_at > 0)) return null;
     if (nowMs - prev.closed_at > ABORTED_REBALANCE_MAX_AGE_MS) return null;

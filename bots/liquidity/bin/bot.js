@@ -36,7 +36,7 @@ import { openDatabase, syncPools, getOpenPosition, insertPosition, closePosition
          getIncompleteTsExecutions, latestStopValueUsd,
          upsertPnlInvariantDaily } from '../lib/db.js';
 import { getAdapter }      from '../lib/pool-adapter/index.js';
-import { calculateRange }  from '../lib/range.js';
+import { calculateRange, resolvePositionRange, positionRangePct } from '../lib/range.js';
 import { analyzePool, estimateRebalanceCost, CANDIDATE_RANGES, getPoolTypeConfig } from '../lib/range-advisor.js';
 import { getKeypair, getSolBalance, getSolBalanceFresh, getUsdcBalance, getUsdcBalanceFresh, assertSufficientSol, getUsableSolBalance, getTokenBalance, getTokenBalanceFresh, getUsableSolBalanceFresh, getConnection, getTxFee } from '../lib/wallet.js';
 import { swapTokens } from '../lib/swap.js';
@@ -2092,6 +2092,9 @@ async function _advisorRangeHintScan(activePools) {
         let currentPct = pool.rangeOverride?.fixedPct ?? null;
         const pos = getOpenPosition(db, pool.id);
         if (!pos) { _rangeHintState.delete(pool.id); continue; } // kein Rebalance ohne Position
+        // Eigene Breite der Position (LIQ#001776): Pool-/Advisor-Range gilt hier nicht,
+        // ein Hinweis auf eine andere Pool-Breite wäre beim nächsten Rebalance wirkungslos.
+        if (positionRangePct(pos) != null) { _rangeHintState.delete(pool.id); continue; }
         if (currentPct == null) {
             if (!Number.isFinite(pos.tick_lower) || !Number.isFinite(pos.tick_upper)
                     || pos.tick_upper <= pos.tick_lower) {
@@ -2515,8 +2518,13 @@ async function _openNewPosition(pool, adapter) {
     const effectiveRange = pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range;
     // checkTargetUsdc wurde oben bereits ohne Phantom-Fallback ermittelt (null statt 1000
     // ohne echte Basis) – hier nur noch auf 0 normalisiert, der Advisor braucht eine Zahl.
-    const range = (await _getAdvisedRange(pool, currentPrice, checkTargetUsdc ?? 0))
-               ?? calculateRange(pool, currentPrice, effectiveRange, db);
+    // Nachgeholter Rebalance-Open setzt die Kette fort: die Breite des geschlossenen
+    // Vorgängers gilt weiter (LIQ#001776). Echte Neueröffnung: keine eigene Breite.
+    const openRangePct = abortedReb ? positionRangePct(abortedReb.oldPosition) : null;
+    const { range } = await resolvePositionRange({
+        pool, price: currentPrice, rangePct: openRangePct, fallbackRange: effectiveRange, db,
+        advise: () => _getAdvisedRange(pool, currentPrice, checkTargetUsdc ?? 0),
+    });
     let amountA, amountB;
 
     // Wallet-Cap: Orca-DEFAULT_SLIPPAGE = 1% → tokenMax wird mit (1+slippage) berechnet.
@@ -2677,6 +2685,7 @@ async function _openNewPosition(pool, adapter) {
             hodlPriceUsd: currentPrice,
             openTx:       result.txHash,
             openedAt:     Date.now(),
+            rangePct:     openRangePct,
         });
 
         const openPosFee = await getTxFee(result.txHash);
@@ -3405,17 +3414,27 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
 
     console.log(`[bot:${pool.id}] Rebalance-Kapital aus Wallet: ${newCapital.toFixed(2)} USDC`);
 
+    // Eigene Breite der Position (LIQ#001776): gilt für die ganze Rebalance-Kette, vor
+    // Pool-Breite und Range Advisor. NULL = Verhalten wie bisher.
+    const rebRangePct = positionRangePct(position);
+
     // Advisor-Check: ggf. konfigurierte Range anpassen, bevor die neue Position
     // dimensioniert wird. Fehler dürfen das Rebalancing nicht abbrechen.
-    try {
-        await _advisorRebalanceCheck(pool, newCapital);
-    } catch (err) {
-        console.error(`[bot:${pool.id}] Advisor-Check fehlgeschlagen (ignoriert): ${err.message}`);
+    // Bei eigener Breite übersprungen: die Pool-Breite gilt für diese Position nicht,
+    // eine Anpassung würde die Pool-Einstellung ohne Wirkung verstellen.
+    if (rebRangePct == null) {
+        try {
+            await _advisorRebalanceCheck(pool, newCapital);
+        } catch (err) {
+            console.error(`[bot:${pool.id}] Advisor-Check fehlgeschlagen (ignoriert): ${err.message}`);
+        }
     }
 
     const effectiveRangeReb = pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range;
-    let newRange = (await _getAdvisedRange(pool, newStats.price, newCapital))
-                ?? calculateRange(pool, newStats.price, effectiveRangeReb, db);
+    let { range: newRange } = await resolvePositionRange({
+        pool, price: newStats.price, rangePct: rebRangePct, fallbackRange: effectiveRangeReb, db,
+        advise: () => _getAdvisedRange(pool, newStats.price, newCapital),
+    });
 
     // Token-Mix ausgleichen (Fix 3: Pre-Swap bei Imbalance) mit echtem Wallet-Kapital.
     // Topf A (baseWalletA/B) bleibt dabei unangetastet — nur freigesetztes Kapital
@@ -3487,8 +3506,10 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
                     `außerhalb geplanter Range ${newRange.priceLower.toFixed(4)}–${newRange.priceUpper.toFixed(4)} ` +
                     `— Range wird neu berechnet`
                 );
-                newRange = (await _getAdvisedRange(pool, postSwapStats.price, newCapital))
-                        ?? calculateRange(pool, postSwapStats.price, effectiveRangeReb, db);
+                ({ range: newRange } = await resolvePositionRange({
+                    pool, price: postSwapStats.price, rangePct: rebRangePct, fallbackRange: effectiveRangeReb, db,
+                    advise: () => _getAdvisedRange(pool, postSwapStats.price, newCapital),
+                }));
                 console.log(`[bot:${pool.id}] Neue Range: ${newRange.priceLower.toFixed(4)}–${newRange.priceUpper.toFixed(4)}`);
             }
         } catch (err) {
@@ -3574,6 +3595,7 @@ async function _doRebalance(pool, position, state, adapter, reason = 'out_of_ran
         hodlPriceUsd: newStats.price,
         openTx:       openResult.txHash,
         openedAt:     Date.now(),
+        rangePct:     rebRangePct,
     });
 
     const openRebFee = await getTxFee(openResult.txHash);

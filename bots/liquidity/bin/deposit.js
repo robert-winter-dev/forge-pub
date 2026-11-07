@@ -20,6 +20,9 @@
  *   --amount <betrag> Menge des Anker-Tokens (zusammen mit --token)
  *   Genau eines von --usdc / --tokenb / (--token + --amount) ist Pflicht.
  *   --new             Neue Position erlauben wenn keine existiert
+ *   --range-pct <n>   Nur mit --new: eigene halbe Range-Breite ±n % (1–30) für diese Position.
+ *                     Steht in positions.range_pct und gilt bei jedem Rebalance der Kette statt
+ *                     Pool-Breite/Range Advisor (LIQ#001776). Ohne: Pool-Range wie bisher.
  *   --dry-run         Simulation: alle Checks + Berechnungen, keine On-Chain-TX
  *   --simulate-wallet Nur mit --dry-run: fiktiver Wallet-Stand (viel USDC/SOL, sonst 0),
  *                     unabhängig vom echten Guthaben (LIQ#000964)
@@ -56,7 +59,7 @@ import {
 } from '../lib/db.js';
 // Performance-Segments seit v0.3.47 nicht mehr geschrieben — Baseline = netDeposited.
 import { getAdapter }        from '../lib/pool-adapter/index.js';
-import { calculateRange }    from '../lib/range.js';
+import { calculateRange, validatePositionRangePct } from '../lib/range.js';
 import {
     getKeypair, getUsdcBalance as realGetUsdcBalance,
     getUsableSolBalance as realGetUsableSolBalance,
@@ -116,6 +119,7 @@ const { values: args } = parseArgs({
         'max-a':   { type: 'string' },   // Modus C: beide Seiten als Obergrenze (Engpass-Logik)
         'max-b':   { type: 'string' },
         new:       { type: 'boolean', default: false },
+        'range-pct': { type: 'string' },   // LIQ#001776: halbe Range-Breite je Position
         // Cleanup-Reinvest (LIQ#000988): Buchungs-Note und Position, an die der Aufruf gebunden ist.
         note:      { type: 'string' },
         'expect-position': { type: 'string' },
@@ -201,6 +205,19 @@ if (reinvestCall) {
         console.error(`[deposit] ${bad}`);
         process.exit(1);
     }
+}
+// ─── Range-Breite je Position (LIQ#001776) ─────────────────────────────────
+// Vor jedem Seiteneffekt prüfen: eine ungültige Breite darf nie bis zum Swap kommen.
+let ownRangePct = null;
+if (args['range-pct'] != null) {
+    const bad = !args.new ? '--range-pct gilt nur zusammen mit --new (Breite einer neuen Position).'
+        : (() => { const r = validatePositionRangePct(args['range-pct']); return r.ok ? null : r.error; })();
+    if (bad) {
+        if (jsonMode) { emitJson(false, bad, 'range_pct_invalid'); process.exit(1); }
+        console.error(`[deposit] ${bad}`);
+        process.exit(1);
+    }
+    ownRangePct = validatePositionRangePct(args['range-pct']).value;
 }
 const useTokenB     = hasTokenB;
 const useModeB      = hasModeB;
@@ -552,6 +569,13 @@ if (!position && !args.new) {
     abort(t('cli.ld.no_position_hint', { pool: pool.pair }));
 }
 
+// --range-pct beschreibt eine NEUE Position. Besteht schon eine, würde --new still aufstocken
+// und die Breite ginge verloren — lieber laut abbrechen (LIQ#001776).
+if (position && ownRangePct != null) {
+    abort(`--range-pct gilt nur für eine neue Position, ${pool.pair} hat aber schon eine offene `
+        + `(${position.nft_mint}). Die Breite einer bestehenden Position ändert sich nicht.`, 'range_pct_position_exists');
+}
+
 if (position) {
     console.log(`[deposit] Position: ${position.nft_mint}`);
 } else {
@@ -609,8 +633,12 @@ if (pool.volatilePair) {
 // rechnen — der Pre-Swap tauscht dann am tatsächlichen Bedarf vorbei und ein Teil des
 // Kapitals bleibt beim Deposit liegen (Orca nimmt nur die bindende Seite).
 // Fall B unten benutzt exakt diese Range weiter, deshalb wird sie hier einmal berechnet.
+// Mit --range-pct gilt die eigene Breite der Position statt der Pool-Breite (LIQ#001776).
+const newRangeConfig = ownRangePct != null
+    ? { mode: 'fixed', fixedPct: ownRangePct }
+    : (pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range);
 const newRange = (!position && args.new)
-    ? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db)
+    ? calculateRange(pool, currentPrice, newRangeConfig, db)
     : null;
 const planLower = position?.price_lower ?? newRange?.priceLower;
 const planUpper = position?.price_upper ?? newRange?.priceUpper;
@@ -1466,8 +1494,14 @@ if (position) {
 // zweiter Aufruf: der Pre-Swap muss zwingend mit genau der Range gerechnet haben,
 // die hier eröffnet wird, sonst passt der getauschte Token-Mix nicht zum Bedarf.
 const range = newRange
-    ?? calculateRange(pool, currentPrice, pool.rangeOverride ? { ...config.range, ...pool.rangeOverride } : config.range, db);
+    ?? calculateRange(pool, currentPrice, newRangeConfig, db);
 console.log(`[deposit] Range:   ${range.priceLower.toFixed(4)} – ${range.priceUpper.toFixed(4)} ${quoteSymbol(pool)}`);
+// Nur mit --range-pct: ohne den Parameter bleibt die Ausgabe exakt wie vor LIQ#001776.
+if (ownRangePct != null) {
+    const lowPct = (1 - range.priceLower / currentPrice) * 100;
+    const upPct  = (range.priceUpper / currentPrice - 1) * 100;
+    console.log(`[deposit] Range-Breite: −${lowPct.toFixed(2)} % / +${upPct.toFixed(2)} % um ${currentPrice.toPrecision(6)} (eigene Breite ±${ownRangePct} %, --range-pct)`);
+}
 
 // Modus B/C: manualAmountA/B direkt, kein Wallet-Cap nötig (oben schon geprüft).
 const volatileNewTargets = pool.volatilePair
@@ -1513,6 +1547,7 @@ if (dryRun) {
         estimatedTokenA: estDepA, estimatedTokenB: amountBNew,
         estimatedUsdc:   estCapital,
         priceLower: range.priceLower, priceUpper: range.priceUpper,
+        ...(ownRangePct != null ? { rangePct: ownRangePct } : {}),
         tokenALabel, tokenBLabel,
     });
     db.close();
@@ -1615,6 +1650,7 @@ insertPosition(db, {
     hodlPriceUsd: currentPrice,
     openTx:       resultNew.txHash,
     openedAt:     Date.now(),
+    rangePct:     ownRangePct,
 });
 
 const openNewFee = await getTxFee(resultNew.txHash);
@@ -1721,6 +1757,7 @@ Object.assign(jsonResult, {
     depositedUsdc:   totalCapital,
     priceLower: range.priceLower,
     priceUpper: range.priceUpper,
+    ...(ownRangePct != null ? { rangePct: ownRangePct } : {}),
     tokenALabel, tokenBLabel,
     sweepTxHash: sweepNew?.txHash ?? null,
     sweepUsdc:   sweepNew?.usdc   ?? 0,
