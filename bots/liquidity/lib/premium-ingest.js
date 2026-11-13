@@ -25,6 +25,8 @@ import { decryptBlob } from '../../../lib/premium-blob.js';
 import { insertPoolScoreHistory } from './db.js';
 import { DELIVERED_SLOPES_PATH } from './slopes-provider.js';
 import { DELIVERED_EDGE_PATH } from './edge-provider.js';
+import { DELIVERED_CHANCE_PATH } from './chance-provider.js';
+import { DELIVERED_TVLINKS_PATH } from './tv-links-provider.js';
 import { writePoolOffers, loadPoolOffers } from './premium-offers-store.js';
 import { writeTsAdvice, TS_ADVICE_PATH } from './premium-ts-advice-store.js';
 import { PATHS } from '../../../config/paths.js';
@@ -164,6 +166,8 @@ export function ingestBlob(db, data, {
     scoresJsonPath = PATHS.liquidityScores,
     deliveredSlopesPath = DELIVERED_SLOPES_PATH,
     deliveredEdgePath = DELIVERED_EDGE_PATH,
+    deliveredChancePath = DELIVERED_CHANCE_PATH,
+    deliveredTvLinksPath = DELIVERED_TVLINKS_PATH,
     poolOffersPath = path.join(PATHS.liquidityData, 'premium', 'pool-offers.json'),
     tsAdvicePath   = TS_ADVICE_PATH,
 } = {}) {
@@ -235,6 +239,22 @@ export function ingestBlob(db, data, {
         edgeWritten = true;
     }
 
+    // Chance-Wert (LIQ#001953). Ablage für lib/chance-provider.js ('delivered'); additiv: ein Blob
+    // ohne `chance` lässt die Ablage unberührt, der Provider wertet sie nach 2 h als veraltet.
+    let chanceWritten = false;
+    if (data.chance) {
+        writeJsonAtomic(deliveredChancePath, JSON.stringify(data.chance));
+        chanceWritten = true;
+    }
+
+    // Chart-Links des Chart-Dialogs (LIQ#001954). Ablage für lib/tv-links-provider.js ('delivered'),
+    // additiv wie `chance`: ein Blob ohne `tvLinks` lässt die Ablage unberührt (der Provider wertet sie nach 2 h als veraltet).
+    let tvLinksWritten = false;
+    if (data.tvLinks) {
+        writeJsonAtomic(deliveredTvLinksPath, JSON.stringify(data.tvLinks));
+        tvLinksWritten = true;
+    }
+
     // Slopes der Opportunity-Tabelle. Ablage für lib/slopes-provider.js ('delivered'),
     // unverändert wie geliefert ({ generatedAt, timeframeIds, pools }).
     let slopesWritten = false;
@@ -269,7 +289,7 @@ export function ingestBlob(db, data, {
         tsAdviceWritten = true;
     }
 
-    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], slopesWritten, edgeWritten, poolOffersWritten, tsAdviceWritten };
+    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], slopesWritten, edgeWritten, chanceWritten, tvLinksWritten, poolOffersWritten, tsAdviceWritten };
 }
 
 /**
@@ -306,6 +326,8 @@ export async function selfTest() {
     const poolOffersPath = path.join(tmpdir(), `premium-ingest-selftest-offers-${randomBytes(4).toString('hex')}.json`);
     const tsAdvicePath   = path.join(tmpdir(), `premium-ingest-selftest-tsadvice-${randomBytes(4).toString('hex')}.json`);
     const deliveredEdgePath = path.join(tmpdir(), `premium-ingest-selftest-edge-${randomBytes(4).toString('hex')}.json`);
+    const deliveredChancePath = path.join(tmpdir(), `premium-ingest-selftest-chance-${randomBytes(4).toString('hex')}.json`);
+    const deliveredTvLinksPath = path.join(tmpdir(), `premium-ingest-selftest-tvlinks-${randomBytes(4).toString('hex')}.json`);
     const failures = [];
 
     const sampleBlob = (sequence, ageMs = 0, withEdgeSlopes = false, withScoreHistory = false, withPoolOffers = false, withTsAdvice = false) => ({
@@ -322,6 +344,12 @@ export async function selfTest() {
         ...(withEdgeSlopes ? {
             edge: { generatedAt: new Date(Date.now() - ageMs).toISOString(), capitalUsdc: 1000, windowIds: ['6h', '24h'],
                     pools: { 'liq-sol-usdc': { npWindows: { '6h': -1.5, '24h': 4.2 }, npUnreliableWindows: ['6h'], npFeeSource: 'model' } } },
+            chance: { generatedAt: new Date(Date.now() - ageMs).toISOString(), pools: { 'liq-sol-usdc': {
+                value: 56, met: 5, applicable: 9, edgeOnly: false,
+                signals: [{ src: 'edge', tf: '1h', raw: 1, status: 'met' }],
+                tv: { status: 'missing', symbol: null, source: null, fetchedAt: null } } } },
+            tvLinks: { generatedAt: new Date(Date.now() - ageMs).toISOString(), pools: { 'liq-sol-usdc': {
+                pool: 'ORCA:SOLUSDC_CZFQ3X', tokens: { So11111111111111111111111111111111111111112: 'BINANCE:SOLUSDT' } } } },
             slopes: { generatedAt: new Date(Date.now() - ageMs).toISOString(), timeframeIds: ['24h'],
                       pools: { 'liq-sol-usdc': { '24h': { sampleCount: 96, priceSlopePct: 0.05, yieldSlopePct: -1, tvlSlopePct: 0.1 } } } },
         } : {}),
@@ -351,6 +379,8 @@ export async function selfTest() {
 
         const r1 = ingestBlob(db, sampleBlob(1), { scoresJsonPath, deliveredSlopesPath, poolOffersPath, tsAdvicePath });
         if (!r1.ingested || r1.rows !== 1) failures.push(`erster Ingest fehlgeschlagen: ${JSON.stringify(r1)}`);
+        if (r1.chanceWritten || fs.existsSync(deliveredChancePath)) failures.push('chance als geschrieben gemeldet, obwohl der Blob keine enthielt');
+        if (r1.tvLinksWritten || fs.existsSync(deliveredTvLinksPath)) failures.push('tvLinks als geschrieben gemeldet, obwohl der Blob keine enthielt');
         if (r1.slopesWritten || r1.edgeWritten) failures.push('slopes/edge als geschrieben gemeldet, obwohl der Blob keine enthielt');
         if (fs.existsSync(deliveredSlopesPath)) failures.push('slopes.json wurde ohne slopes-Feld im Blob angelegt');
         if (fs.existsSync(deliveredEdgePath)) failures.push('edge.json wurde ohne edge-Feld im Blob angelegt');
@@ -373,10 +403,22 @@ export async function selfTest() {
         // Neuere Sequenz, frisch, MIT edge/slopes + scoreHistory + poolOffers → muss durchgehen,
         // edge.json/slopes.json schreiben, eine zusätzliche pool_score_history-Zeile anlegen UND
         // pool-offers.json als reine Ablage schreiben (keine DB-/pools.json-Wirkung).
-        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, poolOffersPath, tsAdvicePath });
+        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, deliveredChancePath, deliveredTvLinksPath, poolOffersPath, tsAdvicePath });
         if (!r4.ingested) failures.push(`gültiger Folge-Ingest wurde abgelehnt: ${r4.reason}`);
         if (!r4.slopesWritten) failures.push('slopesWritten war false, obwohl der Blob slopes enthielt');
         if (!r4.edgeWritten) failures.push('edgeWritten war false, obwohl der Blob edge enthielt');
+        if (!r4.tvLinksWritten) failures.push('tvLinksWritten war false, obwohl der Blob tvLinks enthielt');
+        else {
+            const { readDeliveredTvLinks } = await import('./tv-links-provider.js');
+            const tl = readDeliveredTvLinks(deliveredTvLinksPath);
+            if (tl?.stale !== false || tl.byPool['liq-sol-usdc']?.pool !== 'ORCA:SOLUSDC_CZFQ3X') failures.push(`tv-links.json kam nicht lesbar beim Provider an: ${JSON.stringify(tl)}`);
+        }
+        if (!r4.chanceWritten) failures.push('chanceWritten war false, obwohl der Blob chance enthielt');
+        else {
+            const { readDeliveredChance } = await import('./chance-provider.js');
+            const ch = readDeliveredChance(deliveredChancePath);
+            if (ch?.stale !== false || ch.byPool['liq-sol-usdc']?.value !== 56) failures.push(`chance.json kam nicht lesbar beim Provider an: ${JSON.stringify(ch)}`);
+        }
         if (r4.scoreHistoryRows !== 1) failures.push(`erwartete 1 scoreHistoryRows, bekam ${r4.scoreHistoryRows}`);
         if (!r4.poolOffersWritten) failures.push('poolOffersWritten war false, obwohl der Blob poolOffers enthielt');
         if (!r4.tsAdviceWritten) failures.push('tsAdviceWritten war false, obwohl der Blob trailingStopAdvice enthielt');
@@ -450,6 +492,8 @@ export async function selfTest() {
         fs.rmSync(poolOffersPath, { force: true });
         fs.rmSync(tsAdvicePath, { force: true });
         fs.rmSync(deliveredEdgePath, { force: true });
+        fs.rmSync(deliveredChancePath, { force: true });
+        fs.rmSync(deliveredTvLinksPath, { force: true });
         for (const suffix of ['-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
     }
 

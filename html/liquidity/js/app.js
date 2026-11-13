@@ -469,7 +469,7 @@ let _poolsSortDir = (localStorage.getItem(LS_POOLS_SORT_DIR) === 'asc') ? 'asc' 
 // Opportunity-Tabelle: aktive Sortierspalte + Richtung (null = Standard alphabetisch, LIQ#000928)
 const LS_OPP_SORT_COL = 'liquiditybot_opp_sort_col';
 const LS_OPP_SORT_DIR = 'liquiditybot_opp_sort_dir';
-const _OPP_SORT_COLS  = new Set(['delta','priceSlope','aprSlope','tvlSlope']);
+const _OPP_SORT_COLS  = new Set(['delta','chance','priceSlope','aprSlope','tvlSlope']);
 let _oppSortCol = _OPP_SORT_COLS.has(localStorage.getItem(LS_OPP_SORT_COL))
     ? localStorage.getItem(LS_OPP_SORT_COL) : null;
 let _oppSortDir = (localStorage.getItem(LS_OPP_SORT_DIR) === 'asc') ? 'asc' : 'desc';
@@ -666,6 +666,14 @@ function renderOpportunityTable(data) {
                 if (_lastData) openMetricChartModal(metricEl.dataset.poolId, metricEl.dataset.metric, _lastData);
                 return;
             }
+            const chanceEl = e.target.closest('.opp-chance-clickable[data-pool-id]');
+            if (chanceEl) {
+                const pool = (_lastData?.pools ?? []).find(p => p.id === chanceEl.dataset.poolId);
+                if (!pool?.chance) return;
+                const { openChanceModal } = await import('./chance-modal.js?v=20261113j');
+                openChanceModal(pool, { drawChart: _drawMetricChart, meta: _METRIC_META.chance, ranges: _METRIC_RANGES });
+                return;
+            }
             const infoEl = e.target.closest('.opp-info-btn[data-pool-id]');
             if (infoEl) {
                 const pool = (_lastData?.pools ?? []).find(p => p.id === infoEl.dataset.poolId);
@@ -678,7 +686,7 @@ function renderOpportunityTable(data) {
             if (!el) return;
             const pool = (_lastData?.pools ?? []).find(p => p.id === el.dataset.poolId);
             if (!pool) return;
-            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261107a');
+            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261113f');
             openPoolChartModal(pool);
         });
     }
@@ -864,15 +872,34 @@ function renderOpportunityTable(data) {
                     if (_npRaw == null) return null;
                     return _npRaw;   // % ist kapitalunabhängig, Reihenfolge = Reihenfolge der Rohwerte
                 }
+                if (_oppSortCol === 'chance') return item.pool.chance?.value ?? null;
                 if (_oppSortCol === 'priceSlope') return item.trendPct;
                 if (_oppSortCol === 'aprSlope')   return item.s?.yieldSlopePct ?? null;
                 if (_oppSortCol === 'tvlSlope')   return item.s?.tvlSlopePct   ?? null;
                 return null;
             };
+            // Chance (LIQ#001953): Pools mit "nur Edge" (5 statt 9 Signale, z.B. Stablecoin-Paare) erreichen
+            // hohe Werte zu leicht und sind für die Einstiegssuche nicht gemeint. Sie stehen in beiden
+            // Sortierrichtungen hinter den Pools mit allen Signalen, Pools ohne Wert ganz am Ende.
+            if (_oppSortCol === 'chance') {
+                const grp = item => item.pool.chance == null ? 2 : item.pool.chance.edgeOnly ? 1 : 0;
+                const g = grp(a) - grp(b);
+                if (g !== 0) return g;
+            }
             const aVal = getVal(a), bVal = getVal(b);
             if (aVal == null && bVal == null) return 0;
             if (aVal == null) return 1;
             if (bVal == null) return -1;
+            // LIQ#001962: bei gleichem Stimmungswert entscheidet der Edge im gewählten Fenster
+            // (nur Sortierung nach dem gelieferten npWindows, keine Berechnung); ohne Edge hinten.
+            if (_oppSortCol === 'chance' && aVal === bVal) {
+                const aE = a.pool.npWindows?.[_oppDisplayTf] ?? null;
+                const bE = b.pool.npWindows?.[_oppDisplayTf] ?? null;
+                if (aE == null && bE == null) return 0;
+                if (aE == null) return 1;
+                if (bE == null) return -1;
+                return dir * (aE - bE);
+            }
             return dir * (aVal - bVal);
         }
         return comparePoolSortKeys(
@@ -946,6 +973,17 @@ function renderOpportunityTable(data) {
         return `<em style="color:#fff;font-size:0.9em;opacity:0.85">${pct > 0 ? '+' : '−'}${txt}</em>`;
     };
 
+    // Chance-Spalte (LIQ#001953): Wert kommt fertig vom Master (data.json pools[].chance), hier wird nichts
+    // gerechnet. Farbe nur zusätzlich, die Zahl trägt die Bedeutung.
+    const chanceHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.chance.title', 'Stimmung')}" data-tooltip-content="${escHtml(tr('liq.chance.head_tip', 'Anteil der erfüllten Signale in %: Edge in 1h, 6h, 12h, 24h und 7d positiv, Trend in 1h, 2h, 4h, 1d und 1w auf Kaufen. Bei gleichem Wert steht der Pool mit dem höheren Edge im gewählten Zeitfenster oben. Klick auf den Wert zeigt die Einzelsignale.'))}" data-tooltip-type="text" style="cursor:default">${tr('liq.chance', 'Stimmung')}</span>`;
+    const chanceCell = (pool, pid) => {
+        const c = pool.chance;
+        if (!c) return `<span class="text-muted" style="font-size:0.78em">–</span>`;
+        const cls = c.value >= 67 ? 'value-good' : c.value <= 33 ? 'value-danger' : '';
+        const tip = escHtml(tr('liq.chance.cell_tip', '{met} von {applicable} Signalen positiv', { met: c.met, applicable: c.applicable }));
+        return `<span class="opp-chance-clickable ${cls}" data-pool-id="${pid}" data-chance="${c.value}" style="cursor:pointer" title="${tip}"><span style="text-decoration:underline dotted;text-underline-offset:3px">${c.value}\u202f%</span>${c.edgeOnly ? `<span class="text-muted" style="font-size:0.7em"> ${escHtml(tr('liq.chance.edge_only', 'nur Edge'))}</span>` : ''}</span>`;
+    };
+
     // Pool-Filter Select (inline im Header, idempotent)
     const poolFilterSel = `<select id="oppPoolFilterSelect" style="background:#0f172a;border:none;color:#f1f5f9;font:inherit;cursor:pointer;padding:0;outline:none;border-radius:3px;font-size:0.7rem;letter-spacing:0.05em;text-transform:uppercase">
         <option value="all"${_oppPoolFilter==='all'?' selected':''}>${tr('liq.all_pools', 'Alle Pools')}</option>
@@ -1012,6 +1050,7 @@ function renderOpportunityTable(data) {
             <span style="display:flex;align-items:center;gap:3px">${poolFilterSel}</span>
             <span class="has-tooltip" data-tooltip-title="Chart" data-tooltip-content="${tr('liq.tip.chart_open', 'Öffnet den Kurs- und Fee-Chart des Pools.')}" data-tooltip-type="text" style="cursor:default">Chart</span>
             <span style="display:flex;align-items:center;gap:3px">${_sortBtn('delta',tr('liq.sort_delta', 'Nach Edge sortieren'))}${deltaHead}</span>
+            <span style="display:flex;align-items:center;gap:3px">${_sortBtn('chance',tr('liq.chance.sort', 'Nach Stimmung sortieren'))}${chanceHead}</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('priceSlope',tr('liq.sort_price_slope', 'Nach Preis-Slope sortieren'))}Preis-Slope</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('aprSlope',tr('liq.sort_apr_slope', 'Nach APR-Slope sortieren'))}APR-Slope</span>
             <span class="opp-col-detail" style="display:flex;align-items:center;gap:3px">${_sortBtn('tvlSlope',tr('liq.sort_tvl_slope', 'Nach TVL-Slope sortieren'))}TVL-Slope</span>
@@ -1049,6 +1088,7 @@ function renderOpportunityTable(data) {
             <span class="opp-pool-name"><button class="opp-info-btn has-tooltip" data-pool-id="${pid}" data-tooltip-title="Token-Info" data-tooltip-content="${escHtml(_tokenInfoTip(pool))}" data-tooltip-type="text" aria-label="${tr('liq.token_info_show', 'Token-Infos anzeigen')}">${_infoIconSvg}</button><span class="opp-pool-name-text">${pair}</span></span>
             <button class="opp-chart-btn" data-pool-id="${pid}">${_chartIconSvg(_chartIconArrow(trendPct))}</button>
             ${deltaCell}
+            ${chanceCell(pool, pid)}
             <span class="opp-col-detail ${mc} ${slopeCls(trendPct)}" data-pool-id="${pid}" data-metric="priceSlope" style="cursor:pointer"${trendPct == null ? '' : ' title="' + tr('liq.slope_price_show', 'Preis-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(trendPct, '%/h', pool.id, _oppDisplayTf, 'Preis-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.yieldSlopePct)}" data-pool-id="${pid}" data-metric="aprSlope"   style="cursor:pointer"${s?.yieldSlopePct == null ? '' : ' title="' + tr('liq.slope_apr_show', 'APR-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.yieldSlopePct, 'pp/h', pool.id, _oppDisplayTf, 'APR-Slope')}</span>
             <span class="opp-col-detail ${mc} ${slopeCls(s?.tvlSlopePct)}"  data-pool-id="${pid}" data-metric="tvlSlope"   style="cursor:pointer"${s?.tvlSlopePct == null ? '' : ' title="' + tr('liq.slope_tvl_show', 'TVL-Slope-Verlauf anzeigen') + '"'}>${fmtSlope(s?.tvlSlopePct, '%/h', pool.id, _oppDisplayTf, 'TVL-Slope')}</span>
@@ -4858,6 +4898,8 @@ const _METRIC_META = {
     pnl24h:     { get label() { return _edgeUnitFullLabel('pnl'); },  unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: true, ranges: ['1D', '1W', '1M'] },
     // Edge-Wert der Opportunity-Tabelle (LIQ#001114): Verlauf des 24h-Modellwerts, stündliche
     // Snapshots aus opportunity_scores.edge_pct, sammelt sich ab dem Start dieser Funktion.
+    // Stimmung (LIQ#001967): Verlauf im Stimmung-Dialog, Y fest 0–100 %, stündliche Werte ab dem Formelwechsel
+    chance:     { get label() { return tr('liq.chance.title', 'Stimmung'); }, unit: ' %', dec: 0, get axis() { return tr('liq.chance.axis_pct', 'Stimmung in %'); }, zeroline: true, yFixed: [0, 100] },
     edgeModel:  { get label() { return tr('liq.edge_chart_title', 'Edge (24 Std.)'); }, unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: 'auto', zeroDash: true, zeroToggle: true },
 };
 
@@ -4889,8 +4931,11 @@ function _drawMetricChart(svgEl, points, meta, { forceZero = false } = {}) {
         ? (_vMin <= 0 && _vMax >= 0) || (_vMin > 0 && _vMin <= 2 * _span) || (_vMax < 0 && -_vMax <= 2 * _span)
         : !!meta.zeroline);
     if (zeroOn) { yMin = Math.min(yMin, 0); yMax = Math.max(yMax, 0); }
-    const yPad = (yMax - yMin) * 0.08;
-    yMin -= yPad; yMax += yPad;
+    // Feste Achse (Stimmung 0–100 %, LIQ#001967): Pools bleiben vergleichbar, kein Rand, keine Autoskalierung
+    if (meta.yFixed) { [yMin, yMax] = meta.yFixed; } else {
+        const yPad = (yMax - yMin) * 0.08;
+        yMin -= yPad; yMax += yPad;
+    }
     const yRange = yMax - yMin;
 
     const yPx  = v  => PT + cH - ((v - yMin) / yRange) * cH;
@@ -4913,7 +4958,7 @@ function _drawMetricChart(svgEl, points, meta, { forceZero = false } = {}) {
         const py = yPx(v).toFixed(1);
         svg += `<line x1="${PL}" y1="${py}" x2="${PL+cW}" y2="${py}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`;
         if (zyNum != null && Math.abs(parseFloat(py) - zyNum) < 10) continue;
-        const lbl = Math.abs(v) < 0.001 ? '0' : v >= 10 || v <= -10 ? v.toFixed(1) : v.toFixed(meta.dec ?? 2);
+        const lbl = Math.abs(v) < 0.001 ? '0' : meta.yFixed ? String(Math.round(v)) : v >= 10 || v <= -10 ? v.toFixed(1) : v.toFixed(meta.dec ?? 2);
         svg += `<text x="${(PL-4).toFixed(1)}" y="${(parseFloat(py)+3.5).toFixed(1)}" font-size="9" fill="#64748b" text-anchor="end">${lbl}</text>`;
     }
 

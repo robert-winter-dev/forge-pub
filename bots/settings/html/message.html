@@ -7,7 +7,7 @@
     <link rel="icon" type="image/png" href="/forge/img/forge-logo.png">
     <link rel="stylesheet" href="css/settings.css?v=20260909a">
     <link rel="stylesheet" href="/forge/css/toast.css?v=20260722b">
-    <link rel="stylesheet" href="css/message.css?v=20260905a">
+    <link rel="stylesheet" href="css/message.css?v=20261113a">
     <!-- Sprache + Katalog, erzeugt von lib/i18n.js. Synchron und vor allen Modulen,
          damit die Seite nicht erst deutsch rendert und dann umgeschrieben wird. -->
     <script src="/forge/i18n/active.js"></script>
@@ -65,6 +65,8 @@
             </div>
             <div class="mc-toolbar-right">
                 <button class="msg-new-btn" id="msgNewBtn" hidden data-i18n="msg.new_message">Neue Nachricht</button>
+                <!-- Nur in der Rubrik Support und nur, wenn unbekannte Absender vorliegen (siehe core/premium/support-trust.js). -->
+                <button class="msg-unknown-btn" id="mcUnknownBtn" hidden></button>
                 <button class="msg-icon-btn" id="mcMarkAllBtn"
                     title="Alle als gelesen markieren"
                     aria-label="Alle als gelesen markieren" data-i18n-attr="title:msg.mark_all_read,aria-label:msg.mark_all_read">&#10003;</button>
@@ -87,6 +89,6 @@
 
 <div class="toast-container" id="toastContainer"></div>
 
-<script type="module" src="js/message.js?v=20260923b"></script>
+<script type="module" src="js/message.js?v=20261113a"></script>
 </body>
 </html>

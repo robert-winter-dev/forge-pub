@@ -399,6 +399,7 @@ function loadConfig() {
 
     const telegramToken  = optionalEnv('TELEGRAM_BOT_TOKEN');
     const telegramChatId = optionalEnv('TELEGRAM_CHAT_ID');
+    const telegramThreadId = optionalEnv('TELEGRAM_THREAD_ID'); // optional topic (CORE#001859); sending happens in Nexus
 
     return {
         // Bot-Identifikation
@@ -469,6 +470,7 @@ outOfRangeMinutes:     optionalPositiveInt('OUT_OF_RANGE_ALERT_MINUTES', 30),
         telegram: {
             token:   telegramToken,
             chatId:  telegramChatId,
+            threadId: telegramThreadId,
             get enabled() {
                 return !!(this.token && this.chatId);
             },

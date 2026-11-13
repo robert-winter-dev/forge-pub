@@ -29,6 +29,12 @@ else
 fi
 MAINTENANCE_CMD="node ${FORGE_ROOT}/bin/maintenance.js"
 
+# TAL#001788: sessions from talos (agents) run without sudo (NoNewPrivileges). polkit on
+# business lets the FORGE operator user restart the services such sessions need
+# (/etc/polkit-1/rules.d/62-talos-forge-svc.rules), so call systemctl directly there.
+SUDO=(sudo)
+grep -q "^NoNewPrivs:[[:space:]]*1" /proc/self/status 2>/dev/null && SUDO=()
+
 # ── Argumente ─────────────────────────────────────────────────────────────────
 
 ACTION="${1:-}"
@@ -172,8 +178,8 @@ fi
 # ── Service-Aktion ────────────────────────────────────────────────────────────
 
 echo ""
-echo "⚡  sudo systemctl ${ACTION} ${SERVICE}"
-sudo systemctl "${ACTION}" "${SERVICE}" || true   # Fehler nicht skript-abbrechend
+echo "⚡  ${SUDO[*]:+sudo }systemctl ${ACTION} ${SERVICE}"
+"${SUDO[@]}" systemctl "${ACTION}" "${SERVICE}" || true   # Fehler nicht skript-abbrechend
 echo ""
 
 # ── Warten bis erwarteter Zustand erreicht ────────────────────────────────────
@@ -235,7 +241,7 @@ else
     if [[ "$FINAL" == "failed" ]]; then
         echo ""
         echo "── Letzte Log-Zeilen ──────────────────────────────────────"
-        sudo journalctl -u "${SERVICE}" --no-pager -n 15 2>/dev/null || true
+        "${SUDO[@]}" journalctl -u "${SERVICE}" --no-pager -n 15 2>/dev/null || true
     fi
 fi
 

@@ -1,10 +1,10 @@
-// pool-chart-modal.js v20261107a
+// pool-chart-modal.js v20261113c
 // Kurs-Charts fuer Pools.
 // Datenquelle 1 (bevorzugt): lokale price-history.json aus pool_stats-DB
 // Datenquelle 2 (Fallback): GeckoTerminal API (CORS: access-control-allow-origin: *)
 // Lazy-geladen beim ersten Klick - kein Nexus, kein Backend noetig.
-// Pro Tab zusaetzlich ein Link auf den GeckoTerminal-Chart (extern, TradingView-artig),
-// wenn GeckoTerminal fuer diese Kombination einen Pool kennt - sonst kein Link.
+// Pro Tab zusaetzlich genau ein externer Chart-Link: TradingView, wo der Export ein Symbol liefert
+// (pool.tvLink, LIQ#001954), sonst GeckoTerminal, wenn es fuer diese Kombination einen Pool kennt - sonst kein Link.
 // Zeitraum-Wahl (1D/1W/1M, Sperre bei zu wenig Historie): html/js/chart-range.js
 // (CORE#000933). Geladen wird je Tab einmal die volle Reihe, gefiltert wird lokal.
 // Maximiert (LIQ#001115): Indikator-Leiste EMA 10/20/30 (im Preis-Chart) sowie RSI und MACD
@@ -12,7 +12,7 @@
 // und erst danach auf den Zeitraum gefiltert.
 
 import { createRangeBar, filterToRange, historyStartOf } from '../../js/chart-range.js?v=20260923a';
-import { ema, rsi, macd, volatility, resample, rangeExitStats, MIN_POINTS } from './indicators.js?v=20260929e';
+import { ema, rsi, macd, volatility, resample, rangeExitStats, MIN_POINTS } from './indicators.js?v=20261113a';
 
 // Indikatoren rechnen auf 4h-Kerzen (Schlusskurs), die Preislinie bleibt stuendlich.
 // Auf Stundenwerten sprang der RSI bei ruhigen Pools zwischen ueberkauft und ueberverkauft.
@@ -165,7 +165,7 @@ const IND_DEFS = [
     { key: 'ema',  label: 'EMA 10/20/30', title: 'EMA 10/20/30',
       tip: 'Exponentielle gleitende Durchschnitte über 10, 20 und 30 Kerzen (4h-Kerzen) im Preis-Chart. Liegt der Kurs über den Linien und sind sie nach Länge geordnet (10 über 20 über 30), spricht das für einen Aufwärtstrend.' },
     { key: 'rsi',  label: 'RSI',  title: 'RSI (14)',
-      tip: 'Relative-Stärke-Index über 14 Kerzen à 4 Stunden, Skala 0 bis 100. Über 70 gilt als überkauft, unter 30 als überverkauft. Die Werte weichen leicht von TradingView ab, weil hier die Kurse dieser Reihe genutzt werden.' },
+      tip: 'Relative-Stärke-Index über 14 Kerzen à 4 Stunden, Skala 0 bis 100. Über 70 gilt als überkauft, unter 30 als überverkauft. Die Werte weichen leicht von anderen Chart-Anbietern ab, weil hier die Kurse dieser Reihe genutzt werden.' },
     { key: 'macd', label: 'MACD', title: 'MACD (12, 26, 9)',
       tip: 'Auf 4h-Kerzen: Differenz zweier EMAs (12 und 26) mit Signallinie (9) und Histogramm. Kreuzt die MACD-Linie die Signallinie von unten nach oben, dreht das Momentum nach oben, umgekehrt nach unten.' },
     { key: 'vol',  label: 'Volatilität', title: 'Volatilität (20 Kerzen, 4h)',
@@ -176,7 +176,7 @@ const IND_DEFS = [
 
 function buildIndBar() {
     // Die Leiste haengt nicht im Modal-Grundggeruest, sondern in der Fusszeile des aktiven Panels
-    // (auf Hoehe des GeckoTerminal-Links, siehe placeIndBar()).
+    // (auf Hoehe des externen Chart-Links, siehe placeIndBar()).
     const bar = document.createElement('div');
     bar.className = 'pool-chart-ind-bar';
     bar.id = 'poolChartIndBar';
@@ -289,7 +289,8 @@ function buildTabs(pool) {
     // Eine Seite ist USDC: nur ein Tab für den Nicht-USDC-Token.
     const nonUsdcName = dpA.toUpperCase() !== 'USDC' ? dpA : dpB;
     const nonUsdcMint = isUsdcA ? pool.tokenB : pool.tokenA;
-    return [{ label: nonUsdcName + ' / USDC', type: 'token', mint: nonUsdcMint }];
+    // poolSide: dieser Tab IST der Pool (Token gegen USDC) — der externe Link darf das Pool-Symbol nehmen (LIQ#001954).
+    return [{ label: nonUsdcName + ' / USDC', type: 'token', mint: nonUsdcMint, poolSide: true }];
 }
 
 // -- DOM-Aufbau --------------------------------------------------------------
@@ -325,9 +326,9 @@ function buildTabsDOM() {
                 '<div class="pool-chart-overlay" id="poolChartNote_' + k + i + '" style="display:none">Zu wenig Historie</div>' +
                 '</div>').join('') +
             '</div>' +
-            '<div class="pool-chart-gecko-link-row">' +
+            '<div class="pool-chart-ext-link-row">' +
             '<span class="pool-chart-ind-slot" id="poolChartIndSlot' + i + '"></span>' +
-            '<a class="pool-chart-gecko-link" id="poolChartLink' + i + '" href="#" target="_blank" rel="noopener" style="display:none">GeckoTerminal ↗</a>' +
+            '<a class="pool-chart-ext-link" id="poolChartExtLink' + i + '" href="#" target="_blank" rel="noopener" style="display:none"></a>' +
             '</div>';
         panels.appendChild(panel);
     });
@@ -455,10 +456,10 @@ async function loadAndRender(tabIdx) {
 
     _ctx[tabIdx] = { series, ohlcv, label: tab.label };
     renderAll(tabIdx);
-    updateGeckoLink(tabIdx, tab);
+    updateExtLink(tabIdx, tab);
 }
 
-// -- Externer Chart-Link (GeckoTerminal) --------------------------------------
+// -- Externer Chart-Link (TradingView, sonst GeckoTerminal) --------------------------------------
 
 // Sucht den Pool, in dem `mint` gegen USDC gehandelt wird (fuer den externen
 // Link UND als OHLCV-Fallback genutzt - ein Ergebnis, ein Cache).
@@ -489,22 +490,49 @@ async function findTokenUsdcPool(mint) {
     return result;
 }
 
-// Loest fuer einen Tab die GeckoTerminal-Pool-Adresse auf, wenn vorhanden.
-async function resolveTabGeckoUrl(tab) {
-    if (tab.type === 'pair') return tab.address ? geckoPoolUrl(tab.address) : null;
+// Loest fuer einen Tab den externen Chart-Link auf (LIQ#001954): TradingView, wo der Master/Premium-Export
+// ein Symbol liefert (pool.tvLink), sonst GeckoTerminal. Es steht immer genau ein Link da.
+//   - pair-Tab und Token-Tab eines USDC-Pools (poolSide, der Tab IST der Pool): das Pool-Symbol. Fehlt es,
+//     gibt es seit LIQ#001961 ersatzweise `similar` (anderer DEX oder Kurs des Basiswerts), aber immer
+//     sichtbar als „ähnlicher Chart" gekennzeichnet (ein tokenisiertes SPYx ist nicht der ETF AMEX:SPY).
+//   - sonstiger Token-Tab (Pool ohne USDC-Seite): Token-Symbol je Mint.
+const tradingViewUrl = sym => 'https://www.tradingview.com/chart/?symbol=' + encodeURIComponent(sym);
+
+function tvSymbolForTab(tab) {
+    const l = _pool?.tvLink;
+    if (!l) return null;
+    if (tab.type === 'pair' || tab.poolSide) return l.pool ?? null;
+    return l.tokens?.[tab.mint] ?? null;
+}
+
+const SIMILAR_HINT = 'Nicht dieser Pool, aber für den Trend vergleichbar.';
+
+// Ähnlicher Chart (LIQ#001961): nur auf Tabs, die den Pool selbst zeigen, und nur ohne echtes Pool-Symbol.
+function similarForTab(tab) {
+    const l = _pool?.tvLink;
+    if (!l || l.pool || !l.similar?.symbol) return null;
+    return (tab.type === 'pair' || tab.poolSide) ? l.similar : null;
+}
+
+async function resolveTabLink(tab) {
+    const sym = tvSymbolForTab(tab);
+    if (sym) return { url: tradingViewUrl(sym), label: 'TradingView ↗' };
+    const sim = similarForTab(tab);
+    if (sim) return { url: tradingViewUrl(sim.symbol), label: 'TradingView, ähnlicher Chart ↗', note: `${sim.note}. ${SIMILAR_HINT}` };
+    if (tab.type === 'pair') return tab.address ? { url: geckoPoolUrl(tab.address), label: 'GeckoTerminal ↗' } : null;
     const found = await findTokenUsdcPool(tab.mint);
-    return found ? geckoPoolUrl(found.address) : null;
+    return found ? { url: geckoPoolUrl(found.address), label: 'GeckoTerminal ↗' } : null;
 }
 
 // Zeigt/versteckt den Link je Tab-Panel - laeuft parallel zum Chart-Rendering,
 // blockiert es also nicht.
-function updateGeckoLink(tabIdx, tab) {
-    const linkEl = document.getElementById('poolChartLink' + tabIdx);
+function updateExtLink(tabIdx, tab) {
+    const linkEl = document.getElementById('poolChartExtLink' + tabIdx);
     if (!linkEl) return;
-    resolveTabGeckoUrl(tab).then(url => {
+    resolveTabLink(tab).then(link => {
         if (_activeTab !== tabIdx) return; // Tab inzwischen gewechselt
-        if (url) { linkEl.href = url; linkEl.style.display = ''; }
-        else       linkEl.style.display = 'none';
+        if (link) { linkEl.href = link.url; linkEl.textContent = link.label; linkEl.title = link.note ?? ''; linkEl.style.display = ''; }
+        else        linkEl.style.display = 'none';
     });
 }
 

@@ -63,6 +63,7 @@ export const config = {
     telegram: {
         token:  optional('TELEGRAM_BOT_TOKEN', ''),
         chatId: optional('TELEGRAM_CHAT_ID', ''),
+        threadId: optional('TELEGRAM_THREAD_ID', ''), // optional topic (CORE#001859); sending happens in Nexus
         get enabled() { return !!this.token && !!this.chatId; },
     },
 

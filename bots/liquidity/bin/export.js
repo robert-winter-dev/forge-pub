@@ -40,6 +40,9 @@ import { getPremiumCoverage } from '../../../lib/premium-wallet.js';
 import { FEE_MODEL_V2 } from '../lib/fee-model.js';
 // Edge-Prognose (npWindows) nur über die Naht — Rechnung in lib/edge-compute.js (CORE#000931).
 import { loadEdge } from '../lib/edge-provider.js';
+import { loadChance } from '../lib/chance-provider.js';
+import { recordChanceHistory, attachChanceHistory } from '../lib/chance-history.js';
+import { loadTvLinks } from '../lib/tv-links-provider.js';
 import { computeRangeHints, positionRangeHints } from '../lib/range-hint.js';
 import { VOLUME_DUST_USD } from '../lib/volume-dust.js';
 import { PATHS } from '../../../config/paths.js';
@@ -2103,6 +2106,36 @@ for (const po of poolsOverview) {
     po.npWindows           = e?.npWindows ?? {};
     po.npUnreliableWindows = e?.npUnreliableWindows ?? [];
     if (e?.npFeeSource) po.npFeeSource = e.npFeeSource;
+}
+
+// ─── Chance-Wert (LIQ#001953) ─────────────────────────────────────────────────
+// Orientierungswert 0–100 % aus Edge-Fenstern + Trend. 🔒 LIQ#000938: entsteht nur auf dem
+// Master (lib/chance-score.js, closureExclude), der Fork bekommt ihn über Premium (Sektion `chance`)
+// und rechnet nie selbst. Verlauf `chance_history` stündlich auf beiden (LIQ#001967).
+const _chanceRes = await loadChance(poolsOverview);
+for (const po of poolsOverview) {
+    const c = _chanceRes.byPool[po.id];
+    if (c) po.chance = c;
+}
+// Verlauf (LIQ#001967): Master und Fork schreiben den vorliegenden Wert stündlich, ohne zu rechnen
+// (lib/chance-history.js, importiert chance-score.js nicht). Nur Zeilen mit Teilpunkten zählen.
+try {
+    const dbCh = new Database(DB_PATH);
+    dbCh.pragma('journal_mode = WAL');
+    recordChanceHistory(dbCh, poolsOverview, _oppNowMs);
+    attachChanceHistory(dbCh, poolsOverview, Date.now());
+    dbCh.close();
+} catch (e) {
+    console.warn(`export.js: Chance-Verlauf nicht geschrieben/gelesen (${e.message})`);
+}
+
+// ─── Chart-Links des Chart-Dialogs (LIQ#001954) ─────────────────────────
+// Pool-Symbol (täglicher Abgleich) und Token-Symbole je Pool. Master liest die Abgleichsdatei, der Fork
+// bekommt sie über Premium (Sektion `tvLinks`). Fehlt ein Eintrag, bleibt der Dialog bei GeckoTerminal.
+const _tvLinks = await loadTvLinks(poolsOverview);
+for (const po of poolsOverview) {
+    const l = _tvLinks.byPool[po.id];
+    if (l) po.tvLink = l;
 }
 
 // Range-Empfehlung des Range Advisors (± % um den Kurs) fuer die Range-Ansicht im Kurs-Chart

@@ -56,7 +56,8 @@ import {
 } from './rpc-fallback.js';
 import { renderNotification } from '../../lib/notify-render.js';
 import { getLang } from '../../lib/i18n.js';
-import { envFile } from '../../config/paths.js';
+import { envFile, PATHS } from '../../config/paths.js';
+import { buildSendMessageBody, parseThreadId, parseThreadMap, resolveThreadId, tgTitle } from './telegram-body.js';
 
 // .env laden (dotenv via require, da wir ESM nutzen)
 const require  = createRequire(import.meta.url);
@@ -70,6 +71,10 @@ const HELIUS_API_KEY     = process.env.HELIUS_API_KEY     ?? '';
 const HELIUS_RPC_URL     = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const TELEGRAM_TOKEN     = process.env.TELEGRAM_BOT_TOKEN ?? '';
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   ?? '';
+// Optional: Thema (Forum-Gruppe) für alle Meldungen; leer = wie bisher (CORE#001859)
+const TELEGRAM_THREAD_ID = process.env.TELEGRAM_THREAD_ID ?? '';
+// Optional: Thema je botId, z.B. "backup:8" (DEVOPS#001864); ohne Eintrag gilt TELEGRAM_THREAD_ID
+const TELEGRAM_THREAD_MAP = parseThreadMap(process.env.TELEGRAM_THREAD_BY_BOT ?? '');
 
 // ─── Telegram-Helper ──────────────────────────────────────────────────────────
 
@@ -82,7 +87,8 @@ const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   ?? '';
  * (auf forge-pub1 real beobachtet: HTTP 404, Zeile trotzdem als "gesendet" markiert).
  * Damit war die Spalte für jede Auswertung wertlos (Fix 2026-08-04).
  */
-async function sendTelegram(text) {
+async function sendTelegram(text, botId) {
+    const threadId = resolveThreadId(botId, TELEGRAM_THREAD_MAP, parseThreadId(TELEGRAM_THREAD_ID));
     if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return false;
     const RETRY_DELAYS = [5000, 30000];
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -90,12 +96,10 @@ async function sendTelegram(text) {
             const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({
-                    chat_id:                  TELEGRAM_CHAT_ID,
-                    text,
-                    parse_mode:               'Markdown',
-                    disable_web_page_preview: true,
-                }),
+                body:    JSON.stringify(buildSendMessageBody({
+                    chatId: TELEGRAM_CHAT_ID, threadId, text,
+                    extra: { parse_mode: 'Markdown', disable_web_page_preview: true },
+                })),
             });
             if (!res.ok) {
                 const errText = await res.text();
@@ -104,7 +108,10 @@ async function sendTelegram(text) {
                     await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
                         method:  'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body:    JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, disable_web_page_preview: true }),
+                        body:    JSON.stringify(buildSendMessageBody({
+                            chatId: TELEGRAM_CHAT_ID, threadId, text,
+                            extra: { disable_web_page_preview: true },
+                        })),
                     });
                     return true;
                 }
@@ -138,6 +145,21 @@ function sendThrottleAlert(api, waitedMs, requestsInWindow, maxInWindow, windowS
 const app  = express();
 const PORT = 3100;
 const HOST = '127.0.0.1';
+
+// Optionale Master-only Routen (fehlen im öffentlichen Fork, das Modul ist dort nicht enthalten).
+// Müssen VOR express.json() hängen, der Body bleibt roh.
+let masterRoutes = null;
+try {
+    const mod = await import('./master-routes.js');
+    masterRoutes = mod.mountMasterRoutes(app, {
+        dataDir: PATHS.data,
+        notify: (level, category, message) => insertNotification('nexus', level, category, message, null, false, 'System'),
+        host: HOST,
+        port: PORT,
+    });
+} catch (err) {
+    if (err?.code !== 'ERR_MODULE_NOT_FOUND' || !String(err.message).includes('master-routes')) throw err;
+}
 
 app.use(express.json({ limit: '2mb' }));
 
@@ -509,7 +531,7 @@ app.post('/notify', async (req, res) => {
         // Absichtserklärung statt des tatsächlichen Ergebnisses (Fix 2026-08-04).
         let sentTg = false;
         if (!maintenance) {
-            sentTg = await sendTelegram(message);
+            sentTg = await sendTelegram(message, botId);
             console.log(`[nexus:notify] LIFECYCLE | ${botId} | ${category} | telegram=${sentTg}`);
         } else {
             console.log(`[nexus:notify] LIFECYCLE | ${botId} | ${category} | telegram=SUPPRESSED (Wartungsmodus: ${maintenance.reason})`);
@@ -563,11 +585,11 @@ app.post('/notify', async (req, res) => {
     const pair = context?.pair;
     const tgHeader = displayName
         ? (pair ? `${displayName} · ${pair}:` : `${displayName}:`)
-        : `\`${botId}\` → ${category}`;
+        : `${botId} → ${category}`;
     if (level === 'error') {
-        sentTelegram = await sendTelegram(`🚨 ${tgHeader}\n${message}`);
+        sentTelegram = await sendTelegram(`${tgTitle(`Fehler: ${tgHeader}`, true)}\n\n${message}`, botId);
     } else if (level === 'warn' && TELEGRAM_WARN_CATEGORIES.has(category)) {
-        sentTelegram = await sendTelegram(`📈 ${tgHeader}\n${message}`);
+        sentTelegram = await sendTelegram(`${tgTitle(`Hinweis: ${tgHeader}`)}\n\n${message}`, botId);
     }
 
     // telegramOnly: Nachricht bewusst nicht in nexus.db (→ keine Dashboard-Glocke),
@@ -682,7 +704,10 @@ app.get('/health', (_req, res) => {
             orcav2:       orcaV2Limiter.getStats(),
             orcav2Background: orcaV2BackgroundLimiter.getStats(),
             blobFetch:    blobFetchLimiter.getStats(),
+            ...(masterRoutes?.limiterStats() ?? {}),
         },
+        // Herkunft der Aufrufe der Master-only Routen (TAL#001958): 3100 = FORGE lokal, 3102 = Tunnel nach talos
+        ...(masterRoutes?.extraStats() ?? {}),
         rpcFallback: { enabled: FALLBACK_ENABLED, ...fallbackState.snapshot() },
         jupiterCircuit: jupiterCircuit.getStats(),
         recalLock: recalLock
@@ -1358,14 +1383,17 @@ const server = app.listen(PORT, HOST, async () => {
     // Verwaiste/umbenannte Keys in der Sichtbarkeits-Blockliste sofort melden —
     // sonst greift der Filter still nicht mehr (siehe notify-visibility.js).
     checkLogOnlyKeys();
-    await sendTelegram('🟢 forge-nexus → running');
+    await sendTelegram(tgTitle('forge-nexus gestartet'));
 });
+
+masterRoutes?.listen();
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
 async function shutdown(signal) {
     console.log(`[FORGE Nexus] ${signal} empfangen – fahre herunter…`);
-    await sendTelegram('🔴 forge-nexus → stopped');
+    await sendTelegram(tgTitle('forge-nexus gestoppt'));
+    masterRoutes?.close();
     server.close(() => process.exit(0));
     // Fallback: nach 5s hart beenden falls server.close hängt
     setTimeout(() => process.exit(0), 5_000).unref();

@@ -11,8 +11,11 @@
 
 import Database from 'better-sqlite3';
 import { PATHS } from '../../config/paths.js';
+import { knownPeerSql } from './support-trust.js';
 
 const DB_PATH = PATHS.premiumDb;
+// Gleiche Ableitung wie IS_MASTER_IDENTITY in server.js (Vertrauensstufen gelten nur am Master).
+const IS_MASTER = (process.env.NOSTR_IDENTITY?.trim() || 'FORGE.Master') === 'FORGE.Master';
 
 export function openMessagesDb() {
     const db = new Database(DB_PATH);
@@ -83,6 +86,11 @@ export function openMessagesDb() {
     }
     if (!cols.includes('thread_id')) {
         db.exec(`ALTER TABLE nostr_support_messages ADD COLUMN thread_id TEXT`);
+    }
+    // Spam-Merkmal beim Eingang erkannt (Kurzlink/unsichtbare Zeichen), siehe support-trust.js.
+    // NULL = unauffällig. Nur Befund, kein Löschgrund: die Nachricht bleibt lesbar.
+    if (!cols.includes('spam_reason')) {
+        db.exec(`ALTER TABLE nostr_support_messages ADD COLUMN spam_reason TEXT`);
     }
     return db;
 }
@@ -210,23 +218,40 @@ export function pruneMessagesToLimit(db, category) {
     // Tie-Break `id ASC`: bei gleichem Zeitstempel (Relay-Sekunden) behält die ältere
     // Zeile ihren Platz – die per Replay neu eingefügte wird gekappt statt eine
     // bereits gelesene zu verdrängen.
-    const stale = category === 'support'
-        ? `category = 'support'
-              AND (peer_pubkey, COALESCE(thread_id, '')) NOT IN (
-                  SELECT peer_pubkey, COALESCE(thread_id, '')
-                  FROM nostr_support_messages
-                  WHERE category = 'support'
-                  GROUP BY peer_pubkey, COALESCE(thread_id, '')
-                  ORDER BY MAX(timestamp) DESC, MIN(id) ASC
-                  LIMIT ?
-              )`
-        : `category = ?
+    // 'support' wird getrennt für bekannte und unbekannte Absender gekappt (je 100 Threads):
+    // ein Spam-Schwall unbekannter Absender darf echte Anliegen nicht aus dem Limit drängen.
+    if (category === 'support') {
+        for (const known of [1, 0]) pruneSupportGroup(db, known);
+        return;
+    }
+    const stale = `category = ?
               AND id NOT IN (
                   SELECT id FROM nostr_support_messages WHERE category = ? ORDER BY timestamp DESC, id ASC LIMIT ?
               )`;
-    const args = category === 'support'
-        ? [MAX_MESSAGES_PER_CATEGORY]
-        : [category, category, MAX_MESSAGES_PER_CATEGORY];
+    const args = [category, category, MAX_MESSAGES_PER_CATEGORY];
+    db.transaction(() => {
+        db.prepare(`
+            INSERT OR IGNORE INTO nostr_deleted_events (event_id, deleted_at)
+            SELECT event_id, ? FROM nostr_support_messages WHERE event_id IS NOT NULL AND ${stale}
+        `).run(Date.now(), ...args);
+        db.prepare(`DELETE FROM nostr_support_messages WHERE ${stale}`).run(...args);
+    })();
+}
+
+function pruneSupportGroup(db, known) {
+    const outer = knownPeerSql(db, 'nostr_support_messages.peer_pubkey', IS_MASTER);
+    const inner = knownPeerSql(db, 'g.peer_pubkey', IS_MASTER);
+    const stale = `category = 'support'
+          AND (${outer}) = ?
+          AND (peer_pubkey, COALESCE(thread_id, '')) NOT IN (
+              SELECT g.peer_pubkey, COALESCE(g.thread_id, '')
+              FROM nostr_support_messages g
+              WHERE g.category = 'support' AND (${inner}) = ?
+              GROUP BY g.peer_pubkey, COALESCE(g.thread_id, '')
+              ORDER BY MAX(g.timestamp) DESC, MIN(g.id) ASC
+              LIMIT ?
+          )`;
+    const args = [known, known, MAX_MESSAGES_PER_CATEGORY];
     db.transaction(() => {
         db.prepare(`
             INSERT OR IGNORE INTO nostr_deleted_events (event_id, deleted_at)

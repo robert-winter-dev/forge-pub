@@ -1395,6 +1395,26 @@ function migrateSchema(db) {
         }
         console.log('[db] Migration: edge_history angelegt.');
     }
+    // Chance-Verlauf (LIQ#001953): stündlicher Snapshot des Chance-Werts je Pool, nur auf dem Master
+    // beschrieben. `signals` = je ein Zeichen pro Signal in fester Reihenfolge (Edge 1h,6h,12h,24h,7d,
+    // dann Trend 1h,2h,4h,1d,1w): m = erfüllt, u = nicht erfüllt, n = keine Daten. Seit LIQ#001962 JSON mit
+    // Rohwert je Signal (lib/chance-score.js encodeSignals/decodeSignals, liest beide Formate). Dient der späteren
+    // Messung, ob ein hoher Wert zu besseren Einstiegen führt.
+    if (!tables.includes('chance_history')) {
+        db.exec(`
+            CREATE TABLE IF NOT EXISTS chance_history (
+                pool_id     TEXT    NOT NULL,
+                recorded_at INTEGER NOT NULL,   -- Unix-ms, auf die volle Stunde abgerundet
+                chance_pct  INTEGER NOT NULL,
+                met         INTEGER NOT NULL,
+                applicable  INTEGER NOT NULL,
+                signals     TEXT    NOT NULL,
+                PRIMARY KEY (pool_id, recorded_at)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chance_history_time ON chance_history(recorded_at);
+        `);
+        console.log('[db] Migration: chance_history angelegt.');
+    }
     if (!oppCols.includes('trend_factor')) {
         db.exec(`ALTER TABLE opportunity_scores ADD COLUMN trend_factor REAL`);
         console.log('[db] Migration: opportunity_scores.trend_factor ergänzt.');
@@ -2282,6 +2302,7 @@ export function pruneScoreHistories(db, { oppDays = 30, poolScoreDays = 30 } = {
         ['opportunity_scores',   now - oppDays       * DAY],
         ['pool_score_history',   now - poolScoreDays * DAY],
         ['edge_history',         now - oppDays       * DAY],
+        ['chance_history',       now - oppDays       * DAY],
     ];
     const deleted = {};
     for (const [table, cutoff] of jobs) {

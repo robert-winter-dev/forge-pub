@@ -9,6 +9,7 @@
       "maxMb": 400,
       "tables": {
         "opportunity_scores":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js, stündlich; Slope-Historie)" },
+        "chance_history":      { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js, stündlich; Chance-Verlauf, LIQ#001953)" },
         "pool_score_history":   { "column": "recorded_at",  "unit": "ms", "retentionDays": 30,  "prune": "pruneScoreHistories (export.js) + pool-explorer.js" },
         "advisor_log":          { "column": "recorded_at",  "unit": "ms", "retentionDays": 14,  "prune": "pruneAdvisorLog, nur pool-explorer.js (im Fork nicht vorhanden)" },
         "portfolio_history":    { "column": "recorded_at",  "unit": "ms", "retentionDays": 90,  "prune": "bot.js täglich" },

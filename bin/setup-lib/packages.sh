@@ -317,6 +317,7 @@ do_config() {
     # leer setzen, damit der bestehende Guard sauber greift.
     set_env_var "$nexus_env" TELEGRAM_BOT_TOKEN ""
     set_env_var "$nexus_env" TELEGRAM_CHAT_ID   ""
+    set_env_var "$nexus_env" TELEGRAM_THREAD_ID ""
 
     env_from_example "$APP_DIR/bots/settings" "$ENV_DIR/settings.env"
 

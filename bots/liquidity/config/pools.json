@@ -2265,5 +2265,54 @@
     "tvlExitThreshold": 32000,
     "poolType": "volatil_2",
     "active": false
+  },
+  {
+    "id": "liq-cards-sol",
+    "protocol": "orca",
+    "address": "HNXTRVNoi63PZvBnVmZCUBouyF76zQbXHYtUpZcxKinc",
+    "pair": "SOL/CARDS",
+    "displayPair": "CARDS/SOL",
+    "tokenA": "So11111111111111111111111111111111111111112",
+    "tokenB": "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 1,
+    "tickSpacing": 128,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-sol-usdc",
+    "quoteTokenMint": "So11111111111111111111111111111111111111112",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "aprAlertDisabled": true,
+    "tvlWarnThreshold": 478000,
+    "tvlExitThreshold": 239000,
+    "poolType": "volatil_3",
+    "active": false
+  },
+  {
+    "id": "liq-chadx-usdc",
+    "protocol": "orca",
+    "address": "EKDrWztfufzSL2Ck4pVHm6np5W3y22e4d2dFVxFy3FEB",
+    "pair": "CHADx/USDC",
+    "tokenA": "Xsg8azkTEAmBz4Qbs8iYYhgRkLKSqNo85vcJL68aLMH",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.05,
+    "tickSpacing": 8,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 144000,
+    "tvlExitThreshold": 72000,
+    "poolType": "rwa",
+    "active": false
   }
 ]

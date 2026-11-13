@@ -336,6 +336,10 @@ let premiumSearchQuery = '';
 let supportThreads = [];
 let supportShown = PAGE_SIZE;
 let supportSearchQuery = '';
+// Support-Ansicht: 'known' (Standard) oder 'unknown' – Absender ohne Bezug zu uns
+// (kein früheres Gespräch, kein Premium/Daten-teilen, kein Thread-Tag), siehe
+// core/premium/support-trust.js. Dieselbe Rubrik, nur ein Filter auf supportThreads.
+let supportView = 'known';
 
 const elList     = document.getElementById('mcList');
 const elPane     = document.getElementById('mcPane');
@@ -433,6 +437,8 @@ function selectMenu(name, { keepSelection = false } = {}) {
     if (isSettings) { renderSettingsPanel(); return; }
 
     document.getElementById('msgNewBtn').hidden = name !== 'support';
+    if (name !== 'support') supportView = 'known';
+    updateUnknownBtn();
     if (changed) {
         // Suche ist bewusst je Rubrik eigenständig – ein Suchbegriff aus der
         // Systemliste ergibt im Support-Postfach selten Sinn.
@@ -512,7 +518,8 @@ function listItems() {
         from:    peerNick(t.peerName),
         time:    t.lastTimestamp,
         level:   '',
-        subject: stripEmoji(stripQuoteMarkers(t.lastText)),
+        // ⚠ = Spam-Merkmal erkannt (Kurzlink/unsichtbare Zeichen); Bedeutung steckt im Symbol, nicht in der Farbe.
+        subject: (t.spam ? '⚠ ' : '') + stripEmoji(stripQuoteMarkers(t.lastText)),
     }));
 }
 
@@ -526,7 +533,9 @@ const EMPTY_TEXT = {
     system:  () => tr('msg.no_system_notifications', 'Keine System-Benachrichtigungen.'),
     bots:    () => tr('msg.no_bot_notifications', 'Keine Bot-Meldungen.'),
     premium: () => tr('msg.no_premium_messages', 'Noch keine Premium-Nachrichten.'),
-    support: () => tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.'),
+    support: () => supportView === 'unknown'
+        ? tr('msg.no_unknown_senders', 'Keine Nachrichten von unbekannten Absendern.')
+        : tr('msg.no_conversations', 'Noch keine Konversationen. Über "Neue Nachricht" eine starten.'),
 };
 
 function renderList() {
@@ -615,6 +624,9 @@ async function reloadActiveList({ reset = false } = {}) {
     } else if (activeMenu === 'support') {
         if (reset) supportShown = PAGE_SIZE;
         supportThreads = await fetchThreads();
+        // Ist die Ansicht "Unbekannt" leer geworden (z.B. alles gelöscht), zurück zu Support.
+        if (supportView === 'unknown' && !supportThreads.some(t => t.known === false)) supportView = 'known';
+        updateUnknownBtn();
     }
     renderList();
 }
@@ -678,13 +690,36 @@ function filteredPremium() {
     );
 }
 function filteredSupport() {
-    if (!supportSearchQuery) return supportThreads;
+    const inView = supportThreads.filter(t => (supportView === 'unknown') === (t.known === false));
+    if (!supportSearchQuery) return inView;
     const q = supportSearchQuery.toLowerCase();
-    return supportThreads.filter(t =>
+    return inView.filter(t =>
         (t.peerName ?? '').toLowerCase().includes(q) ||
         (t.lastText ?? '').toLowerCase().includes(q)
     );
 }
+
+// Umschalter Support ↔ Unbekannt. Sichtbar nur in der Rubrik Support und nur, solange es
+// unbekannte Absender gibt (oder man gerade in deren Ansicht ist).
+function updateUnknownBtn() {
+    const btn = document.getElementById('mcUnknownBtn');
+    if (!btn) return;
+    const unknown = supportThreads.filter(t => t.known === false);
+    const unreadUnknown = unknown.reduce((n, t) => n + (t.unreadCount || 0), 0);
+    btn.hidden = activeMenu !== 'support' || (!unknown.length && supportView !== 'unknown');
+    btn.textContent = supportView === 'unknown'
+        ? tr('msg.back_to_support', '← Zurück zu Support')
+        : tr('msg.unknown_senders', 'Unbekannt') + ` (${unknown.length}${unreadUnknown ? `, ${unreadUnknown} ` + tr('msg.unread_short', 'ungelesen') : ''})`;
+    btn.title = tr('msg.unknown_senders_hint', 'Absender ohne Bezug zu FORGE: lösen keinen Zähler und kein Popup aus.');
+}
+document.getElementById('mcUnknownBtn').addEventListener('click', () => {
+    supportView = supportView === 'unknown' ? 'known' : 'unknown';
+    activeKey = null; activePeer = null; activeThreadId = null; composeOpen = false;
+    elList.scrollTop = 0;
+    renderPanePlaceholder();
+    updateUnknownBtn();
+    reloadActiveList({ reset: true });
+});
 
 // Ein Support-Anliegen wird über peerPubkey + threadId identifiziert (nicht nur
 // peerPubkey – ein Nutzer kann mehrere getrennte Anliegen mit demselben FORGE
@@ -1246,6 +1281,7 @@ async function openSupportThread(peerPubkeyHex, threadId, { markRead = false } =
                 // für dieselbe Sache.
                 [tr('msg.to', 'An'), `<span id="msgThreadPeer">${tr('msg.loading', 'Lade…')}</span>`],
             ])}
+            <div id="msgUnknownNote"></div>
             <div class="msg-thread" id="msgThread"><div class="msg-empty">${tr('msg.loading', 'Lade…')}</div></div>
             <form class="msg-compose" id="msgComposeForm">
                 <textarea id="msgComposeInput" rows="3" placeholder="${tr('msg.reply_ph', 'Antworten…')}" maxlength="1000"></textarea>
@@ -1274,7 +1310,11 @@ async function loadThreadMessages() {
     if (!thread) return;
     try {
         const r = await fetch(supportThreadUrl(activePeer, activeThreadId));
-        const { messages, peerName, peerNpub } = await r.json();
+        const { messages, peerName, peerNpub, known } = await r.json();
+        const noteEl = document.getElementById('msgUnknownNote');
+        if (noteEl) noteEl.innerHTML = known === false
+            ? `<div class="msg-unknown-note">⚠ ${esc(tr('msg.unknown_note', 'Unbekannter Absender: kein früheres Gespräch, kein Premium- oder Daten-teilen-Bezug. Links nicht öffnen. Eine Antwort von dir macht ihn bekannt.'))}</div>`
+            : '';
         const peerEl = document.getElementById('msgThreadPeer');
         if (peerEl) peerEl.innerHTML = peerLabelWithNpub(peerNpub, peerNick(peerName));
         if (!messages.length) {
@@ -1613,7 +1653,7 @@ document.getElementById('mcMarkAllBtn').addEventListener('click', async () => {
         }
     } else {
         // Kein Bulk-Endpoint – jedes offene Anliegen einzeln quittieren.
-        for (const t of supportThreads.filter(x => x.unreadCount > 0)) {
+        for (const t of supportThreads.filter(x => x.unreadCount > 0 && (supportView === 'unknown') === (x.known === false))) {
             await markSupportThreadRead(t.peerPubkey, t.threadId);
         }
     }

@@ -4,7 +4,7 @@
 // Eingabe: Array von Schlusskursen. Ausgabe: gleich lang, null solange der Wert
 // noch nicht definiert ist (Einschwingphase).
 
-/** EMA mit Startwert = einfacher Mittelwert der ersten `period` Werte (TradingView-Konvention). */
+/** EMA mit Startwert = einfacher Mittelwert der ersten `period` Werte (übliche Konvention). */
 export function ema(values, period) {
     const out = new Array(values.length).fill(null);
     if (values.length < period) return out;
@@ -76,7 +76,7 @@ export function resample(series, bucketMs) {
     return out;
 }
 
-/** Standardabweichung der Grundgesamtheit (wie TradingView ta.stdev). */
+/** Standardabweichung der Grundgesamtheit (wie üblich). */
 const mean  = a => a.reduce((x, y) => x + y, 0) / a.length;
 const pstd  = a => { const m = mean(a); return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length); };
 

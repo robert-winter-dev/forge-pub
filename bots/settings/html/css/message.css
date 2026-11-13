@@ -498,6 +498,29 @@ table.mc-table .mc-num {
 }
 .msg-new-btn:hover { border-color: var(--accent); background: rgba(0,212,255,0.08); }
 
+/* Umschalter "Unbekannt (N)" / "Zurück zu Support" – bewusst zurückhaltend (kein Akzent),
+   die Rubrik soll nicht nach Alarm aussehen. Bedeutung steckt im Text, nicht in der Farbe. */
+.msg-unknown-btn {
+    background: transparent;
+    border: 1px dashed var(--border, rgba(255,255,255,0.25));
+    color: inherit;
+    border-radius: 7px;
+    padding: 0.45rem 0.9rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.msg-unknown-btn:hover { border-style: solid; }
+.msg-unknown-note {
+    margin: 0 0 0.6rem;
+    padding: 0.55rem 0.75rem;
+    border: 1px solid rgba(255,255,255,0.25);
+    border-left: 4px solid currentColor;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
 /* Live-Volltextsuche (debounce siehe message.js): System serverseitig,
    Premium/Support clientseitig auf der ohnehin geladenen Liste. */
 .mcs-search {

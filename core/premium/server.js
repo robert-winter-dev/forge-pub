@@ -47,9 +47,10 @@ import { issueActivationToken, getLastIssuedAt } from './activation.js';
 import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
 import { loadMinVersionConfig, signMinVersion, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
 import { cleanVersion } from '../../lib/version.js';
-import { startConnectionMonitor, getConnectionStats } from '../../lib/nostr-stats.js';
+import { startConnectionMonitor, getConnectionStats, getLiveConnection } from '../../lib/nostr-stats.js';
 // npub-Lock der Systemdaten-Freigabe: siehe resetLockReason() weiter unten.
 import { isShareApproved } from '../../lib/health-share-state.js';
+import { detectSpamReason, knownPeerSql, isPeerKnown } from './support-trust.js';
 import { openMessagesDb, markEventsDeleted, isEventDeleted, markBlobEventProcessed, markActivationEventProcessed, markHealthShareEventProcessed, pruneMessagesToLimit } from './messages-db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -594,19 +595,30 @@ function startNostrService() {
             // INSERT OR IGNORE + event_id: subscribeMany liefert bei jedem Server-Start
             // das Relay-Backlog erneut aus – ohne Dedup würden dieselben Nachrichten bei
             // jedem Neustart erneut gespeichert werden.
+            // Spam-Merkmale (Kurzlink, unsichtbare Zeichen) nur am Master und nur für
+            // Support-Freitext erkennen – siehe support-trust.js. Nur Befund, die DM bleibt lesbar.
+            const spamReason = (category === 'support' && IS_MASTER_IDENTITY) ? detectSpamReason(cleanText) : null;
             const info = db.prepare(`
-                INSERT OR IGNORE INTO nostr_support_messages (direction, timestamp, text, peer_pubkey, event_id, category, thread_id)
-                VALUES ('in', ?, ?, ?, ?, ?, ?)
-            `).run(timestamp, cleanText, rumor.pubkey ?? null, rumor.id ?? null, category, threadId);
+                INSERT OR IGNORE INTO nostr_support_messages (direction, timestamp, text, peer_pubkey, event_id, category, thread_id, spam_reason)
+                VALUES ('in', ?, ?, ?, ?, ?, ?, ?)
+            `).run(timestamp, cleanText, rumor.pubkey ?? null, rumor.id ?? null, category, threadId, spamReason);
 
             if (info.changes === 1) {
                 pruneMessagesToLimit(db, category);
-                messageEvents.emit(category === 'premium' ? 'premium-message' : 'support-message', {
-                    direction: 'in',
-                    timestamp,
-                    text: cleanText,
-                    peerPubkey: rumor.pubkey ?? null,
-                });
+                // Unbekannte Absender (siehe support-trust.js) lösen keinen Live-Push aus:
+                // kein Zähler, kein Popup. Sie erscheinen nur in der Ansicht "Unbekannt".
+                const unknownSender = category === 'support' && !!rumor.pubkey
+                    && !isPeerKnown(db, rumor.pubkey, IS_MASTER_IDENTITY);
+                if (unknownSender) {
+                    console.log(`[premium] Support-DM von unbekanntem Absender ${rumor.pubkey} abgelegt (Spam-Merkmal: ${spamReason ?? 'keins'}).`);
+                } else {
+                    messageEvents.emit(category === 'premium' ? 'premium-message' : 'support-message', {
+                        direction: 'in',
+                        timestamp,
+                        text: cleanText,
+                        peerPubkey: rumor.pubkey ?? null,
+                    });
+                }
 
                 // Aktivierungs-Token-Austausch (nur Master, siehe activation.js + [[payment]]
                 // "Identitäts-/Memo-Modell"). `info.changes === 1` ist Pflicht hier: ohne diese
@@ -1297,7 +1309,8 @@ app.get('/contacts', (_req, res) => {
 // Relay-Verbindungsstatistik (Fund 2026-07-28: stiller Verbindungsverlust ohne
 // Reconnect/Ping, siehe lib/nostr-stats.js) — Uptime/Downtime/Reconnect-Zahlen je Relay.
 app.get('/nostr/stats', (_req, res) => {
-    res.json({ relays: getConnectionStats() });
+    const live = getLiveConnection();
+    res.json({ relays: getConnectionStats({ live: live?.relays ?? null }), pollAgeMs: live?.pollAgeMs ?? null });
 });
 
 // Anzeigename (Nostr-Profil, kind 0) ändern. Leerer/fehlender Wert setzt den Default.
@@ -1426,7 +1439,9 @@ app.get('/support/threads', async (_req, res) => {
                    AND COALESCE(m2.thread_id,'') = COALESCE(m1.thread_id,'')
                    AND m2.category = 'support'
                  ORDER BY timestamp DESC LIMIT 1) AS lastText,
-                SUM(CASE WHEN direction = 'in' AND read = 0 THEN 1 ELSE 0 END) AS unreadCount
+                SUM(CASE WHEN direction = 'in' AND read = 0 THEN 1 ELSE 0 END) AS unreadCount,
+                (${knownPeerSql(db, 'm1.peer_pubkey', IS_MASTER_IDENTITY)}) AS known,
+                MAX(spam_reason IS NOT NULL) AS spam
             FROM nostr_support_messages m1
             WHERE peer_pubkey IS NOT NULL AND category = 'support'
             GROUP BY peer_pubkey, COALESCE(thread_id,'')
@@ -1436,7 +1451,9 @@ app.get('/support/threads', async (_req, res) => {
         db.close();
     }
     const names = await resolveProfileNames(rows.map(r => r.peerPubkey));
-    res.json({ threads: rows.map(r => ({ ...r, peerName: names[r.peerPubkey] ?? null })) });
+    res.json({
+        threads: rows.map(r => ({ ...r, known: !!r.known, spam: !!r.spam, peerName: names[r.peerPubkey] ?? null })),
+    });
 });
 
 app.get('/support/unread-count', (_req, res) => {
@@ -1444,9 +1461,16 @@ app.get('/support/unread-count', (_req, res) => {
     try {
         const row = db.prepare(
             `SELECT COUNT(*) AS n, MIN(timestamp) AS oldest FROM nostr_support_messages
-             WHERE direction = 'in' AND read = 0 AND category = 'support'`
+             WHERE direction = 'in' AND read = 0 AND category = 'support'
+               AND ${knownPeerSql(db, 'nostr_support_messages.peer_pubkey', IS_MASTER_IDENTITY)}`
         ).get();
-        res.json({ unread: row.n, oldestUnread: row.oldest ?? null });
+        const unknown = db.prepare(
+            `SELECT COUNT(*) AS n FROM nostr_support_messages
+             WHERE direction = 'in' AND read = 0 AND category = 'support'
+               AND NOT ${knownPeerSql(db, 'nostr_support_messages.peer_pubkey', IS_MASTER_IDENTITY)}`
+        ).get();
+        // unreadUnknown: nur für die Anzeige in der Ansicht "Unbekannt", zählt NICHT in den Rubrik-Zähler.
+        res.json({ unread: row.n, oldestUnread: row.oldest ?? null, unreadUnknown: unknown.n });
     } finally {
         db.close();
     }
@@ -1468,6 +1492,7 @@ app.get('/support/thread/:peer', async (req, res) => {
 
     const db = openMessagesDb();
     let rows;
+    let known = true;
     try {
         rows = db.prepare(`
             SELECT id, direction, timestamp, text, peer_pubkey AS peerPubkey, thread_id AS threadId
@@ -1476,6 +1501,7 @@ app.get('/support/thread/:peer', async (req, res) => {
             ORDER BY timestamp ASC
             LIMIT 500
         `).all(peerPubkeyHex, threadId);
+        known = isPeerKnown(db, peerPubkeyHex, IS_MASTER_IDENTITY);
     } finally {
         db.close();
     }
@@ -1486,6 +1512,7 @@ app.get('/support/thread/:peer', async (req, res) => {
         peerNpub: nip19.npubEncode(peerPubkeyHex),
         peerName: names[peerPubkeyHex] ?? null,
         threadId,
+        known,
     });
 });
 

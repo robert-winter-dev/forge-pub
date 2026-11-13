@@ -98,6 +98,10 @@ body.modal-open {
    Höhe von Hand nachgezogen werden muss (früher min-height, LIQ#000803, wurde von den
    zwei Kartenreihen des Details-Reiters überholt). */
 #posValueModal .modal-tab-stack { display: grid; position: relative; }
+/* Stimmung-Dialog (LIQ#001960): beide Reiter liegen in einer Grid-Zelle, der höhere gibt die Höhe vor. */
+#chanceModal .modal-tab-stack { display: grid; }
+#chanceModal .modal-tab-panel { display: block; grid-area: 1 / 1; visibility: hidden; }
+#chanceModal .modal-tab-panel.active { visibility: visible; }
 /* Chart 316 px + Zeitraum-Knöpfe: Mindesthöhe auch ohne Chart-Daten, sonst schrumpft
    der Details-Reiter mit (LIQ#000867). */
 #posValuePanelLp { min-height: 347px; }
@@ -1071,19 +1075,19 @@ body.modal-open {
     pointer-events: none;
 }
 
-.pool-chart-gecko-link-row {
+.pool-chart-ext-link-row {
     display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
     margin-top: 0.3rem;
     min-height: 1.4rem;
 }
-.pool-chart-gecko-link-row .pool-chart-gecko-link { margin-left: auto; }
-.pool-chart-gecko-link {
+.pool-chart-ext-link-row .pool-chart-ext-link { margin-left: auto; }
+.pool-chart-ext-link {
     font-size: 0.75rem;
     color: #4f9eff;
     text-decoration: none;
     opacity: 0.75;
 }
-.pool-chart-gecko-link:hover { opacity: 1; text-decoration: underline; }
+.pool-chart-ext-link:hover { opacity: 1; text-decoration: underline; }
 
 .pool-name-link {
     cursor: pointer;

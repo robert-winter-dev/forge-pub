@@ -9,7 +9,8 @@
  * Zusage (KB Core/wirkungsnachweis.md) — also muss öfter abgetastet werden.
  *
  * Was eine Runde tut (je aktivem Pool mit offener Position und aktivem Trailing Stop):
- *   1. Pool-Preis live lesen — ein einzelner Account-Read (`adapter.getPoolPrice`).
+ *   1. Pool-Preise live lesen — gebündelt, ein getMultipleAccounts-Credit je Runde für alle
+ *      Pools (`adapter.getPricesOnChainBulk`); einzeln (`getPoolPrice`) nur als Rückfall.
  *   2. Positionswert aus gespeicherter Liquidität + Range + diesem Preis rechnen — mit
  *      **derselben Formel wie jeder Snapshot** (`computeLpValueFromState`), kein zweites Modell.
  *   3. `evaluateTsTrigger()` — die unveränderte Auslöse-Entscheidung des Trailing Stops.
@@ -30,8 +31,9 @@
  *   - Parallel zum Zyklus laufen. Der Aufrufer ruft sie ausschließlich in der Wartephase
  *     zwischen zwei Zyklen auf — keine zweite Schreibstelle neben processPool.
  *
- * Last: je Pool ein RPC-Read pro Runde, über `rpcLimiter`. Bei 3 Positionen und 30 s Takt
- * sind das 6 Reads/Minute — gegen ~1700 Upstream-Calls/Stunde heute vernachlässigbar.
+ * Last: ein Credit je Runde (alle Pools gebündelt). Einzelnes getPool() kostete ~4,8 Credits
+ * je Pool und Runde (Messung 12.11.2026: 4,81 Reads/Check) und trieb den Helius-Verbrauch
+ * auf das Doppelte; mit 4 Pools wären es ~40.000 Credits/Tag gewesen.
  */
 
 import { getOpenPosition, getIncompleteTsExecutions, insertTsFastCheck, latestStopValueUsd } from './db.js';
@@ -71,6 +73,8 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
     // dient nur als Gegenprobe und Rückfallebene.
     try { await refreshPrices(db); } catch { /* bewusst still */ }
 
+    // Durchgang 1: prüfbare Pools sammeln (offene Position, Referenz da, Stop aktiv).
+    const candidates = [];
     for (const pool of pools) {
         try {
             if (busy.has(pool.id)) continue;
@@ -82,8 +86,23 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
             const cfg = loadConfig(pool.id);
             if (!cfg?.enabled) continue;
 
-            const adapter = getAdapter(pool);
-            const price   = await adapter.getPoolPrice(pool);
+            candidates.push({ pool, position, cfg, adapter: getAdapter(pool) });
+        } catch (err) {
+            summary.errors++;
+            console.warn(`[fast-stop:${pool.id}] Schnellprüfung übersprungen: ${err.message}`);
+        }
+    }
+
+    // Preise gebündelt lesen: ein getMultipleAccounts je Adapter statt je Pool ein
+    // SDK-getPool() (~4,8 Credits, gemessen 12.11.2026 → 4,81 Reads je Check; LIQ#000854).
+    const bulkPrices = await _readBulkPrices(candidates);
+
+    // Durchgang 2: bewerten, protokollieren, ggf. bestätigen und aussteigen.
+    for (const { pool, position, cfg, adapter } of candidates) {
+        try {
+            // Fehlt ein Pool im Sammelergebnis (Konto nicht lesbar), einzeln nachlesen —
+            // kein geschätzter oder geerbter Preis, der Schutz bleibt lückenlos.
+            const price = bulkPrices.get(pool.id) ?? await adapter.getPoolPrice(pool);
             if (!(price > 0)) continue;
 
             const { lpValueUsd } = computeLpValueFromState(db, pool, {
@@ -130,6 +149,32 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
         }
     }
     return summary;
+}
+
+/**
+ * Pool-Preise der Kandidaten gebündelt lesen. Gruppiert nach Adapter-Instanz; Adapter ohne
+ * `getPricesOnChainBulk` und fehlgeschlagene Blöcke liefern keinen Eintrag → der Aufrufer
+ * liest diese Pools einzeln nach.
+ * @returns {Promise<Map<string, number>>} pool.id → Preis
+ */
+async function _readBulkPrices(candidates) {
+    const out = new Map();
+    const byAdapter = new Map();
+    for (const c of candidates) {
+        if (typeof c.adapter?.getPricesOnChainBulk !== 'function') continue;
+        if (!byAdapter.has(c.adapter)) byAdapter.set(c.adapter, []);
+        byAdapter.get(c.adapter).push(c.pool);
+    }
+    for (const [adapter, pools] of byAdapter) {
+        try {
+            const map = await adapter.getPricesOnChainBulk(pools);   // Schlüssel: pool.address
+            for (const p of pools) {
+                const v = map.get(p.address);
+                if (v && v.price > 0) out.set(p.id, v.price);
+            }
+        } catch { /* Einzelnachlesen im Aufrufer */ }
+    }
+    return out;
 }
 
 /**

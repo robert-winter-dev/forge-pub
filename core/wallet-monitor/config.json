@@ -359,6 +359,16 @@
       "symbol": "UNI",
       "mint": "uniHfuPhEQSrtpzXpJZDCSq53yaejKKpNhFUiKoHKHV",
       "decimals": 8
+    },
+    {
+      "symbol": "CARDS",
+      "mint": "CARDSccUMFKoPRZxt5vt3ksUbxEFEcnZ3H2pd3dKxYjp",
+      "decimals": 6
+    },
+    {
+      "symbol": "CHADx",
+      "mint": "Xsg8azkTEAmBz4Qbs8iYYhgRkLKSqNo85vcJL68aLMH",
+      "decimals": 8
     }
   ],
   "retainDays": 30
