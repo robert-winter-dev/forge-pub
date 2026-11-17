@@ -36,7 +36,7 @@ import fs                 from 'fs';
 import path               from 'path';
 import { execSync }       from 'child_process';
 import { PATHS }          from './paths.js';
-import { identityExists } from '../lib/nostr-client.js';
+import { identityExists, loadRelays } from '../lib/nostr-client.js';
 
 // Ein Bot wird im Health Monitor angezeigt, sobald seine systemd-Unit auf dem System
 // existiert – unabhängig davon, ob sie aktiviert ist. Ausgeblendet wird nur, was es
@@ -62,15 +62,15 @@ function isBotInstalled(serviceId) {
     }
 }
 
-// Relay-Liste kommt aus config/nostr-relays.json (git-versioniert, Master und
-// FORGE-public-Fork teilen dieselbe Datei) – hier nicht zweite Quelle der Wahrheit
-// anlegen, sondern direkt einlesen. Leere Liste bei fehlender/kaputter Datei statt
+// Relay-Liste über loadRelays() (lib/nostr-client.js): Master config/nostr-relays.json,
+// Fork bevorzugt die vom Master signierte Liste (CORE#002022) – hier keine zweite
+// Quelle der Wahrheit. Leere Liste bei fehlender/kaputter Datei statt
 // Absturz der gesamten Health-Config.
 function loadNostrRelays() {
     try {
-        const raw = fs.readFileSync(path.join(PATHS.config, 'nostr-relays.json'), 'utf8');
-        const { relays } = JSON.parse(raw);
-        return Array.isArray(relays) ? relays : [];
+        // Line count kept on purpose: tools/pub-export/sanitize-text.js addresses
+        // later lines of this file by number.
+        return loadRelays();
     } catch {
         return [];
     }

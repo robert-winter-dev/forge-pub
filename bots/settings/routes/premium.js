@@ -27,6 +27,7 @@ import { getCurrentPricing } from '../../../lib/premium-pricing-store.js';
 import { getMyActivationToken } from '../../../lib/premium-token-store.js';
 import { isAutoPayEnabled, setAutoPayEnabled, setPayFailureNotified } from '../../../lib/premium-auto-pay-store.js';
 import { recordPremiumMessage } from '../../../core/premium/messages-db.js';
+import { isShareApproved } from '../../../lib/health-share-state.js';
 import { t } from '../../../lib/i18n.js';
 
 const execFileAsync = promisify(execFile);
@@ -93,6 +94,12 @@ router.get('/status', async (_req, res) => {
             Promise.resolve(getMyActivationToken()),
         ]);
 
+        // CORE#002030: Der Master hat die Systemdaten-Freigabe dieser Installation
+        // bestätigt (DM 'health-share-approved' → approved_at, nicht widerrufen). Premium
+        // läuft dann kostenlos/temporär, ohne Auto-Pay. Nur Anzeige, kein Gate.
+        let tempUnlocked = false;
+        try { tempUnlocked = isShareApproved(); } catch { /* settings.db nicht lesbar → nicht freigeschaltet */ }
+
         const price = pricing?.priceUsdcPerHour ?? null;
         const hours = price != null ? remainingServiceHours(balances?.usdcBalance ?? 0, price) : null;
 
@@ -111,6 +118,7 @@ router.get('/status', async (_req, res) => {
             lowBalanceWarnHours: pricing?.lowBalanceWarnHours ?? null,
             lowBalanceCriticalHours: pricing?.lowBalanceCriticalHours ?? null,
             enabled: isAutoPayEnabled(),
+            temporarilyUnlocked: tempUnlocked,
         });
     } catch (err) {
         res.status(500).json({ available: true, error: err.message });

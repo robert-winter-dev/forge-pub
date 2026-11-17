@@ -152,20 +152,22 @@ export async function runFastStopRound(db, pools, { getAdapter, onConfirmedTrigg
 }
 
 /**
- * Pool-Preise der Kandidaten gebündelt lesen. Gruppiert nach Adapter-Instanz; Adapter ohne
- * `getPricesOnChainBulk` und fehlgeschlagene Blöcke liefern keinen Eintrag → der Aufrufer
- * liest diese Pools einzeln nach.
+ * Pool-Preise der Kandidaten gebündelt lesen. Gruppiert nach Adapter-KLASSE (nicht Instanz:
+ * getAdapter() liefert je Aufruf eine neue Instanz, Gruppierung nach Instanz ergäbe einen
+ * Aufruf je Pool, CORE#001999). Adapter ohne `getPricesOnChainBulk` und fehlgeschlagene
+ * Blöcke liefern keinen Eintrag → der Aufrufer liest diese Pools einzeln nach.
  * @returns {Promise<Map<string, number>>} pool.id → Preis
  */
 async function _readBulkPrices(candidates) {
     const out = new Map();
-    const byAdapter = new Map();
+    const byClass = new Map();
     for (const c of candidates) {
         if (typeof c.adapter?.getPricesOnChainBulk !== 'function') continue;
-        if (!byAdapter.has(c.adapter)) byAdapter.set(c.adapter, []);
-        byAdapter.get(c.adapter).push(c.pool);
+        const key = c.adapter.constructor;
+        if (!byClass.has(key)) byClass.set(key, { adapter: c.adapter, pools: [] });
+        byClass.get(key).pools.push(c.pool);
     }
-    for (const [adapter, pools] of byAdapter) {
+    for (const { adapter, pools } of byClass.values()) {
         try {
             const map = await adapter.getPricesOnChainBulk(pools);   // Schlüssel: pool.address
             for (const p of pools) {

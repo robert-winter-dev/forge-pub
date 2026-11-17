@@ -48,6 +48,7 @@ import { loadPricingConfig, signPricing } from '../../lib/premium-pricing.js';
 import { loadMinVersionConfig, signMinVersion, isValidVersion, isVersionSupported } from '../../lib/premium-min-version.js';
 import { cleanVersion } from '../../lib/version.js';
 import { startConnectionMonitor, getConnectionStats, getLiveConnection } from '../../lib/nostr-stats.js';
+import { startRelayListSync } from '../../lib/nostr-relay-list-sync.js';
 // npub-Lock der Systemdaten-Freigabe: siehe resetLockReason() weiter unten.
 import { isShareApproved } from '../../lib/health-share-state.js';
 import { detectSpamReason, knownPeerSql, isPeerKnown } from './support-trust.js';
@@ -1250,6 +1251,18 @@ function startNostrService() {
 }
 
 const nostrService = startNostrService();
+
+// Fork: signierte Relay-Liste vom Master (CORE#002022, KB Core/nostr-relay-pool). Eine
+// geänderte Liste braucht neuen Pool und neue Subscriptions; der Prozess endet, systemd
+// (Restart=always) startet ihn mit der neuen Liste aus loadRelays(). Master: no-op.
+if (nostrService) {
+    startRelayListSync({
+        onApplied: () => {
+            console.log('🔁  Neue Relay-Liste vom Master gespeichert – Neustart über systemd in 2 s');
+            setTimeout(() => process.exit(0), 2000);
+        },
+    });
+}
 
 // ── HTTP API ──────────────────────────────────────────────────────────────────
 

@@ -1277,3 +1277,21 @@ body {
 }
 .scam-detail-muted { color: var(--text-muted); font-size: 0.85rem; cursor: help; }
 .scam-tx { color: inherit; }
+
+/* LIQ#002025: anklickbares Tag "Kostenlos testen" in der Premium-Zeile */
+.free-trial-tag {
+    margin-left: 0.6rem;
+    padding: 0.1rem 0.55rem;
+    font-size: 0.72rem;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+}
+.free-trial-tag:hover { background: var(--accent-glow); }
+.free-trial-tag.hidden { display: none; }
+/* Clickable text (status "temporarily unlocked", path in the free-trial modal): underline
+   marks it as a link, not colour alone. */
+.free-trial-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.free-trial-link:hover { color: var(--accent); }

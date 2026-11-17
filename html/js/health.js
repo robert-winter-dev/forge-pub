@@ -583,6 +583,7 @@ const SHARE_STATE_TEXT = {
 // Letzter bekannter Zustand — die Abschalt-Rückfrage muss wissen, ob dieser Nutzer
 // überhaupt einen Premium-Zugang zu verlieren hat (siehe unten).
 let lastShareState = null;
+let shareDeepLinkDone = false;
 
 function renderShare(state) {
     lastShareState = state;
@@ -595,6 +596,12 @@ function renderShare(state) {
     // dem Master und auf statischen Kopien leer in der Leiste (Fund 2026-08-13).
     document.getElementById('shareOptInTab')?.classList.remove('hidden');
     box.classList.remove('hidden');
+    // Deep link from the free-trial modal in the settings (LIQ#002025): #teilen opens the
+    // share tab once, as soon as it is visible.
+    if (location.hash === '#teilen' && !shareDeepLinkDone) {
+        shareDeepLinkDone = true;
+        document.getElementById('shareOptInTab')?.click();
+    }
     check.checked = !!state.enabled;
 
     let text = SHARE_STATE_TEXT[state.phase]?.() ?? '';

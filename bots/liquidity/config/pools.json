@@ -2314,5 +2314,23 @@
     "tvlExitThreshold": 72000,
     "poolType": "rwa",
     "active": false
+  },
+  {
+    "id": "liq-sol-usdc-2",
+    "protocol": "orca",
+    "address": "HJPjoWUrhoZzkNfRpHuieeFk9WcZWjwy6PBjZ81ngndJ",
+    "pair": "SOL/USDC",
+    "tokenA": "So11111111111111111111111111111111111111112",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 9,
+    "decimalsB": 6,
+    "feeTier": 0.3,
+    "tickSpacing": 64,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "tvlWarnThreshold": 114000,
+    "tvlExitThreshold": 57000,
+    "poolType": "volatil_2",
+    "active": false
   }
 ]

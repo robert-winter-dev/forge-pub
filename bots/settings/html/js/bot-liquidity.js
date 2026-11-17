@@ -234,6 +234,33 @@ function _premiumExplainerHtml() {
         </p>`;
 }
 
+// LIQ#002025: Hinweis "Kostenlos testen". Ehrlich zum manuellen Ablauf: der Master schaltet
+// Datenteiler von Hand frei (kein Automatismus), befristet bis 31.12.2026.
+function _openFreeTrialModal() {
+    const mid = 'liquiditybot-free-trial-modal';
+    showModal({
+        id: mid,
+        title: tr('sliq.free_trial_title', 'Premium kostenlos testen'),
+        body: `
+            <p style="margin:0 0 0.6rem;">
+                ${tr('sliq.free_trial_1', 'Teile Deine anonymen Systemdaten über den Health Monitor – dann schalten wir Dir den Premium Service bis zum 31.12.2026 kostenlos frei.')}
+            </p>
+            <p style="margin:0 0 0.6rem;color:var(--text-muted);">
+                ${tr('sliq.free_trial_2', 'So geht es: {path} aktivieren. Die Freischaltung erfolgt manuell durch uns, nicht automatisch und nicht sofort.', {
+                    // Deep link: health.js opens the share tab on #teilen. Only shown on forks,
+                    // where the health page is health.html (the master hides the premium row).
+                    path: `<a href="/forge/health.html#teilen" class="free-trial-link">${tr('sliq.free_trial_path', 'Health Monitor → Tab „Daten teilen“ → „Monitoring-Daten freigeben“')}</a>`,
+                })}
+            </p>
+            <p style="margin:0;color:var(--text-muted);">
+                ${tr('sliq.free_trial_3', 'Ohne Freischaltung wird Premium stündlich aus Deinem Premium-Wallet bezahlt (Preis unter „Verwalten“).')}
+            </p>`,
+        actions: [
+            { label: tr('common.close', 'Schließen'), onClick: () => closeModal(mid) },
+        ],
+    });
+}
+
 async function _openPremiumModal() {
     const mid = 'liquiditybot-premium-modal';
     let status;
@@ -313,8 +340,20 @@ async function _refreshPremiumBadge() {
     try {
         const status = await _fetchPremiumStatus();
         if (!status.available) { text.closest('tr')?.style.setProperty('display', 'none'); return; }
-        text.innerHTML   = status.enabled ? tr('sliq.badge_active', '&#10003; Aktiv') : tr('sliq.badge_inactive', '&#9888; Inaktiv');
-        text.className   = 'key-status ' + (status.enabled ? 'set' : 'unset');
+        // CORE#002030: Vom Master kostenlos freigeschaltet (Systemdaten-Freigabe) und keine
+        // eigene Auto-Zahlung → „Temporär freigeschaltet“ statt „Inaktiv“. Bezahlter Betrieb
+        // (enabled) bleibt „Aktiv“.
+        const tempUnlocked = !status.enabled && status.temporarilyUnlocked === true;
+        text.innerHTML   = status.enabled ? tr('sliq.badge_active', '&#10003; Aktiv')
+            : tempUnlocked ? tr('sliq.badge_temp_unlocked', '&#10003; Temporär freigeschaltet')
+            : tr('sliq.badge_inactive', '&#9888; Inaktiv');
+        text.className   = 'key-status ' + (status.enabled || tempUnlocked ? 'set' : 'unset');
+        // Temporarily unlocked: the "try for free" tag is pointless, the status text itself
+        // opens the explanation instead (CORE#002030).
+        text.classList.toggle('free-trial-link', tempUnlocked);
+        if (tempUnlocked) { text.setAttribute('role', 'button'); text.tabIndex = 0; }
+        else { text.removeAttribute('role'); text.removeAttribute('tabindex'); }
+        _container?.querySelector('#liquiditybot-btn-free-trial')?.classList.toggle('hidden', tempUnlocked);
     } catch { /* Text bleibt wie zuletzt bekannt */ }
 }
 
@@ -348,6 +387,7 @@ async function _renderService(el) {
                     <td class="wat-label">${tr('sliq.premium_badge', 'Premium &#128296;')}</td>
                     <td class="wat-info">
                         <span class="key-status" id="liquiditybot-premium-text">${tr('sb.loading_short', 'laden…')}</span>
+                        <button type="button" class="free-trial-tag" id="liquiditybot-btn-free-trial">${tr('sliq.free_trial_tag', 'Kostenlos testen')}</button>
                     </td>
                     <td class="wat-action">
                         <button class="btn btn-secondary btn-sm" id="liquiditybot-btn-premium">${tr('sb.manage', 'Verwalten')}</button>
@@ -364,6 +404,17 @@ async function _renderService(el) {
 
     card.querySelector('#liquiditybot-btn-status-manage')?.addEventListener('click', () => _openBotControlModal());
     card.querySelector('#liquiditybot-btn-premium')?.addEventListener('click', () => _openPremiumModal());
+    card.querySelector('#liquiditybot-btn-free-trial')?.addEventListener('click', () => _openFreeTrialModal());
+    const premiumText = card.querySelector('#liquiditybot-premium-text');
+    premiumText?.addEventListener('click', () => {
+        if (premiumText.classList.contains('free-trial-link')) _openFreeTrialModal();
+    });
+    premiumText?.addEventListener('keydown', e => {
+        if ((e.key === 'Enter' || e.key === ' ') && premiumText.classList.contains('free-trial-link')) {
+            e.preventDefault();
+            _openFreeTrialModal();
+        }
+    });
 
     const cleanupWrap = card.querySelector('#liquiditybot-cleanup-wrap');
     try {

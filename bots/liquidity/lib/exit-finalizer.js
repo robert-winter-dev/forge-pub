@@ -571,8 +571,50 @@ export function checkExitAmountsAgainstLastMeasurement(db, pool, coinsA, coinsB,
     }
     return { ok: true, shortfallA, shortfallB, reason: null };
 }
+
+/**
+ * USDC-Bestand des Wallets, best-effort (null bei Lesefehler oder Pool ohne USDC-Seite).
+ * Dient nur dem Vorher/Nachher-Vergleich um den Close (CORE#001970).
+ */
+async function readUsdcSideBalance(pool) {
+    const { usdcSide } = sellSideOf(pool);
+    if (!usdcSide) return null;
+    try {
+        const v = await getTokenBalanceFresh(getKeypair().publicKey, usdcSide.mint, usdcSide.decimals);
+        return Number.isFinite(v) ? v : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Tatsächlich aus der Position gekommene USDC-Menge statt der Quote (CORE#001970).
+ *
+ * 🔒 Warum: `closed.amountA/B` stammt aus der Quote vor der TX. Kreuzt der Preis bis zur
+ * Ausführung die Range-Grenze, stimmt der Token-Mix nicht mehr. Beleg: liq-chadx-usdc,
+ * 13.11.2026 — Quote 50,78 CHADx + 0,41 USDC, entnommen 47,52 CHADx + ~32,4 USDC. Der Swap
+ * ist auf den Wallet-Bestand gedeckelt (capToPosition), der USDC-Anteil wurde aber aus der
+ * Quote addiert: 32,4 USDC fehlten im gebuchten Kapitalabfluss, Pool-PnL −32 USDC zu niedrig.
+ *
+ * Gemessen wird der USDC-Bestand direkt vor und nach `closePosition` (die Fees sind vorher
+ * schon geclaimed und stecken im Vorher-Wert). Nur ein plausibler Delta (>= 0) ersetzt die
+ * Quote; der Rest bleibt wie bisher.
+ *
+ * @returns {number} USDC-Menge der Position (ohne die vorher geclaimten Fees)
+ */
+export function usdcFromPosition(before, after, quoted, logPrefix) {
+    if (before == null || after == null) return quoted;
+    const delta = after - before;
+    if (!(delta >= 0)) return quoted;
+    if (Math.abs(delta - quoted) > Math.max(0.05, quoted * 0.01)) {
+        console.log(`${logPrefix} USDC aus Position gemessen: ${delta.toFixed(6)} (Quote ${quoted.toFixed(6)})`);
+    }
+    return delta;
+}
+
 export async function finalizeClosePosition(adapter, pool, position, db, { feesA, feesB, note, logPrefix }) {
     let closed;
+    const usdcBefore = await readUsdcSideBalance(pool);
     try {
         closed = await adapter.closePosition(pool, position.nft_mint);
     } catch (err) {
@@ -589,8 +631,16 @@ export async function finalizeClosePosition(adapter, pool, position, db, { feesA
         throw err;
     }
 
-    const coinsA = feesA + (closed.amountA ?? 0);
-    const coinsB = feesB + (closed.amountB ?? 0);
+    let posA = closed.amountA ?? 0;
+    let posB = closed.amountB ?? 0;
+    const { usdcSide, sellIsA } = sellSideOf(pool);
+    if (usdcSide) {
+        const usdcAfter = await readUsdcSideBalance(pool);
+        if (sellIsA) posB = usdcFromPosition(usdcBefore, usdcAfter, posB, logPrefix);
+        else         posA = usdcFromPosition(usdcBefore, usdcAfter, posA, logPrefix);
+    }
+    const coinsA = feesA + posA;
+    const coinsB = feesB + posB;
 
     console.log(`${logPrefix} Position geschlossen: ${coinsA.toFixed(6)} A + ${coinsB.toFixed(6)} B  TX: ${closed.txHash}`);
 
