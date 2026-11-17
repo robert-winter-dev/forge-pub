@@ -13,6 +13,8 @@ It's a reduced, public fork of FORGE — the trading engine explained in the
 novel [Der EXPLOIT](https://uag.de/buch/der-exploit/) (see [AUTHORS](AUTHORS)
 for why this project is published under the name "Robert Winter").
 
+**Version 1.0** was released on November 17, 2026 — the day *Der EXPLOIT* was published.
+
 ## Why FORGE public
 
 Concentrated liquidity (CLMM, e.g. on Orca) earns noticeably higher fees than

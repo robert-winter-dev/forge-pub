@@ -14,6 +14,8 @@ Trading-Engine aus dem Roman [Der EXPLOIT](https://uag.de/buch/der-exploit/)
 (warum dieses Projekt unter dem Namen „Robert Winter" veröffentlicht wird,
 erklärt die [AUTHORS](AUTHORS)-Datei).
 
+**Version 1.0** ist am 17.11.2026 erschienen — am Erscheinungstag von *Der EXPLOIT*.
+
 ## Warum FORGE public
 
 Konzentrierte Liquidität (CLMM, z.B. auf Orca) verdient spürbar höhere
