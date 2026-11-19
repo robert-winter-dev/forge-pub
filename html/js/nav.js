@@ -32,6 +32,7 @@
  */
 
 import { t } from './i18n.js';
+import { loadSiteConfig } from './site-config.js?v=20261119a';
 
 /** Gibt true zurück wenn der Aufruf aus dem lokalen Netz kommt. */
 export function isLanAccess() {
@@ -545,6 +546,15 @@ export function initNav({ current = '', logout = '' } = {}) {
         ${logoutHtml}`;
 
     document.body.appendChild(panel);
+
+    // Ausgeblendete Bots (CORE#002084): site-config.json gibt es nur im Web-Staging von
+    // bin/sync.sh. Der Baum wird sofort synchron gebaut, die Gruppe danach entfernt.
+    loadSiteConfig().then(cfg => {
+        for (const id of cfg.hiddenBots) {
+            // (kein CSS.escape: `CSS` ist in dieser Datei der Stylesheet-String)
+            [...panel.querySelectorAll('.nav-group')].find(g => g.dataset.group === id)?.remove();
+        }
+    });
 
     // Installierte FORGE-public-Artefakt-Version anzeigen (nur auf einer per setup.sh
     // installierten Fork-Instanz vorhanden, siehe tools/pub-export/build-artifact.js →

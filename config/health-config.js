@@ -76,7 +76,7 @@ function loadNostrRelays() {
     }
 }
 
-function relayServiceId(url) {
+export function relayServiceId(url) {
     return `nostr-${url.replace(/^wss?:\/\//, '').replace(/[^a-z0-9]+/gi, '-')}`;
 }
 

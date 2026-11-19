@@ -102,6 +102,8 @@ body.modal-open {
 #chanceModal .modal-tab-stack { display: grid; }
 #chanceModal .modal-tab-panel { display: block; grid-area: 1 / 1; visibility: hidden; }
 #chanceModal .modal-tab-panel.active { visibility: visible; }
+/* Maximiert (LIQ#002050): inaktive Reiter belegen keine Höhe mehr, sonst rechnet fitHeight() sie vom Chart ab */
+#chanceModal .forge-maximized .modal-tab-panel:not(.active) { display: none; }
 /* Chart 316 px + Zeitraum-Knöpfe: Mindesthöhe auch ohne Chart-Daten, sonst schrumpft
    der Details-Reiter mit (LIQ#000867). */
 #posValuePanelLp { min-height: 347px; }

@@ -22,7 +22,7 @@ import { ToastManager }   from '../../js/toast.js?v=20260809a';
 import { EarningsToast }  from '../../js/earnings-toast.js?v=20260720a';
 import { initMessageBell } from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal } from '../../js/wallet-detail-modal.js?v=20260807a';
-import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20260826a';
+import { initNav, initFooter, setLastUpdate } from '../../js/nav.js?v=20261119a';
 import { wireMaximize, fitHeight }             from '../../js/modal.js?v=20261002b';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (15 Fundstellen) – ein gleichnamiger Import wäre eine
@@ -34,8 +34,8 @@ import {
     partsInTZ, hourBucketKey, makeFmt, fmtDateDE
 } from '../../js/tz.js?v=20260414a';
 import { renderBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
-// Zeitraum-Filter (1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LEN#000935)
-import { DEFAULT_RANGES, createRangeBar, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20260923a';
+// Zeitraum-Filter (4H/1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LEN#000935)
+import { DEFAULT_RANGES, createRangeBar, intradayHours, isIntradayRange, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20261118b';
 
 const toastManager   = new ToastManager({
     storageKey: 'lendingbot_lastToastTs',
@@ -423,11 +423,11 @@ function filterByRange(arr, range, getTs, ranges = DEFAULT_RANGES) {
 
 /**
  * Gibt die passende X-Achsen-Beschriftung zurück:
- * - 1D → Uhrzeit (HH:MM)
+ * - 4H, 1D → Uhrzeit (HH:MM)
  * - alle anderen → Datum (TT.MM.)
  */
 function xLabel(ts, range) {
-    return range === '1D' ? fmtTime(ts) : fmtDate(ts).slice(0, 5);
+    return isIntradayRange(range) ? fmtTime(ts) : fmtDate(ts).slice(0, 5);
 }
 
 // containerId → { bar, container, getRange, historyStart }: eine Leiste je Container, mehrere
@@ -525,7 +525,7 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, range
         xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T + cH + 16).toFixed(1)}">${xLabel(t, range)}</text>`;
     }
     // Achsentitel: Y = Einheit (gedreht), X = Uhrzeit bzw. Datum.
-    const xTitle = range === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    const xTitle = isIntradayRange(range) ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
     xLabels += `<text class="chart-label" transform="translate(11,${(PAD_T + cH / 2).toFixed(1)}) rotate(-90)" text-anchor="middle" font-size="10">USDC</text>`;
     xLabels += `<text class="chart-label" x="${(PAD_L + cW / 2).toFixed(1)}" y="${H - 2}" text-anchor="middle" font-size="10">${xTitle}</text>`;
 
@@ -1352,20 +1352,21 @@ function _yieldActiveRange(data) {
 /**
  * Bereitet die Yield-Daten für den gewählten Zeitraum auf.
  * Rückgabe: [{label, usdc, date}]
- *   1D: rollend 24h (jetzt-24h → jetzt), 24 Stunden-Buckets, Label = HH:00 in FORGE_TZ
+ *   4H / 1D: rollend 4 bzw. 24 Stunden (jetzt-N → jetzt), N Stunden-Buckets, Label = HH:00 in FORGE_TZ
  *   1W: letzte 7 Tage
  *   1M: alle 30 Tage
  */
 function _getYieldData(data, range) {
-    if (range === '1D') {
-        // 1D: rollend 24h (jetzt-24h → jetzt), 24 Stunden-Buckets, Label = HH:00 in FORGE_TZ.
+    if (isIntradayRange(range)) {
+        // Rollend N Stunden (4H: 4, 1D: 24), N Stunden-Buckets, Label = HH:00 in FORGE_TZ.
+        const hours = intradayHours(range);
         const history  = data?.portfolioHistory ?? [];
         const txns     = data?.transactions     ?? [];
 
         const nowMs   = Date.now();
-        const startMs = rangeCutoff('1D', { now: nowMs }); // rolling 24h
+        const startMs = rangeCutoff(range, { now: nowMs });   // rollendes Fenster
 
-        // Baseline: letzter portfolioHistory-Eintrag VOR dem 24h-Fenster.
+        // Baseline: letzter portfolioHistory-Eintrag VOR dem Fenster.
         const preWindow = history.filter(r => r.ts < startMs);
         const baseline  = preWindow.length > 0
             ? preWindow.reduce((a, b) => a.ts > b.ts ? a : b).v
@@ -1374,11 +1375,11 @@ function _getYieldData(data, range) {
         if (baseline === null) return [];
 
         // Kapitalflüsse (Deposits/Withdrawals) pro Stunden-Bucket herausrechnen.
-        const hourNetFlow = new Array(24).fill(0);
+        const hourNetFlow = new Array(hours).fill(0);
         for (const tx of txns) {
             if (!tx.createdAt || tx.createdAt < startMs) continue;
             const h = Math.floor((tx.createdAt - startMs) / 3_600_000);
-            if (h < 0 || h > 23) continue;
+            if (h < 0 || h > hours - 1) continue;
             if (tx.type === 'deposit')  hourNetFlow[h] += tx.amount ?? 0;
             if (tx.type === 'withdraw') hourNetFlow[h] -= tx.amount ?? 0;
         }
@@ -1388,7 +1389,7 @@ function _getYieldData(data, range) {
         const hourVal = {};
         for (const pt of pts) {
             const h = Math.floor((pt.ts - startMs) / 3_600_000);
-            if (h >= 0 && h <= 23 && hourVal[h] === undefined) hourVal[h] = pt.v;
+            if (h >= 0 && h <= hours - 1 && hourVal[h] === undefined) hourVal[h] = pt.v;
         }
 
         // Sanity-Cap: max. 15 % APY / 24 Stunden – filtert API-Settlement-Lag
@@ -1397,7 +1398,7 @@ function _getYieldData(data, range) {
 
         const bars = [];
         let prevV = baseline;
-        for (let h = 0; h <= 23; h++) {
+        for (let h = 0; h <= hours - 1; h++) {
             const bucketStartMs = startMs + h * 3_600_000;
             const p     = partsInTZ(bucketStartMs);
             const label = String(p.hour).padStart(2, '0') + ':00';
@@ -1485,10 +1486,10 @@ function _yieldBarTooltipText(bar) {
     return `${lbl}: ${fmt(usdc, 4)} USDC`;
 }
 
-// 1D braucht einen Portfolio-Wert VOR dem 24h-Fenster. Fehlt er bei vorhandener Historie (Konto jünger
-// als 24 h), zeigt der Chart einen Hinweis statt Wochenbalken unter einer 1D-Beschriftung (LEN#000935).
+// 4H/1D brauchen einen Portfolio-Wert VOR dem Fenster. Fehlt er bei vorhandener Historie (Konto jünger
+// als das Fenster), zeigt der Chart einen Hinweis statt Wochenbalken unter einer Stunden-Beschriftung (LEN#000935).
 function _yieldLacks24h(data, range) {
-    return range === '1D' && (data?.portfolioHistory?.length ?? 0) > 0;
+    return isIntradayRange(range) && (data?.portfolioHistory?.length ?? 0) > 0;
 }
 const _yieldNo24hText = () => tr('len.yield_no_24h', 'Noch keine 24 h Daten');
 
@@ -1922,8 +1923,8 @@ function _getInOutBars(proto, txns, range) {
         t.protocol === proto && t.createdAt >= cutoff &&
         (t.type === 'deposit' || t.type === 'withdraw'));
 
-    if (range === '1D') {
-        return Array.from({ length: 24 }, (_, h) => {
+    if (isIntradayRange(range)) {
+        return Array.from({ length: intradayHours(range) }, (_, h) => {
             const bucketStart = cutoff + h * 3_600_000;
             const bucketEnd   = bucketStart + 3_600_000;
             const bTxs = relevant.filter(t => t.createdAt >= bucketStart && t.createdAt < bucketEnd);

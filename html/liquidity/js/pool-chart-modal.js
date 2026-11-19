@@ -5,13 +5,13 @@
 // Lazy-geladen beim ersten Klick - kein Nexus, kein Backend noetig.
 // Pro Tab zusaetzlich genau ein externer Chart-Link: TradingView, wo der Export ein Symbol liefert
 // (pool.tvLink, LIQ#001954), sonst GeckoTerminal, wenn es fuer diese Kombination einen Pool kennt - sonst kein Link.
-// Zeitraum-Wahl (1D/1W/1M, Sperre bei zu wenig Historie): html/js/chart-range.js
+// Zeitraum-Wahl (4H/1D/1W/1M, Sperre bei zu wenig Historie): html/js/chart-range.js
 // (CORE#000933). Geladen wird je Tab einmal die volle Reihe, gefiltert wird lokal.
 // Maximiert (LIQ#001115): Indikator-Leiste EMA 10/20/30 (im Preis-Chart) sowie RSI und MACD
 // (eigene Panels darunter), berechnet im Browser (indicators.js) ueber die volle Reihe
 // und erst danach auf den Zeitraum gefiltert.
 
-import { createRangeBar, filterToRange, historyStartOf } from '../../js/chart-range.js?v=20260923a';
+import { createRangeBar, filterToRange, historyStartOf } from '../../js/chart-range.js?v=20261118b';
 import { ema, rsi, macd, volatility, resample, rangeExitStats, MIN_POINTS } from './indicators.js?v=20261113a';
 
 // Indikatoren rechnen auf 4h-Kerzen (Schlusskurs), die Preislinie bleibt stuendlich.
@@ -45,7 +45,7 @@ try { _showTip = localStorage.getItem(LS_POOL_CHART_TIP) !== '0'; } catch { /* b
 let _indBar    = null;   // Indikator-Leiste (wird in die Fusszeile des aktiven Panels verschoben)
 let _ctx       = {};     // tabIdx -> { series, ohlcv, label } fuer Neuzeichnen ohne Neuladen
 
-// Bis v20260909 stand hier die Stundenzahl (24/168/720), seitdem der Key (1D/1W/1M).
+// Bis v20260909 stand hier die Stundenzahl (24/168/720), seitdem der Key (4H/1D/1W/1M).
 // Ein alter Wert wird als Vorgabe übernommen und beim nächsten Klick überschrieben.
 const LS_POOL_CHART_RANGE = 'liquiditybot_pool_chart_limit';
 const LEGACY_HOURS_TO_KEY = { 24: '1D', 168: '1W', 720: '1M' };
@@ -581,7 +581,7 @@ function fmtSmall(v) {
 /**
  * Formatiert einen Timestamp für die X-Achse.
  * Basiert auf der echten Datenspanne – nicht auf dem Zeitraum – damit junge Pools
- * (wenig Daten im 1W/1M-View) korrekte Labels bekommen.
+ * (wenig Daten im 1W-View) korrekte Labels bekommen.
  *
  * ≤ 1 Tag   → nur Uhrzeit  "14:00"
  * ≤ 4 Tage  → Datum + Zeit "18. Mai 06:00" (Mitternacht: nur "18. Mai")

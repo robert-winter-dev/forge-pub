@@ -9,7 +9,7 @@
  *     (forge-nexus: zusätzlich Nexus-Statistiken)
  */
 
-import { initNav, initFooter, setLastUpdate } from './nav.js?v=20260826a';
+import { initNav, initFooter, setLastUpdate } from './nav.js?v=20261119a';
 import { initMessageBell } from './message-bell.js?v=20260825a';
 // Sprache: t() nimmt den deutschen Text als Fallback UND Vorlage, applyDom()
 // übersetzt das statische Markup. Dynamisch erzeugte Karten gehen durch t().

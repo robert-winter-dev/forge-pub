@@ -16,6 +16,28 @@ erklärt die [AUTHORS](AUTHORS)-Datei).
 
 **Version 1.0** ist am 17.11.2026 erschienen — am Erscheinungstag von *Der EXPLOIT*.
 
+## Screenshots
+
+![Liquidity-Bot-Dashboard: Guthabenverlauf, eingesammelte Fees und Pool-Kennzahlen](docs/screenshots/liquidity-dashboard.webp)
+*Liquidity-Bot-Dashboard: Guthabenverlauf, eingesammelte Fees und Pool-Kennzahlen.*
+
+![Pool-Metriken nach APR 24h sortiert](docs/screenshots/pool-metrics.webp)
+*Pool-Metriken, nach APR 24h sortiert: wo gerade Gebühren verdient werden.*
+
+![Operative Metriken mit PnL 24h je aktivem Pool](docs/screenshots/operational-metrics.webp)
+*Operative Metriken: PnL 24h je aktivem Pool.*
+
+![Range der Position über dem Preischart](docs/screenshots/range.webp)
+*Range: der Preiskorridor der Position über dem aktuellen Preis.*
+
+![Mein Anteil: Ergebnis einer Position in Prozent](docs/screenshots/my-share.webp)
+*Mein Anteil: das Ergebnis einer Position, von der Einzahlung bis zum heutigen Wert.*
+
+![Pool-Preischart mit 1D / 1W / 1M](docs/screenshots/pool-chart.webp)
+*Pool-Preischart mit wählbarem Zeitraum.*
+
+*Beträge sind auf allen Bildern ausgeblendet; zu sehen sind nur Prozentwerte und Marktdaten.*
+
 ## Warum FORGE public
 
 Konzentrierte Liquidität (CLMM, z.B. auf Orca) verdient spürbar höhere

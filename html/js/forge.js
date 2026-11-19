@@ -6,7 +6,7 @@
     const { renderNotifItem }   = await import('./notifications.js?v=20260822a');
     const { NotifHub }          = await import('./notif-hub.js?v=20260822a');
     const { initMessageBell }   = await import('./message-bell.js?v=20260825a');
-    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20260826a');
+    const { initNav, initFooter, setLastUpdate } = await import('./nav.js?v=20261119a');
     const { attachHoverOverlay, attachBarTooltip } = await import('./chart.js?v=20260925a');
     const { wireMaximize } = await import('./modal.js?v=20261002b');
     const { TZ, todayISO, startOfDayMs, fmtDE, fmtDateDE, fmtTimeDE, partsInTZ, hourBucketKey } = await import('./tz.js?v=20260414a');
@@ -14,7 +14,11 @@
     // bewusst NICHT importiert: `t` ist in dieser Datei durchgängig ein Timestamp.
     const { NUM_LOCALE, dayMonth, hourLabel, t: tr } = await import('./i18n.js?v=20260811a');
     // Zeitraum-Leisten: zentrale Lib (KB Core/chart-range-lib, CORE#000936)
-    const { createRangeBar, historyStartOf, rangeCutoff } = await import('./chart-range.js?v=20260923a');
+    const { createRangeBar, historyStartOf, rangeCutoff, intradayHours } = await import('./chart-range.js?v=20261118b');
+
+    const { loadSiteConfig } = await import('./site-config.js?v=20261119a');
+    const siteCfg = await loadSiteConfig();
+    const lendingHidden = siteCfg.hiddenBots.includes('lending');   // CORE#002084
 
     initNav({ current: 'overview' });
     initFooter();
@@ -29,7 +33,7 @@
     earningsToast.startPolling('liquidity/data/data.json', null);
 
     const hub = new NotifHub();
-    hub.startPolling('liquidity/data/data.json', 'lending/data/data.json');
+    hub.startPolling('liquidity/data/data.json', lendingHidden ? null : 'lending/data/data.json');
 
     // Zeitraum-Zustand: der AKTIVE Zeitraum je Chart (Wunsch + Sperre führt die Lib).
     // Je Chart zwei Leisten (Inline-Card + Modal), die denselben Zustand teilen.
@@ -67,7 +71,8 @@
 
     function aggregatePortfolioHistory(sources, cutoff, now) {
         const rangeMs  = now - cutoff;
-        const bucketMs = rangeMs <= 86_400_000 ? 3_600_000
+        const bucketMs = rangeMs <= 4 * 3_600_000 ? 900_000
+                       : rangeMs <= 86_400_000 ? 3_600_000
                        : rangeMs <= 7*86_400_000 ? 21_600_000
                        : 86_400_000;
 
@@ -96,7 +101,8 @@
     // Liquidity: claimHistory (alle Claims des Monats, kein 25-TX-Limit).
     // LendingBot: Tagesertrag gleichmäßig auf verstrichene Stunden verteilt.
 
-    function aggregateHourlyEarnings(lendLive, liqLive) {
+    // hours: 24 (1D) oder 4 (4H) — die letzten N der 24 Stunden-Buckets.
+    function aggregateHourlyEarnings(lendLive, liqLive, hours = 24) {
         const now    = Date.now();
         const cutoff = now - 86_400_000;  // rolling 24h
 
@@ -148,7 +154,7 @@
             }
         }
 
-        return [...buckets.values()].map(b => ({
+        return [...buckets.values()].slice(-hours).map(b => ({
             date: b.label,   // "HH:00" – direkt als X-Label
             lend: Math.max(0, parseFloat(b.lend.toFixed(4))),
             liq: Math.max(0, parseFloat(b.liq.toFixed(4))),
@@ -426,8 +432,9 @@
         // Liniendiagramm – kein Fadenkreuz im Inline-Chart
         buildLineChart(document.getElementById('portfolioChartSvg'), points, 140, false);
 
-        const bars = earRange === '1D'
-            ? aggregateHourlyEarnings(lendLive, liqLive)
+        const earHours = intradayHours(earRange);   // 4H → 4, 1D → 24, 1W/1M → null
+        const bars = earHours
+            ? aggregateHourlyEarnings(lendLive, liqLive, earHours)
             : aggregateDailyEarnings(lendLive, liqLive, earRange === '1W' ? 7 : 30);
         _lastBars  = bars;
 
@@ -473,7 +480,7 @@
         const rows = [
             { label: 'Liquidity Bot', href: 'liquidity/', gesamt: liqGesamt, profit: liqProfit24h, apr: liqApr },
             { label: 'Lending Bot',   href: 'lending/',          gesamt: lendGesamt, profit: lendProfit24h, apr: lendApr },
-        ];
+        ].filter(r => !(lendingHidden && r.href === 'lending/'));
 
         const tbody = document.getElementById('botTableBody');
         if (!tbody) return;
@@ -677,10 +684,10 @@
 
     async function refresh() {
         const [lendLive, liqLive, lendStatus, lendHist, liqHist] = await Promise.all([
-            loadJSON('lending/data/data.json'),
+            lendingHidden ? null : loadJSON('lending/data/data.json'),
             loadJSON('liquidity/data/data.json'),
-            loadJSON('data/lendingbot-status.json'),
-            loadJSON('lending/data/data-history.json'),
+            lendingHidden ? null : loadJSON('data/lendingbot-status.json'),
+            lendingHidden ? null : loadJSON('lending/data/data-history.json'),
             loadJSON('liquidity/data/data-history.json'),
         ]);
         if (lendHist && lendLive) Object.assign(lendLive, lendHist);

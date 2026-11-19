@@ -550,7 +550,14 @@ async function startup() {
     console.log('[bot] Liquidity startet...');
 
     // Aktives Profil (Phase 2 Profil-Refactor, ab Phase-3-Hot-Reload aus .env)
-    const { getActiveProfile } = await import('../lib/economic-scorer/config.js');
+    const { getActiveProfile, migrateProfileInEnv } = await import('../lib/economic-scorer/config.js');
+    // LIQ#002040: alte Profilwerte (6h/12h/short/medium) einmalig auf 4h/24h/7d umschreiben
+    try {
+        const mig = migrateProfileInEnv();
+        if (mig.changed) console.log(`[bot] PROFILE in .env migriert: ${mig.from} → ${mig.to}`);
+    } catch (err) {
+        console.warn(`[bot] PROFILE-Migration fehlgeschlagen (${err.message}) — Wert wird beim Lesen umgedeutet`);
+    }
     console.log(`[bot] Aktives Profil: ${getActiveProfile()} (live aus .env, hot-reloadable)`);
 
     // DB-Schema vorbereitet, Pools eintragen
@@ -4657,6 +4664,13 @@ async function mainLoop() {
             await _trailingStopCheck(pool);
         }
 
+        // Ohne offene Position schreibt kein _takeSnapshot() ein Aggregat: der Gesamtwert (Wallet)
+        // bliebe stehen und lib/pnl.js zöge Zuflüsse von einem veralteten Endwert ab
+        // (pub1 19.11.2026, PnL 24h −501,26 USDC). Dann das Wallet-Aggregat hier schreiben.
+        if (!_portfolioSnapshotPending
+            && !db.prepare(`SELECT 1 FROM positions WHERE closed_at IS NULL LIMIT 1`).get()) {
+            _portfolioSnapshotPending = true;
+        }
         // Portfolio-Aggregat einmal pro Zyklus, wenn alle Pool-Snapshots frisch sind (CORE#001278)
         await _flushPortfolioSnapshot();
 
@@ -4721,14 +4735,18 @@ async function mainLoop() {
                     // Wallet-Flüsse, LIQ#001062) — das ist die maßgebliche "Daten vorhanden?"-Prüfung,
                     // session-übergreifend und ohne Abhängigkeit von einer zum Tagesende offenen Position.
                     const pnlValue = portfolioPnlForPeriod(db, { flavor: config.botId, fromMs: dayStartMs, toMs: dayEndMs });
-                    if (pnlValue == null) continue;
-
-                    // lp_close ist nur der Anzeigewert; 0 falls exakt zum Tagesende keine Position
-                    // offen war (z.B. zwischen zwei Sessions) — blockiert dann nicht mehr den Eintrag.
-                    const lpClose = lpValueAt(db, { flavor: config.botId, ts: dayEndMs - 1 }) ?? 0;
-                    db.prepare(`INSERT OR IGNORE INTO pnl_daily (date, lp_close, pnl_value, created_at) VALUES (?, ?, ?, ?)`)
-                      .run(dayStr, lpClose, pnlValue, Date.now());
-                    console.log(`[bot] pnl_daily: ${dayStr} nachgeführt (lp_close=${lpClose.toFixed(2)}, pnl=${pnlValue.toFixed(2)} USDC)`);
+                    // Kein `continue` bei null: Das würde auch die Invariante unten überspringen, und
+                    // eine frische Installation (leere DB, noch keine Position) hätte dann wochenlang
+                    // keine Zeile in pnl_invariant_daily — Skopos meldet pnl_invariant_age/drift als
+                    // unknown (pub1 19.11.2026, SKO#002085/SKO#002086). Nur der pnl_daily-Insert entfällt.
+                    if (pnlValue != null) {
+                        // lp_close ist nur der Anzeigewert; 0 falls exakt zum Tagesende keine Position
+                        // offen war (z.B. zwischen zwei Sessions) — blockiert dann nicht mehr den Eintrag.
+                        const lpClose = lpValueAt(db, { flavor: config.botId, ts: dayEndMs - 1 }) ?? 0;
+                        db.prepare(`INSERT OR IGNORE INTO pnl_daily (date, lp_close, pnl_value, created_at) VALUES (?, ?, ?, ?)`)
+                          .run(dayStr, lpClose, pnlValue, Date.now());
+                        console.log(`[bot] pnl_daily: ${dayStr} nachgeführt (lp_close=${lpClose.toFixed(2)}, pnl=${pnlValue.toFixed(2)} USDC)`);
+                    }
                 }
                 // Die Invariante der letzten drei Tage wird jedes Mal neu gerechnet (INSERT OR
                 // REPLACE), nicht übersprungen: So korrigiert der Bot eine Zeile selbst, wenn sich

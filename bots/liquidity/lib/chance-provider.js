@@ -33,10 +33,10 @@ function sanitizeEntry(e) {
     if (!e || !Number.isFinite(e.value) || !Array.isArray(e.signals)) return null;
     const valid = e.signals
         .filter(s => (s?.src === 'edge' || s?.src === 'tv') && typeof s.tf === 'string' && STATUSES.has(s.status));
-    // LIQ#001963: Trend 2h gibt es nicht mehr. Liefert ein noch nicht aktualisierter Master es mit, wird das
+    // LIQ#001963/LIQ#002037: Trend 2h und 1h gibt es nicht mehr. Liefert ein noch nicht aktualisierter Master es mit, wird das
     // Signal verworfen (nicht der ganze Eintrag) und Zähler/Wert aus den verbleibenden Signalen nachgezogen.
     const signals = valid
-        .filter(s => !(s.src === 'tv' && s.tf === '2h'))
+        .filter(s => !(s.src === 'tv' && (s.tf === '2h' || s.tf === '1h'))) // 1h: LIQ#002037
         .map(s => ({ src: s.src, tf: s.tf, raw: Number.isFinite(s.raw) ? s.raw : null, status: s.status,
                      ...(Number.isFinite(s.score) ? { score: Math.max(0, Math.min(1, s.score)) } : {}),
                      ...(s.src === 'edge' && Number.isFinite(s.ref) && s.ref > 0 ? { ref: s.ref } : {}),

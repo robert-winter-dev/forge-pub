@@ -17,6 +17,7 @@ import { USD_PEG_REF } from '../lib/pool-tokens.js';
 import Database          from 'better-sqlite3';
 import { notificationText } from '../../../lib/notify-render.js';
 import { roundPrice, quoteSymbol } from '../../../html/js/format-price.js';
+import { TIME_WINDOWS } from '../../../html/js/time-windows.js';
 import { readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'fs';
 import { resolve, dirname }  from 'path';
 import { fileURLToPath }     from 'url';
@@ -1867,8 +1868,9 @@ for (const p of positionsOut) {
     p.pnl1d = _pnlData.metricsByPool[p.poolId]?.pnl_1d_usd ?? null;
 }
 
-// PnL-Deltas für die Zeitfenster der Opportunity-Tabelle (1h, 6h, 12h, 24h, 7d).
-// Zentrale Lib: session-begrenzte Fenster-PnL aus derselben Kurve wie pnl1d.
+// PnL-Deltas je Zeitfenster (4h, 24h, 7d aus html/js/time-windows.js, LIQ#002040).
+// Zentrale Lib: session-begrenzte Fenster-PnL aus derselben Kurve wie pnl1d. Leser: das
+// NP-Qualitätslog (lib/edge-compute.js) und der Cleanup-Reinvest.
 // Das 24h-Fenster kommt aus REINVEST_PNL_WINDOW: „Bester PnL (24h)“ im Cleanup-Reinvest (LIQ#000988)
 // vergleicht genau diese Spalte, und die Vorschau weiter unten liest sie aus demselben Ergebnis.
 let _winPnl = {};
@@ -1876,13 +1878,8 @@ let _winPnl = {};
     _winPnl = pnlWindows(db, {
         flavor:  'liquidity',
         now:     Date.now(),
-        windows: [
-            { id: '1h',  ms:   1 * 3_600_000 },
-            { id: '6h',  ms:   6 * 3_600_000 },
-            { id: '12h', ms:  12 * 3_600_000 },
-            REINVEST_PNL_WINDOW,
-            { id: '7d',  ms: 168 * 3_600_000 },
-        ],
+        windows: TIME_WINDOWS.map(w => w.id === REINVEST_PNL_WINDOW.id
+            ? REINVEST_PNL_WINDOW : { id: w.id, ms: w.hours * 3_600_000 }),
     });
     for (const po of poolsOverview) po.pnlWindows = _winPnl[po.id] ?? {};
 }
@@ -1949,14 +1946,13 @@ let _winPnl = {};
     // der letzte Chart-Punkt exakt mit dem pnlWindows-Tabellenwert übereinstimmt.
     try {
         const nowMs  = Date.now();
-        const cut6h  = nowMs -  6 * 3_600_000;
-        const cut12h = nowMs - 12 * 3_600_000;
+        const cut4h  = nowMs -  4 * 3_600_000;
         const cut1d  = nowMs - 86_400_000;
         const cut7d  = nowMs - 7  * 86_400_000;
         const cut31d = nowMs - 31 * 86_400_000;
 
-        const bucketSizes = { '6h': 300_000, '12h': 600_000, '1d': 600_000, '1w': 3_600_000, '1m': 86_400_000 };
-        const cuts = { '6h': cut6h, '12h': cut12h, '1d': cut1d, '1w': cut7d, '1m': cut31d };
+        const bucketSizes = { '4h': 300_000, '1d': 600_000, '1w': 3_600_000, '1m': 86_400_000 };
+        const cuts = { '4h': cut4h, '1d': cut1d, '1w': cut7d, '1m': cut31d };
 
         // pnlHistory nach Pool indexieren (Entries aufsteigend sortiert)
         const _mhPnlIdx = {};
@@ -2027,13 +2023,13 @@ let _winPnl = {};
             ORDER BY ts`);
 
         const B5m = 300_000, B10m = 600_000, B1h = 3_600_000, B1d = 86_400_000;
-        const psQ  = { '6h': qSlope('price_slope_pct', B5m), '12h': qSlope('price_slope_pct', B10m), '1d': qSlope('price_slope_pct', B10m), '1w': qSlope('price_slope_pct', B1h), '1m': qSlope('price_slope_pct', B1d) };
-        const asQ  = { '6h': qSlope('yield_slope_pct', B5m), '12h': qSlope('yield_slope_pct', B10m), '1d': qSlope('yield_slope_pct', B10m), '1w': qSlope('yield_slope_pct', B1h), '1m': qSlope('yield_slope_pct', B1d) };
-        const tvlQ = { '6h': qSlope('tvl_slope_pct',   B5m), '12h': qSlope('tvl_slope_pct',   B10m), '1d': qSlope('tvl_slope_pct',   B10m), '1w': qSlope('tvl_slope_pct',   B1h), '1m': qSlope('tvl_slope_pct',   B1d) };
+        const psQ  = { '4h': qSlope('price_slope_pct', B5m), '1d': qSlope('price_slope_pct', B10m), '1w': qSlope('price_slope_pct', B1h), '1m': qSlope('price_slope_pct', B1d) };
+        const asQ  = { '4h': qSlope('yield_slope_pct', B5m), '1d': qSlope('yield_slope_pct', B10m), '1w': qSlope('yield_slope_pct', B1h), '1m': qSlope('yield_slope_pct', B1d) };
+        const tvlQ = { '4h': qSlope('tvl_slope_pct',   B5m), '1d': qSlope('tvl_slope_pct',   B10m), '1w': qSlope('tvl_slope_pct',   B1h), '1m': qSlope('tvl_slope_pct',   B1d) };
         // volatilePair-Pools (z.B. PUMP/SOL): price_slope_pct ist die Token/Token-Ratio,
         // kein USD-Trend — für die Preis-Slope-Historie dort usd_trend_slope_pct nehmen
         // (gleiche Weiche wie die aktuelle Tabellenzelle im Dashboard).
-        const utQ  = { '6h': qSlope('usd_trend_slope_pct', B5m), '12h': qSlope('usd_trend_slope_pct', B10m), '1d': qSlope('usd_trend_slope_pct', B10m), '1w': qSlope('usd_trend_slope_pct', B1h), '1m': qSlope('usd_trend_slope_pct', B1d) };
+        const utQ  = { '4h': qSlope('usd_trend_slope_pct', B5m), '1d': qSlope('usd_trend_slope_pct', B10m), '1w': qSlope('usd_trend_slope_pct', B1h), '1m': qSlope('usd_trend_slope_pct', B1d) };
 
         const toPoints = rows => rows.map(r => ({ ts: r.ts, v: r.v }));
 
@@ -2056,7 +2052,7 @@ let _winPnl = {};
         for (const po of poolsOverview) {
             po.metricHistory = {};
             const pnlEntries = _mhPnlIdx[po.id] ?? [];
-            for (const range of ['6h', '12h', '1d', '1w', '1m']) {
+            for (const range of ['4h', '1d', '1w', '1m']) {
                 const cut    = cuts[range];
                 const bucket = bucketSizes[range];
                 const rawPnl = _bucketize(pnlEntries, po.id, cut, bucket);
@@ -2071,7 +2067,7 @@ let _winPnl = {};
                     tvlSlope:   toPoints(tvlQ[range].all(po.id, cut)),
                 };
                 const pnl24 = _pnl24SeriesByPool[po.id];
-                if (pnl24?.length && ['1d', '1w', '1m'].includes(range)) {
+                if (pnl24?.length) {
                     po.metricHistory[range].pnl24h = _edgePoints(pnl24, cut, bucket, 'pct');
                 }
             }
@@ -2179,7 +2175,7 @@ try {
     })();
     // Verlauf für den Chart, gebucketet wie die Slope-Historie
     const _nowE = Date.now();
-    const _rangesE = { '6h': [6 * 3_600_000, 300_000], '12h': [12 * 3_600_000, 600_000], '1d': [86_400_000, 600_000],
+    const _rangesE = { '4h': [4 * 3_600_000, 300_000], '1d': [86_400_000, 600_000],
                        '1w': [7 * 86_400_000, 3_600_000], '1m': [31 * 86_400_000, 86_400_000] };
     const _stmtsE = Object.fromEntries(Object.entries(_rangesE).map(([k, [, bucket]]) => [k, dbEdge.prepare(`
         SELECT CAST(recorded_at / ${bucket} AS INTEGER) * ${bucket} AS ts, ROUND(AVG(edge_pct), 3) AS v

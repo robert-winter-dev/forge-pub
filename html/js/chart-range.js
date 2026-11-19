@@ -1,6 +1,6 @@
 // html/js/chart-range.js
 // ─────────────────────────────────────────────────────────────────────────────
-// ⛔ ZENTRALE LIB FÜR ZEITRAUM-FILTER (1D / 1W / 1M …) ALLER CHARTS
+// ⛔ ZENTRALE LIB FÜR ZEITRAUM-FILTER (4H / 1D / 1W / 1M) ALLER CHARTS
 // ─────────────────────────────────────────────────────────────────────────────
 // Warum es sie gibt, die Freischalt-Regel und woher der Historie-Beginn kommt:
 // KB Core/chart-range-lib.md (CORE#000933).
@@ -14,9 +14,11 @@
 //     resolveRange, rangeCutoff, filterToRange, historyStartOf
 //   - createRangeBar(): die Button-Leiste als Komponente
 //
+// Zeiträume seit CORE#002054: 4H, 1D, 1W, 1M (CORE#002051 hatte 1M entfernt; 6H/12H bleiben abgeschafft).
+//
 // Freischalt-Regel: Ein Zeitraum ist wählbar, sobald die Daten WEITER zurück-
 // reichen als der nächstkleinere Zeitraum (streng „länger als"). Der kleinste
-// Zeitraum ist immer wählbar. 0 Tage → [1D], 2 Tage → [1D,1W], 8 Tage → alle.
+// Zeitraum ist immer wählbar. 0 Std. → [4H], 5 Std. → [4H,1D], 2 Tage → [4H,1D,1W], 8 Tage → alle.
 //
 // Historie-Beginn: der erste tatsächlich vorhandene Datenpunkt der angezeigten
 // Reihe (ms) — nie aus einem separaten Feld wie opened_at geschätzt.
@@ -24,14 +26,31 @@
 
 import { t } from './i18n.js?v=20260811a';
 
+const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
 /** Standard-Zeiträume, aufsteigend. ms = Länge des Zeitraums. */
 export const DEFAULT_RANGES = Object.freeze([
+    Object.freeze({ key: '4H', label: '4H', ms: 4 * HOUR }),
     Object.freeze({ key: '1D', label: '1D', ms: DAY }),
     Object.freeze({ key: '1W', label: '1W', ms: 7 * DAY }),
     Object.freeze({ key: '1M', label: '1M', ms: 30 * DAY }),
 ]);
+
+/** Gespeicherte Auswahl 6H/12H (abgeschafft, CORE#002051) → Rückfall auf 1D (normalizeRangeKey liefert dafür null). */
+export const LEGACY_RANGE_FALLBACK = '1D';
+
+/** Stundenzeiträume (4H, 1D): Beschriftung mit Uhrzeit, Balken je Stunde. */
+export function isIntradayRange(key) {
+    const k = String(key ?? '').toUpperCase();
+    return k === '4H' || k === '1D';
+}
+
+/** Anzahl Stunden eines Intraday-Zeitraums (4H → 4, 1D → 24), sonst null. */
+export function intradayHours(key) {
+    const k = String(key ?? '').toUpperCase();
+    return k === '4H' ? 4 : k === '1D' ? 24 : null;
+}
 
 /**
  * Standard-Zeiträume plus Zusatz-Zeiträume eines Aufrufers, aufsteigend nach ms.
@@ -81,13 +100,17 @@ export function isRangeUnlocked(key, historyStartMs, opts = {}) {
 
 /**
  * Der tatsächlich anzuzeigende Zeitraum: der gewünschte, wenn wählbar —
- * sonst (gesperrt oder unbekannt) der größte wählbare (Rückfall).
+ * sonst der größte wählbare (Rückfall); ein unbekannter Wunsch ergibt 1D.
  */
 export function resolveRange(wanted, historyStartMs, opts = {}) {
     const ranges   = opts.ranges ?? DEFAULT_RANGES;
     const unlocked = unlockedRanges(historyStartMs, { ...opts, ranges });
     const k        = normalizeRangeKey(wanted, ranges);
-    return k != null && unlocked.includes(k) ? k : unlocked[unlocked.length - 1];
+    if (k != null && unlocked.includes(k)) return k;
+    // Unbekannt (z.B. gespeichertes 6H/12H aus der Zeit vor CORE#002051) → 1D; gesperrt → größter wählbarer.
+    const legacy = normalizeRangeKey(LEGACY_RANGE_FALLBACK, ranges);
+    if (k == null && legacy != null && unlocked.includes(legacy)) return legacy;
+    return unlocked[unlocked.length - 1];
 }
 
 /** Zeitpunkt „jetzt minus Zeitraum" (ms). Unendlicher Zeitraum → -Infinity. */
@@ -123,6 +146,7 @@ export function historyStartOf(points, getTs = defaultGetTs) {
 // ── Button-Leiste ────────────────────────────────────────────────────────────
 
 function _spanText(ms) {
+    if (ms < DAY) return t('chart_range.span.hours', '{n} Stunden', { n: Math.round(ms / HOUR) });
     const days = Math.round(ms / DAY);
     return days === 1
         ? t('chart_range.span.one_day', '1 Tag')
@@ -164,6 +188,7 @@ export function createRangeBar(container, o = {}) {
 
     let wish = normalizeRangeKey(_lsGet(o.storageKey), ranges)
             ?? normalizeRangeKey(o.active, ranges)
+            ?? normalizeRangeKey(LEGACY_RANGE_FALLBACK, ranges)
             ?? ranges[ranges.length - 1].key;
     let historyStart = o.historyStart ?? null;
     let active = resolveRange(wish, historyStart, { ranges, now: now() });

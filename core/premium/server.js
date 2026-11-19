@@ -625,6 +625,16 @@ function startNostrService() {
                 // "Identitäts-/Memo-Modell"). `info.changes === 1` ist Pflicht hier: ohne diese
                 // Bedingung würde jeder Neustart das komplette Relay-Backlog erneut auswerten
                 // und bei jeder alten "premium-activate"-DM einen weiteren Token ausstellen.
+                // CORE#002029: Support-Freitext bekannter Absender (ohne Spam-Merkmal) legt ein
+                // Agora-Ticket mit dem Verlauf an bzw. hängt eine Notiz an. Fire-and-forget.
+                if (IS_MASTER_IDENTITY && category === 'support' && rumor.pubkey && !unknownSender && !spamReason) {
+                    import('./master-support-ticket.js')
+                        .then(m => m.recordSupportRequest(openMessagesDb, {
+                            peerPubkey: rumor.pubkey, threadId, text: cleanText, timestamp,
+                        }))
+                        .catch(err => console.warn(`[premium] Ticket zur Support-Anfrage nicht angelegt: ${err.message}`));
+                }
+
                 if (IS_MASTER_IDENTITY) {
                     handlePremiumCommand(rumor).catch(err => {
                         console.error(`[premium] Aktivierungs-Befehl fehlgeschlagen (${rumor.pubkey}): ${err.message}`);
@@ -742,6 +752,17 @@ function startNostrService() {
         }
         console.log(`[premium] Aktivierung Systemdaten-Freigabe von ${rumor.pubkey.slice(0, 12)}… → ${result.created ? 'neu aufgenommen' : 'aktualisiert'}. `
             + `Sichtbar im Health Monitor unter "Share".`);
+
+        // CORE#002026: nur ein NEUER Teilnehmer löst ein Ticket aus (kein Ticket bei Toggle-
+        // Flattern oder korrigierten Angaben). Fehler dürfen die Aktivierung nie stören.
+        if (result.created) {
+            try {
+                const { notifyNewHealthShareParticipant } = await import('./master-agora-notify.js');
+                await notifyNewHealthShareParticipant({ pubkeyHex: rumor.pubkey, displayName: cmd.alias });
+            } catch (err) {
+                console.warn(`[premium] Ticket zur neuen Health-Daten-Freigabe nicht angelegt: ${err.message}`);
+            }
+        }
     }
 
     /**

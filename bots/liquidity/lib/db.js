@@ -1360,15 +1360,9 @@ function migrateSchema(db) {
         console.log('[db] Migration: opportunity_scores.profile → timeframe (Werte gemappt).');
     }
 
-    // Timeframe '4h' → '6h' (LMB#0116, 2026-05-20: Fenster von 4h auf 6h erhöht).
-    const has4h = db.prepare(
-        `SELECT COUNT(*) AS n FROM opportunity_scores WHERE timeframe = '4h'`
-    ).get().n > 0;
-    if (has4h) {
-        db.exec(`UPDATE opportunity_scores SET timeframe = '6h', window_hours = 6
-                  WHERE timeframe = '4h'`);
-        console.log('[db] Migration: opportunity_scores timeframe 4h → 6h.');
-    }
+    // Die frühere Migration „Timeframe 4h → 6h“ (LMB#0116, 2026-05-20) ist entfernt (LIQ#002040):
+    // 4h ist seit LIQ#002039 wieder ein Slope-Fenster, die Migration benannte jede neue 4h-Zeile
+    // beim nächsten Start in 6h um. Die Altzeilen von Mai sind längst umgeschrieben.
 
     // USD-Trend-Spalten (LMB Phase 2): gerichteter USD-Korb-Trend (volatilePair-Pools).
     if (!oppCols.includes('usd_trend_slope_pct')) {

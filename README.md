@@ -15,6 +15,28 @@ for why this project is published under the name "Robert Winter").
 
 **Version 1.0** was released on November 17, 2026 — the day *Der EXPLOIT* was published.
 
+## Screenshots
+
+![Liquidity Bot dashboard: balance curve, claimed fees and pool metrics](docs/screenshots/liquidity-dashboard.webp)
+*Liquidity Bot dashboard: balance curve, claimed fees and pool metrics.*
+
+![Pool metrics sorted by 24h APR](docs/screenshots/pool-metrics.webp)
+*Pool metrics, sorted by 24h APR: where fees are earned right now.*
+
+![Operational metrics with PnL 24h per active pool](docs/screenshots/operational-metrics.webp)
+*Operational metrics: PnL 24h per active pool.*
+
+![Position range over the price chart](docs/screenshots/range.webp)
+*Range: the position's price corridor over the live price.*
+
+![My share: result of a position in percent](docs/screenshots/my-share.webp)
+*My share: the result of a position, from deposit to value today.*
+
+![Pool price chart with 1D / 1W / 1M ranges](docs/screenshots/pool-chart.webp)
+*Pool price chart with selectable time ranges.*
+
+*Amounts are masked in all images; only percentages and market data are shown.*
+
 ## Why FORGE public
 
 Concentrated liquidity (CLMM, e.g. on Orca) earns noticeably higher fees than

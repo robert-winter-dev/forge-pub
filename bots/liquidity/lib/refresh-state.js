@@ -682,14 +682,26 @@ export async function writePortfolioSnapshot(db) {
     //    gestiegen ist → Wallet-Spike, kein externer Zufluss.
     //    In diesem Fall walletVal auf den zuletzt bekannten Wallet-Anteil einfrieren.
     const _lastSnap = db.prepare(
-        `SELECT total_usd, lp_value_usd, fees_pending_usd FROM portfolio_history
+        `SELECT total_usd, lp_value_usd, fees_pending_usd, recorded_at FROM portfolio_history
          ORDER BY recorded_at DESC LIMIT 1`
     ).get();
     if (_lastSnap) {
         const prevWallet   = Math.max(0, _lastSnap.total_usd - _lastSnap.lp_value_usd - _lastSnap.fees_pending_usd);
         const lpIncrease   = aggLpValue - _lastSnap.lp_value_usd;
         const totalIncrease = (aggLpValue + aggFees + walletVal) - _lastSnap.total_usd;
-        if (totalIncrease > 500 && totalIncrease > lpIncrease + 200) {
+        // Echter Zufluss: nichts im Umlauf (keine LP-Werte, kein Rebalancing-Kapital) oder ein
+        // gebuchter Zufluss in wallet_flows seit dem letzten Snapshot deckt den Sprung. Sonst
+        // bliebe der Gesamtwert eingefroren, der Fluss würde aber abgezogen (pub1 19.11.2026:
+        // PnL 24h −501,26 USDC nach Wallet-Wechsel mit 501,26 USDC Einzahlung).
+        const nothingInFlight = aggLpValue === 0 && _lastSnap.lp_value_usd === 0;
+        let bookedInflow = 0;
+        try {
+            bookedInflow = db.prepare(
+                `SELECT COALESCE(SUM(usd_value), 0) AS s FROM wallet_flows WHERE created_at > ? AND usd_value > 0`
+            ).get(_lastSnap.recorded_at).s;
+        } catch { /* Tabelle fehlt: wie bisher */ }
+        const coveredByFlow = bookedInflow >= totalIncrease * 0.8;
+        if (totalIncrease > 500 && totalIncrease > lpIncrease + 200 && !nothingInFlight && !coveredByFlow) {
             console.warn(`[portfolio] Wallet-Spike gedämpft: total wäre +${totalIncrease.toFixed(0)} USDC (LP +${lpIncrease.toFixed(0)}) — walletVal ${walletVal.toFixed(0)} → ${prevWallet.toFixed(0)}`);
             walletVal = prevWallet;
         }

@@ -174,13 +174,21 @@ const SHORT_CONFIG = {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, statSync, chmodSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TIME_WINDOW_IDS } from '../../../../html/js/time-windows.js';
 
-// Neue Strategie-Werte (6h/12h/24h/7d) seit Umbau 2026-05-21.
-// Legacy-Werte (medium/short) werden on-the-fly migriert.
-const VALID_PROFILES = ['6h', '12h', '24h', '7d'];
+// Strategie-Werte = die zentralen Zeitfenster 4h/24h/7d (LIQ#002040, Mapping
+// freigegeben 18.11.2026). Ältere Werte werden beim Lesen umgedeutet und beim Bot-Start
+// per migrateProfileInEnv() in die .env zurückgeschrieben. Jede Zuordnung behält die
+// Scorer-Config, die der alte Wert hatte (6h/12h → SHORT_CONFIG, 24h/7d → MEDIUM_CONFIG).
+const VALID_PROFILES = TIME_WINDOW_IDS;
+export const LEGACY_PROFILE_MAP = Object.freeze({
+    '6h': '4h', '12h': '4h', short: '4h',   // vor LIQ#002040 bzw. vor 2026-05-21
+    medium: '24h',
+});
+const DEFAULT_PROFILE = '24h';
 
 // Hot-Reload: PROFILE wird direkt aus .env gelesen statt aus process.env, damit
 // ein Profil-Wechsel via ForgeSettings ohne Bot-Restart wirksam wird.
@@ -193,29 +201,61 @@ let _cachedProfile     = null;
 let _cachedAt          = 0;
 let _lastWarnedRaw     = null;   // Anti-Spam für „unbekanntes PROFILE"-Warnung
 
-function _readProfileFromEnv() {
+// Akzeptiert PROFILE=short, PROFILE='short', PROFILE="short", auch mit Whitespace
+const _PROFILE_LINE_RE = /^\s*PROFILE\s*=\s*['"]?([^'"#\r\n]*)['"]?\s*$/m;
+
+/** Rohwert → gültiges Profil (4h/24h/7d); unbekannt → null. */
+export function normalizeProfile(raw) {
+    const v = String(raw ?? '').trim().toLowerCase();
+    if (!v) return DEFAULT_PROFILE;
+    if (VALID_PROFILES.includes(v)) return v;
+    return LEGACY_PROFILE_MAP[v] ?? null;
+}
+
+function _readProfileFromEnv(envPath = _ENV_PATH) {
     let raw = null;
     try {
-        const content = readFileSync(_ENV_PATH, 'utf8');
-        // Akzeptiert PROFILE=short, PROFILE='short', PROFILE="short", auch mit Whitespace
-        const m = content.match(/^\s*PROFILE\s*=\s*['"]?([^'"#\r\n]*)['"]?\s*$/m);
+        const content = readFileSync(envPath, 'utf8');
+        const m = content.match(_PROFILE_LINE_RE);
         if (m) raw = m[1].trim().toLowerCase();
     } catch {
         // Datei nicht lesbar → Fallback auf process.env (z.B. systemd-Env ohne .env)
         raw = (process.env.PROFILE ?? '').trim().toLowerCase();
     }
-    if (!raw) return '24h';
-    // Legacy-Mapping: medium → 24h, short → 6h
-    if (raw === 'medium') return '24h';
-    if (raw === 'short')  return '6h';
-    if (!VALID_PROFILES.includes(raw)) {
+    const profile = normalizeProfile(raw);
+    if (profile == null) {
         if (raw !== _lastWarnedRaw) {
-            console.warn(`[scorer-config] PROFILE='${raw}' unbekannt — falle zurück auf '24h'`);
+            console.warn(`[scorer-config] PROFILE='${raw}' unbekannt — falle zurück auf '${DEFAULT_PROFILE}'`);
             _lastWarnedRaw = raw;
         }
-        return '24h';
+        return DEFAULT_PROFILE;
     }
-    return raw;
+    return profile;
+}
+
+/**
+ * Schreibt einen alten PROFILE-Wert (6h/12h/short/medium) als neuen Wert in die .env
+ * (LIQ#002040). Läuft beim Bot-Start; idempotent. Nur die PROFILE-Zeile ändert sich, der
+ * Rest der Datei bleibt byteweise gleich. Atomar über Temp-Datei + rename, Rechte bleiben.
+ * Unbekannte oder fehlende Werte werden nicht angefasst.
+ * @returns {{ changed: boolean, from?: string, to?: string }}
+ */
+export function migrateProfileInEnv(envPath = _ENV_PATH) {
+    let content;
+    try { content = readFileSync(envPath, 'utf8'); } catch { return { changed: false }; }
+    const m = content.match(_PROFILE_LINE_RE);
+    if (!m) return { changed: false };
+    const from = m[1].trim().toLowerCase();
+    const to = LEGACY_PROFILE_MAP[from];
+    if (!to) return { changed: false };
+    const next = content.replace(_PROFILE_LINE_RE, line => line.replace(m[1], m[1].replace(m[1].trim(), to)));
+    const tmp = `${envPath}.tmp-${process.pid}`;
+    const mode = statSync(envPath).mode & 0o777;
+    writeFileSync(tmp, next, { mode });
+    chmodSync(tmp, mode);
+    renameSync(tmp, envPath);
+    _cachedProfile = null;
+    return { changed: true, from, to };
 }
 
 /**
@@ -224,13 +264,13 @@ function _readProfileFromEnv() {
  * 5 s später wirksam.
  *
  * Fallback-Kette:
- *   .env-Datei nicht lesbar → process.env.PROFILE → 'medium'
+ *   .env-Datei nicht lesbar → process.env.PROFILE → '24h'
  *
  * Ein Profil-Wechsel mid-flight beeinflusst keine bereits laufenden Exit-Ausführungen
  * (die nutzen ihren config_snapshot zur Wiederaufnahme).
  *
- * Rückgabewert seit 2026-05-21: '6h' | '12h' | '24h' | '7d'
- * (Legacy-Werte 'medium'/'short' werden in _readProfileFromEnv migriert.)
+ * Rückgabewert seit LIQ#002040: '4h' | '24h' | '7d'
+ * (ältere Werte werden in _readProfileFromEnv über LEGACY_PROFILE_MAP umgedeutet.)
  */
 export function getActiveProfile() {
     const now = Date.now();
@@ -246,12 +286,16 @@ export function getActiveProfile() {
  * Liefert die Scorer-Config für ein bestimmtes Profil.
  * Ohne Argument: aktives Profil (env-basiert).
  *
- * Mapping: 6h/12h → SHORT_CONFIG (reaktiv), 24h/7d → MEDIUM_CONFIG (träge).
+ * Mapping: 4h → SHORT_CONFIG (reaktiv), 24h/7d → MEDIUM_CONFIG (träge). Die alten Werte
+ * 6h/12h bleiben auf SHORT_CONFIG, falls ein Aufrufer sie noch direkt übergibt.
+ * ⚠️ 'short' liefert weiterhin MEDIUM_CONFIG: So verhält es sich seit 2026-05-21, und das
+ * Umstellen wäre eine Verhaltensänderung (KB Liquidity Bot/time-windows.md, „Fund am Rand“).
  *
- * @param {'6h'|'12h'|'24h'|'7d'} [profile]
+ * @param {'4h'|'24h'|'7d'|'short'|'medium'} [profile]
  */
+const _SHORT_PROFILES = new Set(['4h', '6h', '12h']);
 export function getScorerConfig(profile = getActiveProfile()) {
-    return (profile === '6h' || profile === '12h') ? SHORT_CONFIG : MEDIUM_CONFIG;
+    return _SHORT_PROFILES.has(profile) ? SHORT_CONFIG : MEDIUM_CONFIG;
 }
 
 /**

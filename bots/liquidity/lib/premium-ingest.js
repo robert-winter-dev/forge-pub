@@ -342,11 +342,11 @@ export async function selfTest() {
             rank: 1, of: 5, tier: 'invest', short_term_tier: 'hold',
         }],
         ...(withEdgeSlopes ? {
-            edge: { generatedAt: new Date(Date.now() - ageMs).toISOString(), capitalUsdc: 1000, windowIds: ['6h', '24h'],
-                    pools: { 'liq-sol-usdc': { npWindows: { '6h': -1.5, '24h': 4.2 }, npUnreliableWindows: ['6h'], npFeeSource: 'model' } } },
+            edge: { generatedAt: new Date(Date.now() - ageMs).toISOString(), capitalUsdc: 1000, windowIds: ['4h', '24h'],
+                    pools: { 'liq-sol-usdc': { npWindows: { '4h': -1.5, '24h': 4.2 }, npUnreliableWindows: ['4h'], npFeeSource: 'model' } } },
             chance: { generatedAt: new Date(Date.now() - ageMs).toISOString(), pools: { 'liq-sol-usdc': {
                 value: 56, met: 5, applicable: 9, edgeOnly: false,
-                signals: [{ src: 'edge', tf: '1h', raw: 1, status: 'met' }],
+                signals: [{ src: 'edge', tf: '4h', raw: 1, status: 'met' }],
                 tv: { status: 'missing', symbol: null, source: null, fetchedAt: null } } } },
             tvLinks: { generatedAt: new Date(Date.now() - ageMs).toISOString(), pools: { 'liq-sol-usdc': {
                 pool: 'ORCA:SOLUSDC_CZFQ3X', tokens: { So11111111111111111111111111111111111111112: 'BINANCE:SOLUSDT' } } } },
@@ -462,7 +462,7 @@ export async function selfTest() {
         const { readDeliveredEdge } = await import('./edge-provider.js');
         const edge = readDeliveredEdge(deliveredEdgePath);
         if (edge?.stale !== false || edge?.byPool?.['liq-sol-usdc']?.npWindows?.['24h'] !== 4.2
-            || edge.byPool['liq-sol-usdc'].npUnreliableWindows[0] !== '6h') {
+            || edge.byPool['liq-sol-usdc'].npUnreliableWindows[0] !== '4h') {
             failures.push(`edge.json kam nicht lesbar beim Provider an: ${JSON.stringify(edge)}`);
         }
         const slopes = fs.existsSync(deliveredSlopesPath) ? JSON.parse(fs.readFileSync(deliveredSlopesPath, 'utf8')) : null;

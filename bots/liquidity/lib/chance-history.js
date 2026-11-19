@@ -56,8 +56,8 @@ export function recordChanceHistory(db, pools, nowMs) {
 
 /** Buckets je Range wie beim Edge-Verlauf. Stündliche Daten: kürzere Ranges haben wenige Punkte. */
 export const CHANCE_RANGES = {
-    '6h': [6 * 3_600_000, 3_600_000], '12h': [12 * 3_600_000, 3_600_000], '1d': [86_400_000, 3_600_000],
-    '1w': [7 * 86_400_000, 3_600_000], '1m': [31 * 86_400_000, 86_400_000],
+    '4h': [4 * 3_600_000, 3_600_000], '1d': [86_400_000, 3_600_000], '1w': [7 * 86_400_000, 3_600_000],
+    '1m': [31 * 86_400_000, 86_400_000],
 };
 
 /** Setzt `po.metricHistory[range].chance = [{ts, v}]` (v = Mittel je Bucket, ganze %). */

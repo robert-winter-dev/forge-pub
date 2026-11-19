@@ -473,6 +473,31 @@
     "active": false
   },
   {
+    "id": "liq-spcx-sol",
+    "poolType": "rwa",
+    "protocol": "orca",
+    "address": "58iQRQbAKgPU2ADzRLS4QJxBS2RsdUTEd567dPpMcLHe",
+    "pair": "SPCX/SOL",
+    "tokenA": "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb",
+    "tokenB": "So11111111111111111111111111111111111111112",
+    "decimalsA": 6,
+    "decimalsB": 9,
+    "feeTier": 0.04,
+    "tickSpacing": 4,
+    "volatilePair": true,
+    "quotePricePoolId": "liq-sol-usdc",
+    "quoteTokenMint": "So11111111111111111111111111111111111111112",
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 5
+    },
+    "stopLossPctOpen": 0.7,
+    "tvlWarnThreshold": 59000,
+    "tvlExitThreshold": 29000,
+    "active": false
+  },
+  {
     "id": "liq-tslax-usdc",
     "poolType": "rwa",
     "protocol": "orca",

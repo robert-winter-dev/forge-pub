@@ -5,7 +5,7 @@
  * Prototyp – Detailimplementierung folgt nach Bot-Fertigstellung.
  */
 
-import { initNav, initFooter, setLastUpdate, isLanAccess } from '../../js/nav.js?v=20260910a';
+import { initNav, initFooter, setLastUpdate, isLanAccess } from '../../js/nav.js?v=20261119a';
 // Sprache. Bewusst als `tr` importiert und nicht als `t`: `t` ist in dieser Datei
 // durchgängig ein Timestamp (57 Fundstellen) – ein gleichnamiger Import wäre eine
 // Verwechslungsfalle. bin/i18n-check.js kennt beide Namen.
@@ -13,9 +13,10 @@ import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
 import { filterOutliers, filterSpikes, attachHoverOverlay, attachBarTooltip } from '../../js/chart.js?v=20260925a';
 import { startOfDayMs }                        from '../../js/tz.js?v=20260414a';
 import { wireMaximize, fitHeight }             from '../../js/modal.js?v=20261002b';
-// Zeitraum-Filter (1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LIQ#000934)
-import { DEFAULT_RANGES, buildRanges, createRangeBar, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20260923a';
+// Zeitraum-Filter (4H/1D/1W/1M, Sperre bei zu wenig Historie): zentrale Lib, siehe KB Core/chart-range-lib (CORE#000933, LIQ#000934)
+import { DEFAULT_RANGES, createRangeBar, intradayHours, isIntradayRange, filterToRange, historyStartOf, normalizeRangeKey, rangeCutoff, resolveRange } from '../../js/chart-range.js?v=20261118b';
 import { formatPrice }                         from '../../js/format-price.js?v=20260820a';
+import { TIME_WINDOWS }                        from '../../js/time-windows.js?v=20261118a';
 import { EarningsToast }                       from '../../js/earnings-toast.js?v=20260720a';
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
 import { initMessageBell }                     from '../../js/message-bell.js?v=20260825a';
@@ -474,18 +475,12 @@ let _oppSortCol = _OPP_SORT_COLS.has(localStorage.getItem(LS_OPP_SORT_COL))
     ? localStorage.getItem(LS_OPP_SORT_COL) : null;
 let _oppSortDir = (localStorage.getItem(LS_OPP_SORT_DIR) === 'asc') ? 'asc' : 'desc';
 
-// Opportunity-Anzeige-Zeitfenster (steuert nur die PnL-Spalte in der Opportunity-Tabelle)
+// Opportunity-Anzeige-Zeitfenster 4H/1D/1W (LIQ#002039), aus der zentralen Definition (LIQ#002040)
 const LS_OPP_DISPLAY_TIMEFRAME = 'liquiditybot_opp_display_tf';
-const OPP_TF_OPTIONS = [
-    { id: '1h',  label: '1 h'    },
-    { id: '6h',  label: '6 h'    },
-    { id: '12h', label: '12 h'   },
-    { id: '24h', label: '24 h'   },
-    { id: '7d',  label: '7 Tage' },
-];
+const OPP_TF_OPTIONS = TIME_WINDOWS.map(w => ({ id: w.id, label: w.label }));
 const OPP_TF_VALID = new Set(OPP_TF_OPTIONS.map(o => o.id));
 const _lsOppDisplayTf = localStorage.getItem(LS_OPP_DISPLAY_TIMEFRAME);
-let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '6h';
+let _oppDisplayTf = OPP_TF_VALID.has(_lsOppDisplayTf) ? _lsOppDisplayTf : '4h';
 
 // ── Premium-Deckung (2026-07-29) ──────────────────────────────────────────────
 // Eine Stelle für "hat diese Installation gerade Zugriff", von renderNotifs()
@@ -670,8 +665,8 @@ function renderOpportunityTable(data) {
             if (chanceEl) {
                 const pool = (_lastData?.pools ?? []).find(p => p.id === chanceEl.dataset.poolId);
                 if (!pool?.chance) return;
-                const { openChanceModal } = await import('./chance-modal.js?v=20261113j');
-                openChanceModal(pool, { drawChart: _drawMetricChart, meta: _METRIC_META.chance, ranges: _METRIC_RANGES });
+                const { openChanceModal } = await import('./chance-modal.js?v=20261118e');
+                openChanceModal(pool, { drawChart: _drawMetricChart, meta: _METRIC_META.chance, ranges: _CHANCE_RANGES });
                 return;
             }
             const infoEl = e.target.closest('.opp-info-btn[data-pool-id]');
@@ -686,7 +681,7 @@ function renderOpportunityTable(data) {
             if (!el) return;
             const pool = (_lastData?.pools ?? []).find(p => p.id === el.dataset.poolId);
             if (!pool) return;
-            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261113f');
+            const { openPoolChartModal } = await import('./pool-chart-modal.js?v=20261118d');
             openPoolChartModal(pool);
         });
     }
@@ -878,7 +873,7 @@ function renderOpportunityTable(data) {
                 if (_oppSortCol === 'tvlSlope')   return item.s?.tvlSlopePct   ?? null;
                 return null;
             };
-            // Chance (LIQ#001953): Pools mit "nur Edge" (5 statt 9 Signale, z.B. Stablecoin-Paare) erreichen
+            // Chance (LIQ#001953): Pools mit "nur Edge" (3 statt 6 Signale, z.B. Stablecoin-Paare) erreichen
             // hohe Werte zu leicht und sind für die Einstiegssuche nicht gemeint. Sie stehen in beiden
             // Sortierrichtungen hinter den Pools mit allen Signalen, Pools ohne Wert ganz am Ende.
             if (_oppSortCol === 'chance') {
@@ -924,20 +919,7 @@ function renderOpportunityTable(data) {
         const etaTimeStr = etaDate.toLocaleTimeString(NUM_LOCALE, { hour: '2-digit', minute: '2-digit' });
         return `Messpunkte sind verfügbar:\n${etaDateStr} ab ca. ${etaTimeStr} Uhr`;
     };
-    // LIQ#000847: Im 1-h-Fenster sind vorhandene, aber zu wenige Stützpunkte der Normalfall
-    // kapitalfreier Pools (Stats-Takt 60 Min, lib/stats-budget.js). Das ist kein Datenloch:
-    // eigene Zelle mit Grund, unterscheidbar von "no data" (0 Stützpunkte).
-    const _slowCadenceSpan = (poolId, tf) => {
-        const entry = scores[poolId]?.[tf];
-        if (tf !== '1h' || entry?.reason !== 'insufficient_data' || !(entry.sampleCount > 0)) return null;
-        const tip = tr('liq.slow_cadence_tip',
-            'Im 1-h-Fenster liegen {have} von mindestens {need} Messpunkten vor. Pools ohne Kapital werden im längeren Takt fortgeschrieben (spart Helius-Aufrufe), deshalb reicht eine Stunde nicht für eine Steigung. Das ist kein Fehler. Wähle 6 h oder länger, dort sind alle Pools vollständig.',
-            { have: entry.sampleCount, need: OPP_MIN_SAMPLES });
-        return `<span class="has-tooltip text-muted" data-tooltip-title="${escHtml(tr('liq.slow_cadence_title', 'Takt zu langsam'))}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">${escHtml(tr('liq.slow_cadence', 'Takt zu langsam'))}</span>`;
-    };
     const _noDataSpan = (poolId, tf) => {
-        const slow = _slowCadenceSpan(poolId, tf);
-        if (slow) return slow;
         const tip = _dataEtaTooltip(poolId, tf);
         return tip
             ? `<span class="has-tooltip text-muted" data-tooltip-title="${tr('liq.no_data_yet', 'Noch keine Daten')}" data-tooltip-content="${escHtml(tip)}" data-tooltip-type="text" style="font-size:0.78em;cursor:default">no data</span>`
@@ -975,7 +957,7 @@ function renderOpportunityTable(data) {
 
     // Chance-Spalte (LIQ#001953): Wert kommt fertig vom Master (data.json pools[].chance), hier wird nichts
     // gerechnet. Farbe nur zusätzlich, die Zahl trägt die Bedeutung.
-    const chanceHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.chance.title', 'Stimmung')}" data-tooltip-content="${escHtml(tr('liq.chance.head_tip', 'Anteil der erfüllten Signale in %: Edge in 1h, 6h, 12h, 24h und 7d positiv, Trend in 1h, 2h, 4h, 1d und 1w auf Kaufen. Bei gleichem Wert steht der Pool mit dem höheren Edge im gewählten Zeitfenster oben. Klick auf den Wert zeigt die Einzelsignale.'))}" data-tooltip-type="text" style="cursor:default">${tr('liq.chance', 'Stimmung')}</span>`;
+    const chanceHead = `<span class="has-tooltip" data-tooltip-title="${tr('liq.chance.title', 'Stimmung')}" data-tooltip-content="${escHtml(tr('liq.chance.head_tip', 'Durchschnitt der Teilpunkte in %: Edge in 4h, 24h und 7d (voller Punkt bei den besten 10 % aller Pools im Fenster, anteilig darunter) und Trend in 4h, 1d und 1w (voller Punkt ab +0,5, anteilig darunter). Bei gleichem Wert steht der Pool mit dem höheren Edge im gewählten Zeitfenster oben. Klick auf den Wert zeigt die Einzelsignale.'))}" data-tooltip-type="text" style="cursor:default">${tr('liq.chance', 'Stimmung')}</span>`;
     const chanceCell = (pool, pid) => {
         const c = pool.chance;
         if (!c) return `<span class="text-muted" style="font-size:0.78em">–</span>`;
@@ -2118,7 +2100,7 @@ function filterByRange(arr, range, getTs, ranges = DEFAULT_RANGES) {
 
 function xLabel(ts, range) {
     const d = new Date(ts);
-    if (range === '1D') {
+    if (isIntradayRange(range)) {
         return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
     }
     return `${d.getDate()}.${String(d.getMonth()+1).padStart(2,'0')}.`;
@@ -2245,7 +2227,7 @@ function _buildPortfolioSvg(svgEl, H, PAD_L, PAD_R, PAD_T, PAD_B, history, filte
         const t = tMin + spanMs * i / 4;
         xLabels += `<text class="chart-label chart-label-x" x="${sx(t).toFixed(1)}" y="${(PAD_T+cH+16).toFixed(1)}">${xLabel(t, rangeKey)}</text>`;
     }
-    const xTitle = rangeKey === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    const xTitle = isIntradayRange(rangeKey) ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
     xLabels += `<text class="chart-label" x="${(PAD_L + cW / 2).toFixed(1)}" y="${H - 2}" text-anchor="middle" font-size="10">${xTitle}</text>`;
 
     // Pfad: herausgefilterte Ausreißer (null) werden übersprungen, die Linie läuft durchgehend
@@ -2442,7 +2424,8 @@ const _feeTs = r => new Date(r.date + 'T00:00:00').getTime();
 
 function _getFeeData(data, wishRange) {
     const range = activeRange(wishRange, data?.dailyFees ?? [], _feeTs);
-    if (range === '1D') {
+    if (isIntradayRange(range)) {
+        const hours  = intradayHours(range);   // 4H → 4 Stunden-Balken, 1D → 24
         const now    = Date.now();
         const cutoff = rangeCutoff(range, { now });
         // claimHistory enthaelt ALLE Claims des Monats (transactions ist auf 25 Eintraege limitiert
@@ -2450,11 +2433,11 @@ function _getFeeData(data, wishRange) {
         const claims = (data?.claimHistory ?? [])
             .filter(t => t.claimedAt >= cutoff);
 
-        // Alle Stunden im 24h-Fenster vorbelegen (0 USDC)
+        // Alle Stunden im Fenster vorbelegen (0 USDC)
         const nowHour = new Date(now);
         nowHour.setMinutes(0, 0, 0);
         const buckets = new Map();
-        for (let h = 23; h >= 0; h--) {
+        for (let h = hours - 1; h >= 0; h--) {
             const t = new Date(nowHour.getTime() - h * 3_600_000);
             const key = `${t.getFullYear()}-${t.getMonth()}-${t.getDate()}-${t.getHours()}`;
             buckets.set(key, { label: `${String(t.getHours()).padStart(2,'0')}:00`, fees: 0, ts: t.getTime() });
@@ -2469,8 +2452,8 @@ function _getFeeData(data, wishRange) {
             .sort((a, b) => a.ts - b.ts)
             .map(b => ({ label: b.label, fees: parseFloat(b.fees.toFixed(4)) }));
     }
-    // Anzahl Tage des Zeitraums aus der Lib-Definition (1D-Länge = Tagesmaß)
-    const days = DEFAULT_RANGES.find(r => r.key === range).ms / DEFAULT_RANGES[0].ms;
+    // Anzahl Tage des Zeitraums aus der Lib-Definition (1W und 1M erreichen diesen Zweig)
+    const days = DEFAULT_RANGES.find(r => r.key === range).ms / 86_400_000;
     return (data?.dailyFees ?? []).slice(-days);
 }
 
@@ -2584,7 +2567,7 @@ let _compositionRange    = localStorage.getItem(LS_RANGE.composition) ?? '1W';
  * X = Uhrzeit bzw. Datum je nach Zeitraum. Erwartet pad.bottom >= 44 (Ticks bei H - 19).
  */
 function _axisTitlesHtml(pad, W, H, yTitle, rangeKey) {
-    const xTitle = rangeKey === '1D' ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
+    const xTitle = isIntradayRange(rangeKey) ? tr('liq.axis_time', 'Uhrzeit') : tr('liq.axis_date', 'Datum');
     const cx = (pad.left + (W - pad.left - pad.right) / 2).toFixed(1);
     const cy = (pad.top + (H - pad.top - pad.bottom) / 2).toFixed(1);
     return `<text class="chart-label" transform="translate(12,${cy}) rotate(-90)" text-anchor="middle" font-size="10">${escHtml(yTitle)}</text>`
@@ -3018,7 +3001,7 @@ function renderPnLChart(data, poolId) {
  * @param {object} data       Daten-Objekt (_lastData)
  * @param {string} poolId     z.B. "liq-sol-usdc"
  * @param {string} tokenKey   'amountA' oder 'amountB'
- * @param {string} range      '1D' | '1W' | '1M'
+ * @param {string} range      '4H' | '1D' | '1W' | '1M'
  */
 function renderTokenAmountChart(svgId, emptyId, data, poolId, tokenKey, range) {
     const svg      = $(svgId);
@@ -3829,7 +3812,7 @@ function initMyAprModal() {
 
 // ── TVL Chart + Modal ─────────────────────────────────────────────────────────
 
-let _tvlRange    = normalizeRangeKey(localStorage.getItem(LS_RANGE.tvl)) ?? '1W';
+let _tvlRange    = localStorage.getItem(LS_RANGE.tvl) ?? '1W';
 let _tvlPool     = null;
 let _tvlData     = null;   // data bei Modal-Öffnung – hat tvlHistory garantiert
 let _tvlResizeOb = null;
@@ -3996,10 +3979,10 @@ function initTvlModal() {
 
 // ── VOL-Chart-Modal ───────────────────────────────────────────────────────────
 
-// Tages-Balken: 1D wäre ein einzelner Balken, deshalb nur 1W/1M (Lib-Definitionen ohne 1D)
-const VOL_MODAL_RANGES = DEFAULT_RANGES.filter(r => r.key !== '1D');
+// 4H/1D: Stunden-Balken (volumeHistory ist stündlich), 1W/1M: Tages-Balken (CORE#002051/002054)
+const VOL_MODAL_RANGES = DEFAULT_RANGES;
 
-let _volModalRange    = normalizeRangeKey(localStorage.getItem(LS_RANGE.volModal), VOL_MODAL_RANGES) ?? '1W';
+let _volModalRange    = localStorage.getItem(LS_RANGE.volModal) ?? '1W';
 let _volModalPool     = null;
 let _volModalResizeOb = null;
 
@@ -4011,9 +3994,10 @@ function renderVolModalChart(data, poolId) {
         .filter(r => r.poolId === poolId && r.volume != null);
 
     const volModalRange = activeRange(_volModalRange, history, r => r.t, VOL_MODAL_RANGES);
-    const filtered = aggregateDailyVolume(
-        filterByRange(history, volModalRange, r => r.t, VOL_MODAL_RANGES)
-    );
+    const inRange  = filterByRange(history, volModalRange, r => r.t, VOL_MODAL_RANGES);
+    const filtered = isIntradayRange(volModalRange)
+        ? inRange.map(r => ({ t: r.t, volume: Math.round(r.volume) })).sort((a, b) => a.t - b.t)
+        : aggregateDailyVolume(inRange);
 
     if (filtered.length < 1) {
         svg.style.display = 'none';
@@ -4084,7 +4068,9 @@ function renderVolModalChart(data, poolId) {
     const volModalWrap = svg.closest('.modal-box') ?? svg.parentElement;
     if (volModalWrap) attachBarTooltip(svg, volModalWrap, '.vol-modal-bar', bar => {
         const d = new Date(parseInt(bar.dataset.t, 10));
-        const lbl = d.toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
+        const lbl = isIntradayRange(volModalRange)
+            ? `${d.toLocaleDateString(NUM_LOCALE, { day: 'numeric', month: 'short' })} ${String(d.getHours()).padStart(2, '0')}:00 Uhr`
+            : d.toLocaleDateString(NUM_LOCALE, { weekday: 'short', day: 'numeric', month: 'short' });
         return `${lbl}: ${fmtVol(parseInt(bar.dataset.vol, 10))}`;
     });
 
@@ -4141,7 +4127,7 @@ function initVolModal() {
 
 // ── Range-Chart-Modal ─────────────────────────────────────────────────────────
 
-let _rangeChartRange = normalizeRangeKey(localStorage.getItem(LS_RANGE.rangeChart)) ?? '1D';
+let _rangeChartRange = localStorage.getItem(LS_RANGE.rangeChart) ?? '1D';
 let _rangeChartPool  = null;
 let _rangeResizeOb   = null;
 
@@ -4877,15 +4863,12 @@ async function refresh() {
 
 // ── Metric Chart Modal (PnL / Slopes) ────────────────────────────────────────
 
-// Metrik-Fenster: Lib-Zeiträume plus 6H/12H (nur Kurzfrist-Metriken). Die vom Export
-// gelieferten Fenster-Schlüssel (pool.metricHistory) sind kleingeschrieben, siehe _metricWindowKey().
-const _HOUR_MS = DEFAULT_RANGES[0].ms / 24;
-const _METRIC_RANGES = buildRanges([
-    { key: '6H',  label: '6H',  ms: 6 * _HOUR_MS },
-    { key: '12H', label: '12H', ms: 12 * _HOUR_MS },
-]);
+// Metrik-Fenster = Lib-Zeiträume 4H/1D/1W/1M (CORE#002051, 1M wieder seit CORE#002054). Die vom Export gelieferten
+// Fenster-Schlüssel (pool.metricHistory) sind kleingeschrieben, siehe _metricWindowKey().
+const _METRIC_RANGES = DEFAULT_RANGES;
+const _CHANCE_RANGES = DEFAULT_RANGES;   // Stimmung-Verlauf (LIQ#002050)
 const _metricWindowKey = key => key.toLowerCase();
-let _metricChartRange = normalizeRangeKey(localStorage.getItem(LS_RANGE.metricChart), _METRIC_RANGES) ?? '1D';
+let _metricChartRange = localStorage.getItem(LS_RANGE.metricChart) ?? '1D';
 let _metricRangeBar   = null;
 
 // axis = Beschriftung der Y-Achse (Einheit der Werte), X-Achse beschriftet _drawMetricChart selbst.
@@ -4894,18 +4877,18 @@ const _METRIC_META = {
     aprSlope:   { label: 'APR-Slope',   unit: ' pp/h', axis: 'pp/h', zeroline: true  },
     tvlSlope:   { label: 'TVL-Slope',   unit: ' %/h',  axis: '%/h',  zeroline: true  },
     // Spalte Edge 24H / PnL 24H (LIQ#001023): jeder Punkt ist der 24h-Wert zu diesem
-    // Zeitpunkt, export.js liefert ihn für 1D/1W/1M. Label per Getter, tr() erst zur Anzeige.
-    pnl24h:     { get label() { return _edgeUnitFullLabel('pnl'); },  unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: true, ranges: ['1D', '1W', '1M'] },
+    // Zeitpunkt, export.js liefert ihn für 4H/1D/1W/1M. Label per Getter, tr() erst zur Anzeige.
+    pnl24h:     { get label() { return _edgeUnitFullLabel('pnl'); },  unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: true },
     // Edge-Wert der Opportunity-Tabelle (LIQ#001114): Verlauf des 24h-Modellwerts, stündliche
     // Snapshots aus opportunity_scores.edge_pct, sammelt sich ab dem Start dieser Funktion.
     // Stimmung (LIQ#001967): Verlauf im Stimmung-Dialog, Y fest 0–100 %, stündliche Werte ab dem Formelwechsel
-    chance:     { get label() { return tr('liq.chance.title', 'Stimmung'); }, unit: ' %', dec: 0, get axis() { return tr('liq.chance.axis_pct', 'Stimmung in %'); }, zeroline: true, yFixed: [0, 100] },
+    chance:     { get label() { return tr('liq.chance.title', 'Stimmung'); }, unit: ' %', dec: 0, get axis() { return tr('liq.chance.axis_pct', 'Stimmung in %'); }, zeroline: true, yFixed: [0, 100], height: 140 },
     edgeModel:  { get label() { return tr('liq.edge_chart_title', 'Edge (24 Std.)'); }, unit: ' %', dec: 3, get axis() { return tr('liq.axis_pct_24h', '% je 24 Std.'); }, zeroline: 'auto', zeroDash: true, zeroToggle: true },
 };
 
 function _drawMetricChart(svgEl, points, meta, { forceZero = false } = {}) {
     const W  = svgEl.getBoundingClientRect().width || 560;
-    const H  = fitHeight(svgEl, 220);
+    const H  = fitHeight(svgEl, meta.height ?? 220);
     // PL/PB mit Platz für die Achsentitel (Y gedreht links, X unter den Zeitmarken).
     const PL = 66, PR = 12, PT = 12, PB = 40;
     const cW = W - PL - PR;
@@ -5043,7 +5026,7 @@ function openMetricChartModal(poolId, metric, data) {
         : _METRIC_RANGES;
     // Gespeicherte Auswahl nur übernehmen, wenn die Metrik das Fenster kennt (Delta: kein 6H/12H);
     // sonst lokal auf das erste Fenster, ohne die gespeicherte Auswahl der übrigen Charts zu ändern.
-    const wish = normalizeRangeKey(_metricChartRange, ranges) ?? ranges[0].key;
+    const wish = normalizeRangeKey(_metricChartRange, ranges) ?? normalizeRangeKey('1D', ranges) ?? ranges[0].key;
     const pair = pool.displayLabel ?? pool.displayPair ?? pool.pair ?? poolId;
     if (titleEl) titleEl.textContent = `${pair} – ${meta.label}`;
 

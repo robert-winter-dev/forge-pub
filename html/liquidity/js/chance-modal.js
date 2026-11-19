@@ -5,7 +5,9 @@
 // Lazy-geladen aus app.js wie token-info-modal.js.
 
 import { t as tr, NUM_LOCALE } from '../../js/i18n.js?v=20260811a';
-import { createRangeBar, historyStartOf } from '../../js/chart-range.js?v=20260923a';
+import { makeMaximizable } from '../../js/modal.js?v=20261002b';
+import { createRangeBar, historyStartOf } from '../../js/chart-range.js?v=20261118b';
+import { windowLabel } from '../../js/time-windows.js?v=20261118a';
 
 let _modal = null;
 
@@ -31,6 +33,8 @@ function ensureModal() {
   <div id="chanceModalBody"></div>
 </div>`;
     document.body.appendChild(_modal);
+    // Maximieren (LIQ#002050): der Verlauf-Chart zeichnet mit der neuen Fläche neu
+    makeMaximizable(_modal.querySelector('.modal-box'), { onResize: () => _modal._drawHistory?.() });
     document.getElementById('chanceModalClose').addEventListener('click', closeChanceModal);
     _modal.addEventListener('click', e => { if (e.target === _modal) closeChanceModal(); });
     document.addEventListener('keydown', e => {
@@ -38,7 +42,6 @@ function ensureModal() {
     });
 }
 
-const TF_LABEL = { '1h': '1 h', '4h': '4 h', '6h': '6 h', '12h': '12 h', '24h': '24 h', '1d': '1 d', '1w': '1 w', '7d': '7 d' };
 
 const STATUS = {
     full:   { sym: '✓', key: 'liq.chance.status_full',   de: 'voll' },
@@ -98,16 +101,16 @@ function row(s) {
         ? ` class="has-tooltip" data-tooltip-title="${esc(tr('liq.chance.col_points', 'Punkte'))}" data-tooltip-content="${esc(tr('liq.chance.ref_tip', 'Voller Punkt ab {ref} (beste 10 % aller Pools in diesem Fenster).', { ref: valueText({ src: 'edge', raw: s.ref }) }))}" data-tooltip-type="text"`
         : '';
     return `<tr data-signal="${esc(s.src)}-${esc(s.tf)}" data-score="${Number.isFinite(s.score) ? s.score : ''}">
-        <td>${esc(TF_LABEL[s.tf] ?? s.tf)}</td>
+        <td>${esc(windowLabel(s.tf))}</td>
         <td style="text-align:right">${esc(wert)}${warn}</td>
         <td style="text-align:right"><span${refTip}>${esc(punkte)}</span></td>
         <td style="padding-left:1.25rem"><span aria-hidden="true">${st.sym}</span> ${esc(tr(st.key, st.de))}</td></tr>`;
 }
 
 function table(signals) {
-    // Trend hat 4 Zeilen, Edge 5: eine unsichtbare Fußzeile gleicht aus, damit der Erklärtext in beiden Tabs auf gleicher Höhe steht (LIQ#001967)
-    const pad = signals.length < 5
-        ? `<tfoot aria-hidden="true" style="visibility:hidden">${'<tr><td colspan="4">&nbsp;</td></tr>'.repeat(5 - signals.length)}</tfoot>`
+    // Edge und Trend haben je 3 Zeilen (LIQ#002050): fehlt eine, gleicht eine unsichtbare Fußzeile aus, damit der Erklärtext in beiden Tabs auf gleicher Höhe steht (LIQ#001967)
+    const pad = signals.length < 3
+        ? `<tfoot aria-hidden="true" style="visibility:hidden">${'<tr><td colspan="4">&nbsp;</td></tr>'.repeat(3 - signals.length)}</tfoot>`
         : '';
     // Gleiche Spaltenbreiten in beiden Tabs (table-layout: fixed + colgroup), damit beim Umschalten nichts wandert
     return `<table class="chance-table" style="width:100%;table-layout:fixed;font-size:0.82rem;border-collapse:collapse">
@@ -159,8 +162,7 @@ let _rangeBar = null;
 
 function historyPanel() {
     return `<div id="chanceHistoryRange" class="chart-range-btns"></div>
-        <svg id="chanceHistorySvg" class="metric-chart-svg" width="100%" style="display:block;overflow:visible"></svg>
-        <p id="chanceHistoryNote" ${NOTE}></p>`;
+        <svg id="chanceHistorySvg" class="metric-chart-svg" width="100%" style="display:block;overflow:visible"></svg>`;
 }
 
 function setupHistory(pool, ext) {
@@ -168,16 +170,12 @@ function setupHistory(pool, ext) {
     _rangeBar = null;
     const { drawChart, meta, ranges } = ext ?? {};
     const svg = document.getElementById('chanceHistorySvg');
-    const note = document.getElementById('chanceHistoryNote');
     if (!drawChart || !svg) return;
     const pts = r => pool.metricHistory?.[r.key.toLowerCase()]?.chance ?? [];
     let range = null;
     const draw = () => {
         const points = pts({ key: range });
         drawChart(svg, points, meta);
-        note.textContent = points.length < 2
-            ? tr('liq.chance.hist_few', 'Noch zu wenig Verlauf, es kommt jede Stunde ein Punkt dazu.')
-            : tr('liq.chance.hist_note', 'Stündlich gespeichert. Werte vor dem 13.11.2026, 19 Uhr, wurden anders gerechnet und fehlen hier.');
     };
     const starts = ranges.map(r => historyStartOf(pts(r), p => p.ts)).filter(ms => ms != null);
     _rangeBar = createRangeBar(document.getElementById('chanceHistoryRange'), {
