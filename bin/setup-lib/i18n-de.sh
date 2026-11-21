@@ -82,6 +82,7 @@ MSG=(
     [DEPLOY_NPM_ONE_FAILED]="Mindestens eine npm-Installation fehlgeschlagen."
     [DEPLOY_DEPS_STASHED]="Abhängigkeiten zwischengeparkt (%s Unterprojekte) – werden nach dem Kopieren wiederverwendet."
     [DEPLOY_DEPS_RESTORED]="Abhängigkeiten wiederverwendet (%s Unterprojekte)."
+    [DEPLOY_PREMIUM_KEPT]="Premium-Token-Infos übernommen."
     [DEPLOY_DEPS_RENEW]="--renew-deps: Abhängigkeiten werden verworfen und vollständig neu installiert."
     [DEPLOY_NPM_ALL_CURRENT]="Abhängigkeiten unverändert – Installation übersprungen."
     [DEPLOY_NPM_ALL_DONE]="Alle Abhängigkeiten installiert."

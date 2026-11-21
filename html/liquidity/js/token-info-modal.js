@@ -4,7 +4,7 @@
 // token-info-store.js (JSON-Fetch statt Modul-Import, siehe dort). Lazy-geladen analog
 // pool-chart-modal.js.
 
-import { loadTokenInfo, getTokenInfo } from './token-info-store.js?v=20261002a';
+import { loadTokenInfo, getTokenInfo } from './token-info-store.js?v=20261120b';
 
 let _modal = null;
 

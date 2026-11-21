@@ -82,6 +82,7 @@ MSG=(
     [DEPLOY_NPM_ONE_FAILED]="At least one npm installation failed."
     [DEPLOY_DEPS_STASHED]="Dependencies parked aside (%s subprojects) – will be reused after the copy."
     [DEPLOY_DEPS_RESTORED]="Dependencies reused (%s subprojects)."
+    [DEPLOY_PREMIUM_KEPT]="Premium token info kept."
     [DEPLOY_DEPS_RENEW]="--renew-deps: discarding dependencies and reinstalling from scratch."
     [DEPLOY_NPM_ALL_CURRENT]="Dependencies unchanged – installation skipped."
     [DEPLOY_NPM_ALL_DONE]="All dependencies installed."

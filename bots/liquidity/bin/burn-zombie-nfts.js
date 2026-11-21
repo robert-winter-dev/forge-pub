@@ -196,12 +196,20 @@ for (let i = 0; i < posInfos.length; i++) {
     const feeOwedB = d.readBigUInt64LE(136);
     const needsCollect = feeOwedA > 0n || feeOwedB > 0n;
 
+    // reward_infos[i].amount_owed (u64) liegt bei 144 + i*24 + 16. Orcas close_position
+    // verlangt auch hier 0, sonst ClosePositionNotEmpty (0x1775) trotz Liquidität 0 und
+    // fee_owed 0 (CORE#002092: ANT/USDC mit Reward-Emission).
+    let rewardOwed = 0n;
+    for (let r = 0; r < 3; r++) rewardOwed += d.readBigUInt64LE(144 + r * 24 + 16);
+    const needsRewardCollect = rewardOwed > 0n;
+
     const posPda = posPdas[i];
     const pair   = displayPairForMint(mintStr);
-    zombies.push({ mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq: totalLiq, feeOwedA, feeOwedB, rentLamports: info.lamports });
+    zombies.push({ mint, posPda, mintStr, pair, needsCollect, needsRewardCollect, needsDecrease, dustLiq: totalLiq, feeOwedA, feeOwedB, rentLamports: info.lamports });
     const tags = [];
     if (needsDecrease) tags.push(`Dust L=${totalLiq}`);
     if (needsCollect)  tags.push(`Fees ${feeOwedA}A/${feeOwedB}B`);
+    if (needsRewardCollect) tags.push(`Rewards ${rewardOwed}`);
     const tagStr = tags.length > 0 ? ` (${tags.join(' + ')})` : '';
     console.log(`  🧟 Zombie${tagStr}: ${mintStr} (${pair})`);
 }
@@ -289,7 +297,7 @@ const ctx    = WhirlpoolContext.from(conn, wallet, undefined, undefined, {
 const client = buildWhirlpoolClient(ctx);
 
 let burned = 0;
-for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, rentLamports } of zombies) {
+for (const { mint, posPda, mintStr, pair, needsCollect, needsRewardCollect, needsDecrease, dustLiq, rentLamports } of zombies) {
     try {
         // Liquidität abziehen falls noch >0 (sonst wirft closePosition 0x178b ClosePositionNotEmpty)
         // Bei --full-close: echte Position inkl. Kapital; bei --include-dust: nur Dust-Rest
@@ -337,6 +345,18 @@ for (const { mint, posPda, mintStr, pair, needsCollect, needsDecrease, dustLiq, 
             await rpcLimiter.wait();
             const collectHash = await collectTx.buildAndExecute();
             console.log(`  💰 Fees geleert: ${mintStr} TX=${collectHash}`);
+        }
+
+        // Offene Rewards einsammeln, sonst lehnt closePosition mit ClosePositionNotEmpty ab.
+        // updateFeesAndRewards=false: bei Liquidität 0 würde das Update mit 0x177c scheitern.
+        if (needsRewardCollect) {
+            const position = await client.getPosition(posPda, IGNORE_CACHE);
+            const rewardTxs = await position.collectRewards(undefined, false);
+            for (const rewardTx of rewardTxs) {
+                await rpcLimiter.wait();
+                const rewardHash = await rewardTx.buildAndExecute();
+                console.log(`  🎁 Rewards geleert: ${mintStr} TX=${rewardHash}`);
+            }
         }
 
         const positionTokenAccount = getAssociatedTokenAddressSync(mint, keypair.publicKey);

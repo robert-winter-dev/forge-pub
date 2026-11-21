@@ -250,6 +250,20 @@ do_deploy() {
         [[ "$nm_saved" -gt 0 ]] && say "$(t DEPLOY_DEPS_STASHED "$nm_saved")"
     fi
 
+    # Premium-Ablage im Web-Verzeichnis über das rm -rf retten (CORE#002114): die vom
+    # Premium-Ingest geschriebenen Token-Infos (html/liquidity/data/premium/) liegen unter
+    # app/, weil das Dashboard sie direkt abruft. Ohne das hier fehlten sie nach jedem Update
+    # bis zum nächsten Blob mit Token-Infos (bis zu ~1 h). Ohne Premium gibt es den Ordner
+    # nicht, dann passiert nichts. Ob die Infos angezeigt werden, entscheidet nicht das Update,
+    # sondern bin/export.js (nur bei aktivem Premium).
+    local premium_web_rel="html/liquidity/data/premium"
+    local premium_stash="$BASE_DIR/.premium-web-cache"
+    local premium_saved=0
+    rm -rf "$premium_stash"
+    if [[ -d "$APP_DIR/$premium_web_rel" ]]; then
+        mv "$APP_DIR/$premium_web_rel" "$premium_stash" && premium_saved=1
+    fi
+
     rm -rf "${APP_DIR:?}"
     mkdir -p "$APP_DIR"
     if command -v rsync &>/dev/null; then rsync -a "$ARTIFACT_DIR/" "$APP_DIR/"
@@ -268,6 +282,19 @@ do_deploy() {
         c_ok "$(t DEPLOY_DEPS_RESTORED "$nm_saved")"
     fi
     rm -rf "$nm_stash"
+
+    if [[ "$premium_saved" -eq 1 ]]; then
+        # Bringt das neue Artefakt den Ordner selbst mit (heute nicht der Fall), hat es Vorrang:
+        # dann nur fehlende Dateien ergänzen, nichts aus dem Artefakt überschreiben.
+        mkdir -p "$APP_DIR/$(dirname "$premium_web_rel")"
+        if [[ -e "$APP_DIR/$premium_web_rel" ]]; then
+            cp -an "$premium_stash/." "$APP_DIR/$premium_web_rel/"
+        else
+            mv "$premium_stash" "$APP_DIR/$premium_web_rel"
+        fi
+        c_ok "$(t DEPLOY_PREMIUM_KEPT)"
+    fi
+    rm -rf "$premium_stash"
 
     fix_ownership
     c_ok "$(t DEPLOY_DEPLOY_COPIED "$(du -sh "$APP_DIR" | cut -f1)")"

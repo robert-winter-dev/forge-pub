@@ -42,6 +42,38 @@ const SUPPORTED_SCHEMA_VERSIONS = [2];
 const MAX_BLOB_AGE_MS = 30 * 60 * 1000;
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000; // Uhr-Drift zwischen Master und Fork
 
+// Token-Info-Overlay (CORE#002114): Ablage für html/liquidity/js/token-info-store.js. Seit
+// CORE#002114 liegt die kuratierte Basis token-info-data.json nicht mehr im Fork-Archiv,
+// das Overlay ist im Fork die einzige Quelle. Dieselbe Datei ergänzen auch
+// pool-offer-adopt.js / pool-offers-sync.js beim Übernehmen eines Pool-Offers.
+export const TOKEN_INFO_OVERLAY_PATH = path.join(PATHS.html, 'liquidity', 'data', 'premium', 'token-info.json');
+const TOKEN_INFO_FIELDS = ['symbol', 'category', 'categoryEn', 'description', 'descriptionEn', 'url', 'checkedAt'];
+const TOKEN_INFO_MAX_FIELD_CHARS = 2000; // weit über der Master-Grenze (350), nur gegen Ausreißer
+const SOLANA_MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/**
+ * Bereinigt die gelieferten Token-Infos, bevor sie im Web-Verzeichnis landen: nur
+ * Mint-Adressen als Schlüssel, nur bekannte Textfelder, `url` nur mit https://. Das Dashboard
+ * prüft beim Anzeigen noch einmal (sanitizeEntry in token-info-store.js) und escapet; dies hier
+ * ist die zweite Linie, damit keine fremden Felder oder Objekte in eine ausgelieferte Datei kommen.
+ */
+export function sanitizeTokenInfo(tokens) {
+    const out = {};
+    if (!tokens || typeof tokens !== 'object') return out;
+    for (const [mint, entry] of Object.entries(tokens)) {
+        if (!SOLANA_MINT_RE.test(mint) || !entry || typeof entry !== 'object') continue;
+        const clean = {};
+        for (const field of TOKEN_INFO_FIELDS) {
+            const v = entry[field];
+            if (typeof v !== 'string' || v.length > TOKEN_INFO_MAX_FIELD_CHARS) continue;
+            if (field === 'url' && !v.startsWith('https://')) continue;
+            clean[field] = v;
+        }
+        if (Object.keys(clean).length > 0) out[mint] = clean;
+    }
+    return out;
+}
+
 function ensureIngestStateTable(db) {
     db.exec(`
         CREATE TABLE IF NOT EXISTS premium_ingest_state (
@@ -170,6 +202,7 @@ export function ingestBlob(db, data, {
     deliveredTvLinksPath = DELIVERED_TVLINKS_PATH,
     poolOffersPath = path.join(PATHS.liquidityData, 'premium', 'pool-offers.json'),
     tsAdvicePath   = TS_ADVICE_PATH,
+    tokenInfoPath  = TOKEN_INFO_OVERLAY_PATH,
 } = {}) {
     const lastSequence = getLastSequence(db);
     const check = validateEnvelope(data, lastSequence);
@@ -289,7 +322,19 @@ export function ingestBlob(db, data, {
         tsAdviceWritten = true;
     }
 
-    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], slopesWritten, edgeWritten, chanceWritten, tvLinksWritten, poolOffersWritten, tsAdviceWritten };
+    // Token-Infos (CORE#002114) — reine Anzeige, ersetzt das Overlay vollständig (der Master
+    // liefert immer alle Tokens, so verschwinden auch dort gelöschte Einträge). Ein Blob ohne
+    // `tokenInfo` (die meisten, Takt knapp 1 h) oder mit leerer Liste lässt die Ablage unberührt.
+    let tokenInfoWritten = false;
+    if (data.tokenInfo) {
+        const tokens = sanitizeTokenInfo(data.tokenInfo.tokens);
+        if (Object.keys(tokens).length > 0) {
+            writeJsonAtomic(tokenInfoPath, JSON.stringify({ generatedAt: data.tokenInfo.generatedAt ?? data.generatedAt, tokens }));
+            tokenInfoWritten = true;
+        }
+    }
+
+    return { ingested: true, rows, scoreHistoryRows, coveredPools: data.coveredPools ?? [], slopesWritten, edgeWritten, chanceWritten, tvLinksWritten, poolOffersWritten, tsAdviceWritten, tokenInfoWritten };
 }
 
 /**
@@ -328,7 +373,9 @@ export async function selfTest() {
     const deliveredEdgePath = path.join(tmpdir(), `premium-ingest-selftest-edge-${randomBytes(4).toString('hex')}.json`);
     const deliveredChancePath = path.join(tmpdir(), `premium-ingest-selftest-chance-${randomBytes(4).toString('hex')}.json`);
     const deliveredTvLinksPath = path.join(tmpdir(), `premium-ingest-selftest-tvlinks-${randomBytes(4).toString('hex')}.json`);
+    const tokenInfoPath = path.join(tmpdir(), `premium-ingest-selftest-tokeninfo-${randomBytes(4).toString('hex')}.json`);
     const failures = [];
+    const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
     const sampleBlob = (sequence, ageMs = 0, withEdgeSlopes = false, withScoreHistory = false, withPoolOffers = false, withTsAdvice = false) => ({
         schemaVersion: 2,
@@ -388,6 +435,7 @@ export async function selfTest() {
         if (fs.existsSync(poolOffersPath)) failures.push('pool-offers.json wurde ohne poolOffers-Feld im Blob angelegt');
         if (r1.tsAdviceWritten) failures.push('tsAdviceWritten war true, obwohl der Blob keine trailingStopAdvice enthielt');
         if (fs.existsSync(tsAdvicePath)) failures.push('trailing-stop-advice.json wurde ohne trailingStopAdvice-Feld im Blob angelegt');
+        if (r1.tokenInfoWritten) failures.push('tokenInfoWritten war true, obwohl der Blob keine tokenInfo enthielt');
 
         const rowCount1 = db.prepare(`SELECT COUNT(*) AS n FROM pool_score_history`).get().n;
         if (rowCount1 !== 1) failures.push(`erwartete 1 Zeile in pool_score_history, gefunden ${rowCount1}`);
@@ -403,7 +451,26 @@ export async function selfTest() {
         // Neuere Sequenz, frisch, MIT edge/slopes + scoreHistory + poolOffers → muss durchgehen,
         // edge.json/slopes.json schreiben, eine zusätzliche pool_score_history-Zeile anlegen UND
         // pool-offers.json als reine Ablage schreiben (keine DB-/pools.json-Wirkung).
-        const r4 = ingestBlob(db, sampleBlob(2, 0, true, true, true, true), { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, deliveredChancePath, deliveredTvLinksPath, poolOffersPath, tsAdvicePath });
+        const r4 = ingestBlob(db, {
+            ...sampleBlob(2, 0, true, true, true, true),
+            tokenInfo: { generatedAt: new Date().toISOString(), count: 3, tokens: {
+                [SOL_MINT]: { symbol: 'SOL', category: 'Layer-1-Coin', categoryEn: 'Layer-1 coin',
+                    description: 'Beschreibung', descriptionEn: 'Description', url: 'https://solana.com', checkedAt: '2026-11-20',
+                    internal: 'darf nicht mit' },
+                'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': { symbol: 'USDC', url: 'javascript:alert(1)' },
+                '../../etc/passwd': { symbol: 'X' },
+            } },
+        }, { scoresJsonPath, deliveredSlopesPath, deliveredEdgePath, deliveredChancePath, deliveredTvLinksPath, poolOffersPath, tsAdvicePath, tokenInfoPath });
+        if (!r4.tokenInfoWritten || !fs.existsSync(tokenInfoPath)) {
+            failures.push('token-info.json wurde trotz tokenInfo im Blob nicht geschrieben');
+        } else {
+            const ti = JSON.parse(fs.readFileSync(tokenInfoPath, 'utf8'));
+            if (ti.tokens?.[SOL_MINT]?.descriptionEn !== 'Description') failures.push('Token-Info kam nicht unverändert in der Ablage an');
+            if ('internal' in (ti.tokens?.[SOL_MINT] ?? {})) failures.push('unbekanntes Feld wurde in die Token-Info-Ablage übernommen');
+            if (ti.tokens?.EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v?.url) failures.push('url ohne https:// wurde übernommen');
+            if (ti.tokens?.['../../etc/passwd']) failures.push('Schlüssel ohne Mint-Format wurde übernommen');
+            if (!ti.generatedAt) failures.push('generatedAt fehlt in der Token-Info-Ablage');
+        }
         if (!r4.ingested) failures.push(`gültiger Folge-Ingest wurde abgelehnt: ${r4.reason}`);
         if (!r4.slopesWritten) failures.push('slopesWritten war false, obwohl der Blob slopes enthielt');
         if (!r4.edgeWritten) failures.push('edgeWritten war false, obwohl der Blob edge enthielt');
@@ -494,6 +561,7 @@ export async function selfTest() {
         fs.rmSync(deliveredEdgePath, { force: true });
         fs.rmSync(deliveredChancePath, { force: true });
         fs.rmSync(deliveredTvLinksPath, { force: true });
+        fs.rmSync(tokenInfoPath, { force: true });
         for (const suffix of ['-wal', '-shm']) fs.rmSync(dbPath + suffix, { force: true });
     }
 

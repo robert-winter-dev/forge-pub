@@ -221,6 +221,9 @@ export function checkPoolsConfigViolations() {
 // neuen Pool-Token wieder deutschen Text, sobald der Eintrag nur auf Deutsch angelegt wird.
 const TOKEN_INFO_PATH = path.join(__dirname, '..', '..', '..', 'html', 'liquidity', 'js', 'token-info-data.json');
 
+// Das Info-Modal zeigt ca. 70 Zeichen je Zeile; mehr als 5 Zeilen sind zu lang (LIQ#002111).
+export const TOKEN_INFO_MAX_DESCRIPTION_CHARS = 350;
+
 export function checkTokenInfoTranslations(dataOverride = null) {
     let tokens;
     try {
@@ -231,6 +234,11 @@ export function checkTokenInfoTranslations(dataOverride = null) {
     const violations = [];
     for (const [mint, e] of Object.entries(tokens)) {
         const name = `Token-Info ${e.symbol ?? mint.slice(0, 8)}`;
+        for (const field of ['description', 'descriptionEn']) {
+            if (typeof e[field] === 'string' && e[field].length > TOKEN_INFO_MAX_DESCRIPTION_CHARS) {
+                violations.push(`${name}: ${field} hat ${e[field].length} Zeichen, Maximum ${TOKEN_INFO_MAX_DESCRIPTION_CHARS} (5 Zeilen im Info-Modal)`);
+            }
+        }
         for (const field of ['categoryEn', 'descriptionEn']) {
             if (typeof e[field] !== 'string' || !e[field].trim()) {
                 violations.push(`${name}: ${field} fehlt (englische Fassung Pflicht)`);

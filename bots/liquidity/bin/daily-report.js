@@ -156,15 +156,14 @@ function exitReason(poolId, closedAt, openedAt) {
         return { kind: 'Trailing Stop', detail: null, failed: !!ts.error_msg };
     }
 
-    // TVL-Schutz — die unterschrittene Schwelle in USDC, plus die Stufe (L1 teilweise, L2 voll).
-    const tvl = one(`SELECT triggered_at, level, threshold_usd, withdraw_pct, error_msg
+    // TVL-Schutz — nur der Name, ohne Schwelle/Stufe (Vorgabe 20.11.2026, LIQ#002098: "TVL-Schutz
+    // 17.000 USDC" sprengte die Spaltenbreite, wie zuvor beim Trailing Stop). Die Rohdaten
+    // (threshold_usd, withdraw_pct) bleiben unberührt in tvl_executions.
+    const tvl = one(`SELECT triggered_at, error_msg
                        FROM tvl_executions WHERE pool_id = ? AND triggered_at BETWEEN ? AND ?
                       ORDER BY triggered_at DESC LIMIT 1`, poolId, closedAt, openedAt);
     if (tvl) {
-        const t = tvl.threshold_usd != null
-            ? `${Number(tvl.threshold_usd).toLocaleString('de-DE', { maximumFractionDigits: 0 })} USDC` : null;
-        const stage = tvl.withdraw_pct != null && tvl.withdraw_pct < 100 ? ` (${tvl.withdraw_pct} %)` : '';
-        return { kind: 'TVL-Schutz', detail: t ? `${t}${stage}` : null, failed: !!tvl.error_msg };
+        return { kind: 'TVL-Schutz', detail: null, failed: !!tvl.error_msg };
     }
 
     // Score-Limit — der Score, bei dem ausgestiegen wurde.

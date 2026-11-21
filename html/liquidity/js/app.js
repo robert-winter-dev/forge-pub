@@ -21,7 +21,7 @@ import { EarningsToast }                       from '../../js/earnings-toast.js?
 import { ToastManager }                        from '../../js/toast.js?v=20260809a';
 import { initMessageBell }                     from '../../js/message-bell.js?v=20260825a';
 import { initWalletDetailModal }               from '../../js/wallet-detail-modal.js?v=20260807a';
-import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20261002a';
+import { loadTokenInfo, getTokenInfo }         from './token-info-store.js?v=20261120b';
 import { investedStepsInRange }                from './invested-steps.js?v=20261006a';
 import { renderBotInactivePanel, removeBotInactivePanel } from '../../js/bot-inactive-panel.js?v=20260807a';
 
@@ -673,7 +673,7 @@ function renderOpportunityTable(data) {
             if (infoEl) {
                 const pool = (_lastData?.pools ?? []).find(p => p.id === infoEl.dataset.poolId);
                 if (!pool) return;
-                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20261002b');
+                const { openTokenInfoModal } = await import('./token-info-modal.js?v=20261120b');
                 await openTokenInfoModal(pool);
                 return;
             }
@@ -4827,11 +4827,13 @@ function initPoolTxModal() {
 // ── Haupt-Refresh-Schleife ────────────────────────────────────────────────────
 
 async function refresh() {
-    await loadTokenInfo(); // idempotent — nach dem ersten Aufruf sofort aus Cache
     const data = await loadData();
     if (data) _lastData = data;       // Fehlgeschlagener Fetch behält alte Daten
     const d = _lastData;
     if (!d) return;                    // Noch nie Daten erhalten
+    // Nach data.json, weil dort steht, welche Token-Info-Dateien es gibt (CORE#002114).
+    // Idempotent: gleicher Stand → sofort aus dem Cache.
+    await loadTokenInfo(d.tokenInfoSources ?? { base: true, overlayVersion: null });
 
     const _safeRender = (fn, name) => { try { fn(); } catch (e) { console.error('[refresh] ' + name + ' failed:', e); } };
     _safeRender(() => renderHeader(d),           'renderHeader');

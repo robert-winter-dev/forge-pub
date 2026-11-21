@@ -2357,5 +2357,115 @@
     "tvlExitThreshold": 57000,
     "poolType": "volatil_2",
     "active": false
+  },
+  {
+    "id": "liq-ant-usdc",
+    "protocol": "orca",
+    "address": "J7mEHdBtAKGUsfiGnk3bL9cRVxqqcqx4HTxXb4wNnrsk",
+    "pair": "ANT/USDC",
+    "tokenA": "ANTBTZQ1EUuTxUs3tfeampxdqTWPHmwyJmcWj4xoAyNe",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.04,
+    "tickSpacing": 4,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 100000,
+    "tvlExitThreshold": 50000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-ant-usdc-2",
+    "protocol": "orca",
+    "address": "3EfoXaGSHTMG86dowmmEBm95WQwb479MsajkCeKgATTt",
+    "pair": "ANT/USDC",
+    "tokenA": "ANTBTZQ1EUuTxUs3tfeampxdqTWPHmwyJmcWj4xoAyNe",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.08,
+    "tickSpacing": 8,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 33000,
+    "tvlExitThreshold": 17000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-antx-usdc",
+    "protocol": "orca",
+    "address": "CqhZE9j8c7zBziKVTZCKJwwFjfvVY9PBq1VT9HhSYooc",
+    "pair": "ANTx/USDC",
+    "tokenA": "XsYzw7XHj8K2WHeoeNQVyevMmzjzXfcJ8tQ4FmdN1DL",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 8,
+    "decimalsB": 6,
+    "feeTier": 0.65,
+    "tickSpacing": 96,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 1500,
+    "tvlExitThreshold": 700,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-ant-usdc-3",
+    "protocol": "orca",
+    "address": "5CKC8rac8DTwyqazipTkHQ37mtruZN2D6PM4Xj1xKu7S",
+    "pair": "ANT/USDC",
+    "tokenA": "ANTBTZQ1EUuTxUs3tfeampxdqTWPHmwyJmcWj4xoAyNe",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.16,
+    "tickSpacing": 16,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 100000,
+    "tvlExitThreshold": 50000,
+    "poolType": "rwa",
+    "active": false
+  },
+  {
+    "id": "liq-ttwo-usdc",
+    "protocol": "orca",
+    "address": "56QW1m7pe5TdbEg9hTqmCB943LT3PSauVyBdnX4UACXH",
+    "pair": "TTWO/USDC",
+    "tokenA": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+    "tokenB": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimalsA": 6,
+    "decimalsB": 6,
+    "feeTier": 0.01,
+    "tickSpacing": 1,
+    "proactiveTrigger": 0.75,
+    "capitalUSDC": 0,
+    "rangeOverride": {
+      "mode": "fixed",
+      "fixedPct": 3
+    },
+    "tvlWarnThreshold": 140000,
+    "tvlExitThreshold": 70000,
+    "poolType": "rwa",
+    "active": false
   }
 ]

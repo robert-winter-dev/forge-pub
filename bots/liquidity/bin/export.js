@@ -397,6 +397,19 @@ const _timeframeIds     = _slopesRes.timeframeIds;
 // Premium-Deckung (2026-07-29) — siehe getPremiumCoverage() in lib/premium-wallet.js.
 const _premiumCoverage = getPremiumCoverage();
 
+// Das Overlay wird nur gemeldet, solange Premium-Daten anliegen: dieselbe Regel wie für die
+// Opportunity-Tabelle (edgeIsPremium, Frische der Lieferung statt bezahlter Stundengrenze, sonst
+// flackert es an jeder vollen Stunde). Läuft Premium aus, bleibt die Datei liegen, das Dashboard
+// zeigt „Keine Infos hinterlegt"; kommt Premium wieder, ist sie sofort zurück (CORE#002114).
+function _tokenInfoSources(premiumActive) {
+    const htmlDir = resolve(__dirname, '../../../html/liquidity');
+    const mtime = (p) => { try { return Math.floor(statSync(p).mtimeMs); } catch { return null; } };
+    return {
+        base:           mtime(resolve(htmlDir, 'js', 'token-info-data.json')) !== null,
+        overlayVersion: premiumActive ? mtime(resolve(htmlDir, 'data', 'premium', 'token-info.json')) : null,
+    };
+}
+
 // Persistenz: separate writable Connection (WAL erlaubt parallele Writer)
 // Throttle auf max. 1 Snapshot pro Stunde — pool_stats wird ohnehin nur stündlich
 // aktualisiert, häufigere Snapshots würden nur Duplikate erzeugen.
@@ -2522,6 +2535,12 @@ const data = {
     // erklären. Fehlendes Guthaben ist eine ANDERE Ursache (premiumAutoPayEnabled
     // fällt dabei auf false, outagePaused bleibt false) — siehe app.js.
     premiumOutagePaused: _premiumCoverage.outagePaused,
+    // Token-Infos (CORE#002114): welche Dateien das Dashboard abrufen soll. Der Master hat nur
+    // die kuratierte Basis (js/token-info-data.json), der Fork nur das Premium-Overlay
+    // (data/premium/token-info.json), und das nur bei aktivem Premium; ohne keines von beiden. So fragt die Seite
+    // nie eine Datei ab, die es nicht gibt (kein 404-Lärm, WEB#002104). `overlayVersion` ist die
+    // mtime des Overlays: ändert sie sich, lädt das Dashboard neu, ohne Seiten-Reload.
+    tokenInfoSources: _tokenInfoSources(edgeIsPremium(edgeSource, edgeStale)),
     tierOverview: buildTierOverview(poolsOverview),
     positions:   positionsOut,
     transactions,

@@ -1,11 +1,15 @@
-// token-info-store.js v1
+// token-info-store.js v2
 // Lädt die Token-Kurzinfos als reine JSON-Daten statt eines ausgeführten Moduls
-// (FORGE public Pool-Offers Blocker 1, 2026-07-27): ein künftiger Premium-Datenkanal darf
-// niemals Code ausliefern, nur Daten. token-info-data.json bleibt die kuratierte Basis
-// (Recherche-Pflicht siehe dortiger _comment); ein optionales Overlay
-// (data/premium/token-info.json) kann später zusätzliche/aktualisierte Einträge
-// beisteuern, sobald der Premium-Ingest existiert — bis dahin liefert der Fetch
-// einfach 404 und wird stillschweigend ignoriert.
+// (FORGE public Pool-Offers Blocker 1, 2026-07-27): ein Premium-Datenkanal darf niemals
+// Code ausliefern, nur Daten.
+//
+// Zwei Quellen (CORE#002114):
+//   - js/token-info-data.json: kuratierte Basis, nur auf dem Master. Liegt seit CORE#002114
+//     nicht mehr im Fork-Archiv (Premium-Vorteil).
+//   - data/premium/token-info.json: Overlay, im Fork vom Premium-Ingest aus dem Blob
+//     geschrieben (bots/liquidity/lib/premium-ingest.js).
+// Welche davon existiert, steht in data.json (`tokenInfoSources`, bin/export.js). Abgerufen
+// wird nur, was dort als vorhanden gemeldet ist: kein 404 im Webserver-Log (WEB#002104).
 //
 // Sicherheit: `url` wird beim Laden validiert (nur https://, sonst verworfen) — ein
 // fehlerhafter oder böswilliger Overlay-Datensatz darf keine javascript:-URLs in ein
@@ -14,8 +18,13 @@
 
 import { LANG } from '../../js/i18n.js?v=20260811a';
 
-let _cache   = null;
-let _loading = null;
+let _cache    = null;
+let _loading  = null;
+let _cacheKey = null; // Quellen-Stand, aus dem _cache stammt (siehe sourcesKey)
+
+function sourcesKey(sources) {
+    return `${sources?.base ? 1 : 0}:${sources?.overlayVersion ?? ''}`;
+}
 
 function sanitizeEntry(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -46,31 +55,41 @@ async function fetchJson(url) {
 }
 
 /**
- * Lädt die Token-Infos einmalig (Basis + optionales Premium-Overlay). Idempotent —
- * mehrfacher Aufruf (z.B. aus app.js und token-info-modal.js) gibt dieselbe Promise
- * zurück, kein doppelter Fetch.
+ * Lädt die Token-Infos laut `sources` (data.json → tokenInfoSources). Idempotent: derselbe
+ * Quellen-Stand gibt dieselbe Promise bzw. denselben Cache zurück; ändert sich der Stand
+ * (Overlay neu geschrieben, Premium aktiviert), wird neu geladen.
+ *
+ * Ohne `sources` (z. B. aus token-info-modal.js) wird nichts abgerufen, nur der vorhandene
+ * Stand zurückgegeben: das Modal öffnet ohnehin erst, nachdem app.js mit data.json geladen hat.
  */
-export function loadTokenInfo() {
-    if (_cache) return Promise.resolve(_cache);
-    if (_loading) return _loading;
+export function loadTokenInfo(sources) {
+    if (sources === undefined) return _loading ?? Promise.resolve(_cache ?? {});
+    const key = sourcesKey(sources);
+    if (_cacheKey === key && (_cache || _loading)) return _loading ?? Promise.resolve(_cache);
 
-    _loading = (async () => {
+    _cacheKey = key;
+    const loading = (async () => {
         // Basis liegt neben diesem Modul (js/) — modul-relativ auflösen, nicht seiten-relativ
         // wie fetch() es sonst tut (anders als import, das ohnehin modul-relativ auflöst).
-        const baseUrl = new URL('token-info-data.json', import.meta.url).href;
-        const base    = (await fetchJson(baseUrl))?.tokens ?? {};
-        // Overlay liegt (künftig) neben den übrigen generierten Daten — seiten-relativ,
-        // analog zu data/data.json.
-        const overlay = (await fetchJson('data/premium/token-info.json'))?.tokens ?? {};
+        const base = sources?.base
+            ? ((await fetchJson(new URL('token-info-data.json', import.meta.url).href))?.tokens ?? {})
+            : {};
+        // Overlay liegt neben den übrigen generierten Daten — seiten-relativ, analog zu
+        // data/data.json. Die Version im Query umgeht Zwischen-Caches nach einem neuen Ingest.
+        const overlay = sources?.overlayVersion
+            ? ((await fetchJson(`data/premium/token-info.json?v=${encodeURIComponent(sources.overlayVersion)}`))?.tokens ?? {})
+            : {};
         const merged = {};
         for (const [mint, raw] of Object.entries({ ...base, ...overlay })) {
             const clean = sanitizeEntry(raw);
             if (clean) merged[mint] = clean;
         }
-        _cache = merged;
-        return _cache;
+        // Nur übernehmen, wenn inzwischen kein neuerer Quellen-Stand angefordert wurde.
+        if (_cacheKey === key) { _cache = merged; _loading = null; }
+        return merged;
     })();
-    return _loading;
+    _loading = loading;
+    return loading;
 }
 
 /** Synchroner Zugriff nach loadTokenInfo() — undefined solange noch nicht geladen. */

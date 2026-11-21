@@ -356,6 +356,16 @@
       "decimals": 6
     },
     {
+      "symbol": "ANT",
+      "mint": "ANTBTZQ1EUuTxUs3tfeampxdqTWPHmwyJmcWj4xoAyNe",
+      "decimals": 6
+    },
+    {
+      "symbol": "ANTx",
+      "mint": "XsYzw7XHj8K2WHeoeNQVyevMmzjzXfcJ8tQ4FmdN1DL",
+      "decimals": 8
+    },
+    {
       "symbol": "UNI",
       "mint": "uniHfuPhEQSrtpzXpJZDCSq53yaejKKpNhFUiKoHKHV",
       "decimals": 8
@@ -369,6 +379,11 @@
       "symbol": "CHADx",
       "mint": "Xsg8azkTEAmBz4Qbs8iYYhgRkLKSqNo85vcJL68aLMH",
       "decimals": 8
+    },
+    {
+      "symbol": "TTWO",
+      "mint": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo",
+      "decimals": 6
     }
   ],
   "retainDays": 30
