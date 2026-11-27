@@ -434,6 +434,10 @@ export class OrcaAdapter {
             includeVolumeCandles ? settle(this._getVolumeCandles(pool.address)) : Promise.resolve(null),
         ]);
 
+        // CORE#002198: Im Hintergrund-Sweep darf ein gescheiterter Orca-Abruf (429, Timeout) nicht als
+        // Erfolg gelten, sonst schreibt der Aufrufer den letzten Wert als frische Zeile.
+        if (background && orcaStats == null) throw new Error('Orca-v2-Stats nicht verfügbar');
+
         return {
             price:            onChain.price,
             tvlUsd:           orcaStats?.tvlUsd            ?? null,
@@ -489,7 +493,7 @@ export class OrcaAdapter {
             // background: Hintergrund-Spur des Nexus (LIQ#001114), Wartezeit im Limiter zählt zur Antwortzeit
             const res = await fetch(url, background
                 ? { headers: BACKGROUND_LANE_HEADERS, signal: AbortSignal.timeout(BACKGROUND_TIMEOUT_MS) }
-                : { signal: AbortSignal.timeout(25_000) });
+                : { signal: AbortSignal.timeout(60_000) });   // Nexus-Limiter 1 req/s: Warteschlange (CORE#002198)
             if (!res.ok) {
                 console.warn(`[orcav2] Pool-Stats ${res.status} für ${poolAddress.slice(0, 8)}...`);
                 return null;

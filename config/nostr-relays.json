@@ -2,7 +2,7 @@
   "relays": [
     "wss://nostr.mom",
     "wss://nostr.hifish.org",
-    "wss://relay.primal.net",
+    "wss://relay.bitmacro.cloud",
     "wss://relay.minibits.cash"
   ]
 }

@@ -64,6 +64,7 @@ let _presetPoolId     = null;  // Deep-Link-Pool aus dem URL-Hash (LIQ#000533), 
 let _poolsFetchPromise = null;
 let _poolsFetchAt      = 0;
 const POOLS_FETCH_DEDUP_MS = 500;
+const REVEAL_TIMEOUT_MS    = 8000;  // CORE#002175: längste Wartezeit auf das gemeinsame Einblenden
 
 function _fetchLiquidityPools() {
     const now = Date.now();
@@ -137,9 +138,29 @@ function _render() {
     poolsEl.className = 'liquiditybot-grid-pools';
     grid.appendChild(poolsEl);
 
-    _renderService(serviceEl);
-    _renderWallet(walletEl);
-    _renderPools(poolsEl);
+    // CORE#002175: Karten werden unsichtbar aufgebaut und erst gemeinsam
+    // eingeblendet, sobald alle fertig sind (sonst erscheinen sie blockweise
+    // und das Layout springt). Platz bleibt reserviert (visibility statt display),
+    // ein Timeout verhindert, dass eine hängende Karte alles blockiert.
+    grid.style.visibility = 'hidden';
+    const loadingEl = document.createElement('div');
+    loadingEl.className = 'wallet-loading';
+    loadingEl.textContent = tr('msg.loading', 'Lade…');
+    _container.insertBefore(loadingEl, grid);
+
+    const reveal = () => {
+        if (loadingEl.parentNode) loadingEl.remove();
+        grid.style.visibility = '';
+    };
+    const timeout = new Promise(resolve => setTimeout(resolve, REVEAL_TIMEOUT_MS));
+    Promise.race([
+        Promise.allSettled([
+            _renderService(serviceEl),
+            _renderWallet(walletEl),
+            _renderPools(poolsEl),
+        ]),
+        timeout,
+    ]).then(reveal);
 }
 
 // ── Premium-Service (Status/Guthaben laden, Verwalten-Modal aus der Liquidity-
@@ -400,7 +421,7 @@ async function _renderService(el) {
 
     const cachedStatus = _ctx.getStatus?.(SVC_ID);
     if (cachedStatus) _applyStatus(cachedStatus);
-    _refreshPremiumBadge();
+    const premiumBadgeDone = _refreshPremiumBadge().catch(() => {});
 
     card.querySelector('#liquiditybot-btn-status-manage')?.addEventListener('click', () => _openBotControlModal());
     card.querySelector('#liquiditybot-btn-premium')?.addEventListener('click', () => _openPremiumModal());
@@ -420,6 +441,7 @@ async function _renderService(el) {
     try {
         if (cleanupWrap) await _loadAndRenderCleanupRow(cleanupWrap);
     } catch { /* Config nicht verfügbar */ }
+    await premiumBadgeDone;  // CORE#002175: Karte gilt erst als fertig, wenn auch das Premium-Badge steht
 }
 
 function _openBotControlModal() {

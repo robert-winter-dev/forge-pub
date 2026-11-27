@@ -185,14 +185,18 @@ const kaminoLimiter    = new RateLimiter('kamino',    40);
 // Hintergrund: Range Advisor fragt alle 8 Pools pro Zyklus ab → Burst-Schutz nötig.
 const geckoLimiter     = new RateLimiter('gecko',     1, 20_000);
 
-// Orca v2 REST API: kein dokumentiertes Limit → 30 req/10s konservativ (Orca eigene API)
-const ORCA_V2_LIMIT    = { maxRequests: 30, windowMs: 10_000 };
+// Orca v2 REST API: kein dokumentiertes Limit → konservativ 1 req/s gleichmäßig, keine Salven
+// (CORE#002198: 30 je 10 s ließ 9er-Salven durch, Orca antwortete am 25.11. mit 429).
+const ORCA_V2_LIMIT    = { maxRequests: 1, windowMs: 1_000 };
 const orcaV2Limiter    = new RateLimiter('orcav2', ORCA_V2_LIMIT.maxRequests, ORCA_V2_LIMIT.windowMs);
 // Hintergrund-Spur (LIQ#001114): Stats-Sweep der Pools ohne Kapital, Premium-Daten und Pool-Scanner
 // (Header x-forge-lane: background, lib/nexus-lane.js) bekommen 15 % des Limits und zählen zusätzlich
 // gegen das Gesamtlimit — so verstopft ein langer Sweep den Handel nie. Warten ist dort unkritisch.
+// Anteil 40 % (statt 15 %): bei 1 req/s brauchen ca. 104 Pools alle 10 Min mindestens 0,17 req/s,
+// 40 % = 2 je 5 s = 240 Pools je 10 Min (CORE#002198).
+const ORCA_V2_BG_SHARE = 0.4;
 const orcaV2BackgroundLimiter = new RateLimiter('orcav2-background',
-    backgroundLimit(ORCA_V2_LIMIT).maxRequests, backgroundLimit(ORCA_V2_LIMIT).windowMs);
+    backgroundLimit(ORCA_V2_LIMIT, ORCA_V2_BG_SHARE).maxRequests, backgroundLimit(ORCA_V2_LIMIT, ORCA_V2_BG_SHARE).windowMs);
 
 // Loopscale: kein dokumentiertes Limit → 40 req/min (konservativ, 20% Puffer)
 const loopscaleLimiter = new RateLimiter('loopscale', 40);
@@ -1136,7 +1140,14 @@ app.all('/orcav2/*', async (req, res) => {
         const text        = await upstream.text();
         const contentType = upstream.headers.get('content-type') ?? 'application/json';
 
-        if (upstream.status === 429) recordUpstream429('orcav2');
+        if (upstream.status === 429) {
+            recordUpstream429('orcav2');
+            // Retry-After beachten (Sekunden), sonst 10 s; höchstens 60 s (CORE#002198)
+            const ra = Number(upstream.headers.get('retry-after'));
+            const penaltyMs = Math.min(60_000, Number.isFinite(ra) && ra > 0 ? ra * 1000 : 10_000);
+            orcaV2Limiter.penalize(penaltyMs);
+            orcaV2BackgroundLimiter.penalize(penaltyMs);
+        }
         if (upstream.status >= 400) {
             console.warn(`[nexus:orcav2] ← ${upstream.status} | ${upstreamPath}`);
         } else {
